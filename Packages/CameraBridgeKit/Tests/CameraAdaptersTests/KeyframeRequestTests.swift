@@ -1,8 +1,7 @@
 // Loopback mock cameras (PlatformApple transport): macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
-import PlatformApple
 import TestSupport
 import Testing
 @testable import CameraAdapters
@@ -16,7 +15,7 @@ import Testing
     private func hikvision(_ camera: MockHikvisionCamera, spacing: Duration = .seconds(60), credentials: HTTPCredentials? = nil) -> (HikvisionDriver, CameraKeyframeGuard) {
         let guardian = CameraKeyframeGuard(spacing: spacing)
         let driver = HikvisionDriver(endpoint: camera.endpoint, credentials: credentials ?? self.credentials, mainStreamURL: nil, subStreamURL: nil,
-                                     transport: AppleNetworkTransport(), keyframeGuard: guardian)
+                                     transport: PlatformNetworkTransport(), keyframeGuard: guardian)
         return (driver, guardian)
     }
 
@@ -57,7 +56,7 @@ import Testing
         defer { camera.stop() }
         let driver = HikvisionDriver(endpoint: camera.endpoint, credentials: credentials,
                                      mainStreamURL: URL(string: "rtsp://127.0.0.1:554/ISAPI/Streaming/channels/401"), subStreamURL: nil,
-                                     transport: AppleNetworkTransport(), keyframeGuard: CameraKeyframeGuard(spacing: .seconds(60)))
+                                     transport: PlatformNetworkTransport(), keyframeGuard: CameraKeyframeGuard(spacing: .seconds(60)))
         try await driver.requestKeyframe(subStream: true)
         #expect(camera.keyFrameRequests.value == ["402"])
     }
@@ -130,7 +129,7 @@ import Testing
         }
         let guardian = CameraKeyframeGuard(spacing: .seconds(60))
         let driver = ONVIFDriver(endpoint: camera.endpoint, credentials: HTTPCredentials(username: MockONVIFCamera.username, password: MockONVIFCamera.password),
-                                 mainStreamURL: nil, subStreamURL: nil, transport: AppleNetworkTransport(), keyframeGuard: guardian)
+                                 mainStreamURL: nil, subStreamURL: nil, transport: PlatformNetworkTransport(), keyframeGuard: guardian)
         try await driver.requestKeyframe(subStream: false)
         #expect(camera.synchronizationPoints.value == ["000"], "the main (largest) profile")
         let listings = camera.actions.value.filter { $0 == "GetProfiles" }.count
@@ -150,7 +149,7 @@ import Testing
         }
         camera.rejectCredentials.set(true)
         let driver = ONVIFDriver(endpoint: camera.endpoint, credentials: HTTPCredentials(username: "admin", password: "wrong"), mainStreamURL: nil, subStreamURL: nil,
-                                 transport: AppleNetworkTransport(), keyframeGuard: CameraKeyframeGuard(spacing: .zero))
+                                 transport: PlatformNetworkTransport(), keyframeGuard: CameraKeyframeGuard(spacing: .zero))
         // The first refused login throws as `.unauthorized` or, when the profile listing's follow-up calls meet the pause it set, `.lockedOut`.
         await #expect { try await driver.requestKeyframe(subStream: false) } throws: { error in (error as? CameraAdapterError)?.isLoginRefusal == true }
         let sent = camera.server.requests.count
@@ -168,7 +167,7 @@ import Testing
         }
         camera.refuseSynchronizationPoint.set(true)
         let driver = ONVIFDriver(endpoint: camera.endpoint, credentials: HTTPCredentials(username: MockONVIFCamera.username, password: MockONVIFCamera.password),
-                                 mainStreamURL: nil, subStreamURL: nil, transport: AppleNetworkTransport(), keyframeGuard: CameraKeyframeGuard(spacing: .zero))
+                                 mainStreamURL: nil, subStreamURL: nil, transport: PlatformNetworkTransport(), keyframeGuard: CameraKeyframeGuard(spacing: .zero))
         await #expect { try await driver.requestKeyframe(subStream: false) } throws: { error in
             if case CameraAdapterError.unsupported = error { true } else { false }
         }

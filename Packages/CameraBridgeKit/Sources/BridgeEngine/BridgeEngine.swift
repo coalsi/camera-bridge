@@ -2147,9 +2147,10 @@ public final class BridgeEngine {
     private func ensureLoaded() async throws {
         guard !loaded else { return }
         let store = store
-        let (existed, (configuration, recovered)) = try await Self.offMain {
+        let (existed, loadedConfiguration) = try await Self.offMain {
             (FileManager.default.fileExists(atPath: store.fileURL.path(percentEncoded: false)), try store.loadOrRecover())
         }
+        let (configuration, recovered) = loadedConfiguration
         guard !loaded else { return }
         storedSettings = configuration.settings
         configurations = configuration.cameras

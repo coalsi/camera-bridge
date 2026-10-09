@@ -1,8 +1,7 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
-import PlatformApple
 import Testing
 import TestSupport
 @testable import HAP
@@ -33,7 +32,7 @@ private let daemonDown = TransportError.failed("DNS-SD error -65563 (mDNSRespond
     private func makeServer(_ advertiser: RecordingAdvertiser, name: String = "Advertising Test") async -> AccessoryServer {
         let configuration = AccessoryServerConfiguration(port: 0, advertise: true, serviceName: name, loopbackOnly: true)
         let server = AccessoryServer(accessory: TestAccessories.sensorHub().accessory, configuration: configuration, store: InMemoryHAPStore(),
-                                     transport: AppleNetworkTransport(), advertiser: advertiser)
+                                     transport: PlatformNetworkTransport(), advertiser: advertiser)
         await server.setTimings(.fastTests)
         return server
     }

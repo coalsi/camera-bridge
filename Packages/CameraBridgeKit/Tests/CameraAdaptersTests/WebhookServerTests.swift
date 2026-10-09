@@ -1,8 +1,7 @@
 // Real loopback listener (PlatformApple transport): macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
-import PlatformApple
 import Synchronization
 import TestSupport
 import Testing
@@ -14,7 +13,7 @@ import Testing
 
     /// Sends raw HTTP requests over one connection and returns the responses.
     private func send(port: UInt16, _ requests: [HTTPRequestHead]) async throws -> [HTTPResponseHead] {
-        let connection = try await AppleNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5))
+        let connection = try await PlatformNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5))
         defer { connection.close() }
         var parser = HTTPResponseParser()
         var responses: [HTTPResponseHead] = []
@@ -35,7 +34,7 @@ import Testing
     }
 
     private func startServer() async throws -> (WebhookServer, UInt16) {
-        let server = WebhookServer(port: 0, token: token, loopbackOnly: true, transport: AppleNetworkTransport())
+        let server = WebhookServer(port: 0, token: token, loopbackOnly: true, transport: PlatformNetworkTransport())
         try await server.start()
         let port = try #require(await server.boundPort)
         return (server, port)
@@ -83,7 +82,7 @@ import Testing
         let disabled = UUID()
         let enabled = camera
         let asked = Box<[UUID]>([])
-        let server = WebhookServer(port: 0, token: token, loopbackOnly: true, transport: AppleNetworkTransport()) { id in
+        let server = WebhookServer(port: 0, token: token, loopbackOnly: true, transport: PlatformNetworkTransport()) { id in
             asked.update { $0.append(id) }
             return id == enabled ? .enabled : id == disabled ? .disabled : .unknown
         }
@@ -155,11 +154,11 @@ import Testing
     }
 
     @Test func slowTricklingRequestsAreCutOff() async throws {
-        let server = WebhookServer(port: 0, token: token, loopbackOnly: true, transport: AppleNetworkTransport(), idleTimeout: .seconds(30),
+        let server = WebhookServer(port: 0, token: token, loopbackOnly: true, transport: PlatformNetworkTransport(), idleTimeout: .seconds(30),
                                    requestTimeout: .milliseconds(300))
         try await server.start()
         let port = try #require(await server.boundPort)
-        let connection = try await AppleNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5))
+        let connection = try await PlatformNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5))
         defer { connection.close() }
         let trickle = Task {
             for byte in Data("POST /cameras/\(camera.uuidString)/motion HTTP/1.1\r\nHost: x\r\n".utf8) {
@@ -178,7 +177,7 @@ import Testing
 
     @Test func malformedRequestsGet400AndClose() async throws {
         let (server, port) = try await startServer()
-        let connection = try await AppleNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5))
+        let connection = try await PlatformNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5))
         defer { connection.close() }
         try await connection.send(Data("NOT HTTP\r\n\r\n".utf8))
         var parser = HTTPResponseParser()
@@ -351,7 +350,7 @@ import Testing
         var idle: [any TCPConnection] = []
         defer { for connection in idle { connection.close() } }
         for _ in 0..<WebhookServer.maximumConnections {
-            idle.append(try await AppleNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5)))
+            idle.append(try await PlatformNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5)))
         }
         var full = false
         for _ in 0..<500 where !full {

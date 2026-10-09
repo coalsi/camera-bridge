@@ -1,5 +1,5 @@
 // Loopback mock Reolink camera (PlatformApple transport): macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import MediaCore

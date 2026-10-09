@@ -1,8 +1,7 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
-import PlatformApple
 import Testing
 @testable import HAP
 

@@ -4,6 +4,9 @@ import MediaCore
 #if canImport(Darwin)
 import PlatformApple
 #endif
+#if os(Linux)
+import PlatformLinux
+#endif
 
 /// Everything the engine gets from outside: storage location, platform services and codecs.
 public struct BridgeEnvironment: Sendable {
@@ -42,6 +45,27 @@ public struct BridgeEnvironment: Sendable {
                                                      secrets: InMemorySecretStore(), networkChanges: NullNetworkChangeMonitor(),
                                                      power: NullPowerManager()),
                           codecs: AppleMediaCodecs(), loopbackOnly: true, advertise: false)
+    }
+    #endif
+
+    #if os(Linux)
+    /// `LinuxPlatform.services(dataDirectory:)` (POSIX sockets, Avahi, netlink, encrypted-file secrets in `dataDirectory`), the given
+    /// codecs (default: ffmpeg child processes, `FFmpegMediaCodecs`), all interfaces, mDNS on. `dataDirectory` is
+    /// /var/lib/camera-bridge on the OS image.
+    public static func linux(dataDirectory: URL, codecs: any MediaCodecs = FFmpegMediaCodecs(), loopbackOnly: Bool = false,
+                             advertise: Bool = true) -> BridgeEnvironment {
+        BridgeEnvironment(dataDirectory: dataDirectory, platform: LinuxPlatform.services(dataDirectory: dataDirectory), codecs: codecs,
+                          loopbackOnly: loopbackOnly, advertise: advertise)
+    }
+
+    /// `directory`, the Linux transport, in-memory secrets, no advertising / power / network-change monitoring, loopback only;
+    /// `codecs` as given (tests that need real codecs pass the ffmpeg ones).
+    public static func testing(directory: URL, codecs: any MediaCodecs = UnavailableMediaCodecs()) -> BridgeEnvironment {
+        BridgeEnvironment(dataDirectory: directory,
+                          platform: PlatformServices(transport: LinuxNetworkTransport(), advertiser: NullServiceAdvertiser(),
+                                                     secrets: InMemorySecretStore(), networkChanges: NullNetworkChangeMonitor(),
+                                                     power: NullPowerManager()),
+                          codecs: codecs, loopbackOnly: true, advertise: false)
     }
     #endif
 

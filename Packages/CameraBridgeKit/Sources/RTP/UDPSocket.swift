@@ -102,7 +102,8 @@ public final class UDPSocket: Sendable {
 
     private static let queueKey = DispatchSpecificKey<ObjectIdentifier>()
 
-    private struct State {
+    /// `@unchecked`: swift-corelibs-libdispatch's sources are not `Sendable`; this one is only touched under `state`.
+    private struct State: @unchecked Sendable {
         var closed = false
         var source: (any DispatchSourceRead)?
         /// The interface the socket is scoped to (`scope(toInterface:)`), nil when unscoped.

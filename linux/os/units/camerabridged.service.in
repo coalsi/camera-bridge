@@ -1,0 +1,75 @@
+# Rendered by build.sh: @CB_DAEMON@ and @CB_WEB_ROOT@ come from linux/os/paths.env (one place to change them).
+[Unit]
+Description=Camera Bridge engine and web UI
+Documentation=https://github.com/coalsi/camera-bridge
+After=network-online.target avahi-daemon.service camera-bridge-firstboot.service camera-bridge-factory-reset.service chrony.service
+Wants=network-online.target avahi-daemon.service
+Requires=camera-bridge-firstboot.service
+RequiresMountsFor=/var/lib/camera-bridge
+ConditionPathExists=@CB_DAEMON@
+# A daemon that keeps failing must stop being restarted, so the boot counts as bad and the previous system comes back.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=@CB_DAEMON@
+Restart=always
+RestartSec=3
+# The daemon must send WATCHDOG=1 (sd_notify) at least every WatchdogSec/2.
+WatchdogSec=30
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+User=camerabridge
+Group=camerabridge
+SupplementaryGroups=video render
+
+# Where things are. The daemon reads these (documented in linux/os/README.md).
+Environment=CAMERABRIDGE_PLATFORM=linux-os
+Environment=CAMERABRIDGE_DATA_DIR=/var/lib/camera-bridge
+Environment=CAMERABRIDGE_WEB_ROOT=@CB_WEB_ROOT@
+Environment=CAMERABRIDGE_HTTP_PORT=80
+Environment=CAMERABRIDGE_RUN_DIR=/run/camera-bridge
+Environment=CAMERABRIDGE_OS_REQUEST_DIR=/run/camera-bridge/requests
+Environment=CAMERABRIDGE_OS_STATUS_DIR=/run/camera-bridge/status
+Environment=HOME=/var/lib/camera-bridge
+Environment=TMPDIR=/tmp
+EnvironmentFile=-/etc/camera-bridge/camerabridged.env
+WorkingDirectory=/var/lib/camera-bridge
+
+# Hardening: the daemon can write its data directory and drop request files, nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/camera-bridge /run/camera-bridge/requests
+ProtectHome=yes
+PrivateTmp=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# No PrivateDevices: ffmpeg needs the GPU render node for VA-API. Everything else in /dev stays closed.
+DevicePolicy=closed
+DeviceAllow=char-drm rw
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Port 80 without root.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+UMask=0077
+LimitNOFILE=65536
+OOMScoreAdjust=-300
+
+[Install]
+WantedBy=multi-user.target

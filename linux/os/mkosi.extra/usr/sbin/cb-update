@@ -1,0 +1,191 @@
+#!/bin/bash
+# cb-update: A/B updates for Camera Bridge OS.
+#
+#   cb-update status        show the update state (JSON)
+#   cb-update check         look for a newer release on GitHub (os-v* tags); writes /run/camera-bridge/status/update.json
+#   cb-update apply         download, verify and write the newest release into the idle root slot + the ESP; reboot to use it
+#   cb-update auto          what the daily timer runs: does nothing unless automatic updates were enabled
+#
+# How it stays safe:
+#   1. The download runs as the unprivileged user "cbupdate" in a sandbox (cb-update-fetch) and can write only its cache.
+#   2. Before anything touches a partition, this root script re-verifies the minisign signature of SHA256SUMS with the
+#      public key in /usr/share/camera-bridge/update-key.pub and the SHA-256 of each file, hashing the bytes while it copies
+#      them into a root-only staging folder, so the files cannot change between the check and the write.
+#   3. systemd-sysupdate writes only the idle root slot (never the running one) and a new UKI named cb-os_<v>+3.efi.
+#      systemd-boot counts the three tries; systemd-bless-boot keeps the new version only if the boot turns out healthy.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export CB_TAG=cb-update
+# shellcheck source=../lib/camera-bridge/lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+PUBKEY=/usr/share/camera-bridge/update-key.pub
+CACHE=/srv/update/cache
+STAGE=/srv/update/stage
+FETCH=/usr/lib/camera-bridge/cb-update-fetch
+STATUS=update
+FORCE=0
+
+require_root() { [ "$(id -u)" -eq 0 ] || cb_die "run as root"; }
+
+arch() {
+    case $(uname -m) in
+        x86_64) echo amd64 ;;
+        aarch64) echo arm64 ;;
+        *) cb_die "unsupported architecture $(uname -m)" ;;
+    esac
+}
+
+key_is_placeholder() { grep -q 'PLACEHOLDER' "$PUBKEY" 2>/dev/null; }
+
+# Run the download helper as cbupdate, sandboxed. Output of the helper goes to stdout, its messages to stderr.
+run_fetch() {
+    systemd-run --quiet --wait --pipe --collect \
+        -p User=cbupdate -p Group=cbupdate \
+        -p ProtectSystem=strict -p ReadWritePaths=/srv/update/cache -p PrivateTmp=yes -p PrivateDevices=yes \
+        -p ProtectHome=yes -p NoNewPrivileges=yes -p ProtectKernelTunables=yes -p ProtectControlGroups=yes \
+        -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" -p RestrictNamespaces=yes -p LockPersonality=yes \
+        -p CapabilityBoundingSet= -p MemoryMax=768M -p TasksMax=64 -p SystemCallFilter=@system-service \
+        "$FETCH" "$@"
+}
+
+status() {
+    local extra=${3:-}
+    [ -n "$extra" ] || extra='{}'
+    cb_status "$STATUS" "$1" "$2" "$extra"
+}
+
+current_version() { cb_os_version; }
+
+# check: sets LATEST_JSON, LATEST, AVAILABLE
+do_check() {
+    local current latest_json latest available=false extra
+    current=$(current_version)
+    status checking "looking for updates"
+    if ! latest_json=$(run_fetch latest) || [ -z "$latest_json" ]; then
+        status failed "could not reach the update server (is the box online?)" "$(jq -n --arg c "$current" '{current: $c, updateAvailable: false}')"
+        return 1
+    fi
+    latest=$(jq -r .version <<<"$latest_json")
+    if [ "$current" != "unknown" ] && dpkg --compare-versions "$latest" gt "$current"; then available=true; fi
+    extra=$(jq -n --arg c "$current" --argjson a "$available" --argjson r "$latest_json" \
+        '{current: $c, latest: $r.version, tag: $r.tag, updateAvailable: $a, releaseUrl: $r.url, notes: $r.notes, checkedAt: (now | todate)}')
+    if [ "$available" = true ]; then
+        status available "version $latest is available (you have $current)" "$extra"
+    else
+        status current "you are up to date ($current)" "$extra"
+    fi
+    LATEST=$latest
+    AVAILABLE=$available
+}
+
+verify_and_stage() {
+    # verify_and_stage VERSION: re-verify the signature and hashes as root and copy the files into the root-only stage.
+    local version=$1 a dir name want got uki root
+    a=$(arch)
+    dir=$CACHE/$version
+    uki="cb-os_${version}_${a}.efi"
+    root="cb-os_${version}_${a}_root.raw.zst"
+
+    key_is_placeholder && cb_die "this image has no update signing key (a development build); updates are disabled"
+    if [ ! -d "$dir" ] || [ -L "$dir" ]; then cb_die "nothing downloaded for $version"; fi
+
+    find "$STAGE" -mindepth 1 -delete
+    # Copy the list and its signature first, then verify the copies (the cache is owned by an unprivileged user).
+    cat -- "$dir/SHA256SUMS" >"$STAGE/SHA256SUMS"
+    cat -- "$dir/SHA256SUMS.sig" >"$STAGE/SHA256SUMS.sig"
+    minisign -V -q -p "$PUBKEY" -m "$STAGE/SHA256SUMS" -x "$STAGE/SHA256SUMS.sig" || cb_die "signature check FAILED; refusing to install"
+
+    for name in "$uki" "$root"; do
+        want=$(awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }' "$STAGE/SHA256SUMS")
+        [ -n "$want" ] || cb_die "$name is not in the signed list"
+        # Hash exactly the bytes that are written to the stage.
+        got=$(tee "$STAGE/$name" <"$dir/$name" | sha256sum | cut -d' ' -f1)
+        [ "$got" = "$want" ] || cb_die "SHA-256 mismatch for $name; refusing to install"
+    done
+
+    # Names the sysupdate transfer definitions expect (no architecture in them).
+    mv "$STAGE/$uki" "$STAGE/cb-os_${version}.efi"
+    zstd -d -q --sparse -f "$STAGE/$root" -o "$STAGE/cb-os_${version}_root.raw"
+    rm -f "$STAGE/$root"
+}
+
+do_apply() {
+    local version avail_kb need_kb
+    do_check || return 1
+    if [ "$AVAILABLE" != true ] && [ "$FORCE" != 1 ]; then
+        cb_log "already up to date"
+        return 0
+    fi
+    version=$LATEST
+    [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]] || cb_die "odd version string"
+
+    avail_kb=$(df --output=avail -k /srv | tail -1 | tr -d ' ')
+    need_kb=$((4 * 1024 * 1024))
+    if [ "$avail_kb" -lt "$need_kb" ]; then
+        status failed "not enough free space on the data partition (4 GB needed)"
+        return 1
+    fi
+
+    status downloading "downloading version $version" "$(jq -n --arg v "$version" '{latest: $v}')"
+    if ! run_fetch download "$version" "$(arch)"; then
+        status failed "download or verification of version $version failed"
+        return 1
+    fi
+
+    status installing "verifying and installing version $version" "$(jq -n --arg v "$version" '{latest: $v}')"
+    if ! (verify_and_stage "$version"); then
+        status failed "verification of version $version failed; nothing was installed"
+        find "$STAGE" -mindepth 1 -delete 2>/dev/null || true
+        return 1
+    fi
+
+    if ! /usr/lib/systemd/systemd-sysupdate --definitions=/usr/lib/sysupdate.d --verify=no update "$version"; then
+        status failed "writing version $version failed; the running system is untouched"
+        find "$STAGE" -mindepth 1 -delete 2>/dev/null || true
+        return 1
+    fi
+    find "$STAGE" -mindepth 1 -delete 2>/dev/null || true
+    find "$CACHE" -mindepth 1 -delete 2>/dev/null || true
+    sync
+    status installed "version $version is installed; restart to use it. If it does not start properly the box returns to $(current_version) by itself." \
+        "$(jq -n --arg v "$version" --arg c "$(current_version)" '{current: $c, latest: $v, installedVersion: $v, rebootRequired: true}')"
+    cb_log "installed $version; reboot to activate"
+}
+
+schedule_reboot() {
+    # After an automatic update, restart in the quiet hour (03:00, the box runs on UTC).
+    if systemctl is-active --quiet camera-bridge-update-reboot.timer; then return 0; fi
+    systemd-run --quiet --unit=camera-bridge-update-reboot --on-calendar='*-*-* 03:00:00' \
+        --timer-property=AccuracySec=1min systemctl reboot
+    cb_log "restart scheduled for 03:00"
+}
+
+do_auto() {
+    if [ ! -e "$CB_SYSTEM/auto-update" ]; then
+        cb_log "automatic updates are off; only checking"
+        do_check || true
+        return 0
+    fi
+    do_apply || return 1
+    if [ "$(jq -r '.state' "$CB_STATUS/$STATUS.json" 2>/dev/null)" = "installed" ]; then
+        schedule_reboot
+    fi
+}
+
+main() {
+    local cmd=${1:-}
+    shift || true
+    [ "${1:-}" = "--force" ] && FORCE=1
+    LATEST=""; AVAILABLE=false
+    case $cmd in
+        status) cat "$CB_STATUS/$STATUS.json" 2>/dev/null || echo '{"state":"unknown"}' ;;
+        check)  require_root; do_check ;;
+        apply)  require_root; do_apply ;;
+        auto)   require_root; do_auto ;;
+        ''|-h|--help|help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+        *) cb_die "unknown command: $cmd" ;;
+    esac
+}
+
+main "$@"

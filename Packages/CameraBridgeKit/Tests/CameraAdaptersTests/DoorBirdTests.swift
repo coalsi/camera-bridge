@@ -79,8 +79,7 @@ import Testing
     }
 }
 
-#if os(macOS)
-import PlatformApple
+#if os(macOS) || os(Linux)
 
 final class MockDoorBird: Sendable {
     static let jpeg = Data([0xFF, 0xD8, 0xFF, 0xD9])
@@ -151,7 +150,7 @@ final class MockDoorBird: Sendable {
     }
 
     private func driver(_ device: MockDoorBird, factory: FakeRTSPFactory? = nil, timing: DoorBirdEventTiming? = nil) -> DoorBirdDriver {
-        DoorBirdDriver(endpoint: device.endpoint, credentials: credentials, mainStreamURL: nil, transport: AppleNetworkTransport(),
+        DoorBirdDriver(endpoint: device.endpoint, credentials: credentials, mainStreamURL: nil, transport: PlatformNetworkTransport(),
                        rtspFactory: (factory ?? FakeRTSPFactory(FakeRTSPSession(info: info))).factory, timing: timing ?? self.timing())
     }
 

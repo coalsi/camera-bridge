@@ -1,0 +1,5 @@
+out/
+*.img
+*.img.xz
+*.raw
+*.key

@@ -1,0 +1,15 @@
+#!/bin/bash
+# The root file system is read-only, so systemd cannot save /etc/machine-id and invents a new one on every boot; the
+# persistent journal keeps one folder per machine id. Keep the current one and the two most recent others, remove the
+# rest (journald's own size limit only applies inside the current folder).
+set -euo pipefail
+dir=/var/log/journal
+[ -d "$dir" ] || exit 0
+current=$(cat /etc/machine-id 2>/dev/null || true)
+
+# Newest first by modification time; skip the current id and the first two others.
+mapfile -t old < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -rn | awk -v cur="$current" '$2 != cur { print $2 }' | tail -n +3)
+for id in "${old[@]}"; do
+    [[ $id =~ ^[0-9a-f]{32}$ ]] || continue
+    rm -rf --one-file-system -- "${dir:?}/$id"
+done

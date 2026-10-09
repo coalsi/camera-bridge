@@ -95,12 +95,15 @@ private final class ConsoleTrustDelegate: NSObject, URLSessionDelegate, URLSessi
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        #if !os(Linux)
         if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
            challenge.protectionSpace.host.caseInsensitiveCompare(host) == .orderedSame, let trust = challenge.protectionSpace.serverTrust {
             completionHandler(.useCredential, URLCredential(trust: trust))
-        } else {
-            completionHandler(.performDefaultHandling, nil)
+            return
         }
+        #endif
+        // FoundationNetworking has no server-trust challenges: a self-signed console certificate is not accepted there yet.
+        completionHandler(.performDefaultHandling, nil)
     }
 }
 

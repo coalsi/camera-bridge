@@ -1,8 +1,7 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
-import PlatformApple
 import Synchronization
 import TestSupport
 import Testing
@@ -14,7 +13,7 @@ import Testing
         let hub = TestAccessories.sensorHub(category: .ipCamera)
         let configuration = AccessoryServerConfiguration(port: 0, advertise: false, serviceName: "Transport", loopbackOnly: true)
         let server = AccessoryServer(accessory: hub.accessory, configuration: configuration, store: InMemoryHAPStore(),
-                                     transport: AppleNetworkTransport(), advertiser: RecordingAdvertiser())
+                                     transport: PlatformNetworkTransport(), advertiser: RecordingAdvertiser())
         let events = server.events
         try await server.start()
         defer { await server.stop() }
@@ -35,7 +34,7 @@ import Testing
         let store = InMemoryHAPStore()
         let server = AccessoryServer(accessory: TestAccessories.sensorHub().accessory,
                                      configuration: AccessoryServerConfiguration(serviceName: "x", loopbackOnly: true), store: store,
-                                     transport: AppleNetworkTransport(), advertiser: RecordingAdvertiser())
+                                     transport: PlatformNetworkTransport(), advertiser: RecordingAdvertiser())
         let code = try await server.setupCode
         #expect(try store.loadIdentity()?.setupCode == code)
         #expect(await server.port == nil)

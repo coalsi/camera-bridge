@@ -1,0 +1,159 @@
+name: Camera Bridge OS image
+
+# Builds the Camera Bridge OS disk image (Debian 13, mkosi) and, for tags os-v*, publishes it as a GitHub Release.
+# Tag os-v0.1 -> version 0.1 -> camera-bridge-os-0.1-amd64.img.xz. (The Mac app uses v* tags; the two never mix.)
+#
+# Needed once, as repository secrets (see docs/linux/BUILDING.md, "Release signing"):
+#   MINISIGN_SECRET_KEY   content of the minisign secret key file (create it without a password, or also set the next one)
+#   MINISIGN_PASSWORD     only if the key has a password
+# and the matching PUBLIC key committed at linux/os/mkosi.extra/usr/share/camera-bridge/update-key.pub.
+# Without them a tag build fails on purpose: an image that cannot verify its own updates must not be released.
+#
+# Action versions are pinned by commit SHA. The SHAs were read from the GitHub API for the tags named in the comments.
+# Everything else (docker, mkosi, Swift, QEMU) runs inside containers/apt packages from Debian and the swift.org image.
+
+on:
+  push:
+    tags: ['os-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version for a manual build (digits and dots, e.g. 0.2)'
+        required: true
+        default: '0.0'
+      stub_daemon:
+        description: 'Use the stub daemon instead of building camerabridged (OS-only test build, never released)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: os-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: shellcheck, nft -c, systemd-analyze verify, repart, mkosi summary
+        run: linux/os/test-static.sh
+
+  build:
+    name: Build image (amd64)
+    needs: static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Work out the version
+        id: v
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then version="${REF_NAME#os-v}"; else version="$INPUT_VERSION"; fi
+          if ! [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]]; then echo "::error::bad version '$version'"; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build (camerabridged with Swift, image with mkosi)
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          STUB: ${{ github.event.inputs.stub_daemon }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          flags=()
+          if [ "$REF_TYPE" = tag ]; then flags+=(--release); fi
+          if [ "$STUB" = true ]; then flags+=(--stub-daemon); fi
+          linux/os/build.sh --version "$VERSION" --arch amd64 --out "$PWD/out" "${flags[@]}"
+      - name: Show what was built
+        run: ls -la out && cat out/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: camera-bridge-os-${{ steps.v.outputs.version }}-amd64
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  smoke:
+    name: Boot test in QEMU
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: camera-bridge-os-${{ needs.build.outputs.version }}-amd64
+          path: out
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf openssh-client xz-utils curl
+      - name: Enable KVM if the runner offers it
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          if [ -w /dev/kvm ]; then echo "KVM available"; else echo "::warning::no /dev/kvm on this runner; the boot test runs in slow emulation and is limited to the basic tests"; fi
+      - name: Boot the image and check it
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          tests=boot,ssh-off,system,persist,requests,factory-reset,installer,install-boot
+          if [ ! -w /dev/kvm ]; then tests=boot,ssh-off; fi
+          linux/os/test-vm.sh --image "out/camera-bridge-os-$VERSION-amd64.img.xz" --arch amd64 --tests "$tests" --work "$RUNNER_TEMP/vm" --keep
+      - name: Serial log on failure
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP/vm/serial.log" || true
+
+  release:
+    name: Publish GitHub Release
+    if: github.ref_type == 'tag'
+    needs: [build, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: camera-bridge-os-${{ needs.build.outputs.version }}-amd64
+          path: out
+      - name: Check the signatures once more before publishing
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+          cd out
+          sha256sum -c SHA256SUMS
+          test -s SHA256SUMS.sig && test -s "camera-bridge-os-${{ needs.build.outputs.version }}-amd64.img.xz.sig"
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cat > notes.md <<EOF
+          Camera Bridge OS $VERSION (amd64).
+
+          Download \`camera-bridge-os-$VERSION-amd64.img.xz\`, check it against \`.sha256\`, and write it to a USB stick or SSD with balenaEtcher.
+          Guide: docs/linux/USER-GUIDE.md. Updates inside the running system use \`SHA256SUMS\`, \`SHA256SUMS.sig\` and the \`cb-os_*\` files.
+          EOF
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Camera Bridge OS $VERSION" \
+            --notes-file notes.md \
+            out/camera-bridge-os-"$VERSION"-amd64.img.xz \
+            out/camera-bridge-os-"$VERSION"-amd64.img.xz.sha256 \
+            out/camera-bridge-os-"$VERSION"-amd64.img.xz.sig \
+            out/SHA256SUMS \
+            out/SHA256SUMS.sig \
+            out/cb-os_"$VERSION"_amd64.efi \
+            out/cb-os_"$VERSION"_amd64_root.raw.zst

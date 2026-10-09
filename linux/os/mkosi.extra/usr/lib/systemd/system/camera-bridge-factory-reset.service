@@ -1,0 +1,15 @@
+[Unit]
+Description=Camera Bridge factory reset (marker file on the boot partition)
+# A file named camera-bridge-factory-reset on the FAT boot partition (readable from any Mac, Windows or Linux PC) wipes
+# the settings and HomeKit pairings on the next boot. The marker is removed first, so a failed wipe cannot loop.
+# (The boot partition is found with bootctl: gpt-auto mounts it at /boot or /efi.)
+After=var-lib-camera\x2dbridge.mount
+Requires=var-lib-camera\x2dbridge.mount
+Before=camera-bridge-firstboot.service camerabridged.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/cb-system factory-reset-marker
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,9 @@
 // Loopback servers use PlatformApple's transport, so these tests run on macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import Foundation
-import PlatformApple
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Synchronization
 import Testing
 @testable import BridgeSupport
@@ -123,7 +125,7 @@ private final class EndlessBodyServer: Sendable {
     }
 
     static func start(contentLength: Int64?, chunkSize: Int, interval: Duration, maximum: Int) async throws -> EndlessBodyServer {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         let server = EndlessBodyServer(listener: listener, contentLength: contentLength, chunkSize: chunkSize, interval: interval, maximum: maximum)
         server.acceptTask.withLock {
             $0 = Task {

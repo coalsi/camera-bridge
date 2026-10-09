@@ -1,10 +1,10 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
-import PlatformApple
 import Testing
 @testable import HAP
+import TestSupport
 
 extension HAPServerTimings {
     /// Short handler/debounce/retry timings for tests; event coalescing keeps the real 250 ms.
@@ -105,7 +105,7 @@ struct RunningServer {
 
 func startServer(accessory: Accessory, store: any HAPStore = InMemoryHAPStore(), advertiser: RecordingAdvertiser = RecordingAdvertiser(),
                  timings: HAPServerTimings = .fastTests, advertise: Bool = true,
-                 transport: any NetworkTransport = AppleNetworkTransport()) async throws -> RunningServer {
+                 transport: any NetworkTransport = PlatformNetworkTransport()) async throws -> RunningServer {
     let configuration = AccessoryServerConfiguration(port: 0, advertise: advertise, serviceName: "CameraBridge Test", loopbackOnly: true)
     let server = AccessoryServer(accessory: accessory, configuration: configuration, store: store, transport: transport,
                                  advertiser: advertiser)

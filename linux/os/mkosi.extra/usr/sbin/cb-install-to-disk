@@ -1,0 +1,348 @@
+#!/bin/bash
+# cb-install-to-disk: copy the running Camera Bridge OS to an internal disk (SSD / NVMe / eMMC) of this machine.
+#
+#   cb-install-to-disk --list [--json]            show the disks and say which one may be used and why not
+#   cb-install-to-disk --device /dev/nvme0n1 --dry-run
+#                                                 run every check and print exactly what would happen; writes nothing
+#   cb-install-to-disk --device /dev/nvme0n1 [--copy-data] [--confirm "ERASE ALL DATA ON nvme0n1"] [--poweroff|--reboot]
+#
+# THIS ERASES THE WHOLE TARGET DISK. Safety rules, all enforced here:
+#   * There is no default disk. --device is required, and so is a typed confirmation phrase
+#     ("ERASE ALL DATA ON <disk name>", typed at the prompt or given with --confirm by the web UI after the user typed it).
+#   * Refused: the disk this system booted from, any disk with a mounted file system, swap, or a holder (RAID, LVM,
+#     device-mapper, loop), read-only disks, anything that is not a whole disk, disks under 12 GiB, odd device names.
+#   * Everything is checked again right before the first write.
+#   * --dry-run changes nothing, ever (systemd-repart runs with --dry-run=yes).
+#
+# Result layout (same as the USB image): ESP 512 MB | root A (copy of the running system) | root B (empty) | data (rest).
+# --copy-data also copies settings, HomeKit pairings and secrets (the daemon is stopped while that is copied).
+# Afterwards remove the USB stick before the next start so the machine boots from the internal disk.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export CB_TAG=cb-install-to-disk
+# shellcheck source=../lib/camera-bridge/lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+MIN_BYTES=$((12 * 1024 * 1024 * 1024))
+DEVICE_RE='^/dev/(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$'
+
+device=""
+confirm=""
+copy_data=0
+dry_run=0
+list=0
+json=0
+finish=none
+status_name=install-to-disk
+workdir=""
+restart_daemon=0
+reported=0
+
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+
+install_status() {
+    # install_status STATE MESSAGE [STEP]
+    cb_status "$status_name" "$1" "$2" "$(jq -n --arg step "${3:-}" --arg device "${device:-}" '{step: $step, device: $device}')"
+}
+
+die() {
+    cb_log "error: $*"
+    install_status failed "$*" failed 2>/dev/null || true
+    reported=1
+    exit 1
+}
+
+cleanup() {
+    local rc=$?
+    if [ -n "$workdir" ] && [ -d "$workdir" ]; then
+        if mountpoint -q "$workdir/esp" 2>/dev/null; then umount "$workdir/esp" || true; fi
+        rm -rf --one-file-system -- "$workdir"
+    fi
+    if [ "$restart_daemon" -eq 1 ]; then systemctl start camerabridged.service || true; fi
+    if [ "$rc" -ne 0 ] && [ "$reported" -eq 0 ]; then
+        install_status failed "the installation did not finish; see the system log (journalctl -t $CB_TAG)" failed 2>/dev/null || true
+    fi
+    exit "$rc"
+}
+
+# --- looking at disks -------------------------------------------------------------------------------------------------
+
+lsblk_json() { lsblk -J -b -o NAME,KNAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,RO,FSTYPE,LABEL,PARTLABEL,MOUNTPOINTS,PKNAME; }
+
+# The whole disk a block device lives on (the device itself if it is a disk).
+parent_disk() {
+    local dev=$1 type pk
+    type=$(lsblk -dno TYPE "$dev" 2>/dev/null || true)
+    if [ "$type" = "disk" ]; then basename "$dev"; return 0; fi
+    pk=$(lsblk -dno PKNAME "$dev" 2>/dev/null || true)
+    [ -n "$pk" ] && echo "$pk"
+}
+
+# Names (kernel names, e.g. sda) of the disks that hold the running system.
+boot_disks() {
+    local mp src
+    for mp in / /usr /efi /boot /srv /var/lib/camera-bridge; do
+        findmnt -n -o SOURCE --target "$mp" >/dev/null 2>&1 || continue
+        mountpoint -q "$mp" || [ "$mp" = / ] || continue
+        src=$(findmnt -n -o SOURCE --target "$mp" | head -1)
+        src=${src%%\[*}                       # bind mounts show /dev/sdb3[/camera-bridge]
+        [ -b "$src" ] || continue
+        parent_disk "$src" || true
+    done | sort -u
+}
+
+# disk_problems KNAME: one line per reason the disk must not be used. No output = usable.
+disk_problems() {
+    local k=$1 dev size ro type mounted boots
+    dev=/dev/$k
+    [[ $dev =~ $DEVICE_RE ]] || { echo "not a supported disk name"; return 0; }
+    [ -b "$dev" ] || { echo "not a block device"; return 0; }
+    type=$(lsblk -dno TYPE "$dev" 2>/dev/null || true)
+    [ "$type" = "disk" ] || echo "not a whole disk (type '${type:-unknown}')"
+    ro=$(blockdev --getro "$dev" 2>/dev/null || echo 1)
+    [ "$ro" = "0" ] || echo "read-only"
+    size=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+    [ "$size" -ge "$MIN_BYTES" ] || echo "smaller than 12 GiB"
+    boots=$(boot_disks)
+    if grep -qx "$k" <<<"$boots"; then echo "this is the disk the system is running from"; fi
+    [ -n "$boots" ] || echo "cannot tell which disk the system runs from"
+    mounted=$(lsblk -nro MOUNTPOINTS "$dev" 2>/dev/null | grep -v '^$' || true)
+    [ -z "$mounted" ] || echo "a file system on it is mounted ($(head -1 <<<"$mounted"))"
+    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -q "^$dev"; then echo "it is used as swap"; fi
+    if compgen -G "/sys/block/$k/holders/*" >/dev/null || compgen -G "/sys/block/$k/${k}*/holders/*" >/dev/null \
+        || compgen -G "/sys/block/$k/${k}p*/holders/*" >/dev/null; then
+        echo "in use by another device (RAID, LVM or device-mapper)"
+    fi
+}
+
+list_disks() {
+    local data names k problems out="[]" entry
+    data=$(lsblk_json)
+    names=$(jq -r '.blockdevices[] | select(.type == "disk") | .kname | select(test("^(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$"))' <<<"$data")
+    for k in $names; do
+        problems=$(disk_problems "$k" | jq -R . | jq -s . )
+        entry=$(jq --arg k "$k" --argjson p "$problems" '
+            .blockdevices[] | select(.kname == $k)
+            | { name: .kname, path: .path, model: (.model // ""), serial: (.serial // ""), transport: (.tran // ""),
+                removable: (.rm == true or .rm == "1" or .rm == 1), sizeBytes: (.size | tonumber? // 0),
+                partitions: [ (.children // [])[] | { name: .kname, sizeBytes: (.size | tonumber? // 0), fstype: (.fstype // ""), label: (.label // ""), partlabel: (.partlabel // "") } ],
+                eligible: ($p | length == 0), problems: $p,
+                phrase: ("ERASE ALL DATA ON " + .kname) }' <<<"$data")
+        out=$(jq --argjson e "$entry" '. + [$e]' <<<"$out")
+    done
+    if [ "$json" -eq 1 ]; then
+        jq '{disks: .}' <<<"$out"
+    else
+        jq -r '.[] | "\(.path)  \(.sizeBytes / 1073741824 | floor) GiB  \(.model)  \(.transport)\(if .removable then " removable" else "" end)\n    " + (if .eligible then "can be used" else "NOT usable: " + (.problems | join("; ")) end) + (if (.partitions | length) > 0 then "\n    has: " + ([.partitions[] | "\(.name) \(.fstype) \(.label)"] | join(", ")) else "" end)' <<<"$out"
+    fi
+}
+
+# --- the installation -------------------------------------------------------------------------------------------------
+
+running_root_device() {
+    local src
+    src=$(findmnt -n -o SOURCE /)
+    src=${src%%\[*}
+    [ -b "$src" ] || die "cannot find the running root partition"
+    readlink -f "$src"
+}
+
+write_definitions() {
+    # write_definitions DIR: the repart definitions for the target disk.
+    local dir=$1 root_dev root_bytes root_label esp
+    root_dev=$(running_root_device)
+    esp=$(cb_esp)
+    if [ -z "$esp" ] || [ ! -d "$esp/EFI" ]; then die "cannot find the boot partition of the running system"; fi
+    root_bytes=$(blockdev --getsize64 "$root_dev")
+    root_label=$(lsblk -dno PARTLABEL "$root_dev")
+    [[ $root_label =~ ^cb-root_[0-9A-Za-z._-]+$ ]] || die "the running root partition has an unexpected label '$root_label'"
+
+    cat >"$dir/00-esp.conf" <<EOF
+[Partition]
+Type=esp
+Label=cb-esp
+Format=vfat
+CopyFiles=$esp:/
+SizeMinBytes=512M
+SizeMaxBytes=512M
+EOF
+    cat >"$dir/10-root-a.conf" <<EOF
+[Partition]
+Type=root
+Label=$root_label
+CopyBlocks=$root_dev
+SizeMinBytes=$root_bytes
+SizeMaxBytes=$root_bytes
+EOF
+    cat >"$dir/20-root-b.conf" <<EOF
+[Partition]
+Type=root
+Label=_empty
+NoAuto=yes
+SizeMinBytes=$root_bytes
+SizeMaxBytes=$root_bytes
+EOF
+    {
+        cat <<EOF
+[Partition]
+Type=srv
+Label=cb-data
+Format=ext4
+GrowFileSystem=yes
+SizeMinBytes=4G
+Weight=1000
+MakeDirectories=/camera-bridge /system /update /journal
+EOF
+        if [ "$copy_data" -eq 1 ]; then
+            echo "CopyFiles=/srv/camera-bridge:/camera-bridge"
+            echo "CopyFiles=/srv/system:/system"
+        fi
+    } >"$dir/30-data.conf"
+}
+
+print_plan() {
+    local k=$1 dev=/dev/$1 info
+    info=$(lsblk -dno MODEL,SIZE "$dev" 2>/dev/null | sed 's/  */ /g')
+    echo
+    echo "Target disk : $dev  ($info)"
+    echo "Will happen : the ENTIRE disk is erased and gets this layout:"
+    echo "                512 MB boot partition | 2.5 GB system A (copy of this system) | 2.5 GB system B (empty, for updates) | data (the rest)"
+    if [ "$copy_data" -eq 1 ]; then
+        echo "Data        : settings, HomeKit pairings and secrets are COPIED to the new disk (the bridge is stopped while that happens)."
+        echo "              Do not run the USB stick and the new disk at the same time afterwards: both would claim the same pairings."
+    else
+        echo "Data        : the new disk starts empty (fresh setup, new HomeKit pairings)."
+    fi
+    echo "What is on it now:"
+    lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTLABEL "$dev" | sed 's/^/                /'
+    echo
+}
+
+do_install() {
+    local k problems expected typed disk_size line
+    [ "$(id -u)" -eq 0 ] || die "run as root"
+    [ -n "$device" ] || die "--device is required (there is no default disk). See --list."
+    [ ! -L "$device" ] || device=$(readlink -f "$device")
+    [[ $device =~ $DEVICE_RE ]] || die "'$device' is not a supported whole-disk name (sdX, vdX, nvmeXnY, mmcblkX)"
+    k=${device#/dev/}
+    [ -e /sys/firmware/efi ] || die "this machine did not boot in UEFI mode; the installer needs UEFI"
+
+    install_status running "checking the disk" checking
+    problems=$(disk_problems "$k")
+    if [ -n "$problems" ]; then
+        printf 'Refusing to use %s:\n' "$device" >&2
+        while IFS= read -r line; do printf '  - %s\n' "$line" >&2; done <<<"$problems"
+        install_status failed "refused: $(head -1 <<<"$problems")" refused
+        cb_log "refused $device: $(tr '\n' ';' <<<"$problems")"
+        reported=1
+        exit 3
+    fi
+
+    print_plan "$k"
+    expected="ERASE ALL DATA ON $k"
+
+    workdir=$(mktemp -d /run/camera-bridge-install.XXXXXX)
+    chmod 0700 "$workdir"
+    mkdir -p "$workdir/defs" "$workdir/esp"
+    write_definitions "$workdir/defs"
+
+    if [ "$dry_run" -eq 1 ]; then
+        echo "DRY RUN: nothing will be written. systemd-repart's plan for $device:"
+        systemd-repart --dry-run=yes --empty=force --seed=random --definitions="$workdir/defs" "$device" || die "repart rejected the plan"
+        echo
+        echo "To really install, run again without --dry-run and type: $expected"
+        install_status ok "dry run complete; nothing was written" dry-run
+        trap - EXIT
+        rm -rf --one-file-system -- "$workdir"
+        return 0
+    fi
+
+    # The typed confirmation. Never skipped, never guessed.
+    if [ -z "$confirm" ]; then
+        [ -t 0 ] || die "no confirmation given: pass --confirm \"$expected\" (the web UI does this after you type the phrase)"
+        printf 'To erase %s and install, type exactly:\n    %s\n> ' "$device" "$expected"
+        IFS= read -r typed
+        confirm=$typed
+    fi
+    [ "$confirm" = "$expected" ] || die "the confirmation phrase does not match; nothing was changed"
+
+    # Check again right before writing (the disk may have been mounted or changed since).
+    problems=$(disk_problems "$k")
+    [ -z "$problems" ] || die "the disk changed while waiting: $(head -1 <<<"$problems")"
+
+    cb_log "installing to $device (copy data: $copy_data)"
+    disk_size=$(blockdev --getsize64 "$device")
+    if [ "$copy_data" -eq 1 ]; then
+        install_status running "stopping the bridge to copy its data" stopping
+        restart_daemon=1
+        systemctl stop camerabridged.service
+        sync
+    fi
+
+    install_status running "erasing and partitioning $device" partitioning
+    wipefs --all --force "$device" >/dev/null
+    install_status running "copying the system (this takes a few minutes)" copying
+    systemd-repart --dry-run=no --empty=force --seed=random --definitions="$workdir/defs" --sector-size=512 "$device" >"$workdir/repart.log" 2>&1 \
+        || { cat "$workdir/repart.log" >&2; die "partitioning/copying failed"; }
+    cb_log "repart finished ($(wc -l <"$workdir/repart.log") lines of output) for a $disk_size byte disk"
+    udevadm settle --timeout=30 || true
+    partprobe "$device" 2>/dev/null || true
+    udevadm settle --timeout=30 || true
+
+    install_status running "registering the boot entry" boot-entry
+    local esp_dev="" tries
+    for ((tries = 0; tries < 20; tries++)); do
+        esp_dev=$(lsblk -nrpo PATH,PARTTYPE "$device" | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {print $1; exit}')
+        [ -b "${esp_dev:-/dev/null}" ] && break
+        sleep 0.5
+    done
+    [ -b "${esp_dev:-/dev/null}" ] || die "the new boot partition did not appear"
+    mount -t vfat -o umask=0077 "$esp_dev" "$workdir/esp"
+    # The ESP was copied from the running system, so the removable-media path (EFI/BOOT/BOOT*.EFI) already exists and any
+    # UEFI firmware can boot it. Also add a firmware entry (best effort; some firmwares refuse).
+    # bootctl always tries to write /etc/kernel/entry-token, which fails on the read-only root and aborts before the firmware
+    # entry is made; give it a scratch /etc/kernel in a private mount namespace.
+    # ($1 below is expanded by the inner sh, on purpose)
+    # shellcheck disable=SC2016
+    if ! unshare -m sh -c 'mount -t tmpfs tmpfs /etc/kernel && exec bootctl install --esp-path="$1"' sh "$workdir/esp" >"$workdir/bootctl.log" 2>&1; then
+        cb_log "could not add a firmware boot entry (the fallback boot path still works): $(tail -n 3 "$workdir/bootctl.log" | tr '\n' ' ')"
+    fi
+    compgen -G "$workdir/esp/EFI/Linux/cb-os_*.efi" >/dev/null || die "the new boot partition has no system image"
+    umount "$workdir/esp"
+
+    sync
+    install_status ok "installed to $device. Remove the USB stick, then start the machine again." "done"
+    cb_log "installation to $device finished"
+    restart_daemon=0
+    case $finish in
+        poweroff) systemctl poweroff --no-block ;;
+        reboot) systemctl reboot --no-block ;;
+        none) if [ "$copy_data" -eq 1 ]; then systemctl start camerabridged.service || true; fi ;;
+    esac
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --list) list=1 ;;
+        --json) json=1 ;;
+        --device) shift; device=${1:?--device needs a value} ;;
+        --device=*) device=${1#--device=} ;;
+        --confirm) shift; confirm=${1-} ;;
+        --confirm=*) confirm=${1#--confirm=} ;;
+        --copy-data) copy_data=1 ;;
+        --dry-run) dry_run=1 ;;
+        --poweroff) finish=poweroff ;;
+        --reboot) finish=reboot ;;
+        --status-name) shift; status_name=${1:?} ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; die "unknown option: $1" ;;
+    esac
+    shift
+done
+
+if [ "$list" -eq 1 ]; then
+    list_disks
+    exit 0
+fi
+trap cleanup EXIT
+do_install

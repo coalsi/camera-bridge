@@ -1,9 +1,8 @@
 // The loopback server and client use PlatformApple's Network.framework transport: macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import MediaCore
-import PlatformApple
 import RTP
 import Synchronization
 import TestSupport
@@ -19,7 +18,7 @@ private func makeServer(_ configure: (inout RTSPTestServer.Configuration) -> Voi
     async throws -> RTSPTestServer {
     var configuration = RTSPTestServer.Configuration()
     configure(&configuration)
-    let server = RTSPTestServer(source: SyntheticNALSource(configuration: source), transport: AppleNetworkTransport(), configuration: configuration)
+    let server = RTSPTestServer(source: SyntheticNALSource(configuration: source), transport: PlatformNetworkTransport(), configuration: configuration)
     try await server.start()
     return server
 }
@@ -27,7 +26,7 @@ private func makeServer(_ configure: (inout RTSPTestServer.Configuration) -> Voi
 private func makeClient(_ server: RTSPTestServer, credentials: HTTPCredentials? = nil, backchannel: Bool = false,
                         timeout: Duration = .seconds(5)) -> RTSPClient {
     RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: credentials, requestBackchannel: backchannel, timeout: timeout),
-               transport: AppleNetworkTransport())
+               transport: PlatformNetworkTransport())
 }
 
 /// Every frame's NAL is exactly what the synthetic source produced for its index.
@@ -259,7 +258,7 @@ final class WallClockOffsets: Sendable {
         components.user = credentials.username
         components.password = credentials.password
         let url = try #require(components.url)
-        let client = RTSPClient(configuration: RTSPConfiguration(url: url, credentials: nil), transport: AppleNetworkTransport())
+        let client = RTSPClient(configuration: RTSPConfiguration(url: url, credentials: nil), transport: PlatformNetworkTransport())
         _ = try await client.connect()
         await client.close()
         await server.stop()
@@ -342,7 +341,7 @@ final class WallClockOffsets: Sendable {
         let server = try await makeServer({ $0.faults.stall = RTSPTestServer.Stall(after: .milliseconds(500), duration: .seconds(5)) },
                                           source: SyntheticNALSource.Configuration(format: h264Format, keyframeInterval: 5))
         let source = RTSPMediaSource(configuration: RTSPConfiguration(url: server.url, credentials: nil, timeout: .seconds(1)),
-                                     displayName: "stall", transport: AppleNetworkTransport())
+                                     displayName: "stall", transport: PlatformNetworkTransport())
         let first = await collect(try await source.samples(), timeout: .seconds(8))
         #expect(first.ended)
         #expect(first.error as? RTSPError == .timeout)
@@ -360,7 +359,7 @@ final class WallClockOffsets: Sendable {
         let server = try await makeServer({ $0.faults.closeAfter = .seconds(1) },
                                           source: SyntheticNALSource.Configuration(format: h264Format, keyframeInterval: 5))
         let source = RTSPMediaSource(configuration: RTSPConfiguration(url: server.url, credentials: nil, timeout: .seconds(3)),
-                                     displayName: "reconnect", transport: AppleNetworkTransport())
+                                     displayName: "reconnect", transport: PlatformNetworkTransport())
         let first = await collect(try await source.samples(), timeout: .seconds(8))
         #expect(first.ended)
         #expect(first.error != nil, "the stream finishes throwing on disconnect")
@@ -380,7 +379,7 @@ final class WallClockOffsets: Sendable {
     @Test func stopFinishesStreamWithoutError() async throws {
         let server = try await makeServer()
         let source = RTSPMediaSource(configuration: RTSPConfiguration(url: server.url, credentials: nil), displayName: "stop",
-                                     transport: AppleNetworkTransport())
+                                     transport: PlatformNetworkTransport())
         #expect(source.displayName == "stop")
         let stream = try await source.samples()
         let reader = Task { await collect(stream, timeout: .seconds(10)) }
@@ -394,12 +393,12 @@ final class WallClockOffsets: Sendable {
     }
 
     @Test func connectionRefused() async throws {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         let port = listener.port
         listener.close()
         let client = RTSPClient(configuration: RTSPConfiguration(url: try #require(URL(string: "rtsp://127.0.0.1:\(port)/x")), credentials: nil,
                                                                  timeout: .seconds(2)),
-                                transport: AppleNetworkTransport())
+                                transport: PlatformNetworkTransport())
         await #expect(throws: (any Error).self) { try await client.connect() }
     }
 }

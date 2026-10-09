@@ -1,3 +1,4 @@
+#if canImport(Darwin)   // needs EngineFixture (RuntimeEngineTests.swift), which needs the platform codecs
 import BridgeSupport
 import CameraAdapters
 import Foundation
@@ -136,3 +137,4 @@ import TestSupport
         await fixture.tearDown()
     }
 }
+#endif

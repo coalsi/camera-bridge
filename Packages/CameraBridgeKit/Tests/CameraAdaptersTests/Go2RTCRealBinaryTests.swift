@@ -1,9 +1,11 @@
 // Runs the real go2rtc program when CAMERABRIDGE_GO2RTC_DIR names a folder that holds it (Tools/fetch-go2rtc.sh puts it in
 // build/helpers). Contacts nothing outside this Mac: the only stream points at a closed loopback port.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
-import PlatformApple
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import TestSupport
 import Testing
 @testable import CameraAdapters
@@ -14,11 +16,11 @@ private let helperDirectory = ProcessInfo.processInfo.environment["CAMERABRIDGE_
     @Test(.enabled(if: helperDirectory != nil)) func realHelperStartsOnLoopbackWithSecretsOnlyInTheEnvironment() async throws {
         let directory = try TemporaryDirectory(prefix: "Go2RTCReal")
         defer { directory.remove() }
-        let launcher = ProcessHelperLauncher(searchDirectories: [URL(filePath: try #require(helperDirectory), directoryHint: .isDirectory)])
+        let launcher = PlatformHelperLauncher(searchDirectories: [URL(filePath: try #require(helperDirectory), directoryHint: .isDirectory)])
         #expect(launcher.locate("go2rtc") != nil)
         let seen = Box<(port: UInt16, password: String?)?>(nil)
         let manager = Go2RTCManager(launcher: launcher, directory: directory.url.appending(path: "go2rtc", directoryHint: .isDirectory),
-                                    pickPort: Go2RTCManager.portPicker(transport: AppleNetworkTransport()),
+                                    pickPort: Go2RTCManager.portPicker(transport: PlatformNetworkTransport()),
                                     healthCheck: { port, password in
                                         let ok = await Go2RTCManager.httpHealthCheck(port, password)
                                         if ok { seen.set((port, password)) }
@@ -67,7 +69,7 @@ private let helperDirectory = ProcessInfo.processInfo.environment["CAMERABRIDGE_
         #expect(listening.contains("127.0.0.1:\(ports.api)") && listening.contains("127.0.0.1:\(ports.rtsp)"))
 
         // Asking for the stream makes the helper dial its source: the refused port is a clean RTSP error, not a hang.
-        let factory = RTSPProbing.factory(transport: AppleNetworkTransport())
+        let factory = RTSPProbing.factory(transport: PlatformNetworkTransport())
         await #expect(throws: (any Error).self) {
             _ = try await RTSPProbing.describe(url: url, credentials: nil, timeout: .seconds(8), factory: factory)
         }
@@ -79,9 +81,9 @@ private let helperDirectory = ProcessInfo.processInfo.environment["CAMERABRIDGE_
     @Test(.enabled(if: helperDirectory != nil)) func realSignInPageServesGo2RTCsOwnPages() async throws {
         let directory = try TemporaryDirectory(prefix: "Go2RTCReal")
         defer { directory.remove() }
-        let launcher = ProcessHelperLauncher(searchDirectories: [URL(filePath: try #require(helperDirectory), directoryHint: .isDirectory)])
+        let launcher = PlatformHelperLauncher(searchDirectories: [URL(filePath: try #require(helperDirectory), directoryHint: .isDirectory)])
         let manager = Go2RTCManager(launcher: launcher, directory: directory.url.appending(path: "go2rtc", directoryHint: .isDirectory),
-                                    pickPort: Go2RTCManager.portPicker(transport: AppleNetworkTransport()), healthCheck: Go2RTCManager.httpHealthCheck)
+                                    pickPort: Go2RTCManager.portPicker(transport: PlatformNetworkTransport()), healthCheck: Go2RTCManager.httpHealthCheck)
         let url = try await manager.beginSetupSession()
         defer { Task { await manager.stop() } }
         let client = AuthenticatingHTTPClient(credentials: nil, timeout: .seconds(3))

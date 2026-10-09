@@ -1,0 +1,28 @@
+# Wired Ethernet only (v1 has no Wi-Fi setup). DHCP on every Ethernet interface.
+[Match]
+Type=ether
+Kind=!*
+
+[Link]
+# systemd-networkd-wait-online waits at most 30 s for this (see the drop-in), so an unplugged cable never blocks boot.
+RequiredForOnline=routable
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
+# IPv6 link-local always; IPv4 link-local (169.254.x.x) only if there is no DHCP server, so a Mac connected with a
+# single cable can still reach http://camera-bridge.local.
+LinkLocalAddressing=fallback
+# mDNS is answered by avahi-daemon, not by systemd-resolved.
+MulticastDNS=no
+LLMNR=no
+
+[DHCPv4]
+# A stable DHCP identity (the MAC address), so a router reservation keeps working across reboots and updates.
+ClientIdentifier=mac
+UseHostname=no
+UseDomains=no
+RouteMetric=100
+
+[DHCPv6]
+UseHostname=no

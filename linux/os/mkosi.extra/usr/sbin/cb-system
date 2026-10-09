@@ -1,0 +1,275 @@
+#!/bin/bash
+# cb-system: the privileged side of Camera Bridge OS settings. Run as root, from a terminal or by the request dispatcher.
+#
+#   cb-system status                         print the system state as JSON
+#   cb-system ssh-enable KEYFILE             enable SSH (key login for root) with the public keys in KEYFILE
+#   cb-system ssh-disable
+#   cb-system auto-update on|off             let the daily timer install updates by itself
+#   cb-system factory-reset --yes            erase all Camera Bridge settings and pairings, then reboot
+#   cb-system factory-reset-marker           (internal, at boot) honour camera-bridge-factory-reset on the boot partition
+#   cb-system reboot | poweroff
+#   cb-system process-requests               (internal) handle files the daemon dropped in /run/camera-bridge/requests
+#   cb-system run-job NAME                   (internal) run one validated job; see camera-bridge-job@.service
+#
+# The web UI never runs as root. camerabridged writes a small JSON request file; camera-bridge-request.path wakes
+# `process-requests`, which accepts only the names listed in ALLOWED_JOBS, parses the file with jq and passes validated
+# values as arguments (never through a shell). Results appear as /run/camera-bridge/status/<job>.json.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export CB_TAG=cb-system
+# shellcheck source=../lib/camera-bridge/lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+REQUESTS=$CB_RUN/requests
+JOBS=$CB_RUN/jobs
+MAX_REQUEST_BYTES=65536
+ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk"
+# Jobs that change disks or the running system image take this lock; only one at a time.
+HEAVY_JOBS=" update-apply install-to-disk factory-reset "
+
+SSH_DIR=$CB_SYSTEM/ssh
+KEY_RE='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+={0,3}( [^[:cntrl:]]{0,100})?$'
+
+require_root() { [ "$(id -u)" -eq 0 ] || cb_die "run as root"; }
+
+system_status() {
+    local ssh=false auto=false
+    [ -e "$SSH_DIR/enabled" ] && ssh=true
+    [ -e "$CB_SYSTEM/auto-update" ] && auto=true
+    jq -n --arg version "$(cb_os_version)" --argjson ssh "$ssh" --argjson auto "$auto" \
+        --arg booted "$(bootctl status 2>/dev/null | awk -F': ' '/Current Entry/ {print $2; exit}')" \
+        '{version: $version, sshEnabled: $ssh, autoUpdate: $auto, bootEntry: $booted}'
+}
+
+refresh_status() {
+    local extra
+    extra=$(system_status)
+    cb_status system ok "system state" "$extra"
+}
+
+# --- SSH --------------------------------------------------------------------------------------------------------------
+
+validate_keys() {
+    # validate_keys FILE: every non-empty, non-comment line must be a plain public key (no options such as command=).
+    local file=$1 n=0 line
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        [[ "$line" =~ $KEY_RE ]] || cb_die "not a plain SSH public key: ${line:0:40}"
+        n=$((n + 1))
+    done <"$file"
+    [ "$n" -gt 0 ] || cb_die "no public key given"
+    [ "$n" -le 20 ] || cb_die "too many keys (20 at most)"
+}
+
+ssh_apply_firewall() {
+    # Opens (or closes) TCP 22 in the nftables set that the ruleset consults. Safe to call at any time.
+    if ! nft list set inet camera_bridge ssh_port >/dev/null 2>&1; then
+        cb_log "firewall table not loaded; skipping SSH rule"
+        return 0
+    fi
+    nft flush set inet camera_bridge ssh_port
+    if [ -e "$SSH_DIR/enabled" ]; then
+        nft add element inet camera_bridge ssh_port '{ 22 }'
+    fi
+}
+
+cmd_ssh_enable() {
+    local keyfile=${1:?usage: cb-system ssh-enable KEYFILE}
+    [ -f "$keyfile" ] || cb_die "no such file: $keyfile"
+    validate_keys "$keyfile"
+    install -d -m 0700 "$SSH_DIR"
+    install -m 0600 /dev/null "$SSH_DIR/authorized_keys.new"
+    grep -Ev '^[[:space:]]*(#|$)' "$keyfile" >"$SSH_DIR/authorized_keys.new"
+    mv -f "$SSH_DIR/authorized_keys.new" "$SSH_DIR/authorized_keys"
+    if [ ! -s "$SSH_DIR/ssh_host_ed25519_key" ]; then
+        ssh-keygen -q -t ed25519 -N '' -C camera-bridge -f "$SSH_DIR/ssh_host_ed25519_key"
+    fi
+    touch "$SSH_DIR/enabled"
+    ssh_apply_firewall
+    systemctl restart ssh.service
+    cb_log "SSH enabled"
+}
+
+cmd_ssh_disable() {
+    rm -f "$SSH_DIR/enabled"
+    systemctl stop ssh.service 2>/dev/null || true
+    ssh_apply_firewall
+    cb_log "SSH disabled"
+}
+
+cmd_auto_update() {
+    case ${1:-} in
+        on)  touch "$CB_SYSTEM/auto-update" ;;
+        off) rm -f "$CB_SYSTEM/auto-update" ;;
+        *)   cb_die "usage: cb-system auto-update on|off" ;;
+    esac
+    cb_log "automatic updates: $1"
+}
+
+# --- reset / power ----------------------------------------------------------------------------------------------------
+
+wipe_settings() {
+    cb_wipe_dir_contents "$CB_DATA"
+    rm -f "$CB_SYSTEM/first-boot-done" "$CB_SYSTEM/auto-update" "$SSH_DIR/enabled"
+    sync
+}
+
+# Called early in every boot: if the user put a file named camera-bridge-factory-reset on the boot partition (a FAT
+# partition any Mac, Windows or Linux PC can open), remove the marker first (so a failure cannot loop) and wipe the settings.
+factory_reset_marker() {
+    local esp
+    esp=$(cb_esp) || true
+    if [ -z "$esp" ] || [ ! -d "$esp" ]; then return 0; fi
+    [ -e "$esp/camera-bridge-factory-reset" ] || return 0
+    rm -f -- "$esp/camera-bridge-factory-reset"
+    sync
+    cb_log "factory reset requested with the marker file on the boot partition"
+    wipe_settings
+}
+
+cmd_factory_reset() {
+    [ "${1:-}" = "--yes" ] || cb_die "factory-reset erases all settings and HomeKit pairings; pass --yes to confirm"
+    cb_log "factory reset: stopping the daemon and erasing $CB_DATA"
+    systemctl stop camerabridged.service || true
+    wipe_settings
+    systemctl reboot --no-block
+}
+
+# --- request dispatcher -----------------------------------------------------------------------------------------------
+
+job_allowed() {
+    local j
+    for j in $ALLOWED_JOBS; do [ "$j" = "$1" ] && return 0; done
+    return 1
+}
+
+process_requests() {
+    local f name size
+    mkdir -p "$JOBS" "$CB_STATUS"
+    chmod 0700 "$JOBS"
+    # The request folder is writable by the daemon user: look at regular files only, bounded size, allow-listed names.
+    for f in "$REQUESTS"/*.json; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        name=$(basename "$f" .json)
+        if [ -L "$f" ] || [ ! -f "$f" ] || ! job_allowed "$name"; then
+            cb_log "ignoring unexpected request entry '$name'"
+            rm -f -- "$f"
+            continue
+        fi
+        size=$(stat -c %s -- "$f")
+        if [ "$size" -gt "$MAX_REQUEST_BYTES" ]; then
+            cb_log "request '$name' too large"
+            rm -f -- "$f"
+            cb_status "$name" failed "request too large"
+            continue
+        fi
+        if ! head -c "$MAX_REQUEST_BYTES" -- "$f" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            cb_log "request '$name' is not a JSON object"
+            rm -f -- "$f"
+            cb_status "$name" failed "request is not a JSON object"
+            continue
+        fi
+        # Move the content into the root-only jobs folder first, so the file cannot change after validation.
+        head -c "$MAX_REQUEST_BYTES" -- "$f" >"$JOBS/$name.json"
+        chmod 0600 "$JOBS/$name.json"
+        rm -f -- "$f"
+        cb_status "$name" queued "waiting to run"
+        systemctl start --no-block "camera-bridge-job@$name.service" || cb_log "could not start job $name"
+    done
+    # Anything else in the folder (wrong extension, directories) is removed so the path unit does not retrigger forever.
+    find "$REQUESTS" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+}
+
+run_job() {
+    local name=$1 args=$JOBS/$1.json lock=$JOBS/.lock
+    job_allowed "$name" || cb_die "unknown job: $name"
+    [ -f "$args" ] || cb_die "no arguments for job $name"
+    if [[ "$HEAVY_JOBS" == *" $name "* ]]; then
+        exec 9>"$lock"
+        if ! flock -n 9; then
+            cb_status "$name" failed "another system job is running; try again when it has finished"
+            rm -f "$args"
+            return 1
+        fi
+    fi
+    cb_status "$name" running "started"
+    local rc=0
+    run_job_body "$name" "$args" || rc=$?
+    rm -f "$args"
+    # The installer reports its own steps and its own end state in install-to-disk.json. Every other job ends here, so
+    # status/<job>.json always reaches ok or failed (update.json carries the details of the update jobs).
+    if [ "$name" != install-to-disk ]; then
+        if [ "$rc" -eq 0 ]; then
+            cb_status "$name" ok "done"
+        else
+            cb_status "$name" failed "failed (exit $rc); see the system log"
+        fi
+    fi
+    refresh_status
+    return "$rc"
+}
+
+run_job_body() {
+    local name=$1 args=$2 tmp value device phrase
+    case $name in
+        ssh-enable)
+            tmp=$(mktemp)
+            jq -r '.authorizedKeys // empty | strings' "$args" >"$tmp"
+            cmd_ssh_enable "$tmp" || { rm -f "$tmp"; return 1; }
+            rm -f "$tmp"
+            ;;
+        ssh-disable) cmd_ssh_disable ;;
+        auto-update)
+            value=$(jq -r 'if .enabled == true then "on" elif .enabled == false then "off" else "invalid" end' "$args")
+            cmd_auto_update "$value"
+            ;;
+        update-check) /usr/sbin/cb-update check ;;
+        update-apply)
+            /usr/sbin/cb-update apply
+            if [ "$(jq -r '.reboot == true' "$args")" = "true" ]; then systemctl reboot --no-block; fi
+            ;;
+        reboot) systemctl reboot --no-block ;;
+        poweroff) systemctl poweroff --no-block ;;
+        factory-reset)
+            [ "$(jq -r '.confirm // ""' "$args")" = "RESET" ] || { cb_log "factory-reset without the RESET confirmation"; return 1; }
+            cmd_factory_reset --yes
+            ;;
+        install-list) /usr/sbin/cb-install-to-disk --list --json >"$CB_STATUS/install-candidates.json.new" \
+                          && chmod 0644 "$CB_STATUS/install-candidates.json.new" \
+                          && mv -f "$CB_STATUS/install-candidates.json.new" "$CB_STATUS/install-candidates.json" ;;
+        install-to-disk)
+            device=$(jq -r '.device // ""' "$args")
+            phrase=$(jq -r '.phrase // ""' "$args")
+            local extra=()
+            [ "$(jq -r '.copyData == true' "$args")" = "true" ] && extra+=(--copy-data)
+            [ "$(jq -r '.reboot == true' "$args")" = "true" ] && extra+=(--reboot)
+            [ "$(jq -r '.poweroff == true' "$args")" = "true" ] && extra+=(--poweroff)
+            [ "$(jq -r '.dryRun == true' "$args")" = "true" ] && extra+=(--dry-run)
+            /usr/sbin/cb-install-to-disk --device "$device" --confirm "$phrase" --status-name install-to-disk "${extra[@]}"
+            ;;
+        *) cb_die "unhandled job $name" ;;
+    esac
+}
+
+main() {
+    local cmd=${1:-}
+    shift || true
+    case $cmd in
+        status)           system_status ;;
+        ssh-enable)       require_root; cmd_ssh_enable "$@"; refresh_status ;;
+        ssh-disable)      require_root; cmd_ssh_disable; refresh_status ;;
+        ssh-apply-firewall) require_root; ssh_apply_firewall ;;
+        refresh-status)   require_root; refresh_status ;;
+        auto-update)      require_root; cmd_auto_update "$@"; refresh_status ;;
+        factory-reset)    require_root; cmd_factory_reset "$@" ;;
+        factory-reset-marker) require_root; factory_reset_marker ;;
+        reboot)           require_root; systemctl reboot ;;
+        poweroff)         require_root; systemctl poweroff ;;
+        process-requests) require_root; process_requests ;;
+        run-job)          require_root; run_job "${1:?job name}" ;;
+        ''|-h|--help|help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+        *) cb_die "unknown command: $cmd (try: cb-system help)" ;;
+    esac
+}
+
+main "$@"

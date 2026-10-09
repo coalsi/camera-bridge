@@ -116,7 +116,7 @@ import Testing
     }
 }
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
 @Suite(.timeLimit(.minutes(1))) struct HostileDeviceTests {
     @Test func reolinkDetectionSurvivesHugeNumbers() async throws {
         let server = try await MockHTTPServer.start { request in

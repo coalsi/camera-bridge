@@ -1,10 +1,10 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
-import PlatformApple
 import Synchronization
 @testable import HAP
+import TestSupport
 
 /// One HTTP response (or `EVENT/1.0` notification) received by `HAPTestClient`.
 struct HAPTestResponse: Sendable {
@@ -93,7 +93,7 @@ actor HAPTestClient {
 
     static func connect(port: UInt16, controllerID: String = UUID().uuidString, longTermKey: HAPLongTermKey = HAPLongTermKey(),
                         pairing: Pairing? = nil) async throws -> HAPTestClient {
-        let connection = try await AppleNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5))
+        let connection = try await PlatformNetworkTransport().connect(host: "127.0.0.1", port: port, timeout: .seconds(5))
         let client = HAPTestClient(connection: connection, controllerID: controllerID, longTermKey: longTermKey, pairing: pairing)
         await client.startReading()
         return client

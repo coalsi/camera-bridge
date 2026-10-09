@@ -1,8 +1,7 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
-import PlatformApple
 import Testing
 import TestSupport
 @testable import HAP
@@ -49,7 +48,7 @@ import TestSupport
         try secrets.write(nil, account: "hap.lost-identity")
         let advertiser = RecordingAdvertiser()
         let configuration = AccessoryServerConfiguration(port: 0, advertise: true, serviceName: name, loopbackOnly: true)
-        let server = AccessoryServer(accessory: accessory(), configuration: configuration, store: store, transport: AppleNetworkTransport(),
+        let server = AccessoryServer(accessory: accessory(), configuration: configuration, store: store, transport: PlatformNetworkTransport(),
                                      advertiser: advertiser)
         await server.setTimings(.fastTests)
         let events = server.events

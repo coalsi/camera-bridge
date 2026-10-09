@@ -1,14 +1,14 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
-import PlatformApple
 import Synchronization
+import TestSupport
 
-/// `NetworkTransport` over `AppleNetworkTransport` (loopback) that lets a test make the current listener fail the way
+/// `NetworkTransport` over `PlatformNetworkTransport` (loopback) that lets a test make the current listener fail the way
 /// `AppleTCPListener` does when NWListener enters `.failed`/`.waiting` after becoming ready (its `connections` stream
 /// finishes), and queue errors for the next `listen` calls.
 final class FlakyTransport: NetworkTransport {
-    private let base = AppleNetworkTransport()
+    private let base = PlatformNetworkTransport()
     private let state = Mutex<(listeners: [FlakyListener], errors: [TransportError], requestedPorts: [UInt16])>(([], [], []))
 
     /// Ports passed to `listen`, in order.

@@ -1,0 +1,19 @@
+# Root file system: written into the idle slot (the other of the two root partitions), never into the running one.
+# The source folder is the root-only staging area that cb-update fills after verifying signature and hashes.
+[Transfer]
+ProtectVersion=%A
+Verify=no
+
+[Source]
+Type=regular-file
+Path=/srv/update/stage
+MatchPattern=cb-os_@v_root.raw
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=cb-root_@v
+MatchPartitionType=root
+PartitionFlags=0
+ReadOnly=no
+InstancesMax=2

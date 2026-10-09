@@ -1,15 +1,14 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAP
-import PlatformApple
 import TestSupport
 import Testing
 @testable import HDS
 
 /// Loopback only (127.0.0.1): the listener never binds a LAN interface and nothing is advertised.
 @Suite(.timeLimit(.minutes(1))) struct DataStreamServerTests {
-    let transport = AppleNetworkTransport()
+    let transport = PlatformNetworkTransport()
 
     /// A server, one prepared session and a connected (not yet hello'd) client.
     struct Harness {

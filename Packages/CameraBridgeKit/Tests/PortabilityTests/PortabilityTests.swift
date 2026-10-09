@@ -27,7 +27,7 @@ let portableSystemModules: Set<String> = [
 /// Package dependencies and restricted system modules → the only modules that may import them (contracts: dependency
 /// graph; `os` is BridgeSupport's `Log` → `os.Logger`). SwiftPM would let any dependent import them transitively.
 let externalModuleUsers: [String: Set<String>] = [
-    "Crypto": ["BridgeSupport", "HAPCore", "RTP"],
+    "Crypto": ["BridgeSupport", "HAPCore", "RTP", "BridgeWeb"],
     "BigInt": ["HAPCore"],
     "_CryptoExtras": ["RTP"],
     "CommonCrypto": ["RTP"],   // and only in Sources/RTP/SRTP*
@@ -42,7 +42,7 @@ let restrictedImportFiles: [String: [String]] = [
 ]
 /// The only portable files that use the BSD socket API directly: RTP/SRTP media, WS-Discovery multicast and the
 /// interface addresses a live stream's accessory address is chosen from (`getifaddrs`).
-private let bsdSocketFiles = ["Sources/RTP/UDPSocket.swift", "Sources/CameraAdapters/ONVIF/ONVIFDiscovery.swift",
+private let bsdSocketFiles = ["Sources/BridgeDaemon/", "Sources/RTP/UDPSocket.swift", "Sources/CameraAdapters/ONVIF/ONVIFDiscovery.swift",
                               "Sources/BridgeEngine/Delegates/StreamAddress.swift"]
 
 /// Modules that exist only on some platforms: allowed only inside `#if canImport(<module>)`.
@@ -61,13 +61,18 @@ private let allowedPackageImports: [String: Set<String>] = {
         "RTP": ["MediaCore", "BridgeSupport"],
         "RTSP": ["RTP", "MediaCore", "BridgeSupport"],
         "CameraAdapters": ["RTSP", "RTP", "MediaCore", "BridgeSupport"],
-        "BridgeEngine": ["BridgeSupport", "HAPCore", "HAP", "HDS", "HAPCamera", "MediaCore", "FMP4", "RTP", "RTSP", "CameraAdapters", "PlatformApple"],
-        "TestSupport": ["HAPCore", "HAP", "HDS", "RTP", "RTSP", "MediaCore", "FMP4", "BridgeSupport", "PlatformApple"],
+        "BridgeEngine": ["BridgeSupport", "HAPCore", "HAP", "HDS", "HAPCamera", "MediaCore", "FMP4", "RTP", "RTSP", "CameraAdapters", "PlatformApple", "PlatformLinux"],
+        "TestSupport": ["HAPCore", "HAP", "HDS", "RTP", "RTSP", "MediaCore", "FMP4", "BridgeSupport", "PlatformApple", "PlatformLinux"],
     ]
+    graph["BridgeWeb"] = ["BridgeEngine", "CameraAdapters", "RTSP", "MediaCore", "BridgeSupport"]   // the web interface over the engine (CONTRACT_CHANGES)
+    graph["BridgeDaemon"] = ["BridgeWeb", "BridgeEngine", "CameraAdapters", "BridgeSupport", "PlatformLinux"]   // the Camera Bridge OS daemon (it prepares the Linux codecs)
+    graph["camerabridged"] = ["BridgeDaemon"]   // its main
     graph["cbctl"] = (graph["TestSupport"] ?? []).union(["TestSupport"])   // dev tool on top of TestSupport (CONTRACT_CHANGES)
     return graph
 }()
-let packageModules: Set<String> = Set(allowedPackageImports.keys).union(["PlatformApple"])
+/// The platform implementations (each wrapped in its own `#if os(...)`) and the C module they use; not portable, not scanned.
+let platformModules: Set<String> = ["PlatformApple", "PlatformLinux", "CDNSSD"]
+let packageModules: Set<String> = Set(allowedPackageImports.keys).union(["PlatformApple", "PlatformLinux"])
 
 /// Test-only modules may also use swift-testing.
 private let extraAllowed: [String: Set<String>] = ["TestSupport": ["Testing"], "cbctl": []]
@@ -101,7 +106,7 @@ struct ImportLine: Sendable, CustomStringConvertible {
 
     /// True if some enclosing condition contains `atom` un-negated and is not a disjunction (an `#else` branch, a
     /// negation or an `||` does not guarantee the atom holds).
-    private func requires(_ atom: String) -> Bool {
+    func requires(_ atom: String) -> Bool {
         conditions.contains { condition in
             let text = condition.replacingOccurrences(of: " ", with: "")
             guard !text.hasPrefix("!"), !text.contains("||") else { return false }
@@ -174,6 +179,10 @@ func sourceImportViolations(module: String, path: String, imports: [ImportLine])
                 violations.append("\(item) — PlatformApple is macOS-only: import it inside #if canImport(Darwin)")
             } else if item.module == "PlatformApple", module == "BridgeEngine", !path.hasSuffix("BridgeEngine/Environment.swift") {
                 violations.append("\(item) — in BridgeEngine only Environment.swift may import PlatformApple")
+            } else if item.module == "PlatformLinux", !item.requires("os(Linux)") {
+                violations.append("\(item) — PlatformLinux is Linux-only: import it inside #if os(Linux)")
+            } else if item.module == "PlatformLinux", module == "BridgeEngine", !path.hasSuffix("BridgeEngine/Environment.swift") {
+                violations.append("\(item) — in BridgeEngine only Environment.swift may import PlatformLinux")
             }
         } else if let users = externalModuleUsers[item.module], !users.contains(module) {
             violations.append("\(item) — \(module) may not depend on \(item.module)")
@@ -226,7 +235,7 @@ func swiftFiles(under root: URL) -> [URL] {
 func portableModuleSources() throws -> [String: [URL]] {
     var result: [String: [URL]] = [:]
     for module in try FileManager.default.contentsOfDirectory(atPath: sourcesDirectory.path())
-    where module != "PlatformApple" && !module.hasPrefix(".") {
+    where !platformModules.contains(module) && !module.hasPrefix(".") {
         result[module] = swiftFiles(under: sourcesDirectory.appending(path: module, directoryHint: .isDirectory))
     }
     return result

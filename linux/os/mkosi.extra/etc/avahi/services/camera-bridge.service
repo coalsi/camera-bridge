@@ -1,0 +1,11 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Shows the web UI in Bonjour browsers. The HomeKit advertisements come from the engine itself. -->
+<service-group>
+  <name replace-wildcards="yes">Camera Bridge on %h</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>80</port>
+    <txt-record>path=/</txt-record>
+  </service>
+</service-group>

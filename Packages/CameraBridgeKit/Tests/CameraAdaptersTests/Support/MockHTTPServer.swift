@@ -1,9 +1,9 @@
 // Loopback-only mock camera HTTP server built on PlatformApple's transport, so it runs on macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
-import PlatformApple
 import Synchronization
+import TestSupport
 
 struct MockRequest: Sendable {
     let head: HTTPRequestHead
@@ -83,7 +83,7 @@ final class MockHTTPServer: Sendable {
     }
 
     static func start(handler: @escaping Handler) async throws -> MockHTTPServer {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         let server = MockHTTPServer(listener: listener, handler: handler)
         let task = Task { [server] in
             for await connection in listener.connections {

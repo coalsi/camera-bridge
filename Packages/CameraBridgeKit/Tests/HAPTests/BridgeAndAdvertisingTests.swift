@@ -1,11 +1,11 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
-import PlatformApple
 import Synchronization
 import Testing
 @testable import HAP
+import TestSupport
 
 private func child(_ serial: String) -> Accessory {
     let accessory = Accessory(info: AccessoryInfo(name: "Sensor \(serial)", manufacturer: "CameraBridge", model: "Occupancy",
@@ -276,7 +276,7 @@ private func child(_ serial: String) -> Accessory {
         advertiser.failNextAdvertise(with: .localNetworkDenied)
         let configuration = AccessoryServerConfiguration(port: 0, advertise: true, serviceName: "Denied", loopbackOnly: true)
         let server = AccessoryServer(accessory: TestAccessories.sensorHub().accessory, configuration: configuration, store: InMemoryHAPStore(),
-                                     transport: AppleNetworkTransport(), advertiser: advertiser)
+                                     transport: PlatformNetworkTransport(), advertiser: advertiser)
         let events = server.events
         try await server.start()
         defer { await server.stop() }

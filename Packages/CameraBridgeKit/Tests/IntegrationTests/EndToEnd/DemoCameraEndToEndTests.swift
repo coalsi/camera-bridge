@@ -2,6 +2,9 @@
 import BridgeSupport
 @testable import CameraAdapters
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import HAP
 import MediaCore
 import Synchronization

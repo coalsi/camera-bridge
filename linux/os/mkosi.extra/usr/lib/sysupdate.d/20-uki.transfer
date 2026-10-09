@@ -1,0 +1,23 @@
+# Unified kernel image: installed next to the other versions in the boot partition as cb-os_<version>+3.efi.
+# The "+3" is systemd-boot's boot counter: three tries, then the entry is skipped and the previous version boots.
+# systemd-bless-boot removes the counter once the boot is healthy (see camera-bridge-health.service).
+[Transfer]
+ProtectVersion=%A
+Verify=no
+
+[Source]
+Type=regular-file
+Path=/srv/update/stage
+MatchPattern=cb-os_@v.efi
+
+[Target]
+Type=regular-file
+Path=/EFI/Linux
+PathRelativeTo=boot
+MatchPattern=cb-os_@v+@l-@d.efi \
+             cb-os_@v+@l.efi \
+             cb-os_@v.efi
+Mode=0444
+TriesLeft=3
+TriesDone=0
+InstancesMax=2

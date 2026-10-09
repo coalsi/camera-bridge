@@ -1,0 +1,10 @@
+{
+  "name": "Camera Bridge",
+  "short_name": "Camera Bridge",
+  "description": "Bridge your RTSP and ONVIF cameras into Apple Home.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#151517",
+  "theme_color": "#151517",
+  "icons": [{ "src": "/mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

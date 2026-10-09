@@ -7,9 +7,6 @@ import Foundation
 import HAP
 import HAPCore
 import Synchronization
-#if os(macOS)
-import PlatformApple
-#endif
 
 /// A reusable async HomeKit controller for tests and `cbctl`: pair-setup (SRP) and pair-verify, the encrypted HAP
 /// session (≤ 1024-byte frames, per-direction counters), GET/PUT /characteristics (incl. timed and write-response
@@ -707,15 +704,15 @@ public actor HAPTestController {
     }
 }
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
 extension HAPTestController {
-    /// `connect` over `AppleNetworkTransport` (tests on this Mac).
+    /// `connect` over `PlatformNetworkTransport` (tests on this machine).
     public static func connect(host: String = "127.0.0.1", port: UInt16, identity: HAPControllerIdentity = .generate(),
                                pairing: HAPAccessoryPairing? = nil, timeout: Duration = .seconds(10)) async throws -> HAPTestController {
-        try await connect(host: host, port: port, transport: AppleNetworkTransport(), identity: identity, pairing: pairing, timeout: timeout)
+        try await connect(host: host, port: port, transport: PlatformNetworkTransport(), identity: identity, pairing: pairing, timeout: timeout)
     }
 
-    /// Connects, runs pair-setup with `setupCode` and pair-verifies (over `AppleNetworkTransport`).
+    /// Connects, runs pair-setup with `setupCode` and pair-verifies (over `PlatformNetworkTransport`).
     public static func paired(host: String = "127.0.0.1", port: UInt16, setupCode: String,
                               identity: HAPControllerIdentity = .generate()) async throws -> HAPTestController {
         let controller = try await connect(host: host, port: port, identity: identity)

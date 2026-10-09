@@ -1,0 +1,14 @@
+[Unit]
+Description=Camera Bridge OS update check (installs the update too when automatic updates are on)
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/docs/linux/UPDATES.md
+After=network-online.target var-lib-camera\x2dbridge.mount
+Wants=network-online.target
+# Only one system job at a time (the web UI's "Update now" uses the same lock).
+ConditionPathExists=/usr/share/camera-bridge/update-key.pub
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/cb-update auto
+TimeoutStartSec=3h
+Nice=10
+IOSchedulingClass=idle

@@ -1,9 +1,8 @@
 // Loopback mock ISAPI camera (PlatformApple transport): macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import MediaCore
-import PlatformApple
 import TestSupport
 import Testing
 @testable import CameraAdapters
@@ -224,7 +223,7 @@ private func channelAlertPart(_ type: String, channel: Int) -> Data {
     private func driver(_ camera: MockHikvisionCamera, credentials: HTTPCredentials? = nil, timing: HikvisionEventTiming = HikvisionEventTiming(),
                         mainStreamURL: URL? = nil) -> HikvisionDriver {
         HikvisionDriver(endpoint: camera.endpoint, credentials: credentials ?? self.credentials, mainStreamURL: mainStreamURL, subStreamURL: nil,
-                        transport: AppleNetworkTransport(), timing: timing)
+                        transport: PlatformNetworkTransport(), timing: timing)
     }
 
     @Test func probeReadsDeviceChannelsAndCapabilities() async throws {

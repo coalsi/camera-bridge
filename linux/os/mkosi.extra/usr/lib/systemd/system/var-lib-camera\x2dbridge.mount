@@ -1,0 +1,17 @@
+[Unit]
+Description=Camera Bridge data (bound from the data partition)
+DefaultDependencies=no
+Requires=srv.mount camera-bridge-datadirs.service
+After=srv.mount camera-bridge-datadirs.service
+Before=local-fs.target
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=/srv/camera-bridge
+Where=/var/lib/camera-bridge
+Type=none
+Options=bind
+
+[Install]
+WantedBy=local-fs.target

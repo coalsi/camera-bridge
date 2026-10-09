@@ -3,10 +3,12 @@ import CameraAdapters
 import Foundation
 import TestSupport
 import Testing
-@testable import BridgeEngine
-#if os(macOS)
-import PlatformApple
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
 #endif
+@testable import BridgeEngine
 
 private func camera(_ name: String, port: UInt16 = 0, enabled: Bool = true) -> CameraConfiguration {
     var camera = CameraConfiguration(name: name, kind: .camera, vendor: .rtsp, endpoint: CameraEndpoint(host: "192.0.2.1"), username: "")
@@ -106,10 +108,10 @@ private func camera(_ name: String, port: UInt16 = 0, enabled: Bool = true) -> C
     }
 }
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
 @Suite(.timeLimit(.minutes(1))) struct PortCheckLoopbackTests {
     @Test func detectsARealListenerOnLoopback() async throws {
-        let transport = AppleNetworkTransport()
+        let transport = PlatformNetworkTransport()
         let listener = try await transport.listen(port: 0, loopbackOnly: true)
         let allocator = PortAllocator(transport: transport)
         #expect(await !allocator.isAvailable(listener.port))
@@ -125,9 +127,17 @@ private func camera(_ name: String, port: UInt16 = 0, enabled: Bool = true) -> C
     @Test func detectsAnIPv6OnlyLoopbackListener() async throws {
         let listener = try IPv6LoopbackListener()
         defer { listener.close() }
-        let allocator = PortAllocator(transport: AppleNetworkTransport())
+        let allocator = PortAllocator(transport: PlatformNetworkTransport())
         #expect(await !allocator.isAvailable(listener.port))
     }
+}
+
+private func closeDescriptor(_ descriptor: Int32) {
+    #if canImport(Darwin)
+    _ = Darwin.close(descriptor)
+    #else
+    _ = Glibc.close(descriptor)
+    #endif
 }
 
 /// A TCP listener on [::1] only (IPV6_V6ONLY), which a 127.0.0.1 probe cannot see.
@@ -137,20 +147,27 @@ private final class IPv6LoopbackListener {
 
     init() throws {
         struct SocketError: Error { let step: String }
-        let descriptor = socket(AF_INET6, SOCK_STREAM, 0)
+        #if canImport(Glibc)
+        let streamType = Int32(SOCK_STREAM.rawValue)
+        #else
+        let streamType = SOCK_STREAM
+        #endif
+        let descriptor = socket(AF_INET6, streamType, 0)
         guard descriptor >= 0 else { throw SocketError(step: "socket") }
         var on: Int32 = 1
-        setsockopt(descriptor, IPPROTO_IPV6, IPV6_V6ONLY, &on, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(descriptor, Int32(IPPROTO_IPV6), IPV6_V6ONLY, &on, socklen_t(MemoryLayout<Int32>.size))
         var address = sockaddr_in6()
+        #if canImport(Darwin)
         address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+        #endif
         address.sin6_family = sa_family_t(AF_INET6)
         address.sin6_addr = in6addr_loopback
         address.sin6_port = 0
         let bound = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in6>.size)) }
         }
-        guard bound == 0, Darwin.listen(descriptor, 4) == 0 else {
-            Darwin.close(descriptor)
+        guard bound == 0, listen(descriptor, 4) == 0 else {
+            closeDescriptor(descriptor)
             throw SocketError(step: "bind/listen")
         }
         var actual = sockaddr_in6()
@@ -159,7 +176,7 @@ private final class IPv6LoopbackListener {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
         }
         guard named == 0 else {
-            Darwin.close(descriptor)
+            closeDescriptor(descriptor)
             throw SocketError(step: "getsockname")
         }
         self.descriptor = descriptor
@@ -167,7 +184,7 @@ private final class IPv6LoopbackListener {
     }
 
     func close() {
-        Darwin.close(descriptor)
+        closeDescriptor(descriptor)
     }
 }
 #endif

@@ -71,7 +71,9 @@ public final class AuthenticatingHTTPClient: Sendable {
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = self.timeout.timeInterval
-        configuration.waitsForConnectivity = false
+        #if !os(Linux)
+        configuration.waitsForConnectivity = false   // swift-corelibs-foundation: get-only (and false)
+        #endif
         sessionDelegate = SessionDelegate(allowSelfSignedTLS: allowSelfSignedTLS)
         session = URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
     }
@@ -420,6 +422,13 @@ private final class StreamTask: TaskHandler {
         guard let http, let opening, let body else {
             opening?.resume(throwing: HTTPClientError.notHTTPResponse)
             bodyContinuation.finish(throwing: HTTPClientError.notHTTPResponse)
+            return .cancel
+        }
+        if captureHTTPAuth, http.statusCode == 401, http.value(forHTTPHeaderField: "WWW-Authenticate") != nil {
+            // Where URLSession reports no HTTP auth challenge to the delegate (swift-corelibs-foundation) the 401 arrives as an
+            // ordinary response: it is the captured challenge, and its body is not read.
+            opening.resume(returning: .challenged(http))
+            bodyContinuation.finish()
             return .cancel
         }
         opening.resume(returning: .opened(http, body))

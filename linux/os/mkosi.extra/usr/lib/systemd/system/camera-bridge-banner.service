@@ -1,0 +1,10 @@
+[Unit]
+Description=Show the web address on the console
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/camera-bridge/cb-banner
+
+[Install]
+WantedBy=multi-user.target

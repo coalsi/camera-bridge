@@ -113,7 +113,10 @@ public final class SyntheticNALSource: MediaSource {
         let samples = format.codec == .aac ? 1024 : max(1, format.sampleRate / 50)
         let size = format.codec == .aac ? 120 + index % 40 : samples * max(1, format.channels)
         var bytes = indexBytes(index)
-        bytes += (0..<max(0, size - bytes.count)).map { UInt8((index &* 3 &+ $0) % 255 + 1) }
+        for offset in 0..<max(0, size - bytes.count) {
+            let value: Int = (index &* 3 &+ offset) % 255 + 1
+            bytes.append(UInt8(value))
+        }
         return EncodedAudioFrame(format: format, data: Data(bytes), pts: MediaTime(value: Int64(index * samples), timescale: Int32(format.sampleRate)),
                                  sampleCount: samples, wallClock: Date())
     }

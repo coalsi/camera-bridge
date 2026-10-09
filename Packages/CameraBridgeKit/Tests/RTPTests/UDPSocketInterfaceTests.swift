@@ -9,9 +9,9 @@ import Testing
     @Test func aSocketBoundToLoopbackCanBeScopedToItsInterfaceAtBindTime() async throws {
         let receiver = try UDPSocket.bind(host: "127.0.0.1")
         defer { receiver.close() }
-        let sender = try UDPSocket.bind(host: "127.0.0.1", interface: "lo0")
+        let sender = try UDPSocket.bind(host: "127.0.0.1", interface: loopbackInterfaceName)
         defer { sender.close() }
-        #expect(sender.scopedInterface == "lo0" && receiver.scopedInterface == nil)
+        #expect(sender.scopedInterface == loopbackInterfaceName && receiver.scopedInterface == nil)
         try sender.send(Data("ping".utf8), to: SocketAddress(host: "127.0.0.1", port: receiver.localPort))
         let received = await collectDatagrams(receiver.datagrams, count: 1)
         #expect(received.first?.data == Data("ping".utf8))
@@ -23,8 +23,8 @@ import Testing
         let sender = try UDPSocket.bind(host: "127.0.0.1")
         defer { sender.close() }
         #expect(sender.scopedInterface == nil)
-        try sender.scope(toInterface: "lo0")
-        #expect(sender.scopedInterface == "lo0")
+        try sender.scope(toInterface: loopbackInterfaceName)
+        #expect(sender.scopedInterface == loopbackInterfaceName)
         try sender.send(Data([1]), to: SocketAddress(host: "127.0.0.1", port: receiver.localPort))
         try sender.scope(toInterface: nil)
         #expect(sender.scopedInterface == nil)
@@ -36,7 +36,7 @@ import Testing
     @Test func anIPv6SocketCanBeScopedToo() async throws {
         let receiver = try UDPSocket.bind(host: "::1", ipv6: true)
         defer { receiver.close() }
-        let sender = try UDPSocket.bind(host: "::1", ipv6: true, interface: "lo0")
+        let sender = try UDPSocket.bind(host: "::1", ipv6: true, interface: loopbackInterfaceName)
         defer { sender.close() }
         try sender.send(Data([7]), to: SocketAddress(host: "::1", port: receiver.localPort))
         let received = await collectDatagrams(receiver.datagrams, count: 1)
@@ -54,7 +54,7 @@ import Testing
     @Test func aClosedSocketCannotBeScoped() throws {
         let socket = try UDPSocket.bind(host: "127.0.0.1")
         socket.close()
-        #expect(throws: UDPSocketError.closed) { try socket.scope(toInterface: "lo0") }
+        #expect(throws: UDPSocketError.closed) { try socket.scope(toInterface: loopbackInterfaceName) }
     }
 
     /// The seam the session tests use: a send attempt fails with the errno the closure returns, and counts as an attempt.

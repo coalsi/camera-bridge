@@ -1,8 +1,7 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
-import PlatformApple
 import Synchronization
 import TestSupport
 import Testing
@@ -202,7 +201,7 @@ private struct PairingReply: Equatable {
             seen.withLock { $0 = .some(context.session.zone) }
             return nil
         }
-        let running = try await startServer(accessory: hub.accessory, transport: ZonedTransport(base: AppleNetworkTransport(), zone: "lo0"))
+        let running = try await startServer(accessory: hub.accessory, transport: ZonedTransport(base: PlatformNetworkTransport(), zone: "lo0"))
         defer { await running.stop() }
         let client = try await running.pairedClient()
         #expect(try await client.writeCharacteristics([writeItem(1, hub.lightOn, value: 1)]).status == 204)

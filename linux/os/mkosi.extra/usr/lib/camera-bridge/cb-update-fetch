@@ -1,0 +1,116 @@
+#!/bin/bash
+# The network half of the updater. Runs as the unprivileged user "cbupdate" inside a sandbox (started by cb-update with
+# systemd-run); it can write only /srv/update/cache. It never writes a partition and never talks to the boot loader.
+#
+#   cb-update-fetch latest                       print the newest stable release as one JSON line
+#   cb-update-fetch download VERSION ARCH        download that release's update files into /srv/update/cache/VERSION,
+#                                                 then check the SHA-256 list's signature and every file's hash
+#
+# Releases come from GitHub: tags "os-v<version>" (not "v*": those are the Mac app) of the repository named in
+# /etc/camera-bridge/update.conf. Each release has SHA256SUMS and SHA256SUMS.sig (a minisign signature made with
+# the private release key; the public key ships in the image) and, per architecture:
+#   cb-os_<version>_<arch>.efi              unified kernel image
+#   cb-os_<version>_<arch>_root.raw.zst     root file system image (zstd)
+# cb-update repeats every check as root before anything is written to a partition.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 0077
+
+CACHE=/srv/update/cache
+PUBKEY=/usr/share/camera-bridge/update-key.pub
+
+# Read KEY=VALUE lines (no shell evaluation) from the image's config and then the root-owned override on the data partition.
+CB_UPDATE_REPO=coalsi/camera-bridge
+CB_UPDATE_API=https://api.github.com
+CB_UPDATE_ALLOW_HTTP=0
+load_conf() {
+    local f key value
+    for f in /etc/camera-bridge/update.conf /srv/system/update.conf; do
+        [ -f "$f" ] || continue
+        while IFS='=' read -r key value; do
+            case $key in
+                CB_UPDATE_REPO|CB_UPDATE_API|CB_UPDATE_ALLOW_HTTP) printf -v "$key" '%s' "$value" ;;
+            esac
+        done < <(grep -E '^[A-Z_]+=' "$f" || true)
+    done
+}
+load_conf
+
+[[ $CB_UPDATE_REPO =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "bad repository setting" >&2; exit 2; }
+
+proto='=https'
+[ "$CB_UPDATE_ALLOW_HTTP" = "1" ] && proto='=https,http'
+curl_common=(--fail --silent --show-error --location --proto "$proto" --proto-redir "$proto" --tlsv1.2
+    --retry 3 --retry-delay 2 --connect-timeout 15 --user-agent "camera-bridge-os-updater")
+
+releases_json() {
+    curl "${curl_common[@]}" --max-time 60 --max-filesize 4194304 \
+        -H 'Accept: application/vnd.github+json' \
+        "$CB_UPDATE_API/repos/$CB_UPDATE_REPO/releases?per_page=30"
+}
+
+# Newest published, non-draft, non-prerelease release whose tag is os-v<digits and dots>.
+pick_latest() {
+    jq -c '
+      [ .[] | select((.draft | not) and (.prerelease | not) and (.tag_name | test("^os-v[0-9]+(\\.[0-9]+)*$"))) ]
+      | sort_by(.tag_name | ltrimstr("os-v") | split(".") | map(tonumber))
+      | last // empty
+      | { tag: .tag_name, version: (.tag_name | ltrimstr("os-v")), url: .html_url, notes: ((.body // "")[0:2000]),
+          assets: [ .assets[] | { name: .name, size: .size, url: .browser_download_url } ] }'
+}
+
+cmd_latest() {
+    releases_json | pick_latest
+}
+
+download_asset() {
+    # download_asset URL DEST MAXBYTES
+    local url=$1 dest=$2 max=$3
+    case $url in
+        https://*) ;;
+        http://*) [ "$CB_UPDATE_ALLOW_HTTP" = "1" ] || { echo "refusing non-https download" >&2; return 1; } ;;
+        *) echo "refusing odd download url" >&2; return 1 ;;
+    esac
+    rm -f -- "$dest"
+    curl "${curl_common[@]}" --max-time 7200 --max-filesize "$max" -o "$dest" "$url"
+}
+
+cmd_download() {
+    local version=${1:?version} arch=${2:?arch} release dir name want url size
+    [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]] || { echo "bad version" >&2; exit 2; }
+    case $arch in amd64|arm64) ;; *) echo "bad architecture" >&2; exit 2 ;; esac
+    release=$(releases_json | pick_latest)
+    [ -n "$release" ] || { echo "no release found" >&2; exit 1; }
+    [ "$(jq -r .version <<<"$release")" = "$version" ] || { echo "the newest release is not $version" >&2; exit 1; }
+
+    # Clean up older downloads (this folder is only ever used for one update).
+    find "$CACHE" -mindepth 1 -maxdepth 1 ! -name "$version" -exec rm -rf -- {} +
+    dir=$CACHE/$version
+    install -d -m 0700 "$dir"
+
+    for name in SHA256SUMS SHA256SUMS.sig "cb-os_${version}_${arch}.efi" "cb-os_${version}_${arch}_root.raw.zst"; do
+        want=$(jq -c --arg n "$name" '.assets[] | select(.name == $n)' <<<"$release")
+        [ -n "$want" ] || { echo "release $version has no file $name" >&2; exit 1; }
+        url=$(jq -r .url <<<"$want")
+        size=$(jq -r .size <<<"$want")
+        [ "$size" -le 3221225472 ] || { echo "$name is too large" >&2; exit 1; }
+        echo "downloading $name ($size bytes)" >&2
+        download_asset "$url" "$dir/$name" "$((size + 1024))"
+        [ "$(stat -c %s "$dir/$name")" = "$size" ] || { echo "$name has the wrong size" >&2; exit 1; }
+    done
+
+    # First line of defence (cb-update does it again as root): signature of the list, then each file's hash.
+    minisign -V -q -p "$PUBKEY" -m "$dir/SHA256SUMS" -x "$dir/SHA256SUMS.sig" || { echo "BAD SIGNATURE on SHA256SUMS" >&2; exit 1; }
+    for name in "cb-os_${version}_${arch}.efi" "cb-os_${version}_${arch}_root.raw.zst"; do
+        want=$(awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }' "$dir/SHA256SUMS")
+        [ -n "$want" ] || { echo "$name is not in the signed list" >&2; exit 1; }
+        [ "$(sha256sum "$dir/$name" | cut -d' ' -f1)" = "$want" ] || { echo "HASH MISMATCH for $name" >&2; exit 1; }
+    done
+    echo "downloaded and verified $version" >&2
+}
+
+case ${1:-} in
+    latest)   cmd_latest ;;
+    download) shift; cmd_download "$@" ;;
+    *) echo "usage: cb-update-fetch latest | download VERSION ARCH" >&2; exit 2 ;;
+esac

@@ -68,7 +68,8 @@ public enum HAPCrypto {
 }
 
 /// Ephemeral X25519 key pair for pair-verify (accessory and test controllers).
-public struct X25519KeyPair: Sendable {
+/// `@unchecked Sendable`: swift-crypto's key types (Linux) are not marked Sendable; the key is immutable.
+public struct X25519KeyPair: @unchecked Sendable {
     private let privateKey: Curve25519.KeyAgreement.PrivateKey
 
     public init() {
@@ -93,7 +94,8 @@ public struct X25519KeyPair: Sendable {
 }
 
 /// Ed25519 long-term key (accessory LTSK/LTPK).
-public struct HAPLongTermKey: Sendable {
+/// `@unchecked Sendable`: as `X25519KeyPair`.
+public struct HAPLongTermKey: @unchecked Sendable {
     private let privateKey: Curve25519.Signing.PrivateKey
 
     public init() {

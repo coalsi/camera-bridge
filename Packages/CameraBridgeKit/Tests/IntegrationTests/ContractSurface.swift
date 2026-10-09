@@ -3,6 +3,9 @@ import BridgeSupport
 import CameraAdapters
 import FMP4
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import HAP
 import HAPCamera
 import HAPCore

@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Camera Bridge OS update check
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/docs/linux/UPDATES.md
+
+[Timer]
+# /var is volatile, so Persistent= would not survive a reboot: check shortly after boot, then every day.
+OnBootSec=20min
+OnUnitInactiveSec=1d
+RandomizedDelaySec=2h
+AccuracySec=10min
+
+[Install]
+WantedBy=timers.target

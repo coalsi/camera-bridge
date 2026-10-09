@@ -52,6 +52,7 @@ package enum URLFreeErrors {
     private static func summary(_ error: any Error) -> String {
         if let urlError = error as? URLError { return "URLError \(urlError.code.rawValue)" }
         let bridged = error as NSError
+        if bridged.domain == NSURLErrorDomain { return "URLError \(bridged.code)" }   // (not bridged to URLError off Darwin)
         return "\(bridged.domain) \(bridged.code)"
     }
 

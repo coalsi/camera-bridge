@@ -1,5 +1,5 @@
 // Loopback mock ISAPI, Reolink and ONVIF cameras (PlatformApple transport): macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import Testing

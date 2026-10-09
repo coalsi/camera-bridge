@@ -1,0 +1,8 @@
+[Unit]
+Description=Handle requests from the Camera Bridge web UI
+StartLimitIntervalSec=10s
+StartLimitBurst=100
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/cb-system process-requests

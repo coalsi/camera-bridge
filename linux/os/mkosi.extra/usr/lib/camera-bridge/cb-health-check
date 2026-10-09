@@ -1,0 +1,33 @@
+#!/bin/bash
+# Decides whether this boot is good. camera-bridge-health.service runs it; boot-complete.target requires that service,
+# and systemd-bless-boot only blesses the boot (stops the rollback countdown) when boot-complete.target is reached.
+# After three boots that never get there, systemd-boot falls back to the previous system.
+#
+# Good means: the daemon answers on its status endpoint with valid JSON, avahi-daemon runs (HomeKit needs it) and the
+# data partition accepts writes. A box without a network cable is still good: only localhost is checked.
+set -euo pipefail
+export CB_TAG=camera-bridge-health
+# shellcheck source=lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+url=${CB_HEALTH_URL:-http://127.0.0.1/api/v1/status}
+attempts=${CB_HEALTH_ATTEMPTS:-40}      # 40 x 3 s = 2 minutes at most
+delay=${CB_HEALTH_DELAY:-3}
+
+ok=0
+for ((i = 1; i <= attempts; i++)); do
+    if body=$(curl -fsS --max-time 3 "$url" 2>/dev/null) && jq -e . >/dev/null 2>&1 <<<"$body"; then
+        ok=1
+        break
+    fi
+    sleep "$delay"
+done
+[ "$ok" -eq 1 ] || { cb_log "the daemon did not answer $url"; cb_status health failed "the daemon did not answer"; exit 1; }
+
+systemctl is-active --quiet avahi-daemon.service || { cb_log "avahi-daemon is not running"; cb_status health failed "avahi-daemon is not running"; exit 1; }
+
+probe=$(mktemp "$CB_DATA/.health.XXXXXX") || { cb_log "the data partition is not writable"; cb_status health failed "data partition not writable"; exit 1; }
+rm -f "$probe"
+
+cb_log "boot is healthy (version $(cb_os_version))"
+cb_status health ok "boot is healthy"

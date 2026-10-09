@@ -1,9 +1,8 @@
 // Loopback HTTP server over PlatformApple's transport: macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import MediaCore
-import PlatformApple
 import Synchronization
 import TestSupport
 import Testing
@@ -30,7 +29,7 @@ final class StreamingHTTPServer: Sendable {
     }
 
     init(handler: @escaping @Sendable (HTTPRequestHead) -> Reply) async throws {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         self.listener = listener
         let log = requestLog
         task = Task {
@@ -234,7 +233,7 @@ private func flvChunks(frames: Int, startWithDeltaFrame: Bool = true) -> [(Durat
     }
 
     @Test func connectionErrorsNeverCarryTheURL() async throws {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         let port = listener.port
         listener.close()
         let url = try #require(URL(string: "http://127.0.0.1:\(port)/flv?app=bcs&user=admin&password=secret"))

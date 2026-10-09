@@ -1,64 +1,47 @@
-// Loopback servers use Network.framework / PlatformApple, so these tests run on macOS only.
-#if os(macOS)
+// Loopback servers use the platform transport (Network.framework on macOS, POSIX sockets on Linux).
+#if os(macOS) || os(Linux)
 import Crypto
 import Foundation
-import Network
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Synchronization
-import PlatformApple
 import Testing
 @testable import BridgeSupport
 
-/// Minimal loopback HTTP/1.1 server used only by these tests. One handler call per parsed request.
+/// Minimal loopback HTTP/1.1 server used only by these tests (over the platform transport). One handler call per parsed request.
 final class LoopbackHTTPServer: Sendable {
     typealias Handler = @Sendable (HTTPRequestHead, Data) -> (status: Int, headers: [(String, String)], body: Data)
-    private let listener: NWListener
-    private let queue = DispatchQueue(label: "LoopbackHTTPServer")
+    private let listener: any TCPListener
+    private let acceptor: Task<Void, Never>
     let port: UInt16
 
     init(handler: @escaping Handler) async throws {
-        let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
-        let listener = try NWListener(using: parameters)
-        let queue = self.queue
-        listener.newConnectionHandler = { connection in
-            let parser = ParserBox()
-            connection.start(queue: queue)
-            LoopbackHTTPServer.receive(on: connection, parser: parser, handler: handler)
-        }
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         self.listener = listener
-        self.port = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, any Error>) in
-            let resumed = Mutex(false)
-            listener.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if resumed.withLock({ let r = $0; $0 = true; return !r }) { continuation.resume(returning: listener.port?.rawValue ?? 0) }
-                case .failed(let error):
-                    if resumed.withLock({ let r = $0; $0 = true; return !r }) { continuation.resume(throwing: error) }
-                default: break
-                }
+        port = listener.port
+        acceptor = Task {
+            for await connection in listener.connections {
+                Task { await LoopbackHTTPServer.serve(connection, handler: handler) }
             }
-            listener.start(queue: queue)
         }
     }
 
-    func stop() { listener.cancel() }
-
-    private final class ParserBox: @unchecked Sendable {   // only touched on the server queue
-        var parser = HTTPRequestParser()
+    func stop() {
+        listener.close()
+        acceptor.cancel()
     }
 
-    private static func receive(on connection: NWConnection, parser: ParserBox, handler: @escaping Handler) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
-            if let data, !data.isEmpty {
-                guard let requests = try? parser.parser.feed(data) else { connection.cancel(); return }
-                for (head, body) in requests {
-                    let (status, headers, responseBody) = handler(head, body)
-                    let wire = HTTPSerializer.response(status: status, headers: HTTPHeaders(headers), body: responseBody)
-                    connection.send(content: wire, completion: .contentProcessed { _ in })
-                }
+    private static func serve(_ connection: any TCPConnection, handler: @escaping Handler) async {
+        var parser = HTTPRequestParser()
+        defer { connection.close() }
+        while let data = try? await connection.receive(maximumLength: 65_536) {
+            guard let requests = try? parser.feed(data) else { return }
+            for (head, body) in requests {
+                let (status, headers, responseBody) = handler(head, body)
+                let wire = HTTPSerializer.response(status: status, headers: HTTPHeaders(headers), body: responseBody)
+                do { try await connection.send(wire) } catch { return }
             }
-            if isComplete || error != nil { connection.cancel(); return }
-            receive(on: connection, parser: parser, handler: handler)
         }
     }
 }
@@ -317,7 +300,7 @@ private final class ChunkedHTTPServer: Sendable {
     }
 
     static func start(digest: (user: String, password: String, realm: String, nonce: String)? = nil) async throws -> ChunkedHTTPServer {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         let server = ChunkedHTTPServer(listener: listener, digest: digest)
         server.serverTask.withLock { $0 = Task { await server.acceptLoop() } }
         return server

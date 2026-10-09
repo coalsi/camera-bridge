@@ -1,0 +1,38 @@
+#!/bin/bash
+# First-boot setup, safe to run on every boot (it only acts once per data partition).
+#   - hostname camera-bridge
+#   - the secrets key of the encrypted secret store (32 random bytes, 0600, owned by the daemon user)
+#   - the "first run" marker the daemon / web UI use to show the welcome page
+# The data partition itself is grown earlier: systemd-repart enlarges the partition and the gpt-auto mount grows the file system.
+set -euo pipefail
+export CB_TAG=camera-bridge-firstboot
+# shellcheck source=lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+[ "$(hostname)" = "camera-bridge" ] || hostnamectl --transient set-hostname camera-bridge || cb_log "could not set the hostname"
+
+mountpoint -q "$CB_DATA" || cb_die "$CB_DATA is not mounted"
+
+install -d -m 0750 -o camerabridge -g camerabridge "$CB_DATA"
+install -d -m 0700 -o camerabridge -g camerabridge "$CB_DATA/secrets"
+install -d -m 0750 -o camerabridge -g camerabridge "$CB_DATA/Diagnostics"
+
+key="$CB_DATA/secrets/master.key"
+if [ ! -s "$key" ]; then
+    umask 0077
+    tmp=$(mktemp "$CB_DATA/secrets/.master.key.XXXXXX")
+    head -c 32 /dev/urandom >"$tmp"
+    chown camerabridge:camerabridge "$tmp"
+    chmod 0600 "$tmp"
+    sync "$tmp"
+    mv "$tmp" "$key"
+    cb_log "generated the machine-specific secrets key"
+fi
+
+if [ ! -e "$CB_SYSTEM/first-boot-done" ]; then
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$CB_DATA/first-run"
+    chown camerabridge:camerabridge "$CB_DATA/first-run"
+    chmod 0640 "$CB_DATA/first-run"
+    cb_os_version >"$CB_SYSTEM/first-boot-done"
+    cb_log "first boot on this data partition: marked first-run"
+fi

@@ -1,15 +1,15 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
-import PlatformApple
 import Synchronization
+import TestSupport
 
-/// `NetworkTransport` over `AppleNetworkTransport` (loopback) whose accepted connections can be made to stop sending,
+/// `NetworkTransport` over `PlatformNetworkTransport` (loopback) whose accepted connections can be made to stop sending,
 /// like a controller that stopped reading: once the socket buffers are full, `AppleTCPConnection.send` waits for
 /// `.contentProcessed` forever. A stalled connection's `send` returns only when the connection is closed (throwing
 /// `TransportError.closed`, as the real one does).
 final class StallingTransport: NetworkTransport {
-    private let base = AppleNetworkTransport()
+    private let base = PlatformNetworkTransport()
     private let accepted = Mutex<[StallingConnection]>([])
 
     /// Stalls every connection accepted so far (later connections send normally).

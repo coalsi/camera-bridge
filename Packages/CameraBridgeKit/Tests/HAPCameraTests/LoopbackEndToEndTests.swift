@@ -1,9 +1,8 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
 import HDS
-import PlatformApple
 import TestSupport
 import Testing
 @testable import HAP
@@ -28,7 +27,7 @@ import Testing
     }
 
     static func start(isDoorbell: Bool, streaming: FakeStreamingDelegate, recording: FakeRecordingDelegate) async throws -> Running {
-        let transport = AppleNetworkTransport()
+        let transport = PlatformNetworkTransport()
         let accessory = Accessory(info: CameraHarness.info, category: isDoorbell ? .videoDoorbell : .ipCamera)
         let server = AccessoryServer(accessory: accessory,
                                      configuration: AccessoryServerConfiguration(port: 0, advertise: false, serviceName: "Loopback Camera",
@@ -134,7 +133,7 @@ import Testing
         func verifiedClient() async throws -> HAPTestController {
             let identity = HAPControllerIdentity.generate()
             await running.server.addPairingForTesting(controllerID: identity.pairingID, publicKey: identity.publicKey)
-            return try await HAPTestController.connectVerified(host: "127.0.0.1", port: running.port, transport: AppleNetworkTransport(),
+            return try await HAPTestController.connectVerified(host: "127.0.0.1", port: running.port, transport: PlatformNetworkTransport(),
                                                                identity: identity, pairing: pairing)
         }
         let a = try await verifiedClient()
@@ -178,11 +177,11 @@ import Testing
                                           accessoryLongTermPublicKey: longTermKey.publicKey)
         let adminIdentity = HAPControllerIdentity.generate()
         await running.server.addPairingForTesting(controllerID: adminIdentity.pairingID, publicKey: adminIdentity.publicKey)
-        let admin = try await HAPTestController.connectVerified(host: "127.0.0.1", port: running.port, transport: AppleNetworkTransport(),
+        let admin = try await HAPTestController.connectVerified(host: "127.0.0.1", port: running.port, transport: PlatformNetworkTransport(),
                                                                 identity: adminIdentity, pairing: pairing)
         let hubIdentity = HAPControllerIdentity.generate()
         try await admin.addPairing(identifier: hubIdentity.pairingID, publicKey: hubIdentity.publicKey, isAdmin: true)
-        let hub = try await HAPTestController.connectVerified(host: "127.0.0.1", port: running.port, transport: AppleNetworkTransport(),
+        let hub = try await HAPTestController.connectVerified(host: "127.0.0.1", port: running.port, transport: PlatformNetworkTransport(),
                                                               identity: hubIdentity, pairing: pairing)
         let camera = try CameraAccessoryIDs(database: try await hub.accessories())
         let homeKitCameraActive = try #require(camera.homeKitCameraActive)
@@ -268,7 +267,7 @@ import Testing
         let longTermKey = try #require(await running.server.longTermKey)
         let pairing = HAPAccessoryPairing(accessoryPairingID: try await running.server.deviceID.description,
                                           accessoryLongTermPublicKey: longTermKey.publicKey)
-        let client = try await HAPTestController.connectVerified(host: "127.0.0.1", port: running.port, transport: AppleNetworkTransport(),
+        let client = try await HAPTestController.connectVerified(host: "127.0.0.1", port: running.port, transport: PlatformNetworkTransport(),
                                                                  identity: identity, pairing: pairing)
 
         let database = try await client.accessories()

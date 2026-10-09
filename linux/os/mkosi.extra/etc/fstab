@@ -1,0 +1,6 @@
+# Camera Bridge OS. The root file system is read-only and found from the kernel command line (root=PARTLABEL=...).
+# The ESP (/boot, or /efi if that folder is a mount point) and the data partition (/srv) are mounted by systemd-gpt-auto-generator from the disk that was booted,
+# so a second Camera Bridge disk in the same machine can never be mixed up with the running one.
+# /var is volatile: services get a clean /var on every boot. Everything that must survive lives on the data partition,
+# which is bound to /var/lib/camera-bridge and /var/log/journal by the mount units in /usr/lib/systemd/system.
+tmpfs  /var  tmpfs  mode=0755,size=256M,nosuid,nodev  0 0

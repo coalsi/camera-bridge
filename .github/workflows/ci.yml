@@ -39,6 +39,38 @@ jobs:
           # A few timing tests can fail on a loaded shared runner; one retry of the whole run, never more.
           swift test || { echo "Retrying once"; swift test; }
 
+  linux:
+    name: Linux (${{ matrix.arch }}, swift test)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Swift 6.4: the tests use `await` inside `defer`. The same image the local Tools/linux-test.sh uses.
+    container:
+      image: swift:6.4
+      # CAP_NET_ADMIN lets the netlink monitor test add a dummy interface; without it that test does nothing.
+      options: --cap-add NET_ADMIN
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends pkg-config libavahi-compat-libdnssd-dev iproute2 ffmpeg ca-certificates libcurl4-openssl-dev libxml2-dev
+      - name: swift build
+        working-directory: Packages/CameraBridgeKit
+        run: swift build
+      - name: swift test
+        working-directory: Packages/CameraBridgeKit
+        run: |
+          # A few timing tests can fail on a loaded shared runner; one retry of the whole run, never more.
+          swift test || { echo "Retrying once"; swift test; }
+
   app:
     name: App build (unsigned)
     runs-on: macos-latest

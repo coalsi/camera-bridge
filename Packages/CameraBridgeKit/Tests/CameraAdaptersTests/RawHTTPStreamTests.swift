@@ -45,8 +45,7 @@ import Testing
     }
 }
 
-#if os(macOS)
-import PlatformApple
+#if os(macOS) || os(Linux)
 
 @Suite(.timeLimit(.minutes(1))) struct RawHTTPStreamTests {
     private let credentials = HTTPCredentials(username: "admin", password: "pa55")
@@ -63,7 +62,7 @@ import PlatformApple
             }
         }
         defer { server.stop() }
-        let opened = try await RawHTTPStream.open(transport: AppleNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/x?a=[b]",
+        let opened = try await RawHTTPStream.open(transport: PlatformNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/x?a=[b]",
                                                   credentials: credentials)
         #expect(opened.status == 200)
         var received = Data()
@@ -85,7 +84,7 @@ import PlatformApple
     @Test func rejectedCredentialsComeBackAs401() async throws {
         let server = try await MockHTTPServer.start { _ in .digestChallenge() }
         defer { server.stop() }
-        let opened = try await RawHTTPStream.open(transport: AppleNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/", credentials: credentials)
+        let opened = try await RawHTTPStream.open(transport: PlatformNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/", credentials: credentials)
         #expect(opened.status == 401)
         opened.close()
         #expect(server.requests.count == 2, "one challenge, one answer; nothing more")
@@ -99,7 +98,7 @@ import PlatformApple
             return .stream(status: 200, headers: [("Content-Type", "text/plain")]) { writer in await writer.write("hi") }
         }
         defer { server.stop() }
-        let opened = try await RawHTTPStream.open(transport: AppleNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/", credentials: credentials)
+        let opened = try await RawHTTPStream.open(transport: PlatformNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/", credentials: credentials)
         #expect(opened.status == 200)
         var iterator = opened.body.makeAsyncIterator()
         #expect(try await iterator.next().map { String(decoding: $0, as: UTF8.self) } == "hi")
@@ -110,7 +109,7 @@ import PlatformApple
         let server = try await MockHTTPServer.start { _ in .full(status: 401, headers: [("WWW-Authenticate", "Negotiate")], body: Data()) }
         defer { server.stop() }
         await #expect(throws: CameraAdapterError.unauthorized) {
-            _ = try await RawHTTPStream.open(transport: AppleNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/", credentials: credentials)
+            _ = try await RawHTTPStream.open(transport: PlatformNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/", credentials: credentials)
         }
         #expect(server.requests.count == 1 && server.requests.allSatisfy { $0.head.headers["Authorization"] == nil })
     }
@@ -118,18 +117,18 @@ import PlatformApple
     @Test func withoutCredentialsThe401IsReturnedAtOnce() async throws {
         let server = try await MockHTTPServer.start { _ in .digestChallenge() }
         defer { server.stop() }
-        let opened = try await RawHTTPStream.open(transport: AppleNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/", credentials: nil)
+        let opened = try await RawHTTPStream.open(transport: PlatformNetworkTransport(), host: "127.0.0.1", port: Int(server.port), target: "/", credentials: nil)
         #expect(opened.status == 401 && server.requests.count == 1)
         opened.close()
     }
 
     @Test func aRefusedConnectionIsATransportError() async throws {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         let port = listener.port
         listener.close()
         try await Task.sleep(for: .milliseconds(100))
         await #expect(throws: (any Error).self) {
-            _ = try await RawHTTPStream.open(transport: AppleNetworkTransport(), host: "127.0.0.1", port: Int(port), target: "/", credentials: nil, timeout: .seconds(2))
+            _ = try await RawHTTPStream.open(transport: PlatformNetworkTransport(), host: "127.0.0.1", port: Int(port), target: "/", credentials: nil, timeout: .seconds(2))
         }
     }
 }

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Runs on the build host with the image tree in $BUILDROOT, after the packages and extra trees are in place.
+set -euo pipefail
+
+# Name resolution through systemd-resolved's stub (cannot be done in the chroot: mkosi bind-mounts /etc/resolv.conf there).
+ln -sf ../run/systemd/resolve/stub-resolv.conf "$BUILDROOT/etc/resolv.conf"

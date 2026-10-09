@@ -295,22 +295,21 @@ actor IngestSupervisor {
     /// video frame takes the stream online, and the watchdog waits for video frames (audio may flow on its own while
     /// the picture is frozen or was never decodable).
     private nonisolated func consume(_ source: any MediaSource) async -> Outcome {
-        let lastSample = Mutex(ContinuousClock.now)
-        let gotSamples = Mutex(false)
+        let progress = IngestProgress()
         let hub = hub
         let traits = traits
         let lastVideo = lastVideo
         let watchdog = timing.watchdog
         do {
             let stream = try await withDeadline(timing.connectTimeout) { try await source.samples() }
-            lastSample.withLock { $0 = .now }
+            progress.lastSample.withLock { $0 = .now }
             return try await withThrowingTaskGroup(of: Outcome.self) { group in
                 group.addTask { [weak self] in
                     for try await sample in stream {
                         if case .video = sample {
-                            lastSample.withLock { $0 = .now }
+                            progress.lastSample.withLock { $0 = .now }
                             lastVideo.instant.withLock { $0 = .now }
-                            if gotSamples.withLock({ state in defer { state = true }; return !state }) {
+                            if progress.gotSamples.withLock({ state in defer { state = true }; return !state }) {
                                 await self?.firstSample()
                             }
                         }
@@ -324,7 +323,7 @@ actor IngestSupervisor {
                     let tick = min(.seconds(1), watchdog / 4)
                     while true {
                         try await Task.sleep(for: tick)
-                        if ContinuousClock.now - lastSample.withLock({ $0 }) > watchdog { throw Failure.stalled(watchdog) }
+                        if ContinuousClock.now - progress.lastSample.withLock({ $0 }) > watchdog { throw Failure.stalled(watchdog) }
                     }
                 }
                 defer { group.cancelAll() }
@@ -332,7 +331,7 @@ actor IngestSupervisor {
             }
         } catch {
             if Task.isCancelled { return .cancelled }
-            return .finished(reason: Self.describe(error, watchdog: watchdog), gotSamples: gotSamples.withLock { $0 }, error: error)
+            return .finished(reason: Self.describe(error, watchdog: watchdog), gotSamples: progress.gotSamples.withLock { $0 }, error: error)
         }
     }
 
@@ -416,4 +415,10 @@ actor IngestSupervisor {
 /// When the last video frame arrived, shared between the consuming task and the supervisor.
 private final class VideoClock: Sendable {
     let instant = Mutex<ContinuousClock.Instant?>(nil)
+}
+
+/// The ingest watchdog's two flags, in a class: the Linux compiler rejects a noncopyable `Mutex` local captured by a task group's tasks.
+private final class IngestProgress: Sendable {
+    let lastSample = Mutex(ContinuousClock.now)
+    let gotSamples = Mutex(false)
 }

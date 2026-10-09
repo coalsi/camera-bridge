@@ -1,8 +1,7 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import MediaCore
-import PlatformApple
 import RTP
 import Synchronization
 import TestSupport
@@ -27,7 +26,7 @@ final class ScriptedRTSPServer: Sendable {
     private let received = Log()
 
     init(handler: @escaping Handler, afterPlay streamer: Streamer? = nil) async throws {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         self.listener = listener
         let received = self.received
         task = Task {
@@ -89,7 +88,7 @@ final class ScriptedRTSPServer: Sendable {
 }
 
 private func client(_ server: ScriptedRTSPServer, timeout: Duration = .seconds(3)) -> RTSPClient {
-    RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: nil, timeout: timeout), transport: AppleNetworkTransport())
+    RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: nil, timeout: timeout), transport: PlatformNetworkTransport())
 }
 
 private let videoSDP = """
@@ -285,7 +284,7 @@ private func senderReportPacket() -> Data {
                 return [ScriptedRTSPServer.response(200, "OK", request)]
             }
         }
-        let client = RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: nil, timeout: .seconds(30)), transport: AppleNetworkTransport())
+        let client = RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: nil, timeout: .seconds(30)), transport: PlatformNetworkTransport())
         _ = try await client.connect()
         let stream = try await client.play()
         #expect(await eventually(timeout: .seconds(4)) {
@@ -320,7 +319,7 @@ private func senderReportPacket() -> Data {
         }
         let client = RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: HTTPCredentials(username: "u", password: "p"),
                                                                  timeout: .seconds(3)),
-                                transport: AppleNetworkTransport())
+                                transport: PlatformNetworkTransport())
         let info = try await client.connect()
         await client.close()
         #expect(info.videoFormat?.width == 640)
@@ -360,7 +359,7 @@ private func senderReportPacket() -> Data {
             }
         }
         let client = RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: nil, timeout: .seconds(1)),
-                                transport: AppleNetworkTransport(), videoFrameTimeout: .milliseconds(1500))
+                                transport: PlatformNetworkTransport(), videoFrameTimeout: .milliseconds(1500))
         _ = try await client.connect()
         let started = ContinuousClock.now
         let collected = await collect(try await client.play(), timeout: .seconds(5))
@@ -503,7 +502,7 @@ private func senderReportPacket() -> Data {
             }
         }
         let client = RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: nil, timeout: .seconds(30)),
-                                transport: AppleNetworkTransport())
+                                transport: PlatformNetworkTransport())
         _ = try await client.connect()
         let stream = try await client.play()   // kept alive: dropping the stream closes the session
         try await Task.sleep(for: .milliseconds(2600))
@@ -538,7 +537,7 @@ private func rotatingNonceChallenge(_ request: RTSPRequest, stale: String? = nil
     private func client(_ server: ScriptedRTSPServer) -> RTSPClient {
         RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: HTTPCredentials(username: "u", password: "p"),
                                                     timeout: .seconds(3)),
-                   transport: AppleNetworkTransport())
+                   transport: PlatformNetworkTransport())
     }
 
     @Test(arguments: [nil, "\"FALSE\"", "false"] as [String?])
@@ -677,7 +676,7 @@ private func rotatingNonceChallenge(_ request: RTSPRequest, stale: String? = nil
             }
         }
         let client = RTSPClient(configuration: RTSPConfiguration(url: server.url, credentials: credentials, timeout: .seconds(3)),
-                                transport: AppleNetworkTransport())
+                                transport: PlatformNetworkTransport())
         await #expect(throws: RTSPError.unauthorized) { try await client.connect() }
         await client.close()
         #expect(server.requests.contains { $0.method == "DESCRIBE" && $0.headers["Authorization"]?.hasPrefix("Digest ") == true })
@@ -698,7 +697,7 @@ private func rotatingNonceChallenge(_ request: RTSPRequest, stale: String? = nil
             return standard(request)
         }
         let source = RTSPMediaSource(configuration: RTSPConfiguration(url: server.url, credentials: credentials, timeout: .seconds(3)),
-                                     displayName: "downgrade", transport: AppleNetworkTransport())
+                                     displayName: "downgrade", transport: PlatformNetworkTransport())
         _ = try await source.samples()
         impersonating.set(true)
         await #expect(throws: RTSPError.unauthorized) { _ = try await source.samples() }

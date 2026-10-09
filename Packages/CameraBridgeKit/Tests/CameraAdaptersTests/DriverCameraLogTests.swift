@@ -1,8 +1,7 @@
 // Loopback mock cameras and a real loopback transport (PlatformApple): macOS only.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
-import PlatformApple
 import RTSP
 import TestSupport
 import Testing
@@ -34,7 +33,7 @@ import Testing
 
     /// A loopback port nothing listens on.
     private func closedPort() async throws -> Int {
-        let listener = try await AppleNetworkTransport().listen(port: 0, loopbackOnly: true)
+        let listener = try await PlatformNetworkTransport().listen(port: 0, loopbackOnly: true)
         let port = Int(listener.port)
         listener.close()
         return port
@@ -47,7 +46,7 @@ import Testing
             let port = try await closedPort()
             let endpoint = CameraEndpoint(host: "127.0.0.1", httpPort: port, onvifPort: port)
             let driver = CameraDrivers.make(vendor: vendor, endpoint: endpoint, credentials: credentials, mainStreamURL: nil, subStreamURL: nil,
-                                            transport: AppleNetworkTransport(), cameraID: id)
+                                            transport: PlatformNetworkTransport(), cameraID: id)
             let source = try #require(driver.makeEventSource())
             _ = source.events()
             let category = vendor == .hikvision ? "hikvision-events" : "events"
@@ -62,7 +61,7 @@ import Testing
             defer { camera.stop() }
             let id = UUID()
             let driver = CameraDrivers.make(vendor: .hikvision, endpoint: camera.endpoint, credentials: HTTPCredentials(username: "admin", password: "pa55"),
-                                            mainStreamURL: nil, subStreamURL: nil, transport: AppleNetworkTransport(), cameraID: id)
+                                            mainStreamURL: nil, subStreamURL: nil, transport: PlatformNetworkTransport(), cameraID: id)
             let sink = try #require(driver.makeTalkbackSink())
             try await sink.open()
             await sink.close()

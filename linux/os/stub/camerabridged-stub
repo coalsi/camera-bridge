@@ -1,0 +1,89 @@
+#!/usr/bin/python3
+"""Stand-in for camerabridged, for testing the operating system image before the real daemon is built in.
+
+NOT FOR RELEASES (build.sh --stub-daemon marks the image and refuses --release). It behaves like the real daemon as far
+as the OS is concerned: listens on port 80, answers GET /api/v1/status with JSON, serves the web root, speaks the systemd
+notify protocol (READY, WATCHDOG) and drops/reads nothing else.
+"""
+import http.server
+import json
+import os
+import socket
+import socketserver
+import threading
+import time
+
+WEB_ROOT = os.environ.get("CAMERABRIDGE_WEB_ROOT", "/usr/share/camera-bridge/web")
+PORT = int(os.environ.get("CAMERABRIDGE_HTTP_PORT", "80"))
+STARTED = time.time()
+
+
+def notify(message: str) -> None:
+    path = os.environ.get("NOTIFY_SOCKET")
+    if not path:
+        return
+    if path.startswith("@"):
+        path = "\0" + path[1:]
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        sock.connect(path)
+        sock.sendall(message.encode())
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=WEB_ROOT, **kwargs)
+
+    def do_GET(self):  # noqa: N802
+        if self.path.split("?")[0] == "/api/v1/status":
+            body = json.dumps({
+                "name": "camera-bridge-stub",
+                "stub": True,
+                "version": "stub",
+                "uptimeSeconds": int(time.time() - STARTED),
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/" and not os.path.exists(os.path.join(WEB_ROOT, "index.html")):
+            body = b"<!doctype html><title>Camera Bridge (stub)</title><h1>Camera Bridge OS</h1><p>Stub daemon: the OS image works.</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
+    def log_message(self, fmt, *args):  # keep the journal quiet
+        pass
+
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
+def watchdog_loop() -> None:
+    usec = int(os.environ.get("WATCHDOG_USEC", "0"))
+    interval = max(1.0, usec / 2_000_000) if usec else 10.0
+    while True:
+        notify("WATCHDOG=1")
+        time.sleep(interval)
+
+
+def main() -> None:
+    server = Server(("::", PORT), Handler)
+    notify("READY=1\nSTATUS=stub daemon listening")
+    threading.Thread(target=watchdog_loop, daemon=True).start()
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

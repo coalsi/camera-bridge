@@ -181,7 +181,7 @@ private func fastTimings() -> LiveStreamTimings {
         let controller = try TestController()
         defer { controller.close() }
         let sut = try SessionUnderTest(controller: controller, withAudio: false, timings: fastTimings())
-        sut.videoSocket.transport.update { $0.recoveryScopes = ["lo0", nil] }
+        sut.videoSocket.transport.update { $0.recoveryScopes = [loopbackInterfaceName, nil] }
         let logs = LiveStreamLogLines()
         defer { logs.stop() }
         await sut.session.start(video: frames(300), audio: nil)
@@ -190,8 +190,8 @@ private func fastTimings() -> LiveStreamTimings {
             healthy.value ? TestController.healthyBlock(controller) : []
         }
         defer { reports.cancel() }
-        #expect(await eventually(timeout: .seconds(3)) { sut.videoSocket.scopedInterface == "lo0" }, "first the interface owning the address")
-        #expect(sut.audioSocket.scopedInterface == "lo0", "both sockets")
+        #expect(await eventually(timeout: .seconds(3)) { sut.videoSocket.scopedInterface == loopbackInterfaceName }, "first the interface owning the address")
+        #expect(sut.audioSocket.scopedInterface == loopbackInterfaceName, "both sockets")
         #expect(await eventually(timeout: .seconds(3)) { sut.videoSocket.scopedInterface == nil }, "then no scope at all")
         #expect(await sut.session.timeline.controllerNotReceiving)
         // The controller starts receiving after the second step.
@@ -199,7 +199,7 @@ private func fastTimings() -> LiveStreamTimings {
         #expect(await eventually(timeout: .seconds(2)) { await sut.session.timeline.controllerNotReceiving == false })
         #expect(await sut.endReason(within: .milliseconds(300)) == nil, "recovered: the session goes on")
         let port = "\(controller.video.localPort)"
-        #expect(logs.messages(from: .info, mentioning: port).contains { $0.contains("sending through interface lo0") })
+        #expect(logs.messages(from: .info, mentioning: port).contains { $0.contains("sending through interface \(loopbackInterfaceName)") })
         #expect(logs.messages(from: .info, mentioning: "receiving our video again").isEmpty == false)
         await sut.session.stop()
         _ = await sut.session.waitForEnd()

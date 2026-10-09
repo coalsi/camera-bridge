@@ -1,0 +1,15 @@
+[Unit]
+Description=Camera Bridge first-boot setup (secrets key, hostname, first-run marker)
+# The data partition is grown before this runs: systemd-repart (Before=local-fs-pre.target) enlarges the partition and
+# the gpt-auto mount of /srv grows the file system.
+After=var-lib-camera\x2dbridge.mount systemd-repart.service
+Requires=var-lib-camera\x2dbridge.mount
+Before=camerabridged.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/camera-bridge/cb-firstboot
+
+[Install]
+WantedBy=multi-user.target

@@ -1,12 +1,12 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
 import HDS
-import PlatformApple
 import Testing
 @testable import HAP
 @testable import HAPCamera
+import TestSupport
 
 /// A `CameraController` installed on an accessory whose `AccessoryServer` is not started: characteristic handlers are
 /// driven directly (`handleWrite` / `handleRead`, as the server would after validation), and `DataStreamServer` listens
@@ -40,7 +40,7 @@ struct CameraHarness {
         let configuration = CameraControllerConfiguration(streamCount: streamCount, streaming: streamingOptions, recording: recordingOptions,
                                                           isDoorbell: isDoorbell, supportsNightVisionControl: nightVision,
                                                           supportsIndicatorControl: indicator)
-        let transport = AppleNetworkTransport()
+        let transport = PlatformNetworkTransport()
         let accessory = Accessory(info: info, category: isDoorbell ? .videoDoorbell : .ipCamera)
         let server = AccessoryServer(accessory: accessory, configuration: AccessoryServerConfiguration(port: 0, advertise: false,
                                                                                                         serviceName: "Driveway", loopbackOnly: true),

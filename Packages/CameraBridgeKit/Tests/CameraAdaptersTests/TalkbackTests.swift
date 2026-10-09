@@ -127,7 +127,7 @@ func audioFrame(_ byte: UInt8, format: AudioFormat = RTSPBackchannelTalkbackSink
     }
 }
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
 /// Reolink and ONVIF drivers hand out backchannel sinks according to the probe.
 @Suite(.timeLimit(.minutes(1))) struct DriverTalkbackTests {
     /// A fresh session per RTSP connection (the probe closes its own).

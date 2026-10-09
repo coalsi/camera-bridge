@@ -9,9 +9,6 @@ import RTP
 import Synchronization
 import TestSupport
 import Testing
-#if os(macOS)
-import PlatformApple
-#endif
 
 /// Self-tests of TestSupport's HomeKit controller (plan task W2-2; `swift test --filter IntegrationTests.ControllerSelfTests`):
 /// typed camera TLVs against the research brief §3.5/§3.7 goldens and the W1-9 HAP-NodeJS fixture, dataSend
@@ -598,7 +595,7 @@ extension ControllerSelfTests {
     }
 }
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
 
 // MARK: - Media generators (a fake camera's live source)
 
@@ -803,7 +800,7 @@ private final class FakeCamera: Sendable {
     let accessory: Accessory
     let server: AccessoryServer
     let dataStream: DataStreamServer
-    let transport: AppleNetworkTransport
+    let transport: PlatformNetworkTransport
     let state = Box(State())
     let motion: Characteristic
     let port: UInt16
@@ -812,7 +809,7 @@ private final class FakeCamera: Sendable {
     /// init + fragments `dataSend` delivers (a 600 KB fragment spans three 0x40000 chunks).
     let recordingPackets = [randomData(1500), randomData(600_000), randomData(5000), randomData(300_000)]
 
-    private init(accessory: Accessory, server: AccessoryServer, dataStream: DataStreamServer, transport: AppleNetworkTransport, motion: Characteristic,
+    private init(accessory: Accessory, server: AccessoryServer, dataStream: DataStreamServer, transport: PlatformNetworkTransport, motion: Characteristic,
                  port: UInt16, setupCode: String) {
         self.accessory = accessory
         self.server = server
@@ -824,7 +821,7 @@ private final class FakeCamera: Sendable {
     }
 
     static func start() async throws -> FakeCamera {
-        let transport = AppleNetworkTransport()
+        let transport = PlatformNetworkTransport()
         let accessory = Accessory(info: AccessoryInfo(name: "Fake Camera", manufacturer: "CameraBridge", model: "FakeCam",
                                                       serialNumber: "FAKE-\(UUID().uuidString.prefix(8))", firmwareRevision: "1.0.0"),
                                   category: .ipCamera)
@@ -1390,7 +1387,7 @@ extension ControllerSelfTests {
     @Suite struct HDSTestClientTests {
         @Test(.timeLimit(.minutes(1)))
         func helloRequestsEventsAndRecordingAgainstFakeSession() async throws {
-            let transport = AppleNetworkTransport()
+            let transport = PlatformNetworkTransport()
             let server = DataStreamServer(transport: transport, loopbackOnly: true)
             let received = Box<[HDSMessage]>([])
             let packets = [randomData(700), randomData(0x40000 + 17)]
@@ -1445,7 +1442,7 @@ extension ControllerSelfTests {
 
         @Test(.timeLimit(.minutes(1)))
         func wrongKeysAreDropped() async throws {
-            let transport = AppleNetworkTransport()
+            let transport = PlatformNetworkTransport()
             let server = DataStreamServer(transport: transport, loopbackOnly: true)
             let session = TestHAPSession()
             let controllerSalt = ControllerTLV.randomBytes(32)
@@ -1461,7 +1458,7 @@ extension ControllerSelfTests {
         /// `silent` one (never answers) and `burst` (answers, then sends `count` events `n` = 0, 1, …), and a client
         /// that said hello.
         private static func echoServer() async throws -> (server: DataStreamServer, client: HDSTestClient, received: Box<[HDSMessage]>) {
-            let transport = AppleNetworkTransport()
+            let transport = PlatformNetworkTransport()
             let server = DataStreamServer(transport: transport, loopbackOnly: true)
             let received = Box<[HDSMessage]>([])
             await server.setHandler(protocol: "echo") { message, connection in
@@ -1573,10 +1570,10 @@ extension HDSMessage.Kind {
 
 // MARK: - cbctl
 
-/// `AppleNetworkTransport`, except that a connection dies when it sends a pair-verify request (plaintext), so
+/// `PlatformNetworkTransport`, except that a connection dies when it sends a pair-verify request (plaintext), so
 /// pair-setup succeeds and pair-verify fails.
 private struct PairVerifyFailingTransport: NetworkTransport {
-    let base = AppleNetworkTransport()
+    let base = PlatformNetworkTransport()
 
     func listen(port: UInt16, loopbackOnly: Bool) async throws -> any TCPListener {
         try await base.listen(port: port, loopbackOnly: loopbackOnly)
@@ -1673,7 +1670,7 @@ extension ControllerSelfTests {
             try #require(await cli.run(["record", mp4Path.path, "--seconds", "20"]) == 0, "\(captured.error)")
             #expect(try Data(contentsOf: mp4Path) == camera.recordingPackets.reduce(Data(), +))
             #expect(captured.standard.contains("end of stream"))
-            #expect(await eventually { camera.state.value.dataSendEvents.map(\.topic) == ["ack"] })
+            #expect(await eventually { camera.state.value.dataSendEvents.map(\.topic) == ["ack"] }, "events: \(camera.state.value.dataSendEvents.map(\.topic))")
 
             try #require(await cli.run(["unpair"]) == 0, "\(captured.error)")
             #expect(await eventually { await !camera.server.isPaired })
@@ -1695,7 +1692,7 @@ extension ControllerSelfTests {
             let home = try TestSupportModule.makeTemporaryDirectory(prefix: "cbctl")
             defer { try? FileManager.default.removeItem(at: home) }
             let captured = CapturedOutput()
-            let cli = ControllerCLI(store: HAPControllerStore(directory: home), transport: AppleNetworkTransport(), output: captured.output)
+            let cli = ControllerCLI(store: HAPControllerStore(directory: home), transport: PlatformNetworkTransport(), output: captured.output)
             #expect(await cli.run(["--help"]) == 0)
             #expect(captured.standard.contains("watch-motion"))
             #expect(await cli.run([]) == 0)
@@ -1957,12 +1954,12 @@ private struct HAPCameraAccessory {
     let server: AccessoryServer
     let dataStream: DataStreamServer
     let camera: CameraController
-    let transport: AppleNetworkTransport
+    let transport: PlatformNetworkTransport
     let port: UInt16
     let setupCode: String
 
     static func start(streaming: CameraStreamingFake, recording: CameraRecordingFake, isDoorbell: Bool = false) async throws -> HAPCameraAccessory {
-        let transport = AppleNetworkTransport()
+        let transport = PlatformNetworkTransport()
         let accessory = Accessory(info: info, category: isDoorbell ? .videoDoorbell : .ipCamera)
         let server = AccessoryServer(accessory: accessory, configuration: AccessoryServerConfiguration(port: 0, advertise: false,
                                                                                                         serviceName: "Loopback Camera", loopbackOnly: true),

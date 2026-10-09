@@ -1,0 +1,9 @@
+[Unit]
+Description=Camera Bridge system job %i
+# Started by cb-system process-requests with a validated argument file in /run/camera-bridge/jobs.
+CollectMode=inactive-or-failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/cb-system run-job %i
+TimeoutStartSec=4h

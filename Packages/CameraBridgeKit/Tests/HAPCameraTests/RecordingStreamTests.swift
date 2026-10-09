@@ -1,9 +1,8 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import HAPCore
 import HDS
-import PlatformApple
 import Synchronization
 import TestSupport
 import Testing
@@ -44,7 +43,7 @@ import Testing
                 client = HDSLoopbackClient(connection: clientEnd, sharedSecret: admin.sharedSecret, controllerKeySalt: salt,
                                            accessoryKeySalt: response.accessoryKeySalt)
             } else {
-                client = try await HDSLoopbackClient.connect(transport: AppleNetworkTransport(), port: response.port, sharedSecret: admin.sharedSecret,
+                client = try await HDSLoopbackClient.connect(transport: PlatformNetworkTransport(), port: response.port, sharedSecret: admin.sharedSecret,
                                                              controllerKeySalt: salt, accessoryKeySalt: response.accessoryKeySalt)
             }
             let hello = try await client.hello()

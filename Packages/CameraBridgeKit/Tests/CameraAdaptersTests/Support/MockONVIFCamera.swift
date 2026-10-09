@@ -1,4 +1,4 @@
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import BridgeSupport
 import Foundation
 import TestSupport
@@ -140,7 +140,8 @@ final class MockONVIFCamera: Sendable {
     private func envelope(_ body: String) -> MockResponse {
         .soap("""
         <?xml version="1.0"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" \
-        xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"><s:Body>\(body)</s:Body></s:Envelope>
+        xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2" \
+        xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"><s:Body>\(body)</s:Body></s:Envelope>
         """)
     }
 

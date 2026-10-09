@@ -291,8 +291,10 @@ public actor AccessoryServer {
         let now = ContinuousClock.now
         var closed = 0
         for connection in Array(connections.values) where connection.session != nil && !connection.isClosed && now - connection.lastInbound > limit {
-            log.info("Closing the HAP connection from \(connection.transport.remoteAddress) to \(accessory.info.name): nothing received for "
-                     + "\(now - connection.lastInbound) (the Mac slept or the controller is gone)")
+            let remote = connection.transport.remoteAddress   // (a local: the Linux compiler rejects the class in an autoclosure)
+            let silence = now - connection.lastInbound
+            log.info("Closing the HAP connection from \(remote) to \(accessory.info.name): nothing received for "
+                     + "\(silence) (the Mac slept or the controller is gone)")
             closeConnection(connection, graceful: false)
             closed += 1
         }
@@ -579,8 +581,9 @@ public actor AccessoryServer {
         let candidates = unverified.filter { $0 !== newest && $0.id != pairSetupOwner?.connectionID }.sorted { $0.lastActivity < $1.lastActivity }
         for connection in candidates.prefix(excess) {
             // Once per minute whatever the address: every connect beyond the cap gets here.
+            let remote = connection.transport.remoteAddress
             noteUnauthenticated("unverified-cap", from: nil, "Closing unverified HAP connection to \(accessory.info.name) from "
-                                + "\(connection.transport.remoteAddress): too many unverified connections")
+                                + "\(remote): too many unverified connections")
             closeConnection(connection, graceful: false)
         }
     }

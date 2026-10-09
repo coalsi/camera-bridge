@@ -1,0 +1,5 @@
+#!/bin/sh
+# TEST ONLY: a "daemon" that dies at once. build.sh --stub-broken uses it to make an update that boots but never becomes
+# healthy, to prove that the box falls back to the previous version by itself (test-vm.sh --broken-dir).
+echo "camerabridged-broken: simulating a bad update" >&2
+exit 1

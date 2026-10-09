@@ -114,8 +114,7 @@ actor FakeGo2RTCProvider: Go2RTCStreamProviding {
     }
 }
 
-#if os(macOS)
-import PlatformApple
+#if os(macOS) || os(Linux)
 
 final class MockProtectConsole: Sendable {
     let server: MockHTTPServer

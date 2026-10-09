@@ -1,0 +1,21 @@
+#!/bin/bash
+# Creates the directory layout on the data partition (/srv) before it is bound into /var. Idempotent, fast.
+#   /srv/camera-bridge   the daemon's data       (bound to /var/lib/camera-bridge, owned by camerabridge)
+#   /srv/journal         persistent journal       (bound to /var/log/journal)
+#   /srv/system          root-owned state: SSH keys and flags
+#   /srv/update          update download cache (cbupdate) and the root-only staging area
+set -euo pipefail
+export CB_TAG=camera-bridge-datadirs
+# shellcheck source=lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+mountpoint -q /srv || cb_die "/srv (the data partition) is not mounted"
+
+install -d -m 0755 /srv
+install -d -m 0750 -o camerabridge -g camerabridge /srv/camera-bridge
+install -d -m 2755 /srv/journal
+install -d -m 0755 /srv/system
+install -d -m 0700 /srv/system/ssh
+install -d -m 0755 /srv/update
+install -d -m 0700 -o cbupdate -g cbupdate /srv/update/cache
+install -d -m 0700 /srv/update/stage

@@ -161,8 +161,7 @@ import Testing
     }
 }
 
-#if os(macOS)
-import PlatformApple
+#if os(macOS) || os(Linux)
 
 /// A loopback Amcrest camera: Digest-protected CGI, a `magicBox.cgi`, a JPEG with a vendor block, an event stream.
 final class MockAmcrestCamera: Sendable {
@@ -244,7 +243,7 @@ final class MockAmcrestCamera: Sendable {
     }
 
     private func driver(_ camera: MockAmcrestCamera, factory: FakeRTSPFactory? = nil, credentials: HTTPCredentials? = nil) -> AmcrestDriver {
-        AmcrestDriver(endpoint: camera.endpoint, credentials: credentials ?? self.credentials, mainStreamURL: nil, subStreamURL: nil, transport: AppleNetworkTransport(),
+        AmcrestDriver(endpoint: camera.endpoint, credentials: credentials ?? self.credentials, mainStreamURL: nil, subStreamURL: nil, transport: PlatformNetworkTransport(),
                       rtspFactory: (factory ?? FakeRTSPFactory(FakeRTSPSession(info: info))).factory, timing: timing())
     }
 

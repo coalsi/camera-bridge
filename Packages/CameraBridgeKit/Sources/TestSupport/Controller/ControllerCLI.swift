@@ -2,9 +2,6 @@ import BridgeSupport
 import Foundation
 import HAP
 import HDS
-#if os(macOS)
-import PlatformApple
-#endif
 
 /// `cbctl`: a developer HomeKit controller for CameraBridge accessories, built on `HAPTestController`.
 /// It connects by host:port only and never advertises anything. Pairing data lives in `HAPControllerStore`
@@ -68,8 +65,8 @@ public struct ControllerCLI: Sendable {
 
     /// Entry point of the `cbctl` executable: default store (or `--home`), the platform transport, console output.
     public static func main(arguments: [String]) async -> Int32 {
-        #if os(macOS)
-        let cli = ControllerCLI(store: HAPControllerStore(directory: HAPControllerStore.defaultDirectory()), transport: AppleNetworkTransport(),
+        #if os(macOS) || os(Linux)
+        let cli = ControllerCLI(store: HAPControllerStore(directory: HAPControllerStore.defaultDirectory()), transport: PlatformNetworkTransport(),
                                 output: .console)
         return await cli.run(arguments)
         #else
@@ -293,6 +290,9 @@ public struct ControllerCLI: Sendable {
                                                                 duration: .milliseconds(Int64(seconds * 1000)))
                 if capture.endOfStream {
                     try await dataStream.ackRecording(streamID: streamID)
+                    // Let the accessory take the ack before this connection (and the HAP one it rides on) goes away: it reads the
+                    // two connections independently, and closing the HAP one ends the HDS session first if it wins that race.
+                    try await Task.sleep(for: .milliseconds(100))
                 } else if capture.closeReason == nil {
                     try await dataStream.closeRecording(streamID: streamID, reason: .normal)
                 }

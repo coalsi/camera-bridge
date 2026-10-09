@@ -1,0 +1,12 @@
+[Unit]
+Description=Camera Bridge boot health check (keeps or rolls back an update)
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/docs/linux/UPDATES.md
+Requires=camerabridged.service
+After=camerabridged.service avahi-daemon.service
+# Part of boot-complete.target (see boot-complete.target.d): only a healthy boot is blessed by systemd-bless-boot.
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/camera-bridge/cb-health-check
+TimeoutStartSec=180

@@ -1,0 +1,78 @@
+#!/bin/bash
+# Runs inside the image root at the end of the build (mkosi calls it with "final" for the final image).
+# Everything here is baked into the read-only root: enabled units, masks, users, os-release.
+set -euo pipefail
+
+[ "${1:-final}" = "final" ] || exit 0
+
+# --- users and permissions ---------------------------------------------------------------------------------------------
+systemd-sysusers
+chmod 0755 /usr/sbin/cb-install-to-disk /usr/sbin/cb-update /usr/sbin/cb-system \
+    /usr/lib/camera-bridge/cb-* /usr/lib/camera-bridge/lib.sh
+passwd -l root >/dev/null
+# SSH host keys are made on the box (when SSH is enabled), never shipped: they would be shared by every copy of the image.
+rm -f /etc/ssh/ssh_host_*
+# Empty machine-id on a read-only root: systemd uses a transient one each boot (see mkosi.extra/etc/fstab and the README).
+: >/etc/machine-id
+rm -f /var/lib/dbus/machine-id
+
+# --- mount points the gpt-auto generator and our bind mounts need -------------------------------------------------------
+mkdir -p /srv /var/lib/camera-bridge /var/log/journal /run/camera-bridge
+chmod 0755 /srv
+
+# --- units ---------------------------------------------------------------------------------------------------------------
+systemctl enable \
+    systemd-networkd.service \
+    systemd-resolved.service \
+    systemd-networkd-wait-online.service \
+    avahi-daemon.service \
+    chrony.service \
+    nftables.service \
+    ssh.service \
+    camerabridged.service \
+    'var-lib-camera\x2dbridge.mount' \
+    var-log-journal.mount \
+    camera-bridge-journal-prune.service \
+    camera-bridge-firstboot.service \
+    camera-bridge-factory-reset.service \
+    camera-bridge-ssh.service \
+    camera-bridge-credentials.service \
+    camera-bridge-request.path \
+    camera-bridge-update.timer \
+    camera-bridge-banner.timer \
+    camera-bridge-banner.service \
+    fstrim.timer
+
+# Debian ships two chrony units that conflict; with both enabled either may win. We want the one that can set the clock.
+systemctl mask chronyd-restricted.service >/dev/null
+
+# Off by default, started only by the web UI / cb-system (units carry ConditionPathExists on a flag file for ssh).
+systemctl mask ssh.socket >/dev/null 2>&1 || true
+# Nothing may wait for a person at the console of a headless box.
+systemctl mask systemd-firstboot.service >/dev/null
+# /etc/vconsole.conf is a dangling symlink into /usr/share/factory on Debian; systemd-tmpfiles cannot fix it on a read-only root.
+rm -f /etc/vconsole.conf
+echo 'KEYMAP=us' >/etc/vconsole.conf
+# The ssh generator only logs a warning when the machine has no AF_VSOCK; we never use its socket activation.
+mkdir -p /etc/systemd/system-generators
+ln -sf /dev/null /etc/systemd/system-generators/systemd-ssh-generator
+# Nothing needs to wait for the first clock sync (the daemon copes with a clock that is corrected later).
+systemctl mask chrony-wait.service >/dev/null
+# The box never sleeps; no weekly file system scrubs on a USB stick.
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target e2scrub_all.timer e2scrub_reap.service >/dev/null 2>&1 || true
+
+# --- identity ----------------------------------------------------------------------------------------------------------
+pretty="Camera Bridge OS ${IMAGE_VERSION:-dev} (Debian 13)"
+if [ -f /usr/lib/os-release ]; then
+    sed -i -e '/^PRETTY_NAME=/d' -e '/^HOME_URL=/d' -e '/^SUPPORT_URL=/d' -e '/^BUG_REPORT_URL=/d' /usr/lib/os-release
+    {
+        printf 'PRETTY_NAME="%s"\n' "$pretty"
+        echo 'HOME_URL="https://camera-bridge.app/"'
+        echo 'SUPPORT_URL="https://github.com/coalsi/camera-bridge"'
+        echo 'BUG_REPORT_URL="https://github.com/coalsi/camera-bridge/issues"'
+    } >>/usr/lib/os-release
+fi
+
+# The list of installed packages with versions (the dpkg database is hidden under the volatile /var at run time).
+mkdir -p /usr/share/camera-bridge
+dpkg-query -W -f='${Package} ${Version}\n' | sort >/usr/share/camera-bridge/packages.txt

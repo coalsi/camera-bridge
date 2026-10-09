@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply the SSH setting (firewall rule) and refresh the system status
+# Runs after the firewall is loaded: opens TCP 22 only if SSH was enabled in the web UI, then publishes
+# /run/camera-bridge/status/system.json for the UI.
+After=nftables.service srv.mount var-lib-camera\x2dbridge.mount
+Wants=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/cb-system ssh-apply-firewall
+ExecStart=/usr/sbin/cb-system refresh-status
+
+[Install]
+WantedBy=multi-user.target
