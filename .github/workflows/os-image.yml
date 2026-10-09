@@ -140,8 +140,18 @@ jobs:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
+          # Versions before 1.0 are pre-releases: the box's updater skips them and the notes say what has been tested.
+          PRERELEASE=()
+          WARNING=""
+          case "$VERSION" in 0.*)
+            PRERELEASE=(--prerelease)
+            WARNING="**Pre-release.** This image builds and boots in automated tests on virtual machines (Intel and ARM), including first start, install to a second disk, updates and automatic rollback. It has not been tried on real hardware yet: USB boot, hardware video encoding and pairing with the Home app on a real box are still to be confirmed. Please report what you find in an issue."
+            ;;
+          esac
           cat > notes.md <<EOF
           Camera Bridge OS $VERSION (amd64).
+
+          $WARNING
 
           Download \`camera-bridge-os-$VERSION-amd64.img.xz\`, check it against \`.sha256\`, and write it to a USB stick or SSD with balenaEtcher.
           Guide: docs/linux/USER-GUIDE.md. Updates inside the running system use \`SHA256SUMS\`, \`SHA256SUMS.sig\` and the \`cb-os_*\` files.
@@ -150,6 +160,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Camera Bridge OS $VERSION" \
             --notes-file notes.md \
+            "${PRERELEASE[@]}" \
             out/camera-bridge-os-"$VERSION"-amd64.img.xz \
             out/camera-bridge-os-"$VERSION"-amd64.img.xz.sha256 \
             out/camera-bridge-os-"$VERSION"-amd64.img.xz.sig \
