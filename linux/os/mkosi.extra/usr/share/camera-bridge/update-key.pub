@@ -1,2 +1,2 @@
-untrusted comment: PLACEHOLDER - no release signing key has been set up yet. Replace this file with the public key from `minisign -G` (see docs/linux/BUILDING.md, "Release signing"). Images built with this placeholder refuse to update.
-RWPLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLDERPLACE
+untrusted comment: minisign public key 3AF9F34D91CC7085
+RWSFcMyRTfP5OkcicdLtTIAyXLcfsCFDWKozFIYNkaSYcrsDmjg8NvOH
