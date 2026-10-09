@@ -33,7 +33,7 @@ you send. If you contribute for an employer, read section 6 of the CLA first.
 ## Building and testing
 
 ```sh
-cd Packages/CameraBridgeKit && swift test      # engine tests (a few timing-sensitive tests can flake under load: re-run them alone)
+cd Packages/CameraBridgeKit && swift test      # engine tests, need Swift 6.4 (Xcode 27); the sources alone build with Swift 6.3. A few timing-sensitive tests can flake under load: re-run them alone
 cd ../.. && xcodegen generate                  # project.yml is the source of truth; the generated project is committed
 xcodebuild -project CameraBridge.xcodeproj -scheme CameraBridge -configuration Debug test
 ```
