@@ -9,6 +9,7 @@
 #
 # Environment:
 #   CB_SWIFT_IMAGE   base image (default swift:6.4)
+#   CB_CPUS          limit the container to this many CPUs (2 reproduces a GitHub-hosted runner)
 #   CB_PLATFORM      docker platform, e.g. linux/amd64 to run x86_64 under emulation (default: the machine's own)
 #
 # Docker objects it creates, all named cb-linux-*: the image cb-linux-swift (the Swift image plus the system packages the
@@ -55,7 +56,7 @@ MODE="${1:-all}"
 [ "$#" -gt 0 ] && shift
 
 # --scratch-path keeps the build products in the volume. The source tree is mounted read-write (SwiftPM writes Package.resolved).
-RUN="docker run --rm --cap-add NET_ADMIN $PLATFORM_ARGS -v $ROOT:/src -v $VOLUME:/cache -w /src/Packages/CameraBridgeKit -e CI=1"
+RUN="docker run --rm --cap-add NET_ADMIN ${CB_CPUS:+--cpus $CB_CPUS} $PLATFORM_ARGS -v $ROOT:/src -v $VOLUME:/cache -w /src/Packages/CameraBridgeKit -e CI=1"
 case "$MODE" in
     build) exec $RUN "$IMAGE" swift build --scratch-path /cache/build "$@" ;;
     test) exec $RUN "$IMAGE" swift test --scratch-path /cache/build "$@" ;;

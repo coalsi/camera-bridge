@@ -68,8 +68,9 @@ jobs:
       - name: swift test
         working-directory: Packages/CameraBridgeKit
         run: |
-          # A few timing tests can fail on a loaded shared runner; one retry of the whole run, never more.
-          swift test || { echo "Retrying once"; swift test; }
+          # Many tests use real clocks. A 2-CPU hosted runner cannot run them in parallel (reproduced locally with
+          # `CB_CPUS=2 sh Tools/linux-test.sh test`), so they run one at a time; one retry of the whole run, never more.
+          swift test --no-parallel || { echo "Retrying once"; swift test --no-parallel; }
 
   app:
     name: App build (unsigned)
