@@ -123,7 +123,13 @@ uki=$(find "$work/mkosi-out" -maxdepth 1 -name '*.efi' | head -1)
 [ -f "$uki" ] || { ls -la "$work/mkosi-out" >&2; die "mkosi produced no unified kernel image"; }
 
 echo "==> checking the image layout"
-sfdisk -J "$raw" >"$work/layout.json"
+sfdisk -J "$raw" >"$work/layout.json" || die "sfdisk could not read $raw"
+if ! jq -e '(.partitiontable.partitions // []) | length > 0' "$work/layout.json" >/dev/null; then
+    echo "--- sfdisk -J $raw" >&2; cat "$work/layout.json" >&2
+    echo "--- sfdisk -d" >&2; sfdisk -d "$raw" >&2 || true
+    echo "--- $work/mkosi-out" >&2; ls -la "$work/mkosi-out" >&2
+    die "the disk image has no partitions that sfdisk can see"
+fi
 jq -r '.partitiontable.partitions[] | "  \(.node | split("/") | last)  type=\(.type)  start=\(.start)  size=\(.size)  name=\(.name)"' "$work/layout.json"
 root_a=$(jq -r '[.partitiontable.partitions[] | select(.name == "cb-root_'"$version"'")] | first | "\(.start) \(.size)"' "$work/layout.json")
 if [ -z "$root_a" ] || [ "$root_a" = "null null" ]; then die "root slot A (label cb-root_$version) not found in the image"; fi
