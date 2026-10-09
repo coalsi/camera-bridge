@@ -117,9 +117,11 @@ if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then mkosi_args+=(--source-date-epoch "$SOUR
 echo "==> mkosi build (this takes a while)"
 mkosi "${mkosi_args[@]}" build
 
-raw=$(find "$work/mkosi-out" -maxdepth 1 -name 'camera-bridge-os*.raw' | head -1)
+# The whole disk image by its exact name: newer mkosi versions also leave one file per partition next to it
+# (camera-bridge-os.esp.raw, .root.raw, .srv.raw), which a wildcard would pick up.
+raw="$work/mkosi-out/camera-bridge-os.raw"
 [ -f "$raw" ] || { ls -la "$work/mkosi-out" >&2; die "mkosi produced no disk image"; }
-uki=$(find "$work/mkosi-out" -maxdepth 1 -name '*.efi' | head -1)
+uki="$work/mkosi-out/camera-bridge-os.efi"
 [ -f "$uki" ] || { ls -la "$work/mkosi-out" >&2; die "mkosi produced no unified kernel image"; }
 
 echo "==> checking the image layout"
