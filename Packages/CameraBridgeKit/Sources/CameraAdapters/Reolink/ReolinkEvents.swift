@@ -178,7 +178,11 @@ enum ReolinkEvents {
         let netPort = ReolinkDriver.onvifNetPort(try await commandUnlessRefused(api, "GetNetPort"))
         switch netPort.enabled {
         case false?:
-            if !onvifOffReported.withLock({ defer { $0 = true }; return $0 }) {
+            if !onvifOffReported.withLock({ reported in
+                let before = reported
+                reported = true
+                return before
+            }) {
                 log.notice("ONVIF is switched off on Reolink \(model.isEmpty ? "camera" : model): \(isDoorbell ? "rings" : "AI detections") arrive through 1 s polling. Turn ONVIF on in the camera's network port settings for instant events.")
             }
             return nil
