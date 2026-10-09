@@ -292,7 +292,8 @@ final class ScriptedVideoFFmpeg: @unchecked Sendable {
         #expect(throws: MediaCodecError.self) { _ = try codecs.makeVideoDecoder(format: TestFormats.h264) }
         #expect(throws: MediaCodecError.self) { _ = try codecs.makeVideoEncoder(settings: settings()) }
         #expect(throws: MediaCodecError.self) { _ = try codecs.makeAudioTranscoder(input: AudioFormat(codec: .pcma, sampleRate: 8_000, channels: 1), output: AudioEncoderSettings(codec: .opus, sampleRate: 16_000)) }
-        #expect(throws: MediaCodecError.self) { _ = try codecs.silentAACFrames(duration: .seconds(1), sampleRate: 16_000, channels: 1, startPTS: MediaTime(value: 0, timescale: 16_000), wallClock: Date()) }
+        // A rate and layout no other test uses: silence is cached per rate and layout, so a cached one is served without ffmpeg.
+        #expect(throws: MediaCodecError.self) { _ = try codecs.silentAACFrames(duration: .seconds(1), sampleRate: 12_000, channels: 1, startPTS: MediaTime(value: 0, timescale: 12_000), wallClock: Date()) }
     }
 
     @Test func theTimestampOverlayIsADrawtextFilterAndRestartsWhenItsLayoutChanges() async throws {

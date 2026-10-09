@@ -408,8 +408,10 @@ public struct RequestFileSystemControl: SystemControlling {
         // The helper removes files it does not know, which could include the temporary file when it happens to run at that moment.
         for _ in 0..<3 {
             let temporary = requestDirectory.appending(path: ".\(request.rawValue).\(UUID().uuidString).tmp", directoryHint: .notDirectory)
-            guard FileManager.default.createFile(atPath: temporary.path(percentEncoded: false), contents: data, attributes: [.posixPermissions: 0o600]) else {
-                lastError = errno
+            // POSIX calls, not `FileManager.createFile`: on Linux that writes through a hidden temporary of its own (`.dat.nosync…`) in the
+            // same folder, which the helper would remove as an unknown file.
+            if let failure = Self.writeNewFile(temporary.path(percentEncoded: false), data) {
+                lastError = failure
                 continue
             }
             if rename(temporary.path(percentEncoded: false), target.path(percentEncoded: false)) == 0 { return }
@@ -418,6 +420,32 @@ public struct RequestFileSystemControl: SystemControlling {
         }
         log.warning("could not write the \(request.rawValue) request (error \(lastError))")
         throw SystemError("The system couldn’t take the request just now. Try again.")
+    }
+
+    /// Creates `path` exclusively with mode 0600 and writes `data` completely; the errno on failure (the file is removed), else nil.
+    private static func writeNewFile(_ path: String, _ data: Data) -> Int32? {
+        let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { return errno }
+        var failure: Int32?
+        data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let written = write(descriptor, buffer.baseAddress! + offset, buffer.count - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    failure = errno
+                    return
+                }
+                offset += written
+            }
+        }
+        if failure == nil, fsync(descriptor) != 0 { failure = errno }
+        if close(descriptor) != 0, failure == nil { failure = errno }
+        if let failure {
+            unlink(path)
+            return failure
+        }
+        return nil
     }
 
     /// Waits until the helper has taken the request (its file is gone). A request nobody takes is withdrawn.

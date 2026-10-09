@@ -538,7 +538,7 @@ struct Rig {
         _ = try? await rig.system.setAutomaticUpdates(true)
         let modes = await watcher.value
         #expect(modes["auto-update.json"] == 0o600)
-        #expect(modes.keys.allSatisfy { $0 == "auto-update.json" || ($0.hasPrefix(".auto-update.") && $0.hasSuffix(".tmp")) })
+        #expect(modes.keys.allSatisfy { $0 == "auto-update.json" || ($0.hasPrefix(".auto-update.") && $0.hasSuffix(".tmp")) }, "files seen: \(modes.keys.sorted())")
         #expect(rig.leftovers.isEmpty)
     }
 
