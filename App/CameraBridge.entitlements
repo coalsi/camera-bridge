@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Developer ID build: hardened runtime, no App Sandbox. These two are the whole list (docs/distribution.md). Outside the
+	     sandbox they do not gate anything: they document what the app does (connects to cameras, accepts HomeKit controllers)
+	     and keep the file valid if the app is ever sandboxed again. No JIT, no unsigned memory, no library-validation
+	     exception, no debugger access. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

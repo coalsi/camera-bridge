@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "updated": "2026-10-01",
+  "profiles": [
+    {
+      "vendor": "hikvision",
+      "modelPattern": "",
+      "preferredConfigMethod": "hikvisionISAPI",
+      "notes": "Hikvision cameras change video settings over their own ISAPI first, then ONVIF."
+    },
+    {
+      "vendor": "reolink",
+      "modelPattern": "",
+      "preferredConfigMethod": "reolinkAPI",
+      "notes": "Reolink cameras change video settings over the Reolink HTTP API first, then ONVIF."
+    }
+  ]
+}

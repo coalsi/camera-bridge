@@ -1,0 +1,19 @@
+[
+  {
+    "cmd": "GetEvents",
+    "code": 0,
+    "value": {
+      "channel": 0,
+      "ai": {
+        "dog_cat": { "alarm_state": 0, "support": 1 },
+        "face": { "alarm_state": 0, "support": 0 },
+        "people": { "alarm_state": 1, "support": 1 },
+        "vehicle": { "alarm_state": 0, "support": 1 },
+        "package": { "alarm_state": 0, "support": 1 },
+        "other": { "alarm_state": 0, "support": 0 }
+      },
+      "md": { "alarm_state": 1, "support": 1 },
+      "visitor": { "alarm_state": 0, "support": 1 }
+    }
+  }
+]

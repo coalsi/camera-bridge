@@ -1,0 +1,6 @@
+{"type":"add","item":{"id":"ev-ring","modelKey":"event","type":"ring","start":1741267544209,"device":"66d025b301ebc903e80003ea"}}
+{"type":"add","item":{"id":"ev-motion","modelKey":"event","type":"motion","start":1741267545000,"end":null,"device":"66d025b301ebc903e80003ea"}}
+{"type":"add","item":{"id":"ev-smart","modelKey":"event","type":"smartDetectZone","start":1741267546000,"end":null,"device":"66d025b301ebc903e80003ea","smartDetectTypes":["person","package"]}}
+{"type":"update","item":{"id":"ev-smart","modelKey":"event","end":1741267556000,"device":"66d025b301ebc903e80003ea"}}
+{"type":"update","item":{"id":"ev-motion","modelKey":"event","type":"motion","end":1741267555000,"device":"66d025b301ebc903e80003ea"}}
+{"type":"add","item":{"id":"ev-other","modelKey":"event","type":"motion","start":1741267547000,"device":"672094f900e26303e800062a"}}

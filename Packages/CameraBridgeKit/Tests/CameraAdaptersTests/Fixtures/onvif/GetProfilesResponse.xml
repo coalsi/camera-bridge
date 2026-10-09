@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <SOAP-ENV:Body>
+    <trt:GetProfilesResponse>
+      <trt:Profiles token="001" fixed="true">
+        <tt:Name>Profile001_SubStream</tt:Name>
+        <tt:VideoSourceConfiguration token="000">
+          <tt:Name>VideoSourceConfig</tt:Name>
+          <tt:SourceToken>000</tt:SourceToken>
+          <tt:Bounds x="0" y="0" width="2560" height="1920"></tt:Bounds>
+        </tt:VideoSourceConfiguration>
+        <tt:VideoEncoderConfiguration token="001">
+          <tt:Name>VideoEncoderConfig_sub</tt:Name>
+          <tt:Encoding>H264</tt:Encoding>
+          <tt:Resolution><tt:Width>640</tt:Width><tt:Height>480</tt:Height></tt:Resolution>
+          <tt:Quality>4</tt:Quality>
+          <tt:RateControl><tt:FrameRateLimit>15</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>256</tt:BitrateLimit></tt:RateControl>
+          <tt:H264><tt:GovLength>30</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
+        </tt:VideoEncoderConfiguration>
+      </trt:Profiles>
+      <trt:Profiles token="000" fixed="true">
+        <tt:Name>Profile000_MainStream</tt:Name>
+        <tt:VideoSourceConfiguration token="000">
+          <tt:Name>VideoSourceConfig</tt:Name>
+          <tt:SourceToken>000</tt:SourceToken>
+          <tt:Bounds x="0" y="0" width="2560" height="1920"></tt:Bounds>
+        </tt:VideoSourceConfiguration>
+        <tt:AudioSourceConfiguration token="000">
+          <tt:Name>AudioSourceConfig</tt:Name>
+          <tt:SourceToken>000</tt:SourceToken>
+        </tt:AudioSourceConfiguration>
+        <tt:VideoEncoderConfiguration token="000">
+          <tt:Name>VideoEncoderConfig_main</tt:Name>
+          <tt:Encoding>H264</tt:Encoding>
+          <tt:Resolution><tt:Width>2560</tt:Width><tt:Height>1920</tt:Height></tt:Resolution>
+          <tt:Quality>4</tt:Quality>
+          <tt:RateControl><tt:FrameRateLimit>15</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>3072</tt:BitrateLimit></tt:RateControl>
+          <tt:H264><tt:GovLength>30</tt:GovLength><tt:H264Profile>High</tt:H264Profile></tt:H264>
+        </tt:VideoEncoderConfiguration>
+        <tt:AudioEncoderConfiguration token="000">
+          <tt:Name>AudioEncoderConfig</tt:Name>
+          <tt:Encoding>AAC</tt:Encoding>
+          <tt:Bitrate>64</tt:Bitrate>
+          <tt:SampleRate>16</tt:SampleRate>
+        </tt:AudioEncoderConfiguration>
+      </trt:Profiles>
+      <trt:Profiles token="002" fixed="true">
+        <tt:Name>Profile002_Jpeg</tt:Name>
+        <tt:VideoEncoderConfiguration token="002">
+          <tt:Encoding>JPEG</tt:Encoding>
+          <tt:Resolution><tt:Width>1280</tt:Width><tt:Height>960</tt:Height></tt:Resolution>
+        </tt:VideoEncoderConfiguration>
+      </trt:Profiles>
+    </trt:GetProfilesResponse>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>

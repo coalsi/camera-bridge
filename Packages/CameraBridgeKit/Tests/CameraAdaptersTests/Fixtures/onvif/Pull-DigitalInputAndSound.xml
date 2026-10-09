@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2" xmlns:tns1="http://www.onvif.org/ver10/topics" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <env:Body>
+    <tev:PullMessagesResponse>
+      <tev:CurrentTime>2026-09-30T15:03:52Z</tev:CurrentTime>
+      <tev:TerminationTime>2026-09-30T15:05:52Z</tev:TerminationTime>
+      <wsnt:NotificationMessage>
+        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:Device/Trigger/DigitalInput</wsnt:Topic>
+        <wsnt:Message><tt:Message UtcTime="2026-09-30T15:03:52Z" PropertyOperation="Initialized">
+          <tt:Source><tt:SimpleItem Name="InputToken" Value="DigitalInputToken_1"/></tt:Source>
+          <tt:Data><tt:SimpleItem Name="LogicalState" Value="false"/></tt:Data>
+        </tt:Message></wsnt:Message>
+      </wsnt:NotificationMessage>
+      <wsnt:NotificationMessage>
+        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:Device/Trigger/DigitalInput</wsnt:Topic>
+        <wsnt:Message><tt:Message UtcTime="2026-09-30T15:03:53Z" PropertyOperation="Changed">
+          <tt:Source><tt:SimpleItem Name="InputToken" Value="DigitalInputToken_1"/></tt:Source>
+          <tt:Data><tt:SimpleItem Name="LogicalState" Value="true"/></tt:Data>
+        </tt:Message></wsnt:Message>
+      </wsnt:NotificationMessage>
+      <wsnt:NotificationMessage>
+        <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:AudioAnalytics/Audio/DetectedSound</wsnt:Topic>
+        <wsnt:Message><tt:Message UtcTime="2026-09-30T15:03:54Z" PropertyOperation="Changed">
+          <tt:Source><tt:SimpleItem Name="AudioSourceConfigurationToken" Value="AudioSourceToken"/><tt:SimpleItem Name="Rule" Value="SoundRule"/></tt:Source>
+          <tt:Data><tt:SimpleItem Name="IsSoundDetected" Value="true"/></tt:Data>
+        </tt:Message></wsnt:Message>
+      </wsnt:NotificationMessage>
+    </tev:PullMessagesResponse>
+  </env:Body>
+</env:Envelope>

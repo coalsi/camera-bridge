@@ -1,0 +1,20 @@
+--ioboundary
+Content-Type: text/plain
+
+doorbell:H
+
+--ioboundary
+Content-Type: text/plain
+
+motionsensor:H
+
+--ioboundary
+Content-Type: text/plain
+
+doorbell:L
+
+--ioboundary
+Content-Type: text/plain
+
+motionsensor:L
+

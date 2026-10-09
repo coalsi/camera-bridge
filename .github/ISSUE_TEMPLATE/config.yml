@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/coalsi/camera-bridge/security/policy
+    about: Please do not open a public issue. Email security@camera-bridge.app (see SECURITY.md).
+  - name: Commercial license
+    url: https://github.com/coalsi/camera-bridge/blob/main/COMMERCIAL.md
+    about: Installers, businesses and products need a commercial license. Email legal@camera-bridge.app.
+  - name: Documentation and help
+    url: https://docs.camera-bridge.app
+    about: Setup guides and troubleshooting.

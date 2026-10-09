@@ -1,0 +1,2 @@
+[{"id":"66d025b301ebc903e80003ea","modelKey":"camera","state":"CONNECTED","name":"Front Door","type":"UVC G4 Doorbell Pro","mac":"E063DA000001","guid":"g-1","isMicEnabled":true,"micVolume":100,"videoMode":"default","hdrType":"auto","featureFlags":{"hasMic":true,"smartDetectTypes":["person","vehicle","package"]},"hasPackageCamera":true},
+ {"id":"672094f900e26303e800062a","modelKey":"camera","state":"DISCONNECTED","name":"Garage","type":"UVC Micro","mac":"E063DA000002"}]

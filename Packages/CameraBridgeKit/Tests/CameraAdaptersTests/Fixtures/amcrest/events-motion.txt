@@ -1,0 +1,18 @@
+--myboundary
+Content-Type: text/plain
+Content-Length: 37
+
+Code=VideoMotion;action=Start;index=0
+
+--myboundary
+Content-Type: text/plain
+Content-Length: 9
+
+Heartbeat
+
+--myboundary
+Content-Type: text/plain
+Content-Length: 36
+
+Code=VideoMotion;action=Stop;index=0
+

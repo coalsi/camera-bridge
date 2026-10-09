@@ -1,0 +1,149 @@
+# XcodeGen spec (XcodeGen 2.43). Regenerate with `xcodegen generate`; the generated project is committed.
+# Adapted from research brief §6.3 (verified prototype): macOS 27, bundle ID com.coreysilvia.CameraBridge.
+name: CameraBridge
+options:
+  bundleIdPrefix: com.coreysilvia
+  deploymentTarget: { macOS: "15.0" }
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+packages:
+  CameraBridgeKit:
+    path: Packages/CameraBridgeKit
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0   # MIT; the app's updater (Check for Updates…), appcast at https://www.camera-bridge.app/appcast.xml. Pinned: bump on purpose.
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY: YES
+    DEVELOPMENT_TEAM: XL4RAH5J96
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "4"
+  configs:
+    Debug: { SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG $(inherited)" }
+    Release: { SWIFT_COMPILATION_MODE: wholemodule }
+
+targets:
+  CameraBridge:
+    type: application
+    platform: macOS
+    sources:
+      - path: App/Sources
+      - path: App/Resources
+    dependencies:
+      - package: CameraBridgeKit
+        product: BridgeEngine
+      - package: CameraBridgeKit
+        product: BridgeSupport
+      - package: CameraBridgeKit
+        product: CameraAdapters
+      - package: CameraBridgeKit
+        product: MediaCore
+      - package: CameraBridgeKit
+        product: RTSP          # RTSPError, for readable error text (Model/CameraSetupService.swift)
+      - package: CameraBridgeKit
+        product: PlatformApple # TimestampOverlayPreview: the timestamp preview is drawn by the encoder's own renderer
+      - package: Sparkle
+        product: Sparkle       # App/Sources/Updates only (not in the logic-test bundle)
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Camera Bridge
+        CFBundleName: Camera Bridge
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHumanReadableCopyright: "© 2026 Corey Silvia"
+        NSAppTransportSecurity: { NSAllowsLocalNetworking: true }
+        NSLocalNetworkUsageDescription: >-
+          Camera Bridge connects to the security cameras on your network and
+          publishes them to the Apple Home app.
+        NSBonjourServices: [_hap._tcp]
+        # Sparkle 2 (App/Sources/Updates). SUPublicEDKey is the EdDSA public key of the update signatures: Tools/sparkle-generate-keys.sh
+        # makes the key pair (private half in the maintainer's Keychain) and writes SPARKLE_PUBLIC_ED_KEY below. While it is empty the
+        # app has no updater (Check for Updates… is disabled) rather than one that cannot verify anything.
+        SUFeedURL: https://www.camera-bridge.app/appcast.xml
+        SUPublicEDKey: $(SPARKLE_PUBLIC_ED_KEY)
+    postBuildScripts:
+      # The go2rtc streaming helper (MIT) goes into Contents/Helpers and is signed there. Skipped, with a note, when
+      # Tools/fetch-go2rtc.sh has not put build/helpers/go2rtc in place (Docs: docs/integrations/go2rtc.md).
+      - name: Embed go2rtc helper
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(SRCROOT)/build/helpers/go2rtc
+          - $(SRCROOT)/Tools/embed-go2rtc.sh
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/go2rtc
+        script: |
+          set -eu
+          "${SRCROOT}/Tools/embed-go2rtc.sh"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.coreysilvia.CameraBridge
+        PRODUCT_NAME: CameraBridge
+        # The Embed go2rtc helper phase signs the copy it puts in the bundle, and codesign writes a temporary file next to it,
+        # which the script sandbox only allows for declared output files.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_ENTITLEMENTS: App/CameraBridge.entitlements   # hand-maintained; not via the `entitlements:` key (brief §6.5)
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        # Distributed outside the App Store: Developer ID + notarization (Tools/release.sh), hardened runtime, no App Sandbox (so
+        # the app can run a bundled helper process). docs/distribution.md lists the entitlements and why each is there.
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+        SPARKLE_PUBLIC_ED_KEY: "W36y+riDITvOVFIljyJbAIMlG06PTTTxglhGMhEJ1mY="   # public key of the update signatures; the private half is in the maintainer's Keychain
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+      configs:
+        # Release carries exactly the entitlements in App/CameraBridge.entitlements: no get-task-allow (Xcode adds that
+        # base entitlement to development-signed builds unless told not to). Tools/release.sh signs it with Developer ID.
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+
+  # Logic tests for the app's view models (App/Sources/Model is compiled into this bundle). Not hosted in the app, so a
+  # test run never launches CameraBridge, its engine or its menu bar item.
+  CameraBridgeTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: App/Tests
+      - path: App/Sources/Model
+      - path: App/Sources/Viewer/LiveVideoRenderer.swift
+    dependencies:
+      - package: CameraBridgeKit
+        product: BridgeEngine
+      - package: CameraBridgeKit
+        product: BridgeSupport
+      - package: CameraBridgeKit
+        product: CameraAdapters
+      - package: CameraBridgeKit
+        product: MediaCore
+      - package: CameraBridgeKit
+        product: RTSP
+      - package: CameraBridgeKit
+        product: PlatformApple
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.coreysilvia.CameraBridgeTests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+
+schemes:
+  CameraBridge:
+    build: { targets: { CameraBridge: all, CameraBridgeTests: [test] } }
+    run: { config: Debug }
+    test: { config: Debug, targets: [CameraBridgeTests] }
+    profile: { config: Release }
+    analyze: { config: Debug }
+    archive: { config: Release }

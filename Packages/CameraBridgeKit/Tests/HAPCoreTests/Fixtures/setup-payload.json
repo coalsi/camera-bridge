@@ -1,0 +1,342 @@
+{
+ "generator": "Interop/node/goldens.mjs setup-payload (plan task W1-9). Do not edit by hand; regenerate with: cd Interop/node && npm ci && node goldens.mjs setup-payload",
+ "source": "HAP-NodeJS 2.2.3 (Apache-2.0): Accessory.setupURI(), CiaoAdvertiser.computeSetupHash(); cross-checked with research brief §3.3",
+ "notes": [
+  "`uris`: SetupPayload.uri(code: SetupCode(code), setupID:, category: AccessoryCategory(rawValue: category)) must equal `uri`.",
+  "`setupHashes`: SetupPayload.setupHash(setupID:, deviceID: DeviceID(deviceID)) must equal `hash` (base64 of SHA-512(setupID + uppercase device ID)[0..<4])."
+ ],
+ "uris": [
+  {
+   "code": "031-45-154",
+   "setupID": "7OSX",
+   "category": 1,
+   "uri": "X-HM://001408XXE7OSX"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "7OSX",
+   "category": 2,
+   "uri": "X-HM://0023ISYWY7OSX"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "7OSX",
+   "category": 10,
+   "uri": "X-HM://009ZN96TE7OSX"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "7OSX",
+   "category": 17,
+   "uri": "X-HM://00GW95DQA7OSX"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "7OSX",
+   "category": 18,
+   "uri": "X-HM://00HVRPEPU7OSX"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "7OSX",
+   "category": 1,
+   "uri": "X-HM://0014R479V7OSX"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "7OSX",
+   "category": 2,
+   "uri": "X-HM://00249O89F7OSX"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "7OSX",
+   "category": 10,
+   "uri": "X-HM://00A0E4G5V7OSX"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "7OSX",
+   "category": 17,
+   "uri": "X-HM://00GX00N2R7OSX"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "7OSX",
+   "category": 18,
+   "uri": "X-HM://00HWIKO2B7OSX"
+  },
+  {
+   "code": "101-48-005",
+   "setupID": "7OSX",
+   "category": 1,
+   "uri": "X-HM://00144F1D17OSX"
+  },
+  {
+   "code": "101-48-005",
+   "setupID": "7OSX",
+   "category": 2,
+   "uri": "X-HM://0023MZ2CL7OSX"
+  },
+  {
+   "code": "101-48-005",
+   "setupID": "7OSX",
+   "category": 10,
+   "uri": "X-HM://009ZRFA917OSX"
+  },
+  {
+   "code": "101-48-005",
+   "setupID": "7OSX",
+   "category": 17,
+   "uri": "X-HM://00GWDBH5X7OSX"
+  },
+  {
+   "code": "101-48-005",
+   "setupID": "7OSX",
+   "category": 18,
+   "uri": "X-HM://00HVVVI5H7OSX"
+  },
+  {
+   "code": "990-01-287",
+   "setupID": "7OSX",
+   "category": 1,
+   "uri": "X-HM://0015LBGZR7OSX"
+  },
+  {
+   "code": "990-01-287",
+   "setupID": "7OSX",
+   "category": 2,
+   "uri": "X-HM://00253VHZB7OSX"
+  },
+  {
+   "code": "990-01-287",
+   "setupID": "7OSX",
+   "category": 10,
+   "uri": "X-HM://00A18BPVR7OSX"
+  },
+  {
+   "code": "990-01-287",
+   "setupID": "7OSX",
+   "category": 17,
+   "uri": "X-HM://00GXU7WSN7OSX"
+  },
+  {
+   "code": "990-01-287",
+   "setupID": "7OSX",
+   "category": 18,
+   "uri": "X-HM://00HXCRXS77OSX"
+  },
+  {
+   "code": "274-60-139",
+   "setupID": "7OSX",
+   "category": 1,
+   "uri": "X-HM://0014EQ3HN7OSX"
+  },
+  {
+   "code": "274-60-139",
+   "setupID": "7OSX",
+   "category": 2,
+   "uri": "X-HM://0023XA4H77OSX"
+  },
+  {
+   "code": "274-60-139",
+   "setupID": "7OSX",
+   "category": 10,
+   "uri": "X-HM://00A01QCDN7OSX"
+  },
+  {
+   "code": "274-60-139",
+   "setupID": "7OSX",
+   "category": 17,
+   "uri": "X-HM://00GWNMJAJ7OSX"
+  },
+  {
+   "code": "274-60-139",
+   "setupID": "7OSX",
+   "category": 18,
+   "uri": "X-HM://00HW66KA37OSX"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "CB01",
+   "category": 1,
+   "uri": "X-HM://001408XXECB01"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "CB01",
+   "category": 2,
+   "uri": "X-HM://0023ISYWYCB01"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "CB01",
+   "category": 10,
+   "uri": "X-HM://009ZN96TECB01"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "CB01",
+   "category": 17,
+   "uri": "X-HM://00GW95DQACB01"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "CB01",
+   "category": 18,
+   "uri": "X-HM://00HVRPEPUCB01"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "CB01",
+   "category": 1,
+   "uri": "X-HM://0014R479VCB01"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "CB01",
+   "category": 2,
+   "uri": "X-HM://00249O89FCB01"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "CB01",
+   "category": 10,
+   "uri": "X-HM://00A0E4G5VCB01"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "CB01",
+   "category": 17,
+   "uri": "X-HM://00GX00N2RCB01"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "CB01",
+   "category": 18,
+   "uri": "X-HM://00HWIKO2BCB01"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "ZZ9Z",
+   "category": 1,
+   "uri": "X-HM://001408XXEZZ9Z"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "ZZ9Z",
+   "category": 2,
+   "uri": "X-HM://0023ISYWYZZ9Z"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "ZZ9Z",
+   "category": 10,
+   "uri": "X-HM://009ZN96TEZZ9Z"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "ZZ9Z",
+   "category": 17,
+   "uri": "X-HM://00GW95DQAZZ9Z"
+  },
+  {
+   "code": "031-45-154",
+   "setupID": "ZZ9Z",
+   "category": 18,
+   "uri": "X-HM://00HVRPEPUZZ9Z"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "ZZ9Z",
+   "category": 1,
+   "uri": "X-HM://0014R479VZZ9Z"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "ZZ9Z",
+   "category": 2,
+   "uri": "X-HM://00249O89FZZ9Z"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "ZZ9Z",
+   "category": 10,
+   "uri": "X-HM://00A0E4G5VZZ9Z"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "ZZ9Z",
+   "category": 17,
+   "uri": "X-HM://00GX00N2RZZ9Z"
+  },
+  {
+   "code": "482-73-619",
+   "setupID": "ZZ9Z",
+   "category": 18,
+   "uri": "X-HM://00HWIKO2BZZ9Z"
+  }
+ ],
+ "setupHashes": [
+  {
+   "setupID": "7OSX",
+   "deviceID": "CC:22:3D:E3:CE:F3",
+   "hash": "7JWHTA=="
+  },
+  {
+   "setupID": "7OSX",
+   "deviceID": "0E:5A:21:B7:9C:44",
+   "hash": "k/JgZQ=="
+  },
+  {
+   "setupID": "7OSX",
+   "deviceID": "A0:00:00:00:00:01",
+   "hash": "nGjpwQ=="
+  },
+  {
+   "setupID": "7OSX",
+   "deviceID": "FF:FF:FF:FF:FF:FE",
+   "hash": "oOo8Lg=="
+  },
+  {
+   "setupID": "CB01",
+   "deviceID": "CC:22:3D:E3:CE:F3",
+   "hash": "tCIJAg=="
+  },
+  {
+   "setupID": "CB01",
+   "deviceID": "0E:5A:21:B7:9C:44",
+   "hash": "KBkZlg=="
+  },
+  {
+   "setupID": "CB01",
+   "deviceID": "A0:00:00:00:00:01",
+   "hash": "cei88w=="
+  },
+  {
+   "setupID": "CB01",
+   "deviceID": "FF:FF:FF:FF:FF:FE",
+   "hash": "SOguKQ=="
+  },
+  {
+   "setupID": "ZZ9Z",
+   "deviceID": "CC:22:3D:E3:CE:F3",
+   "hash": "TLhzgg=="
+  },
+  {
+   "setupID": "ZZ9Z",
+   "deviceID": "0E:5A:21:B7:9C:44",
+   "hash": "FLj5CA=="
+  },
+  {
+   "setupID": "ZZ9Z",
+   "deviceID": "A0:00:00:00:00:01",
+   "hash": "0Ayv9w=="
+  },
+  {
+   "setupID": "ZZ9Z",
+   "deviceID": "FF:FF:FF:FF:FF:FE",
+   "hash": "E0GPmw=="
+  }
+ ]
+}

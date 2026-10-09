@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TwoWayAudioChannelList version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<TwoWayAudioChannel version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>1</id>
+<enabled>false</enabled>
+<audioCompressionType>G.711ulaw</audioCompressionType>
+<speakerVolume>50</speakerVolume>
+<noisereduce>false</noisereduce>
+</TwoWayAudioChannel>
+</TwoWayAudioChannelList>

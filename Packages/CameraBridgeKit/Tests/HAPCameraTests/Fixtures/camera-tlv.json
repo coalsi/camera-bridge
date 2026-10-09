@@ -1,0 +1,563 @@
+{
+ "generator": "Interop/node/goldens.mjs camera (plan task W1-9). Do not edit by hand; regenerate with: cd Interop/node && npm ci && node goldens.mjs camera",
+ "source": "HAP-NodeJS 2.2.3 (Apache-2.0) CameraController / DoorbellController (cameraStreamCount 2, sensors.motion) → lib/camera/RTPStreamManagement.ts, RecordingManagement.ts, lib/datastream/DataStreamManagement.ts; research brief §3.5, §3.7",
+ "notes": [
+  "All TLV values are hex, exactly as HAP-NodeJS serves them (its characteristic values are base64 of these bytes).",
+  "List elements (resolutions, profiles, levels, sample rates, audio codec configurations, crypto suites, media containers) are separated by a `00 00` item; a single-element list has no separator.",
+  "Option fields are raw values of the HAPCamera contract enums: profiles H264Profile, levels H264Level, audio codec StreamingAudioCodec / RecordingAudioCodec, sample rates StreamingSampleRate / RecordingSampleRate, cryptoSuites SRTPCryptoSuite. resolutions are [width, height, fps]. channels / bitrateMode are the TLV values (bitrate mode 0 = variable).",
+  "`streaming`: the three Supported* values of each CameraRTPStreamManagement service. Every case without `decodeOnly` is an encoder target: CameraStreamingOptions(resolutions:profiles:levels:audioCodecs:twoWayAudio:cryptoSuites:) built from `options` (audioCodecs as (codec, sampleRates)) must produce these bytes. `channels` 1, `bitrateMode` 0 (variable) and `comfortNoise` false are what the contract implies; CameraStreamingOptions has no fields for them. twoWayAudio does not change these TLVs (it adds Speaker/Microphone services).",
+  "`decodeOnly: true` (only the list-delimiter case, which turns comfort noise on and so writes `020101` in the audio TLV) cannot be built through CameraStreamingOptions: use it for TLV parser / list-delimiter tests only, and do not add a comfort-noise option to the contract for it. CameraBridge v1 always offers comfort noise off.",
+  "`recording`: the Supported* values of CameraRecordingManagement. CameraRecordingOptions(prebufferLengthMs:fragmentLengthMs:resolutions:profiles:levels:audioCodec:audioSampleRates:audioChannels:) built from `options` must produce these bytes; `audioBitrateMode` 0 (variable) is implied (not a contract field). `isDoorbell` is CameraControllerConfiguration.isDoorbell, not part of CameraRecordingOptions, and `eventTriggers` is the result that follows from it (1 = motion on a camera, 3 = motion | doorbell on a doorbell). The container is fragmented MP4 (type 0) with fragmentLengthMs.",
+  "`selectedRecordingConfiguration`: a SelectedCameraRecordingConfiguration write (bytes assembled in the brief §3.7 layout with HAP-NodeJS tlv.encode, not a hub capture) and the CameraRecordingConfiguration HAP-NodeJS parses from it."
+ ],
+ "streaming": [
+  {
+   "name": "brief §3.5 reference: 1080p30 + 720p30, all profiles and levels",
+   "options": {
+    "resolutions": [
+     [
+      1920,
+      1080,
+      30
+     ],
+     [
+      1280,
+      720,
+      30
+     ]
+    ],
+    "profiles": [
+     0,
+     1,
+     2
+    ],
+    "levels": [
+     0,
+     1,
+     2
+    ],
+    "audioCodecs": [
+     {
+      "codec": 3,
+      "sampleRates": [
+       1,
+       2
+      ],
+      "channels": 1,
+      "bitrateMode": 0
+     }
+    ],
+    "comfortNoise": false,
+    "twoWayAudio": false,
+    "cryptoSuites": [
+     0
+    ]
+   },
+   "supportedVideoStreamConfiguration": "013e010100021d0101000000010101000001010202010000000201010000020102030100030b010280070202380403011e0000030b010200050202d00203011e",
+   "supportedAudioStreamConfiguration": "0113010103020e0101010201000301010000030102020100",
+   "supportedRTPConfiguration": "020100"
+  },
+  {
+   "name": "v1 default",
+   "options": {
+    "resolutions": [
+     [
+      3840,
+      2160,
+      30
+     ],
+     [
+      2560,
+      1440,
+      30
+     ],
+     [
+      1920,
+      1080,
+      30
+     ],
+     [
+      1280,
+      720,
+      30
+     ],
+     [
+      960,
+      540,
+      30
+     ],
+     [
+      640,
+      360,
+      30
+     ],
+     [
+      320,
+      240,
+      15
+     ]
+    ],
+    "profiles": [
+     1
+    ],
+    "levels": [
+     0,
+     1,
+     2
+    ],
+    "audioCodecs": [
+     {
+      "codec": 3,
+      "sampleRates": [
+       1,
+       2
+      ],
+      "channels": 1,
+      "bitrateMode": 0
+     }
+    ],
+    "comfortNoise": false,
+    "twoWayAudio": false,
+    "cryptoSuites": [
+     0
+    ]
+   },
+   "supportedVideoStreamConfiguration": "017f010100021301010102010000000201010000020102030100030b0102000f0202700803011e0000030b0102000a0202a00503011e0000030b010280070202380403011e0000030b010200050202d00203011e0000030b0102c00302021c0203011e0000030b010280020202680103011e0000030b010240010202f00003010f",
+   "supportedAudioStreamConfiguration": "0113010103020e0101010201000301010000030102020100",
+   "supportedRTPConfiguration": "020100"
+  },
+  {
+   "name": "v1 default with two-way audio",
+   "options": {
+    "resolutions": [
+     [
+      3840,
+      2160,
+      30
+     ],
+     [
+      2560,
+      1440,
+      30
+     ],
+     [
+      1920,
+      1080,
+      30
+     ],
+     [
+      1280,
+      720,
+      30
+     ],
+     [
+      960,
+      540,
+      30
+     ],
+     [
+      640,
+      360,
+      30
+     ],
+     [
+      320,
+      240,
+      15
+     ]
+    ],
+    "profiles": [
+     1
+    ],
+    "levels": [
+     0,
+     1,
+     2
+    ],
+    "audioCodecs": [
+     {
+      "codec": 3,
+      "sampleRates": [
+       1,
+       2
+      ],
+      "channels": 1,
+      "bitrateMode": 0
+     }
+    ],
+    "comfortNoise": false,
+    "twoWayAudio": true,
+    "cryptoSuites": [
+     0
+    ]
+   },
+   "supportedVideoStreamConfiguration": "017f010100021301010102010000000201010000020102030100030b0102000f0202700803011e0000030b0102000a0202a00503011e0000030b010280070202380403011e0000030b010200050202d00203011e0000030b0102c00302021c0203011e0000030b010280020202680103011e0000030b010240010202f00003010f",
+   "supportedAudioStreamConfiguration": "0113010103020e0101010201000301010000030102020100",
+   "supportedRTPConfiguration": "020100"
+  },
+  {
+   "name": "v1 4:3 source",
+   "options": {
+    "resolutions": [
+     [
+      1600,
+      1200,
+      30
+     ],
+     [
+      1280,
+      960,
+      30
+     ],
+     [
+      640,
+      480,
+      30
+     ],
+     [
+      320,
+      240,
+      15
+     ]
+    ],
+    "profiles": [
+     1
+    ],
+    "levels": [
+     0,
+     1,
+     2
+    ],
+    "audioCodecs": [
+     {
+      "codec": 3,
+      "sampleRates": [
+       1,
+       2
+      ],
+      "channels": 1,
+      "bitrateMode": 0
+     }
+    ],
+    "comfortNoise": false,
+    "twoWayAudio": false,
+    "cryptoSuites": [
+     0
+    ]
+   },
+   "supportedVideoStreamConfiguration": "0152010100021301010102010000000201010000020102030100030b010240060202b00403011e0000030b010200050202c00303011e0000030b010280020202e00103011e0000030b010240010202f00003010f",
+   "supportedAudioStreamConfiguration": "0113010103020e0101010201000301010000030102020100",
+   "supportedRTPConfiguration": "020100"
+  },
+  {
+   "name": "single 720p30 resolution",
+   "options": {
+    "resolutions": [
+     [
+      1280,
+      720,
+      30
+     ]
+    ],
+    "profiles": [
+     1
+    ],
+    "levels": [
+     2
+    ],
+    "audioCodecs": [
+     {
+      "codec": 3,
+      "sampleRates": [
+       1,
+       2
+      ],
+      "channels": 1,
+      "bitrateMode": 0
+     }
+    ],
+    "comfortNoise": false,
+    "twoWayAudio": false,
+    "cryptoSuites": [
+     0
+    ]
+   },
+   "supportedVideoStreamConfiguration": "011b0101000209010101020102030100030b010200050202d00203011e",
+   "supportedAudioStreamConfiguration": "0113010103020e0101010201000301010000030102020100",
+   "supportedRTPConfiguration": "020100"
+  },
+  {
+   "name": "list delimiters: two audio codecs, two crypto suites, comfort noise",
+   "decodeOnly": true,
+   "options": {
+    "resolutions": [
+     [
+      1920,
+      1080,
+      30
+     ],
+     [
+      1280,
+      720,
+      30
+     ]
+    ],
+    "profiles": [
+     0,
+     1
+    ],
+    "levels": [
+     2
+    ],
+    "audioCodecs": [
+     {
+      "codec": 3,
+      "sampleRates": [
+       1,
+       2
+      ],
+      "channels": 1,
+      "bitrateMode": 0
+     },
+     {
+      "codec": 2,
+      "sampleRates": [
+       1
+      ],
+      "channels": 1,
+      "bitrateMode": 0
+     }
+    ],
+    "comfortNoise": true,
+    "twoWayAudio": false,
+    "cryptoSuites": [
+     0,
+     1
+    ]
+   },
+   "supportedVideoStreamConfiguration": "012f010100020e0101000000010101020102030100030b010280070202380403011e0000030b010200050202d00203011e",
+   "supportedAudioStreamConfiguration": "0113010103020e01010102010003010100000301020000010e0101020209010101020100030101020101",
+   "supportedRTPConfiguration": "0201000000020101"
+  }
+ ],
+ "recording": [
+  {
+   "name": "brief §3.7 reference: High 4.0 1080p30, AAC-LC 32/44.1/48 kHz, motion",
+   "options": {
+    "isDoorbell": false,
+    "prebufferLengthMs": 4000,
+    "fragmentLengthMs": 4000,
+    "resolutions": [
+     [
+      1920,
+      1080,
+      30
+     ]
+    ],
+    "profiles": [
+     2
+    ],
+    "levels": [
+     2
+    ],
+    "audioCodec": 0,
+    "audioSampleRates": [
+     3,
+     4,
+     5
+    ],
+    "audioChannels": 1,
+    "audioBitrateMode": 0,
+    "eventTriggers": 1
+   },
+   "supportedCameraRecordingConfiguration": "0104a00f000002080100000000000000030b01010002060104a00f0000",
+   "supportedVideoRecordingConfiguration": "01180101000206010102020102030b010280070202380403011e",
+   "supportedAudioRecordingConfiguration": "0118010100021301010102010003010300000301040000030105"
+  },
+  {
+   "name": "v1 camera",
+   "options": {
+    "isDoorbell": false,
+    "prebufferLengthMs": 4000,
+    "fragmentLengthMs": 4000,
+    "resolutions": [
+     [
+      1280,
+      720,
+      30
+     ],
+     [
+      1920,
+      1080,
+      30
+     ]
+    ],
+    "profiles": [
+     0,
+     1,
+     2
+    ],
+    "levels": [
+     0,
+     1,
+     2
+    ],
+    "audioCodec": 0,
+    "audioSampleRates": [
+     3
+    ],
+    "audioChannels": 1,
+    "audioBitrateMode": 0,
+    "eventTriggers": 1
+   },
+   "supportedCameraRecordingConfiguration": "0104a00f000002080100000000000000030b01010002060104a00f0000",
+   "supportedVideoRecordingConfiguration": "013b010100021a0101000000010101000001010202010000000201010000020102030b010200050202d00203011e0000030b010280070202380403011e",
+   "supportedAudioRecordingConfiguration": "010e0101000209010101020100030103"
+  },
+  {
+   "name": "v1 doorbell",
+   "options": {
+    "isDoorbell": true,
+    "prebufferLengthMs": 4000,
+    "fragmentLengthMs": 4000,
+    "resolutions": [
+     [
+      1280,
+      720,
+      30
+     ],
+     [
+      1920,
+      1080,
+      30
+     ]
+    ],
+    "profiles": [
+     0,
+     1,
+     2
+    ],
+    "levels": [
+     0,
+     1,
+     2
+    ],
+    "audioCodec": 0,
+    "audioSampleRates": [
+     3
+    ],
+    "audioChannels": 1,
+    "audioBitrateMode": 0,
+    "eventTriggers": 3
+   },
+   "supportedCameraRecordingConfiguration": "0104a00f000002080300000000000000030b01010002060104a00f0000",
+   "supportedVideoRecordingConfiguration": "013b010100021a0101000000010101000001010202010000000201010000020102030b010200050202d00203011e0000030b010280070202380403011e",
+   "supportedAudioRecordingConfiguration": "010e0101000209010101020100030103"
+  },
+  {
+   "name": "v1 camera, 4:3 source",
+   "options": {
+    "isDoorbell": false,
+    "prebufferLengthMs": 4000,
+    "fragmentLengthMs": 4000,
+    "resolutions": [
+     [
+      1280,
+      720,
+      30
+     ],
+     [
+      1920,
+      1080,
+      30
+     ],
+     [
+      1280,
+      960,
+      30
+     ],
+     [
+      1600,
+      1200,
+      30
+     ]
+    ],
+    "profiles": [
+     0,
+     1,
+     2
+    ],
+    "levels": [
+     0,
+     1,
+     2
+    ],
+    "audioCodec": 0,
+    "audioSampleRates": [
+     3
+    ],
+    "audioChannels": 1,
+    "audioBitrateMode": 0,
+    "eventTriggers": 1
+   },
+   "supportedCameraRecordingConfiguration": "0104a00f000002080100000000000000030b01010002060104a00f0000",
+   "supportedVideoRecordingConfiguration": "0159010100021a0101000000010101000001010202010000000201010000020102030b010200050202d00203011e0000030b010280070202380403011e0000030b010200050202c00303011e0000030b010240060202b00403011e",
+   "supportedAudioRecordingConfiguration": "010e0101000209010101020100030103"
+  }
+ ],
+ "selectedRecordingConfiguration": [
+  {
+   "name": "hub-selected example (brief §3.7): 4000/4000, Main 4.0, 2000 kbps, IDR 4000 ms, 1080p30, AAC-LC mono 32 kHz",
+   "encoded": "011d0104a00f000002080100000000000000030b01010002060104a00f0000022401010002120101010201020304d00700000404a00f0000030b010280070202380403011e0314010100020f010101020100030103040440000000",
+   "configuration": {
+    "prebufferLengthMs": 4000,
+    "eventTriggers": 1,
+    "fragmentLengthMs": 4000,
+    "videoProfile": 1,
+    "videoLevel": 2,
+    "videoBitrateKbps": 2000,
+    "iFrameIntervalMs": 4000,
+    "resolution": {
+     "width": 1920,
+     "height": 1080,
+     "fps": 30
+    },
+    "audioCodec": 0,
+    "audioChannels": 1,
+    "audioSampleRate": 3,
+    "audioMaxBitrateKbps": 64
+   }
+  },
+  {
+   "name": "doorbell selection: motion + doorbell, High 3.2, 800 kbps, IDR 2000 ms, 720p30",
+   "encoded": "011d0104a00f000002080300000000000000030b01010002060104a00f0000022401010002120101020201010304200300000404d0070000030b010200050202d00203011e0314010100020f010101020100030103040420000000",
+   "configuration": {
+    "prebufferLengthMs": 4000,
+    "eventTriggers": 3,
+    "fragmentLengthMs": 4000,
+    "videoProfile": 2,
+    "videoLevel": 1,
+    "videoBitrateKbps": 800,
+    "iFrameIntervalMs": 2000,
+    "resolution": {
+     "width": 1280,
+     "height": 720,
+     "fps": 30
+    },
+    "audioCodec": 0,
+    "audioChannels": 1,
+    "audioSampleRate": 3,
+    "audioMaxBitrateKbps": 32
+   }
+  }
+ ],
+ "dataStreamTransport": {
+  "supportedDataStreamTransportConfiguration": "0103010100"
+ },
+ "streamingStatus": {
+  "available": "010100",
+  "inUse": "010101",
+  "unavailable": "010102"
+ },
+ "setupEndpointsDefault": "020102"
+}

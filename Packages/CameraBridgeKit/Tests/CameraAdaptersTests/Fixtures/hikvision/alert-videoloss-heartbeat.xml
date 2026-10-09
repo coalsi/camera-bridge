@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<EventNotificationAlert version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<ipAddress>192.0.2.79</ipAddress>
+<portNo>80</portNo>
+<protocol>HTTP</protocol>
+<macAddress>bc:ad:28:00:00:01</macAddress>
+<channelID>1</channelID>
+<dateTime>2026-09-30T17:36:00+00:00</dateTime>
+<activePostCount>0</activePostCount>
+<eventType>videoloss</eventType>
+<eventState>inactive</eventState>
+<eventDescription>videoloss alarm</eventDescription>
+</EventNotificationAlert>

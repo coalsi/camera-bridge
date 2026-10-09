@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <SOAP-ENV:Body>
+    <timg:GetImagingSettingsResponse>
+      <timg:ImagingSettings>
+        <tt:Brightness>55</tt:Brightness>
+        <tt:Contrast>60</tt:Contrast>
+        <tt:ColorSaturation>65</tt:ColorSaturation>
+        <tt:Sharpness>50</tt:Sharpness>
+        <tt:BacklightCompensation><tt:Mode>OFF</tt:Mode></tt:BacklightCompensation>
+        <tt:WideDynamicRange><tt:Mode>OFF</tt:Mode></tt:WideDynamicRange>
+        <tt:IrCutFilter>AUTO</tt:IrCutFilter>
+      </timg:ImagingSettings>
+    </timg:GetImagingSettingsResponse>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>

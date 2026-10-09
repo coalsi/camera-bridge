@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:dn="http://www.onvif.org/ver10/network/wsdl" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+  <SOAP-ENV:Header>
+    <wsa:MessageID>uuid:8b4c3d2e-0000-4000-8000-ec71db000001</wsa:MessageID>
+    <wsa:RelatesTo>uuid:{{MESSAGEID}}</wsa:RelatesTo>
+    <wsa:To SOAP-ENV:mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
+    <wsa:Action SOAP-ENV:mustUnderstand="true">http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches</wsa:Action>
+  </SOAP-ENV:Header>
+  <SOAP-ENV:Body>
+    <d:ProbeMatches>
+      <d:ProbeMatch>
+        <wsa:EndpointReference>
+          <wsa:Address>urn:uuid:2419d68a-2dd2-21b2-a205-ec71db000001</wsa:Address>
+        </wsa:EndpointReference>
+        <d:Types>dn:NetworkVideoTransmitter tds:Device</d:Types>
+        <d:Scopes>onvif://www.onvif.org/type/video_encoder onvif://www.onvif.org/Profile/Streaming onvif://www.onvif.org/Profile/T onvif://www.onvif.org/name/Reolink%20Video%20Doorbell onvif://www.onvif.org/hardware/DB_566128M5MP_W onvif://www.onvif.org/location/country/usa</d:Scopes>
+        <d:XAddrs>http://192.0.2.120:8000/onvif/device_service http://[2001:db8::120]:8000/onvif/device_service</d:XAddrs>
+        <d:MetadataVersion>1</d:MetadataVersion>
+      </d:ProbeMatch>
+    </d:ProbeMatches>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>

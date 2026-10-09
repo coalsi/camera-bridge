@@ -1,0 +1,30 @@
+# Build products
+.build/
+build/
+DerivedData/
+*.xcarchive
+.swiftpm/
+Packages/*/.build/
+Packages/*/.swiftpm/
+xcuserdata/
+*.xcuserstate
+
+# Local reference material (third-party sources, research, Apple docs) — never committed
+Reference/
+
+# Interop tooling
+Interop/node/node_modules/
+
+# macOS
+.DS_Store
+.claude/
+Tools/captures/
+
+# Release output and secrets: never committed (Tools/release.sh writes to build/release)
+*.dmg
+*.p12
+*.cer
+*.certSigningRequest
+*private-key*
+*sparkle*.key
+ExportOptions.plist

@@ -1,0 +1,26 @@
+[
+  {
+    "cmd": "GetAbility",
+    "code": 0,
+    "value": {
+      "Ability": {
+        "abilityChn": [
+          {
+            "aiTrack": { "permit": 0, "ver": 0 },
+            "alarmAudio": { "permit": 6, "ver": 1 },
+            "alarmMd": { "permit": 6, "ver": 1 },
+            "supportAiDogCat": { "permit": 4, "ver": 1 },
+            "supportAiFace": { "permit": 4, "ver": 0 },
+            "supportAiPeople": { "permit": 4, "ver": 1 },
+            "supportAiVehicle": { "permit": 4, "ver": 1 },
+            "mdWithPir": { "permit": 0, "ver": 0 }
+          }
+        ],
+        "supportOnvifEnable": { "permit": 6, "ver": 1 },
+        "supportRtmpEnable": { "permit": 6, "ver": 1 },
+        "supportRtspEnable": { "permit": 6, "ver": 1 },
+        "supportHttpsEnable": { "permit": 6, "ver": 1 }
+      }
+    }
+  }
+]

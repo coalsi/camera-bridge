@@ -1,0 +1,1833 @@
+{
+ "generator": "Interop/node/goldens.mjs hds-codec (plan task W1-9). Do not edit by hand; regenerate with: cd Interop/node && npm ci && node goldens.mjs hds-codec",
+ "source": "HAP-NodeJS 2.2.3 (Apache-2.0) lib/datastream/DataStreamParser.ts (DataStreamWriter / DataStreamReader), research brief §3.8, plan W1-6 item 1",
+ "notes": [
+  "Value JSON: {type: null|bool|int|float|string|data|uuid|date|array|dictionary, value}. int values are decimal strings (full int64); float values are float64 JSON numbers; data values are hex; uuid values are uppercase; date values are seconds since 2001-01-01T00:00:00Z (Date(timeIntervalSinceReferenceDate:)); dictionary values are ordered [{key, value}] pairs.",
+  "`values`: HDSCodec.encode(value) must equal `encoded` byte for byte, and HDSCodec.decode(encoded) must equal `value`. `hapNodeJS.writer` is what HAP-NodeJS writes (null when it cannot); `hapNodeJS.readerRoundTrip` says whether HAP-NodeJS reads `encoded` back. Every difference has a `note`.",
+  "Canonical rules: -1 → 0x07; 0…39 → 0x08+n; then int8 0x30 / int16LE 0x31 / int32LE 0x32 / int64LE 0x33 by range; float → float64 0x36; date → 0x06 + float64; strings and data ≤ 32 bytes → 0x40+n / 0x70+n, else length8/16/32/64 (0x61–0x64 / 0x91–0x94); uuid → 0x05 + 16 bytes big-endian; arrays/dictionaries ≤ 14 items → 0xD0+n / 0xE0+n, else 0xDF / 0xEF … 0x03; never back-references (0xA0–0xCF).",
+  "`decodeOnly`: HDSCodec.decode(encoded) must equal `value`; the canonical encoder never produces these bytes. HAP-NodeJS reads all of them.",
+  "Back-references (0xA0+i) refer to the i-th value decoded so far in the same encoded message (header and body are separate messages). HAP-NodeJS's reader counts every bool, int, float, date, string, data and uuid it reads (dictionary keys included; not null and not containers), while its writer only counts strings, ints outside -1…39, floats, dates, data and uuids — the two disagree when a bool or small int precedes a back-reference, so the decodeOnly cases avoid that situation.",
+  "`invalid`: HDSCodec.decode(encoded) must throw."
+ ],
+ "values": [
+  {
+   "name": "null",
+   "value": {
+    "type": "null"
+   },
+   "encoded": "04",
+   "hapNodeJS": {
+    "writer": "04",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "true",
+   "value": {
+    "type": "bool",
+    "value": true
+   },
+   "encoded": "01",
+   "hapNodeJS": {
+    "writer": "01",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "false",
+   "value": {
+    "type": "bool",
+    "value": false
+   },
+   "encoded": "02",
+   "hapNodeJS": {
+    "writer": "02",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int -1",
+   "value": {
+    "type": "int",
+    "value": "-1"
+   },
+   "encoded": "07",
+   "hapNodeJS": {
+    "writer": "07",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 0",
+   "value": {
+    "type": "int",
+    "value": "0"
+   },
+   "encoded": "08",
+   "hapNodeJS": {
+    "writer": "08",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 1",
+   "value": {
+    "type": "int",
+    "value": "1"
+   },
+   "encoded": "09",
+   "hapNodeJS": {
+    "writer": "09",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 38",
+   "value": {
+    "type": "int",
+    "value": "38"
+   },
+   "encoded": "2e",
+   "hapNodeJS": {
+    "writer": "2e",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 39 (tag 0x2F)",
+   "value": {
+    "type": "int",
+    "value": "39"
+   },
+   "encoded": "2f",
+   "hapNodeJS": {
+    "writer": "2f",
+    "readerRoundTrip": false
+   },
+   "note": "HAP-NodeJS's reader accepts integer tags only up to 0x2E (brief §3.8 HN bug); CameraBridge must decode 0x2F as 39."
+  },
+  {
+   "name": "int 40 (first int8)",
+   "value": {
+    "type": "int",
+    "value": "40"
+   },
+   "encoded": "3028",
+   "hapNodeJS": {
+    "writer": "3028",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 127",
+   "value": {
+    "type": "int",
+    "value": "127"
+   },
+   "encoded": "307f",
+   "hapNodeJS": {
+    "writer": "307f",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int -2",
+   "value": {
+    "type": "int",
+    "value": "-2"
+   },
+   "encoded": "30fe",
+   "hapNodeJS": {
+    "writer": "30fe",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int -128",
+   "value": {
+    "type": "int",
+    "value": "-128"
+   },
+   "encoded": "3080",
+   "hapNodeJS": {
+    "writer": "3080",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 128 (first int16)",
+   "value": {
+    "type": "int",
+    "value": "128"
+   },
+   "encoded": "318000",
+   "hapNodeJS": {
+    "writer": "318000",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int -129",
+   "value": {
+    "type": "int",
+    "value": "-129"
+   },
+   "encoded": "317fff",
+   "hapNodeJS": {
+    "writer": "317fff",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 255",
+   "value": {
+    "type": "int",
+    "value": "255"
+   },
+   "encoded": "31ff00",
+   "hapNodeJS": {
+    "writer": "31ff00",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 32767",
+   "value": {
+    "type": "int",
+    "value": "32767"
+   },
+   "encoded": "31ff7f",
+   "hapNodeJS": {
+    "writer": "31ff7f",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int -32768",
+   "value": {
+    "type": "int",
+    "value": "-32768"
+   },
+   "encoded": "310080",
+   "hapNodeJS": {
+    "writer": "310080",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 32768 (first int32)",
+   "value": {
+    "type": "int",
+    "value": "32768"
+   },
+   "encoded": "3200800000",
+   "hapNodeJS": {
+    "writer": "3200800000",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int -32769",
+   "value": {
+    "type": "int",
+    "value": "-32769"
+   },
+   "encoded": "32ff7fffff",
+   "hapNodeJS": {
+    "writer": "32ff7fffff",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 65535",
+   "value": {
+    "type": "int",
+    "value": "65535"
+   },
+   "encoded": "32ffff0000",
+   "hapNodeJS": {
+    "writer": "32ffff0000",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 2147483647",
+   "value": {
+    "type": "int",
+    "value": "2147483647"
+   },
+   "encoded": "32ffffff7f",
+   "hapNodeJS": {
+    "writer": "32ffffff7f",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int -2147483648",
+   "value": {
+    "type": "int",
+    "value": "-2147483648"
+   },
+   "encoded": "3200000080",
+   "hapNodeJS": {
+    "writer": "3200000080",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 2147483648 (first int64)",
+   "value": {
+    "type": "int",
+    "value": "2147483648"
+   },
+   "encoded": "330000008000000000",
+   "hapNodeJS": {
+    "writer": "330000008000000000",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 4294967295",
+   "value": {
+    "type": "int",
+    "value": "4294967295"
+   },
+   "encoded": "33ffffffff00000000",
+   "hapNodeJS": {
+    "writer": "33ffffffff00000000",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "int 4294967296",
+   "value": {
+    "type": "int",
+    "value": "4294967296"
+   },
+   "encoded": "330000000001000000",
+   "hapNodeJS": {
+    "writer": null,
+    "readerRoundTrip": true
+   },
+   "note": "HAP-NodeJS writes int64 as a 32-bit value (writeUInt32LE) and throws outside 0…2^32−1 (brief §3.8 HN bug); CameraBridge writes a full two's-complement int64."
+  },
+  {
+   "name": "int -2147483649",
+   "value": {
+    "type": "int",
+    "value": "-2147483649"
+   },
+   "encoded": "33ffffff7fffffffff",
+   "hapNodeJS": {
+    "writer": null,
+    "readerRoundTrip": true
+   },
+   "note": "HAP-NodeJS writes int64 as a 32-bit value (writeUInt32LE) and throws outside 0…2^32−1 (brief §3.8 HN bug); CameraBridge writes a full two's-complement int64."
+  },
+  {
+   "name": "int 2^53 − 1",
+   "value": {
+    "type": "int",
+    "value": "9007199254740991"
+   },
+   "encoded": "33ffffffffffff1f00",
+   "hapNodeJS": {
+    "writer": null,
+    "readerRoundTrip": true
+   },
+   "note": "HAP-NodeJS writes int64 as a 32-bit value (writeUInt32LE) and throws outside 0…2^32−1 (brief §3.8 HN bug); CameraBridge writes a full two's-complement int64."
+  },
+  {
+   "name": "int64 max",
+   "value": {
+    "type": "int",
+    "value": "9223372036854775807"
+   },
+   "encoded": "33ffffffffffffff7f",
+   "hapNodeJS": {
+    "writer": null,
+    "readerRoundTrip": false
+   },
+   "note": "HAP-NodeJS holds integers as JS numbers and cannot express this int64 exactly; CameraBridge writes the full two's-complement int64."
+  },
+  {
+   "name": "int64 min",
+   "value": {
+    "type": "int",
+    "value": "-9223372036854775808"
+   },
+   "encoded": "330000000000000080",
+   "hapNodeJS": {
+    "writer": null,
+    "readerRoundTrip": true
+   },
+   "note": "HAP-NodeJS holds integers as JS numbers and cannot express this int64 exactly; CameraBridge writes the full two's-complement int64."
+  },
+  {
+   "name": "float 1.5",
+   "value": {
+    "type": "float",
+    "value": 1.5
+   },
+   "encoded": "36000000000000f83f",
+   "hapNodeJS": {
+    "writer": "36000000000000f83f",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "float -0.25",
+   "value": {
+    "type": "float",
+    "value": -0.25
+   },
+   "encoded": "36000000000000d0bf",
+   "hapNodeJS": {
+    "writer": "36000000000000d0bf",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "float 2.0 (integral float stays float64)",
+   "value": {
+    "type": "float",
+    "value": 2
+   },
+   "encoded": "360000000000000040",
+   "hapNodeJS": {
+    "writer": "360000000000000040",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "float 0.1",
+   "value": {
+    "type": "float",
+    "value": 0.1
+   },
+   "encoded": "369a9999999999b93f",
+   "hapNodeJS": {
+    "writer": "369a9999999999b93f",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "float pi",
+   "value": {
+    "type": "float",
+    "value": 3.141592653589793
+   },
+   "encoded": "36182d4454fb210940",
+   "hapNodeJS": {
+    "writer": "36182d4454fb210940",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "float 1e300",
+   "value": {
+    "type": "float",
+    "value": 1e+300
+   },
+   "encoded": "369c7500883ce4377e",
+   "hapNodeJS": {
+    "writer": "369c7500883ce4377e",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "date 0 (2001-01-01T00:00:00Z)",
+   "value": {
+    "type": "date",
+    "value": 0
+   },
+   "encoded": "060000000000000000",
+   "hapNodeJS": {
+    "writer": "060000000000000000",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "date 781000000.5",
+   "value": {
+    "type": "date",
+    "value": 781000000.5
+   },
+   "encoded": "06000040a08e46c741",
+   "hapNodeJS": {
+    "writer": "06000040a08e46c741",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "uuid MotionDetected",
+   "value": {
+    "type": "uuid",
+    "value": "00000022-0000-1000-8000-0026BB765291"
+   },
+   "encoded": "05000000220000100080000026bb765291",
+   "hapNodeJS": {
+    "writer": "05000000220000100080000026bb765291",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "uuid random-looking",
+   "value": {
+    "type": "uuid",
+    "value": "E7A5E2C1-4F7B-4E5D-9A3B-0C6F1D2E3A4B"
+   },
+   "encoded": "05e7a5e2c14f7b4e5d9a3b0c6f1d2e3a4b",
+   "hapNodeJS": {
+    "writer": "05e7a5e2c14f7b4e5d9a3b0c6f1d2e3a4b",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "string empty",
+   "value": {
+    "type": "string",
+    "value": ""
+   },
+   "encoded": "40",
+   "hapNodeJS": {
+    "writer": "40",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "string a",
+   "value": {
+    "type": "string",
+    "value": "a"
+   },
+   "encoded": "4161",
+   "hapNodeJS": {
+    "writer": "4161",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "string dataSend",
+   "value": {
+    "type": "string",
+    "value": "dataSend"
+   },
+   "encoded": "486461746153656e64",
+   "hapNodeJS": {
+    "writer": "486461746153656e64",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "string 32 bytes (last short form)",
+   "value": {
+    "type": "string",
+    "value": "ipcamera.recording.stream.012345"
+   },
+   "encoded": "60697063616d6572612e7265636f7264696e672e73747265616d2e303132333435",
+   "hapNodeJS": {
+    "writer": "60697063616d6572612e7265636f7264696e672e73747265616d2e303132333435",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "string 33 bytes (first length8)",
+   "value": {
+    "type": "string",
+    "value": "ipcamera.recording.stream.0123456"
+   },
+   "encoded": "6121697063616d6572612e7265636f7264696e672e73747265616d2e30313233343536",
+   "hapNodeJS": {
+    "writer": "6121697063616d6572612e7265636f7264696e672e73747265616d2e30313233343536",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "string 255 bytes",
+   "value": {
+    "type": "string",
+    "value": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+   },
+   "encoded": "61ff737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373",
+   "hapNodeJS": {
+    "writer": "61ff737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "string 256 bytes (first length16)",
+   "value": {
+    "type": "string",
+    "value": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+   },
+   "encoded": "62000174747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474",
+   "hapNodeJS": {
+    "writer": "62000174747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474747474",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "string UTF-8 multibyte",
+   "value": {
+    "type": "string",
+    "value": "Grüße ✓ 📷"
+   },
+   "encoded": "504772c3bcc39f6520e29c9320f09f93b7",
+   "hapNodeJS": {
+    "writer": "504772c3bcc39f6520e29c9320f09f93b7",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "data empty",
+   "value": {
+    "type": "data",
+    "value": ""
+   },
+   "encoded": "70",
+   "hapNodeJS": {
+    "writer": "70",
+    "readerRoundTrip": false
+   },
+   "note": "HAP-NodeJS's reader drops data of 0–32 bytes (tags 0x70–0x90 return undefined; brief §3.8 HN bug); CameraBridge must decode it."
+  },
+  {
+   "name": "data 1 byte",
+   "value": {
+    "type": "data",
+    "value": "7f"
+   },
+   "encoded": "717f",
+   "hapNodeJS": {
+    "writer": "717f",
+    "readerRoundTrip": false
+   },
+   "note": "HAP-NodeJS's reader drops data of 0–32 bytes (tags 0x70–0x90 return undefined; brief §3.8 HN bug); CameraBridge must decode it."
+  },
+  {
+   "name": "data 32 bytes (last short form)",
+   "value": {
+    "type": "data",
+    "value": "5d93adedb3f21355b3022b189b95774ed7852ddf4fe1a8d852de973d13149793"
+   },
+   "encoded": "905d93adedb3f21355b3022b189b95774ed7852ddf4fe1a8d852de973d13149793",
+   "hapNodeJS": {
+    "writer": "905d93adedb3f21355b3022b189b95774ed7852ddf4fe1a8d852de973d13149793",
+    "readerRoundTrip": false
+   },
+   "note": "HAP-NodeJS's reader drops data of 0–32 bytes (tags 0x70–0x90 return undefined; brief §3.8 HN bug); CameraBridge must decode it."
+  },
+  {
+   "name": "data 33 bytes (first length8)",
+   "value": {
+    "type": "data",
+    "value": "96b411a7526d602f938e2f6ad45edc66b42166e1bd2bd600c8676b24a34b6ecc64"
+   },
+   "encoded": "912196b411a7526d602f938e2f6ad45edc66b42166e1bd2bd600c8676b24a34b6ecc64",
+   "hapNodeJS": {
+    "writer": "912196b411a7526d602f938e2f6ad45edc66b42166e1bd2bd600c8676b24a34b6ecc64",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "data 255 bytes",
+   "value": {
+    "type": "data",
+    "value": "c22242e19b4c544419c38e6270a8f526cb8727edbc1171f57102fc4aa44f66b71d18603ab01819b2c7bfd180bdf45ca77b16a35c973c30a917379f91612af0335b914a19c328828917017e76e52613b102cf50a94f7526e1cfb2722e0f414e6a4a03b3a95a955dd6d0a7d251d75d4c9fec8d0662d0501f69142c4ac3989a438d0d9031d76da704dd56c9b32df9d703d13f25337fbee610de5f58b62c86666bff09e380258666a20e7c9e8148dfcd34568dd84097634f4c89d0e83e618d30090913465dc961b502702101f62490430962996591f121463940bc45716ee3f33888a8798e38adca49ff4906ec7082c5091fd45f3e5c2d45c7d24689bcd511f4ef"
+   },
+   "encoded": "91ffc22242e19b4c544419c38e6270a8f526cb8727edbc1171f57102fc4aa44f66b71d18603ab01819b2c7bfd180bdf45ca77b16a35c973c30a917379f91612af0335b914a19c328828917017e76e52613b102cf50a94f7526e1cfb2722e0f414e6a4a03b3a95a955dd6d0a7d251d75d4c9fec8d0662d0501f69142c4ac3989a438d0d9031d76da704dd56c9b32df9d703d13f25337fbee610de5f58b62c86666bff09e380258666a20e7c9e8148dfcd34568dd84097634f4c89d0e83e618d30090913465dc961b502702101f62490430962996591f121463940bc45716ee3f33888a8798e38adca49ff4906ec7082c5091fd45f3e5c2d45c7d24689bcd511f4ef",
+   "hapNodeJS": {
+    "writer": "91ffc22242e19b4c544419c38e6270a8f526cb8727edbc1171f57102fc4aa44f66b71d18603ab01819b2c7bfd180bdf45ca77b16a35c973c30a917379f91612af0335b914a19c328828917017e76e52613b102cf50a94f7526e1cfb2722e0f414e6a4a03b3a95a955dd6d0a7d251d75d4c9fec8d0662d0501f69142c4ac3989a438d0d9031d76da704dd56c9b32df9d703d13f25337fbee610de5f58b62c86666bff09e380258666a20e7c9e8148dfcd34568dd84097634f4c89d0e83e618d30090913465dc961b502702101f62490430962996591f121463940bc45716ee3f33888a8798e38adca49ff4906ec7082c5091fd45f3e5c2d45c7d24689bcd511f4ef",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "data 256 bytes (first length16)",
+   "value": {
+    "type": "data",
+    "value": "794ff745518898645b2e39bdd4b1137f9cdf409961d069b5b60160e2f99550b274c4817556f8dc394ac64e27eadc23b2fb02124885a038e2395d19c8ffda146a371fb7996e3776dce60d71e3f0e47ba5f5c301b79e374f8495e3cb3174296a73c72c0f36d2e6fc766ecc7a50ba4c332e1bf9429874b497507a18027a4bb79997b330d55276be68f277fe807f48aaa997b425562a7089f002fa7e9e51f4a1729a35dadf8005799b6e4ff731c07c4de002d38c41898e93a4cd44d5dec7cd7bab05a0805bb7fe88456d9de84844fb0e8246561eff10415a38acfd6d892574616b416a5869192b59abe208c1e5214a6b7a9364540ee9fe1756102e4a81dce6c00570"
+   },
+   "encoded": "920001794ff745518898645b2e39bdd4b1137f9cdf409961d069b5b60160e2f99550b274c4817556f8dc394ac64e27eadc23b2fb02124885a038e2395d19c8ffda146a371fb7996e3776dce60d71e3f0e47ba5f5c301b79e374f8495e3cb3174296a73c72c0f36d2e6fc766ecc7a50ba4c332e1bf9429874b497507a18027a4bb79997b330d55276be68f277fe807f48aaa997b425562a7089f002fa7e9e51f4a1729a35dadf8005799b6e4ff731c07c4de002d38c41898e93a4cd44d5dec7cd7bab05a0805bb7fe88456d9de84844fb0e8246561eff10415a38acfd6d892574616b416a5869192b59abe208c1e5214a6b7a9364540ee9fe1756102e4a81dce6c00570",
+   "hapNodeJS": {
+    "writer": "920001794ff745518898645b2e39bdd4b1137f9cdf409961d069b5b60160e2f99550b274c4817556f8dc394ac64e27eadc23b2fb02124885a038e2395d19c8ffda146a371fb7996e3776dce60d71e3f0e47ba5f5c301b79e374f8495e3cb3174296a73c72c0f36d2e6fc766ecc7a50ba4c332e1bf9429874b497507a18027a4bb79997b330d55276be68f277fe807f48aaa997b425562a7089f002fa7e9e51f4a1729a35dadf8005799b6e4ff731c07c4de002d38c41898e93a4cd44d5dec7cd7bab05a0805bb7fe88456d9de84844fb0e8246561eff10415a38acfd6d892574616b416a5869192b59abe208c1e5214a6b7a9364540ee9fe1756102e4a81dce6c00570",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "array empty",
+   "value": {
+    "type": "array",
+    "value": []
+   },
+   "encoded": "d0",
+   "hapNodeJS": {
+    "writer": "d0",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "array [1]",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "int",
+      "value": "1"
+     }
+    ]
+   },
+   "encoded": "d109",
+   "hapNodeJS": {
+    "writer": "d109",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "array mixed",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "string",
+      "value": "a"
+     },
+     {
+      "type": "int",
+      "value": "1000"
+     },
+     {
+      "type": "bool",
+      "value": true
+     },
+     {
+      "type": "null"
+     },
+     {
+      "type": "float",
+      "value": 0.5
+     }
+    ]
+   },
+   "encoded": "d5416131e803010436000000000000e03f",
+   "hapNodeJS": {
+    "writer": "d5416131e803010436000000000000e03f",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "array 12 items",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "int",
+      "value": "0"
+     },
+     {
+      "type": "int",
+      "value": "1"
+     },
+     {
+      "type": "int",
+      "value": "2"
+     },
+     {
+      "type": "int",
+      "value": "3"
+     },
+     {
+      "type": "int",
+      "value": "4"
+     },
+     {
+      "type": "int",
+      "value": "5"
+     },
+     {
+      "type": "int",
+      "value": "6"
+     },
+     {
+      "type": "int",
+      "value": "7"
+     },
+     {
+      "type": "int",
+      "value": "8"
+     },
+     {
+      "type": "int",
+      "value": "9"
+     },
+     {
+      "type": "int",
+      "value": "10"
+     },
+     {
+      "type": "int",
+      "value": "11"
+     }
+    ]
+   },
+   "encoded": "dc08090a0b0c0d0e0f10111213",
+   "hapNodeJS": {
+    "writer": "dc08090a0b0c0d0e0f10111213",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "array 13 items",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "int",
+      "value": "0"
+     },
+     {
+      "type": "int",
+      "value": "1"
+     },
+     {
+      "type": "int",
+      "value": "2"
+     },
+     {
+      "type": "int",
+      "value": "3"
+     },
+     {
+      "type": "int",
+      "value": "4"
+     },
+     {
+      "type": "int",
+      "value": "5"
+     },
+     {
+      "type": "int",
+      "value": "6"
+     },
+     {
+      "type": "int",
+      "value": "7"
+     },
+     {
+      "type": "int",
+      "value": "8"
+     },
+     {
+      "type": "int",
+      "value": "9"
+     },
+     {
+      "type": "int",
+      "value": "10"
+     },
+     {
+      "type": "int",
+      "value": "11"
+     },
+     {
+      "type": "int",
+      "value": "12"
+     }
+    ]
+   },
+   "encoded": "dd08090a0b0c0d0e0f1011121314",
+   "hapNodeJS": {
+    "writer": "df08090a0b0c0d0e0f101112131403",
+    "readerRoundTrip": true
+   },
+   "note": "HAP-NodeJS writes arrays of more than 12 items in terminated form (0xDF … 0x03); CameraBridge uses the count form up to 14 items (0xD0+n)."
+  },
+  {
+   "name": "array 14 items (last count form)",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "int",
+      "value": "0"
+     },
+     {
+      "type": "int",
+      "value": "1"
+     },
+     {
+      "type": "int",
+      "value": "2"
+     },
+     {
+      "type": "int",
+      "value": "3"
+     },
+     {
+      "type": "int",
+      "value": "4"
+     },
+     {
+      "type": "int",
+      "value": "5"
+     },
+     {
+      "type": "int",
+      "value": "6"
+     },
+     {
+      "type": "int",
+      "value": "7"
+     },
+     {
+      "type": "int",
+      "value": "8"
+     },
+     {
+      "type": "int",
+      "value": "9"
+     },
+     {
+      "type": "int",
+      "value": "10"
+     },
+     {
+      "type": "int",
+      "value": "11"
+     },
+     {
+      "type": "int",
+      "value": "12"
+     },
+     {
+      "type": "int",
+      "value": "13"
+     }
+    ]
+   },
+   "encoded": "de08090a0b0c0d0e0f101112131415",
+   "hapNodeJS": {
+    "writer": "df08090a0b0c0d0e0f10111213141503",
+    "readerRoundTrip": true
+   },
+   "note": "HAP-NodeJS writes arrays of more than 12 items in terminated form (0xDF … 0x03); CameraBridge uses the count form up to 14 items (0xD0+n)."
+  },
+  {
+   "name": "array 15 items (terminated)",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "int",
+      "value": "0"
+     },
+     {
+      "type": "int",
+      "value": "1"
+     },
+     {
+      "type": "int",
+      "value": "2"
+     },
+     {
+      "type": "int",
+      "value": "3"
+     },
+     {
+      "type": "int",
+      "value": "4"
+     },
+     {
+      "type": "int",
+      "value": "5"
+     },
+     {
+      "type": "int",
+      "value": "6"
+     },
+     {
+      "type": "int",
+      "value": "7"
+     },
+     {
+      "type": "int",
+      "value": "8"
+     },
+     {
+      "type": "int",
+      "value": "9"
+     },
+     {
+      "type": "int",
+      "value": "10"
+     },
+     {
+      "type": "int",
+      "value": "11"
+     },
+     {
+      "type": "int",
+      "value": "12"
+     },
+     {
+      "type": "int",
+      "value": "13"
+     },
+     {
+      "type": "int",
+      "value": "14"
+     }
+    ]
+   },
+   "encoded": "df08090a0b0c0d0e0f1011121314151603",
+   "hapNodeJS": {
+    "writer": "df08090a0b0c0d0e0f1011121314151603",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "array nested",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "array",
+      "value": [
+       {
+        "type": "int",
+        "value": "1"
+       },
+       {
+        "type": "int",
+        "value": "2"
+       }
+      ]
+     },
+     {
+      "type": "array",
+      "value": [
+       {
+        "type": "int",
+        "value": "3"
+       },
+       {
+        "type": "array",
+        "value": [
+         {
+          "type": "int",
+          "value": "4"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "encoded": "d2d2090ad20bd10c",
+   "hapNodeJS": {
+    "writer": "d2d2090ad20bd10c",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "dictionary empty",
+   "value": {
+    "type": "dictionary",
+    "value": []
+   },
+   "encoded": "e0",
+   "hapNodeJS": {
+    "writer": "e0",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "dictionary brief §3.8 event header",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "protocol",
+      "value": {
+       "type": "string",
+       "value": "dataSend"
+      }
+     },
+     {
+      "key": "event",
+      "value": {
+       "type": "string",
+       "value": "data"
+      }
+     }
+    ]
+   },
+   "encoded": "e24870726f746f636f6c486461746153656e64456576656e744464617461",
+   "hapNodeJS": {
+    "writer": "e24870726f746f636f6c486461746153656e64456576656e744464617461",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "dictionary 14 entries (last count form)",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "key00",
+      "value": {
+       "type": "int",
+       "value": "0"
+      }
+     },
+     {
+      "key": "key01",
+      "value": {
+       "type": "int",
+       "value": "1"
+      }
+     },
+     {
+      "key": "key02",
+      "value": {
+       "type": "int",
+       "value": "2"
+      }
+     },
+     {
+      "key": "key03",
+      "value": {
+       "type": "int",
+       "value": "3"
+      }
+     },
+     {
+      "key": "key04",
+      "value": {
+       "type": "int",
+       "value": "4"
+      }
+     },
+     {
+      "key": "key05",
+      "value": {
+       "type": "int",
+       "value": "5"
+      }
+     },
+     {
+      "key": "key06",
+      "value": {
+       "type": "int",
+       "value": "6"
+      }
+     },
+     {
+      "key": "key07",
+      "value": {
+       "type": "int",
+       "value": "7"
+      }
+     },
+     {
+      "key": "key08",
+      "value": {
+       "type": "int",
+       "value": "8"
+      }
+     },
+     {
+      "key": "key09",
+      "value": {
+       "type": "int",
+       "value": "9"
+      }
+     },
+     {
+      "key": "key10",
+      "value": {
+       "type": "int",
+       "value": "10"
+      }
+     },
+     {
+      "key": "key11",
+      "value": {
+       "type": "int",
+       "value": "11"
+      }
+     },
+     {
+      "key": "key12",
+      "value": {
+       "type": "int",
+       "value": "12"
+      }
+     },
+     {
+      "key": "key13",
+      "value": {
+       "type": "int",
+       "value": "13"
+      }
+     }
+    ]
+   },
+   "encoded": "ee456b6579303008456b6579303109456b657930320a456b657930330b456b657930340c456b657930350d456b657930360e456b657930370f456b6579303810456b6579303911456b6579313012456b6579313113456b6579313214456b6579313315",
+   "hapNodeJS": {
+    "writer": "ee456b6579303008456b6579303109456b657930320a456b657930330b456b657930340c456b657930350d456b657930360e456b657930370f456b6579303810456b6579303911456b6579313012456b6579313113456b6579313214456b6579313315",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "dictionary 15 entries (terminated)",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "key00",
+      "value": {
+       "type": "int",
+       "value": "0"
+      }
+     },
+     {
+      "key": "key01",
+      "value": {
+       "type": "int",
+       "value": "1"
+      }
+     },
+     {
+      "key": "key02",
+      "value": {
+       "type": "int",
+       "value": "2"
+      }
+     },
+     {
+      "key": "key03",
+      "value": {
+       "type": "int",
+       "value": "3"
+      }
+     },
+     {
+      "key": "key04",
+      "value": {
+       "type": "int",
+       "value": "4"
+      }
+     },
+     {
+      "key": "key05",
+      "value": {
+       "type": "int",
+       "value": "5"
+      }
+     },
+     {
+      "key": "key06",
+      "value": {
+       "type": "int",
+       "value": "6"
+      }
+     },
+     {
+      "key": "key07",
+      "value": {
+       "type": "int",
+       "value": "7"
+      }
+     },
+     {
+      "key": "key08",
+      "value": {
+       "type": "int",
+       "value": "8"
+      }
+     },
+     {
+      "key": "key09",
+      "value": {
+       "type": "int",
+       "value": "9"
+      }
+     },
+     {
+      "key": "key10",
+      "value": {
+       "type": "int",
+       "value": "10"
+      }
+     },
+     {
+      "key": "key11",
+      "value": {
+       "type": "int",
+       "value": "11"
+      }
+     },
+     {
+      "key": "key12",
+      "value": {
+       "type": "int",
+       "value": "12"
+      }
+     },
+     {
+      "key": "key13",
+      "value": {
+       "type": "int",
+       "value": "13"
+      }
+     },
+     {
+      "key": "key14",
+      "value": {
+       "type": "int",
+       "value": "14"
+      }
+     }
+    ]
+   },
+   "encoded": "ef456b6579303008456b6579303109456b657930320a456b657930330b456b657930340c456b657930350d456b657930360e456b657930370f456b6579303810456b6579303911456b6579313012456b6579313113456b6579313214456b6579313315456b657931341603",
+   "hapNodeJS": {
+    "writer": "ef456b6579303008456b6579303109456b657930320a456b657930330b456b657930340c456b657930350d456b657930360e456b657930370f456b6579303810456b6579303911456b6579313012456b6579313113456b6579313214456b6579313315456b657931341603",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "dictionary dataSend open request body",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "target",
+      "value": {
+       "type": "string",
+       "value": "controller"
+      }
+     },
+     {
+      "key": "type",
+      "value": {
+       "type": "string",
+       "value": "ipcamera.recording"
+      }
+     },
+     {
+      "key": "streamId",
+      "value": {
+       "type": "int",
+       "value": "1"
+      }
+     }
+    ]
+   },
+   "encoded": "e3467461726765744a636f6e74726f6c6c6572447479706552697063616d6572612e7265636f7264696e674873747265616d496409",
+   "hapNodeJS": {
+    "writer": "e3467461726765744a636f6e74726f6c6c6572447479706552697063616d6572612e7265636f7264696e674873747265616d496409",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "dictionary nested with data",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "streamId",
+      "value": {
+       "type": "int",
+       "value": "3"
+      }
+     },
+     {
+      "key": "packets",
+      "value": {
+       "type": "array",
+       "value": [
+        {
+         "type": "dictionary",
+         "value": [
+          {
+           "key": "data",
+           "value": {
+            "type": "data",
+            "value": "8d97c448ec9db0326100aaad1d6c73d54107c9986208b41ddea96e437f52816a7359787fb5872c92"
+           }
+          },
+          {
+           "key": "metadata",
+           "value": {
+            "type": "dictionary",
+            "value": [
+             {
+              "key": "dataType",
+              "value": {
+               "type": "string",
+               "value": "mediaFragment"
+              }
+             },
+             {
+              "key": "dataSequenceNumber",
+              "value": {
+               "type": "int",
+               "value": "2"
+              }
+             },
+             {
+              "key": "isLastDataChunk",
+              "value": {
+               "type": "bool",
+               "value": true
+              }
+             }
+            ]
+           }
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "encoded": "e24873747265616d49640b477061636b657473d1e2446461746191288d97c448ec9db0326100aaad1d6c73d54107c9986208b41ddea96e437f52816a7359787fb5872c92486d65746164617461e34864617461547970654d6d65646961467261676d656e74526461746153657175656e63654e756d6265720a4f69734c617374446174614368756e6b01",
+   "hapNodeJS": {
+    "writer": "e24873747265616d49640b477061636b657473d1e2446461746191288d97c448ec9db0326100aaad1d6c73d54107c9986208b41ddea96e437f52816a7359787fb5872c92486d65746164617461e34864617461547970654d6d65646961467261676d656e74526461746153657175656e63654e756d6265720a4f69734c617374446174614368756e6b01",
+    "readerRoundTrip": true
+   }
+  },
+  {
+   "name": "array with a repeated string",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "string",
+      "value": "abc"
+     },
+     {
+      "type": "string",
+      "value": "abc"
+     }
+    ]
+   },
+   "encoded": "d24361626343616263",
+   "hapNodeJS": {
+    "writer": "d243616263a0",
+    "readerRoundTrip": true
+   },
+   "note": "HAP-NodeJS's writer replaces a repeated string/int/float/data with a back-reference (0xA0+index); CameraBridge never emits back-references."
+  },
+  {
+   "name": "dictionary with a repeated value",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "a",
+      "value": {
+       "type": "string",
+       "value": "x"
+      }
+     },
+     {
+      "key": "b",
+      "value": {
+       "type": "string",
+       "value": "x"
+      }
+     }
+    ]
+   },
+   "encoded": "e24161417841624178",
+   "hapNodeJS": {
+    "writer": "e2416141784162a1",
+    "readerRoundTrip": true
+   },
+   "note": "HAP-NodeJS's writer replaces a repeated string/int/float/data with a back-reference (0xA0+index); CameraBridge never emits back-references."
+  }
+ ],
+ "decodeOnly": [
+  {
+   "name": "int 5 as int8 (0x30)",
+   "encoded": "3005",
+   "value": {
+    "type": "int",
+    "value": "5"
+   },
+   "note": "Non-minimal integer form."
+  },
+  {
+   "name": "int -1 as int16 (0x31)",
+   "encoded": "31ffff",
+   "value": {
+    "type": "int",
+    "value": "-1"
+   },
+   "note": "Non-minimal integer form."
+  },
+  {
+   "name": "int 5 as int64 (0x33)",
+   "encoded": "330500000000000000",
+   "value": {
+    "type": "int",
+    "value": "5"
+   },
+   "note": "Non-minimal integer form (HDS headers carry id/status this way)."
+  },
+  {
+   "name": "float32 1.5 (0x35)",
+   "encoded": "350000c03f",
+   "value": {
+    "type": "float",
+    "value": 1.5
+   },
+   "note": "float32 widens to Double."
+  },
+  {
+   "name": "string length8 form for 3 bytes (0x61)",
+   "encoded": "6103616263",
+   "value": {
+    "type": "string",
+    "value": "abc"
+   },
+   "note": "Non-minimal length form."
+  },
+  {
+   "name": "string length16 form (0x62)",
+   "encoded": "620300616263",
+   "value": {
+    "type": "string",
+    "value": "abc"
+   },
+   "note": "Non-minimal length form."
+  },
+  {
+   "name": "string length32 form (0x63)",
+   "encoded": "6303000000616263",
+   "value": {
+    "type": "string",
+    "value": "abc"
+   },
+   "note": "Non-minimal length form."
+  },
+  {
+   "name": "string length64 form (0x64)",
+   "encoded": "640300000000000000616263",
+   "value": {
+    "type": "string",
+    "value": "abc"
+   },
+   "note": "Non-minimal length form."
+  },
+  {
+   "name": "string NUL-terminated (0x6F)",
+   "encoded": "6f61626300",
+   "value": {
+    "type": "string",
+    "value": "abc"
+   },
+   "note": "Terminated by 0x00."
+  },
+  {
+   "name": "data length8 form for 2 bytes (0x91)",
+   "encoded": "91020102",
+   "value": {
+    "type": "data",
+    "value": "0102"
+   },
+   "note": "Non-minimal length form."
+  },
+  {
+   "name": "data length32 form (0x93)",
+   "encoded": "93020000000102",
+   "value": {
+    "type": "data",
+    "value": "0102"
+   },
+   "note": "Non-minimal length form."
+  },
+  {
+   "name": "data length64 form (0x94)",
+   "encoded": "9402000000000000000102",
+   "value": {
+    "type": "data",
+    "value": "0102"
+   },
+   "note": "Non-minimal length form."
+  },
+  {
+   "name": "data terminated (0x9F)",
+   "encoded": "9f010203",
+   "value": {
+    "type": "data",
+    "value": "0102"
+   },
+   "note": "Terminated by 0x03 (so 0x03 cannot occur inside)."
+  },
+  {
+   "name": "array of 13 as HAP-NodeJS writes it (terminated 0xDF)",
+   "encoded": "df08090a0b0c0d0e0f101112131403",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "int",
+      "value": "0"
+     },
+     {
+      "type": "int",
+      "value": "1"
+     },
+     {
+      "type": "int",
+      "value": "2"
+     },
+     {
+      "type": "int",
+      "value": "3"
+     },
+     {
+      "type": "int",
+      "value": "4"
+     },
+     {
+      "type": "int",
+      "value": "5"
+     },
+     {
+      "type": "int",
+      "value": "6"
+     },
+     {
+      "type": "int",
+      "value": "7"
+     },
+     {
+      "type": "int",
+      "value": "8"
+     },
+     {
+      "type": "int",
+      "value": "9"
+     },
+     {
+      "type": "int",
+      "value": "10"
+     },
+     {
+      "type": "int",
+      "value": "11"
+     },
+     {
+      "type": "int",
+      "value": "12"
+     }
+    ]
+   },
+   "note": "HAP-NodeJS writes arrays of more than 12 items in terminated form (0xDF … 0x03); CameraBridge uses the count form up to 14 items (0xD0+n)."
+  },
+  {
+   "name": "array of 2 in terminated form (0xDF)",
+   "encoded": "df080903",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "int",
+      "value": "0"
+     },
+     {
+      "type": "int",
+      "value": "1"
+     }
+    ]
+   },
+   "note": "Terminated form for a short array."
+  },
+  {
+   "name": "dictionary of 2 in terminated form (0xEF)",
+   "encoded": "ef41610841620903",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "a",
+      "value": {
+       "type": "int",
+       "value": "0"
+      }
+     },
+     {
+      "key": "b",
+      "value": {
+       "type": "int",
+       "value": "1"
+      }
+     }
+    ]
+   },
+   "note": "Terminated form for a short dictionary."
+  },
+  {
+   "name": "back-reference (compression) to a repeated string, as HAP-NodeJS writes it",
+   "encoded": "d243616263a0",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "string",
+      "value": "abc"
+     },
+     {
+      "type": "string",
+      "value": "abc"
+     }
+    ]
+   },
+   "note": "HAP-NodeJS's writer replaces a repeated string/int/float/data with a back-reference (0xA0+index); CameraBridge never emits back-references."
+  },
+  {
+   "name": "back-reference (compression) to a repeated dictionary value",
+   "encoded": "e2416141784162a1",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "a",
+      "value": {
+       "type": "string",
+       "value": "x"
+      }
+     },
+     {
+      "key": "b",
+      "value": {
+       "type": "string",
+       "value": "x"
+      }
+     }
+    ]
+   },
+   "note": "HAP-NodeJS's writer replaces a repeated string/int/float/data with a back-reference (0xA0+index); CameraBridge never emits back-references."
+  },
+  {
+   "name": "back-reference (compression) to a repeated int8",
+   "encoded": "d23064a0",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "int",
+      "value": "100"
+     },
+     {
+      "type": "int",
+      "value": "100"
+     }
+    ]
+   },
+   "note": "HAP-NodeJS's writer replaces a repeated string/int/float/data with a back-reference (0xA0+index); CameraBridge never emits back-references."
+  },
+  {
+   "name": "back-reference (compression) to a repeated data value",
+   "encoded": "d29128caba3999d833544a9d15fc85272a6dfc03bb3c47a6fbccbdd42726eb20d4663cf8a5c37327d44052a0",
+   "value": {
+    "type": "array",
+    "value": [
+     {
+      "type": "data",
+      "value": "caba3999d833544a9d15fc85272a6dfc03bb3c47a6fbccbdd42726eb20d4663cf8a5c37327d44052"
+     },
+     {
+      "type": "data",
+      "value": "caba3999d833544a9d15fc85272a6dfc03bb3c47a6fbccbdd42726eb20d4663cf8a5c37327d44052"
+     }
+    ]
+   },
+   "note": "HAP-NodeJS's writer replaces a repeated string/int/float/data with a back-reference (0xA0+index); CameraBridge never emits back-references. HAP-NodeJS compresses data only when the same Buffer object repeats."
+  },
+  {
+   "name": "back-reference (compression) to a dictionary key",
+   "encoded": "e2436b65794576616c7565466e6573746564e1a0456f74686572",
+   "value": {
+    "type": "dictionary",
+    "value": [
+     {
+      "key": "key",
+      "value": {
+       "type": "string",
+       "value": "value"
+      }
+     },
+     {
+      "key": "nested",
+      "value": {
+       "type": "dictionary",
+       "value": [
+        {
+         "key": "key",
+         "value": {
+          "type": "string",
+          "value": "other"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "note": "HAP-NodeJS's writer replaces a repeated string/int/float/data with a back-reference (0xA0+index); CameraBridge never emits back-references. Keys are strings and count as written values."
+  }
+ ],
+ "invalid": [
+  {
+   "name": "tag 0x00 (invalid)",
+   "encoded": "00"
+  },
+  {
+   "name": "unassigned tag 0x34",
+   "encoded": "34"
+  },
+  {
+   "name": "unassigned tag 0x65",
+   "encoded": "65"
+  },
+  {
+   "name": "unassigned tag 0x95",
+   "encoded": "95"
+  },
+  {
+   "name": "string shorter than its tag says",
+   "encoded": "436162"
+  },
+  {
+   "name": "int32 truncated",
+   "encoded": "320100"
+  },
+  {
+   "name": "back-reference with nothing written before it",
+   "encoded": "a0"
+  },
+  {
+   "name": "dictionary missing its value",
+   "encoded": "e14161"
+  },
+  {
+   "name": "array missing an element",
+   "encoded": "d208"
+  },
+  {
+   "name": "NUL-terminated string without NUL",
+   "encoded": "6f6162"
+  },
+  {
+   "name": "terminated array without terminator",
+   "encoded": "df0809"
+  }
+ ]
+}

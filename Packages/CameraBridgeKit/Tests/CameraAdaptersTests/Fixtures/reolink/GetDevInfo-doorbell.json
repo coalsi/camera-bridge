@@ -1,0 +1,29 @@
+[
+  {
+    "cmd": "GetDevInfo",
+    "code": 0,
+    "value": {
+      "DevInfo": {
+        "B485": 0,
+        "IOInputNum": 0,
+        "IOOutputNum": 0,
+        "audioNum": 1,
+        "buildDay": "build 2505072124",
+        "cfgVer": "v3.1.0.0",
+        "channelNum": 1,
+        "detail": "DB_566128M5MP_W00000000000000",
+        "diskNum": 1,
+        "exactType": "IPC",
+        "firmVer": "v3.0.0.4867_2505072124",
+        "frameworkVer": 1,
+        "hardVer": "DB_566128M5MP_W",
+        "model": "Reolink Video Doorbell WiFi",
+        "name": "Front Door",
+        "pakSuffix": "pak",
+        "serial": "00000000ABCD",
+        "type": "BELL",
+        "wifi": 1
+      }
+    }
+  }
+]

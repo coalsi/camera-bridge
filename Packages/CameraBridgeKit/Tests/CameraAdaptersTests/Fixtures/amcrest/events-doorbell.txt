@@ -1,0 +1,30 @@
+--myboundary
+Content-Type: text/plain
+Content-Length: 40
+
+Code=CallNoAnswered;action=Start;index=0
+
+--myboundary
+Content-Type: text/plain
+Content-Length: 108
+
+Code=_DoTalkAction_;action=Pulse;index=0;data={ "Action" : "Invite", "CallID" : "1", "CallSrcMask" : 4 }
+
+--myboundary
+Content-Type: text/plain
+Content-Length: 62
+
+Code=BackKeyLight;action=Pulse;index=0;data={ "State" : 1 }
+
+--myboundary
+Content-Type: text/plain
+Content-Length: 100
+
+Code=_DoTalkAction_;action=Pulse;index=0;data={ "Action" : "Hangup", "HangupReason" : "HangupByPhone" }
+
+--myboundary
+Content-Type: text/plain
+Content-Length: 62
+
+Code=BackKeyLight;action=Pulse;index=0;data={ "State" : 0 }
+

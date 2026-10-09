@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Engine tests (swift test)
+    # Camera Bridge builds with Xcode 27 (macOS 27 SDK) and runs on macOS 15 and later. Use a hosted runner image that has them, or a self-hosted macOS 27 runner.
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest Xcode
+        run: |
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Using $newest"
+          sudo xcode-select -s "$newest/Contents/Developer"
+          xcodebuild -version
+          swift --version
+      - name: swift test
+        working-directory: Packages/CameraBridgeKit
+        run: |
+          # A few timing tests can fail on a loaded shared runner; one retry of the whole run, never more.
+          swift test || { echo "Retrying once"; swift test; }
+
+  app:
+    name: App build (unsigned)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest Xcode
+        run: |
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$newest/Contents/Developer"
+          xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate the project and check it is up to date
+        run: |
+          xcodegen generate
+          git diff --exit-code -- CameraBridge.xcodeproj App/Info.plist || {
+            echo "::error::CameraBridge.xcodeproj or App/Info.plist is out of date: run 'xcodegen generate' and commit the result."
+            exit 1
+          }
+      - name: xcodebuild build (no code signing)
+        run: |
+          xcodebuild -project CameraBridge.xcodeproj -scheme CameraBridge -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO build
+      - name: xcodebuild test (no code signing)
+        run: |
+          xcodebuild -project CameraBridge.xcodeproj -scheme CameraBridge -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO test

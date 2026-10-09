@@ -1,0 +1,22 @@
+{
+  "name": "camerabridge-interop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dev-only interoperability oracles for CameraBridge (HAP controller, codec goldens). Never shipped.",
+  "type": "module",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "goldens": "node goldens.mjs",
+    "goldens:check": "node goldens.mjs --check",
+    "reference-accessory": "node reference-accessory.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "dependencies": {
+    "@homebridge/hap-nodejs": "2.2.3",
+    "fast-srp-hap": "2.0.4",
+    "hap-controller": "0.10.2"
+  }
+}

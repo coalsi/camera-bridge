@@ -1,0 +1,539 @@
+{
+ "generator": "Interop/node/goldens.mjs hds-frames (plan task W1-9). Do not edit by hand; regenerate with: cd Interop/node && npm ci && node goldens.mjs hds-frames",
+ "source": "HAP-NodeJS 2.2.3 (Apache-2.0) lib/datastream/DataStreamServer.ts (prepareSession, sendEvent/sendRequest/sendResponse, sendHDSFrame), research brief §3.8",
+ "notes": [
+  "`messages`: HDSFrameCodec.encodePayload(HDSMessage(kind, protocolName: protocol, topic, body)) must equal `payload`, and decodePayload(payload) must return that message. `header` is the encoded header dictionary (payload = [header length u8][header][body]).",
+  "Header dictionaries: event {protocol, event}; request {protocol, request, id}; response {protocol, response, id, status}, in that order. `id` and `status` are always written as int64 (tag 0x33), as HAP-NodeJS does (brief §3.8 hello-response golden); body values use the canonical forms of hds-codec.json.",
+  "Body value JSON is the hds-codec.json value form. `direction` says who sends the message; the dataSend data events mirror HAP-NodeJS RecordingManagement (dataTotalSize only on chunk 1, endOfStream false on the last chunk of a non-final fragment, omitted on other chunks).",
+  "`keys`: HDSFrameCodec.deriveKeys(sharedSecret:controllerKeySalt:accessoryKeySalt:) must return (accessoryToController: accessoryToControllerKey [info HDS-Read-Encryption-Key], controllerToAccessory: controllerToAccessoryKey [info HDS-Write-Encryption-Key]); HKDF-SHA512, salt = controllerKeySalt ‖ accessoryKeySalt, 32-byte keys.",
+  "`frames`: HDSFrameCodec.sealFrame(payload, key:, counter:) must equal `frame` ([0x01][payload length u24 BE][ciphertext][16-byte tag]; AAD = the 4-byte header; nonce = 4 zero bytes ‖ LE64(counter)), and openFrame(header: frame[0..<4], body: frame[4...], key:, counter:) must return `payload`."
+ ],
+ "messages": [
+  {
+   "name": "control hello request",
+   "direction": "controllerToAccessory",
+   "message": {
+    "kind": "request",
+    "protocol": "control",
+    "topic": "hello",
+    "id": 1,
+    "body": {
+     "type": "dictionary",
+     "value": []
+    }
+   },
+   "header": "e34870726f746f636f6c47636f6e74726f6c47726571756573744568656c6c6f426964330100000000000000",
+   "payload": "2ce34870726f746f636f6c47636f6e74726f6c47726571756573744568656c6c6f426964330100000000000000e0"
+  },
+  {
+   "name": "control hello response",
+   "direction": "accessoryToController",
+   "message": {
+    "kind": "response",
+    "protocol": "control",
+    "topic": "hello",
+    "id": 1234,
+    "status": 0,
+    "body": {
+     "type": "dictionary",
+     "value": []
+    }
+   },
+   "header": "e44870726f746f636f6c47636f6e74726f6c48726573706f6e73654568656c6c6f42696433d20400000000000046737461747573330000000000000000",
+   "payload": "3de44870726f746f636f6c47636f6e74726f6c48726573706f6e73654568656c6c6f42696433d20400000000000046737461747573330000000000000000e0"
+  },
+  {
+   "name": "dataSend open request",
+   "direction": "controllerToAccessory",
+   "message": {
+    "kind": "request",
+    "protocol": "dataSend",
+    "topic": "open",
+    "id": 7,
+    "body": {
+     "type": "dictionary",
+     "value": [
+      {
+       "key": "target",
+       "value": {
+        "type": "string",
+        "value": "controller"
+       }
+      },
+      {
+       "key": "type",
+       "value": {
+        "type": "string",
+        "value": "ipcamera.recording"
+       }
+      },
+      {
+       "key": "streamId",
+       "value": {
+        "type": "int",
+        "value": "1"
+       }
+      }
+     ]
+    }
+   },
+   "header": "e34870726f746f636f6c486461746153656e644772657175657374446f70656e426964330700000000000000",
+   "payload": "2ce34870726f746f636f6c486461746153656e644772657175657374446f70656e426964330700000000000000e3467461726765744a636f6e74726f6c6c6572447479706552697063616d6572612e7265636f7264696e674873747265616d496409"
+  },
+  {
+   "name": "dataSend open response (accepted)",
+   "direction": "accessoryToController",
+   "message": {
+    "kind": "response",
+    "protocol": "dataSend",
+    "topic": "open",
+    "id": 7,
+    "status": 0,
+    "body": {
+     "type": "dictionary",
+     "value": [
+      {
+       "key": "status",
+       "value": {
+        "type": "int",
+        "value": "0"
+       }
+      }
+     ]
+    }
+   },
+   "header": "e44870726f746f636f6c486461746153656e6448726573706f6e7365446f70656e42696433070000000000000046737461747573330000000000000000",
+   "payload": "3de44870726f746f636f6c486461746153656e6448726573706f6e7365446f70656e42696433070000000000000046737461747573330000000000000000e14673746174757308"
+  },
+  {
+   "name": "dataSend open response (busy)",
+   "direction": "accessoryToController",
+   "message": {
+    "kind": "response",
+    "protocol": "dataSend",
+    "topic": "open",
+    "id": 7,
+    "status": 6,
+    "body": {
+     "type": "dictionary",
+     "value": [
+      {
+       "key": "status",
+       "value": {
+        "type": "int",
+        "value": "2"
+       }
+      }
+     ]
+    }
+   },
+   "header": "e44870726f746f636f6c486461746153656e6448726573706f6e7365446f70656e42696433070000000000000046737461747573330600000000000000",
+   "payload": "3de44870726f746f636f6c486461746153656e6448726573706f6e7365446f70656e42696433070000000000000046737461747573330600000000000000e1467374617475730a"
+  },
+  {
+   "name": "dataSend data event (initialization chunk)",
+   "direction": "accessoryToController",
+   "message": {
+    "kind": "event",
+    "protocol": "dataSend",
+    "topic": "data",
+    "body": {
+     "type": "dictionary",
+     "value": [
+      {
+       "key": "streamId",
+       "value": {
+        "type": "int",
+        "value": "1"
+       }
+      },
+      {
+       "key": "packets",
+       "value": {
+        "type": "array",
+        "value": [
+         {
+          "type": "dictionary",
+          "value": [
+           {
+            "key": "data",
+            "value": {
+             "type": "data",
+             "value": "f53f9c8924874ce7c2080294f74db2c6be0953663357a1639fd58ca30f987b33cb2ef815bf5a1ef88b215a43b96dc774"
+            }
+           },
+           {
+            "key": "metadata",
+            "value": {
+             "type": "dictionary",
+             "value": [
+              {
+               "key": "dataType",
+               "value": {
+                "type": "string",
+                "value": "mediaInitialization"
+               }
+              },
+              {
+               "key": "dataSequenceNumber",
+               "value": {
+                "type": "int",
+                "value": "1"
+               }
+              },
+              {
+               "key": "dataChunkSequenceNumber",
+               "value": {
+                "type": "int",
+                "value": "1"
+               }
+              },
+              {
+               "key": "isLastDataChunk",
+               "value": {
+                "type": "bool",
+                "value": true
+               }
+              },
+              {
+               "key": "dataTotalSize",
+               "value": {
+                "type": "int",
+                "value": "48"
+               }
+              }
+             ]
+            }
+           }
+          ]
+         }
+        ]
+       }
+      },
+      {
+       "key": "endOfStream",
+       "value": {
+        "type": "bool",
+        "value": false
+       }
+      }
+     ]
+    }
+   },
+   "header": "e24870726f746f636f6c486461746153656e64456576656e744464617461",
+   "payload": "1ee24870726f746f636f6c486461746153656e64456576656e744464617461e34873747265616d496409477061636b657473d1e244646174619130f53f9c8924874ce7c2080294f74db2c6be0953663357a1639fd58ca30f987b33cb2ef815bf5a1ef88b215a43b96dc774486d65746164617461e5486461746154797065536d65646961496e697469616c697a6174696f6e526461746153657175656e63654e756d6265720957646174614368756e6b53657175656e63654e756d626572094f69734c617374446174614368756e6b014d64617461546f74616c53697a6530304b656e644f6653747265616d02"
+  },
+  {
+   "name": "dataSend data event (first chunk of a split fragment)",
+   "direction": "accessoryToController",
+   "message": {
+    "kind": "event",
+    "protocol": "dataSend",
+    "topic": "data",
+    "body": {
+     "type": "dictionary",
+     "value": [
+      {
+       "key": "streamId",
+       "value": {
+        "type": "int",
+        "value": "1"
+       }
+      },
+      {
+       "key": "packets",
+       "value": {
+        "type": "array",
+        "value": [
+         {
+          "type": "dictionary",
+          "value": [
+           {
+            "key": "data",
+            "value": {
+             "type": "data",
+             "value": "084491ddee989915b0bff8d7ef379ef77f3437bb33f72c8977ef52ce92d1a9361648e4848f05bf70977bb95f948a2e7e1467d5718e8a9dd7fa953d09268b530e231aced73e20d2974be92d0222c7f30a328a631b0479a5101fb72c24bf92f6ddd5054942df4150627788216652396623643709f9f751b04810d9302385b9eab70801757b2151d37e8126f3303f5328ab0b11f7bf8112516ead0f1398e124d444786672d64822f94e943f3d785eb0fbf49b319bb196cc1a78e9ed22ac7f74b3ede1b835ce8a355b4ab4dc08d3f00c33cca3068b40cdc4a98914ee97cac071957c65a465ecb13b963682b8415d6295afdb72ac60cada3a28080205192679d4627d8df7d73eb8e8ad97d66e7a063fed4d9738fe4f462f5c19c3c4a8bb5bbc3f59e254435ddcb6dff9c1536c00a7"
+            }
+           },
+           {
+            "key": "metadata",
+            "value": {
+             "type": "dictionary",
+             "value": [
+              {
+               "key": "dataType",
+               "value": {
+                "type": "string",
+                "value": "mediaFragment"
+               }
+              },
+              {
+               "key": "dataSequenceNumber",
+               "value": {
+                "type": "int",
+                "value": "2"
+               }
+              },
+              {
+               "key": "dataChunkSequenceNumber",
+               "value": {
+                "type": "int",
+                "value": "1"
+               }
+              },
+              {
+               "key": "isLastDataChunk",
+               "value": {
+                "type": "bool",
+                "value": false
+               }
+              },
+              {
+               "key": "dataTotalSize",
+               "value": {
+                "type": "int",
+                "value": "600"
+               }
+              }
+             ]
+            }
+           }
+          ]
+         }
+        ]
+       }
+      }
+     ]
+    }
+   },
+   "header": "e24870726f746f636f6c486461746153656e64456576656e744464617461",
+   "payload": "1ee24870726f746f636f6c486461746153656e64456576656e744464617461e24873747265616d496409477061636b657473d1e24464617461922c01084491ddee989915b0bff8d7ef379ef77f3437bb33f72c8977ef52ce92d1a9361648e4848f05bf70977bb95f948a2e7e1467d5718e8a9dd7fa953d09268b530e231aced73e20d2974be92d0222c7f30a328a631b0479a5101fb72c24bf92f6ddd5054942df4150627788216652396623643709f9f751b04810d9302385b9eab70801757b2151d37e8126f3303f5328ab0b11f7bf8112516ead0f1398e124d444786672d64822f94e943f3d785eb0fbf49b319bb196cc1a78e9ed22ac7f74b3ede1b835ce8a355b4ab4dc08d3f00c33cca3068b40cdc4a98914ee97cac071957c65a465ecb13b963682b8415d6295afdb72ac60cada3a28080205192679d4627d8df7d73eb8e8ad97d66e7a063fed4d9738fe4f462f5c19c3c4a8bb5bbc3f59e254435ddcb6dff9c1536c00a7486d65746164617461e54864617461547970654d6d65646961467261676d656e74526461746153657175656e63654e756d6265720a57646174614368756e6b53657175656e63654e756d626572094f69734c617374446174614368756e6b024d64617461546f74616c53697a65315802"
+  },
+  {
+   "name": "dataSend data event (last chunk, end of stream)",
+   "direction": "accessoryToController",
+   "message": {
+    "kind": "event",
+    "protocol": "dataSend",
+    "topic": "data",
+    "body": {
+     "type": "dictionary",
+     "value": [
+      {
+       "key": "streamId",
+       "value": {
+        "type": "int",
+        "value": "1"
+       }
+      },
+      {
+       "key": "packets",
+       "value": {
+        "type": "array",
+        "value": [
+         {
+          "type": "dictionary",
+          "value": [
+           {
+            "key": "data",
+            "value": {
+             "type": "data",
+             "value": "bcbcf7130d0c315d05fad803e3acc0039af933f98b3bab02ee2adb1193a0529a711f1d5c27b7ffeded517c3f2803301f0b1f5abd6d8e544b5c5e2e1f721c39561b3e3d4a4e737353a607f6eefbf8ac06fbff7361b8c24160a568ca01a806098e078746bff9dc2bd9077dacb75fff484483e88053fcea305b6f5cee0e9c61154de8a42ecc16a87c393f949280a071f5b8f0f59e862217a6bb4f2bd2eb0a35a7ca3c275cf3f15bfce84ff259519ca8892007ad1c9bfda76d3821f707583c3de2388d07798fe8b7a0d5193d1c49a3117fe5bc95ffdb7c3eee95eddf024daecd8eea8eeba233a7714e3c65cdfd17a8b410d4e6232cdd19c99bc52e905d5d20dc691029a1defb33729ad155f692ce2cded9a900f4a3b5892cb72814712d4977c2312c7a4b12b31b6cc7784e4b8e66"
+            }
+           },
+           {
+            "key": "metadata",
+            "value": {
+             "type": "dictionary",
+             "value": [
+              {
+               "key": "dataType",
+               "value": {
+                "type": "string",
+                "value": "mediaFragment"
+               }
+              },
+              {
+               "key": "dataSequenceNumber",
+               "value": {
+                "type": "int",
+                "value": "2"
+               }
+              },
+              {
+               "key": "dataChunkSequenceNumber",
+               "value": {
+                "type": "int",
+                "value": "2"
+               }
+              },
+              {
+               "key": "isLastDataChunk",
+               "value": {
+                "type": "bool",
+                "value": true
+               }
+              }
+             ]
+            }
+           }
+          ]
+         }
+        ]
+       }
+      },
+      {
+       "key": "endOfStream",
+       "value": {
+        "type": "bool",
+        "value": true
+       }
+      }
+     ]
+    }
+   },
+   "header": "e24870726f746f636f6c486461746153656e64456576656e744464617461",
+   "payload": "1ee24870726f746f636f6c486461746153656e64456576656e744464617461e34873747265616d496409477061636b657473d1e24464617461922c01bcbcf7130d0c315d05fad803e3acc0039af933f98b3bab02ee2adb1193a0529a711f1d5c27b7ffeded517c3f2803301f0b1f5abd6d8e544b5c5e2e1f721c39561b3e3d4a4e737353a607f6eefbf8ac06fbff7361b8c24160a568ca01a806098e078746bff9dc2bd9077dacb75fff484483e88053fcea305b6f5cee0e9c61154de8a42ecc16a87c393f949280a071f5b8f0f59e862217a6bb4f2bd2eb0a35a7ca3c275cf3f15bfce84ff259519ca8892007ad1c9bfda76d3821f707583c3de2388d07798fe8b7a0d5193d1c49a3117fe5bc95ffdb7c3eee95eddf024daecd8eea8eeba233a7714e3c65cdfd17a8b410d4e6232cdd19c99bc52e905d5d20dc691029a1defb33729ad155f692ce2cded9a900f4a3b5892cb72814712d4977c2312c7a4b12b31b6cc7784e4b8e66486d65746164617461e44864617461547970654d6d65646961467261676d656e74526461746153657175656e63654e756d6265720a57646174614368756e6b53657175656e63654e756d6265720a4f69734c617374446174614368756e6b014b656e644f6653747265616d01"
+  },
+  {
+   "name": "dataSend ack event",
+   "direction": "controllerToAccessory",
+   "message": {
+    "kind": "event",
+    "protocol": "dataSend",
+    "topic": "ack",
+    "body": {
+     "type": "dictionary",
+     "value": [
+      {
+       "key": "streamId",
+       "value": {
+        "type": "int",
+        "value": "1"
+       }
+      },
+      {
+       "key": "endOfStream",
+       "value": {
+        "type": "bool",
+        "value": true
+       }
+      }
+     ]
+    }
+   },
+   "header": "e24870726f746f636f6c486461746153656e64456576656e744361636b",
+   "payload": "1de24870726f746f636f6c486461746153656e64456576656e744361636be24873747265616d4964094b656e644f6653747265616d01"
+  },
+  {
+   "name": "dataSend close event",
+   "direction": "accessoryToController",
+   "message": {
+    "kind": "event",
+    "protocol": "dataSend",
+    "topic": "close",
+    "body": {
+     "type": "dictionary",
+     "value": [
+      {
+       "key": "streamId",
+       "value": {
+        "type": "int",
+        "value": "1"
+       }
+      },
+      {
+       "key": "reason",
+       "value": {
+        "type": "int",
+        "value": "0"
+       }
+      }
+     ]
+    }
+   },
+   "header": "e24870726f746f636f6c486461746153656e64456576656e7445636c6f7365",
+   "payload": "1fe24870726f746f636f6c486461746153656e64456576656e7445636c6f7365e24873747265616d49640946726561736f6e08"
+  }
+ ],
+ "keys": [
+  {
+   "name": "session 1",
+   "sharedSecret": "c2eafbb893464ae9de48b8a8ad06f10c7b64f3d4f5de7754c9b20f1b7270a042",
+   "controllerKeySalt": "479ec47a25a4558561139ac6af65aa1d3d554c0b7d1cfa80d4ebbf36c3c3d19d",
+   "accessoryKeySalt": "f72117c50143ea07dd95cf8c15068617559d0d2959572e6a0c4f40a6ea84b41e",
+   "accessoryToControllerKey": "bd5d6479ff549ae2538865effb66827cdf13171fea02240ba3ed9d323a50a3b7",
+   "controllerToAccessoryKey": "fd748ca0f5f319337d7e16c4c935dbc1aafad2dfcc559973843e3953a2d070ca"
+  },
+  {
+   "name": "session 2",
+   "sharedSecret": "3cac4106ef64f6f375367eafab4071d36b5ea36fecf90161f5de6b4459f08f32",
+   "controllerKeySalt": "6d6ca39d7e0695201768c5ab289e4e52aa0cd06bd76bf4d4bed9cf371ecd037f",
+   "accessoryKeySalt": "28184f9ff7c793c66bf538340aa3f09abe166ae74535d8d51ae9a0eb65d5df8c",
+   "accessoryToControllerKey": "26977a668b257cb2c575970dd8d3030883a182bdbc206a2b32c76b795a35d85c",
+   "controllerToAccessoryKey": "b69d26410d36b625814cf910af6cd5f6779d382d9b84768c1593bc625df750fc"
+  }
+ ],
+ "frames": [
+  {
+   "name": "control hello request #0",
+   "message": "control hello request",
+   "direction": "controllerToAccessory",
+   "keySet": "session 1",
+   "key": "fd748ca0f5f319337d7e16c4c935dbc1aafad2dfcc559973843e3953a2d070ca",
+   "counter": 0,
+   "payload": "2ce34870726f746f636f6c47636f6e74726f6c47726571756573744568656c6c6f426964330100000000000000e0",
+   "frame": "0100002e2e51d17188846809ec67bd6b16d1bb1a27fd2ad02c7f7a8f405ebd442ae07a02bfb42d94ce7701ce2ada8b36c11cd112da2b39b2f24582f7f5acd09887dd"
+  },
+  {
+   "name": "control hello response #0",
+   "message": "control hello response",
+   "direction": "accessoryToController",
+   "keySet": "session 1",
+   "key": "bd5d6479ff549ae2538865effb66827cdf13171fea02240ba3ed9d323a50a3b7",
+   "counter": 0,
+   "payload": "3de44870726f746f636f6c47636f6e74726f6c48726573706f6e73654568656c6c6f42696433d20400000000000046737461747573330000000000000000e0",
+   "frame": "0100003fc5b5b3086994c716daff85a3ed95eafba4836bd8f3a33564121da1f6d24fc08cc4f7a0e7d33a25519a44edbf9936ec8fc73079e1dc02bef107f9c096fddb591b866c8242f94d500e591d86f7fe9534"
+  },
+  {
+   "name": "dataSend open request #1",
+   "message": "dataSend open request",
+   "direction": "controllerToAccessory",
+   "keySet": "session 1",
+   "key": "fd748ca0f5f319337d7e16c4c935dbc1aafad2dfcc559973843e3953a2d070ca",
+   "counter": 1,
+   "payload": "2ce34870726f746f636f6c486461746153656e644772657175657374446f70656e426964330700000000000000e3467461726765744a636f6e74726f6c6c6572447479706552697063616d6572612e7265636f7264696e674873747265616d496409",
+   "frame": "01000062471b473ef9a36fcc5494936b1a9873d339921b1d779ba195ad1eba522bbfcb43ceffa5a462031d22243775fbc0b21758447fe3d77294e64026bb6cc71930330a259679aaa88ac02f1f1ad9cc3710b1a619648cb31bed1e8d7a9c6100ede766560310ec8565cd658f4bf5a76a419a58efa0b8"
+  },
+  {
+   "name": "dataSend open response (accepted) #1",
+   "message": "dataSend open response (accepted)",
+   "direction": "accessoryToController",
+   "keySet": "session 1",
+   "key": "bd5d6479ff549ae2538865effb66827cdf13171fea02240ba3ed9d323a50a3b7",
+   "counter": 1,
+   "payload": "3de44870726f746f636f6c486461746153656e6448726573706f6e7365446f70656e42696433070000000000000046737461747573330000000000000000e14673746174757308",
+   "frame": "010000474415f35a6575c0b55c54e85725733bdfdbd70552d0699c72605056bd8bb0515e6b739592696be864f2b2d4c9be4027e4e1acfe9cd4062fa01d029a802b9d45295ad8af4ff8ac1ca18502331a3cefb09570a4a57a712770"
+  },
+  {
+   "name": "dataSend data event (initialization chunk) #2",
+   "message": "dataSend data event (initialization chunk)",
+   "direction": "accessoryToController",
+   "keySet": "session 1",
+   "key": "bd5d6479ff549ae2538865effb66827cdf13171fea02240ba3ed9d323a50a3b7",
+   "counter": 2,
+   "payload": "1ee24870726f746f636f6c486461746153656e64456576656e744464617461e34873747265616d496409477061636b657473d1e244646174619130f53f9c8924874ce7c2080294f74db2c6be0953663357a1639fd58ca30f987b33cb2ef815bf5a1ef88b215a43b96dc774486d65746164617461e5486461746154797065536d65646961496e697469616c697a6174696f6e526461746153657175656e63654e756d6265720957646174614368756e6b53657175656e63654e756d626572094f69734c617374446174614368756e6b014d64617461546f74616c53697a6530304b656e644f6653747265616d02",
+   "frame": "010000ed32f063c49acfad80726d6ee43d879d5918ab555b66431c921f822c819f573b9bba15c9459a3c233aa4437ed8cd0c941c9736e58ef1d880c698e65737224bad8a3de7687fb1eb03a52cae733552436738f622179b8020cca47a2f59aade297c20c8d763bd5b985442c9c15fb835f900caa5dbbaeba25a910968f9b72b0054f4c7d2c8de7121ad19d4d85c6555e86c488d51ab9dc2c169d626e72f9760949477f5fbdc47964c9a05e84454a03cc1f9a691a35e219b4f5ee27796f88b7fd66de35668d9a84e0327e0605e56f466d4c842ee8a67e9433c7f9779f102114177813cc41b6e2c58a6095b06d59be76d623cc89c3ac32c5e45661d537215e83bbb"
+  },
+  {
+   "name": "dataSend close event #4294967303",
+   "message": "dataSend close event",
+   "direction": "accessoryToController",
+   "keySet": "session 1",
+   "key": "bd5d6479ff549ae2538865effb66827cdf13171fea02240ba3ed9d323a50a3b7",
+   "counter": 4294967303,
+   "payload": "1fe24870726f746f636f6c486461746153656e64456576656e7445636c6f7365e24873747265616d49640946726561736f6e08",
+   "frame": "0100003355426111ecdff7e89b953fca622db85bfa5b3ccb53f96bf01d0d907accbad201156effc3c7cc9afd031ba3aa24e73358d2b24134daccd94541da566d3df59b55f63d75"
+  }
+ ]
+}

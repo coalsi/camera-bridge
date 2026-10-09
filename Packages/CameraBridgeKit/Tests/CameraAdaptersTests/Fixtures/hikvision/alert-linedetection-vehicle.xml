@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<EventNotificationAlert version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<ipAddress>192.0.2.79</ipAddress>
+<dynChannelID>1</dynChannelID>
+<dateTime>2026-09-30T17:35:05+00:00</dateTime>
+<activePostCount>1</activePostCount>
+<eventType>linedetection</eventType>
+<eventState>active</eventState>
+<eventDescription>linedetection alarm</eventDescription>
+<DetectionRegionList>
+<DetectionRegionEntry>
+<regionID>1</regionID>
+<detectionTarget><name>vehicle</name></detectionTarget>
+</DetectionRegionEntry>
+</DetectionRegionList>
+</EventNotificationAlert>

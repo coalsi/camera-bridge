@@ -1,0 +1,32 @@
+--myboundary
+Content-Type: text/plain
+Content-Length: 330
+
+Code=CrossLineDetection;action=Start;index=0;data={
+   "Class" : "Normal",
+   "DetectLine" : [ [ 1000, 2000 ], [ 8000, 2000 ] ],
+   "Direction" : "LeftToRight",
+   "Name" : "Rule; with {braces} and \"quotes\"",
+   "Object" : {
+      "BoundingBox" : [ 100, 200, 300, 400 ],
+      "ObjectID" : 12,
+      "ObjectType" : "Human"
+   },
+   "RuleId" : 1,
+   "UTC" : 1741267544
+}
+
+--myboundary
+Content-Type: text/plain
+Content-Length: 80
+
+Code=SmartMotionVehicle;action=Start;index=0;data={
+   "RegionName" : [ "Region1" ]
+}
+
+--myboundary
+Content-Type: text/plain
+Content-Length: 41
+
+Code=SmartMotionVehicle;action=Stop;index=0
+

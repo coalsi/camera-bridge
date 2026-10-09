@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+  <SOAP-ENV:Body>
+    <tds:GetDeviceInformationResponse>
+      <tds:Manufacturer>Reolink</tds:Manufacturer>
+      <tds:Model>Reolink Video Doorbell WiFi</tds:Model>
+      <tds:FirmwareVersion>v3.0.0.4867_2505072124</tds:FirmwareVersion>
+      <tds:SerialNumber>00000000ABCD</tds:SerialNumber>
+      <tds:HardwareId>DB_566128M5MP_W</tds:HardwareId>
+    </tds:GetDeviceInformationResponse>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>

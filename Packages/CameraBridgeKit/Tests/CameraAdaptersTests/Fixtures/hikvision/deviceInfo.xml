@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DeviceInfo version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<deviceName>Driveway</deviceName>
+<deviceID>48344d44-3230-3137-3131-bcad28000001</deviceID>
+<deviceDescription>IPCamera</deviceDescription>
+<deviceLocation>hangzhou</deviceLocation>
+<systemContact>Hikvision.China</systemContact>
+<model>DS-2CD2387G2P-LSU/SL</model>
+<serialNumber>DS-2CD2387G2P-LSU/SL20230101AAWRL00000001</serialNumber>
+<macAddress>bc:ad:28:00:00:01</macAddress>
+<firmwareVersion>V5.7.15</firmwareVersion>
+<firmwareReleasedDate>build 230329</firmwareReleasedDate>
+<encoderVersion>V7.3</encoderVersion>
+<encoderReleasedDate>build 230213</encoderReleasedDate>
+<bootVersion>V1.3.4</bootVersion>
+<bootReleasedDate>100316</bootReleasedDate>
+<hardwareVersion>0x0</hardwareVersion>
+<deviceType>IPCamera</deviceType>
+<telecontrolID>88</telecontrolID>
+<supportBeep>true</supportBeep>
+<supportVideoLoss>false</supportVideoLoss>
+</DeviceInfo>

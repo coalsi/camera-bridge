@@ -1,0 +1,6 @@
+appAutoStart=true
+deviceType=IPC-HDW5831R-ZE
+hardwareVersion=1.00
+processor=S3LM
+serialNumber=4X7C5A1ZAG21L3F
+updateSerial=IPC-HDW5831R-ZE

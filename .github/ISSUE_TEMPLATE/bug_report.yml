@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in Camera Bridge does not work as it should.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A **diagnostics export** answers most questions at once, so please attach one.
+        Security problems: do not file them here, see SECURITY.md.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead? Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Add a camera ...
+        2. ...
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Camera Bridge version
+      description: "Camera Bridge ▸ About Camera Bridge, for example 1.0 (3)."
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac model
+      placeholder: "macOS 15.6, MacBook Pro (M3)"
+    validations:
+      required: true
+  - type: textarea
+    id: camera
+    attributes:
+      label: Camera (if the bug involves one)
+      description: Brand, model, firmware, how it is connected (RTSP or ONVIF), and whether it is a doorbell. Leave out passwords.
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics export
+      description: |
+        In Camera Bridge choose **File ▸ Export Diagnostics…** (or Settings ▸ Diagnostics ▸ Export Diagnostics…) and
+        drag the text file here, or paste the relevant part. Passwords and tokens are removed, but the file can
+        contain **IP addresses, camera names and your Mac's name**. Open it and delete what you do not want to share.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched the existing issues.
+          required: true
+        - label: I checked the diagnostics export for anything private (passwords are removed automatically, nothing else is).
+          required: true

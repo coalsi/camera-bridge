@@ -1,0 +1,7 @@
+[
+  {
+    "cmd": "GetMdState",
+    "code": 1,
+    "error": { "detail": "please login first", "rspCode": -6 }
+  }
+]

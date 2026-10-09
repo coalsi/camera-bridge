@@ -1,0 +1,67 @@
+name: Camera support request
+description: A camera does not work with Camera Bridge, or you want one supported.
+title: "[Camera]: "
+labels: ["camera-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Camera Bridge supports cameras through standards (RTSP and ONVIF). Tell us what your camera speaks and what goes wrong.
+        Remove passwords from anything you paste.
+  - type: input
+    id: camera
+    attributes:
+      label: Camera make, model and firmware
+      placeholder: "Make Model, firmware 1.2.3"
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Kind of device
+      options:
+        - Camera
+        - Doorbell
+        - NVR / recorder channel
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: standards
+    attributes:
+      label: What the camera offers (as far as you know)
+      options:
+        - label: RTSP stream
+        - label: ONVIF (Profile S or T)
+        - label: Only a manufacturer app or cloud (no RTSP or ONVIF)
+        - label: I am not sure
+  - type: textarea
+    id: url
+    attributes:
+      label: Stream URL pattern (password removed)
+      description: "For example rtsp://USER:PASSWORD@192.0.2.10:554/path. Use the placeholders, not your real credentials or address."
+    validations:
+      required: false
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happens
+      description: Which step fails (finding the camera, the picture, sound, motion events, recording in Home)? Any error text?
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics export
+      description: |
+        **File ▸ Export Diagnostics…** after trying to add or use the camera. Passwords and tokens are removed; the file can still
+        contain IP addresses and names, so review it before attaching.
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Whether it works in VLC or another RTSP player, and what the camera's own app can do.
+    validations:
+      required: false
