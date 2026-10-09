@@ -27,16 +27,13 @@ jobs:
           sudo xcode-select -s "$newest/Contents/Developer"
           xcodebuild -version
           swift --version
-      - name: swift build
-        working-directory: Packages/CameraBridgeKit
-        run: swift build
       - name: swift test
         working-directory: Packages/CameraBridgeKit
         run: |
-          # The tests use `await` inside `defer`, which needs Swift 6.4 (Xcode 27). The sources themselves build with 6.3.
+          # The engine and its tests use Swift 6.4 features (Xcode 27); hosted macOS runners with Xcode 27 are not available yet.
           minor="$(swift --version | sed -nE 's/.*Swift version 6\.([0-9]+).*/\1/p' | head -1)"
           if [ "${minor:-0}" -lt 4 ]; then
-            echo "::notice::Tests need Swift 6.4 (Xcode 27); this runner has Swift 6.${minor:-?}, so only the build was checked. Run swift test locally."
+            echo "::notice::The engine needs Swift 6.4 (Xcode 27); this runner has Swift 6.${minor:-?}, so nothing was built here. Run swift test locally."
             exit 0
           fi
           # A few timing tests can fail on a loaded shared runner; one retry of the whole run, never more.
