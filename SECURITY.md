@@ -5,7 +5,9 @@ are taken seriously.
 
 ## Reporting a vulnerability
 
-**Email <security@camera-bridge.app>.** Please do not open a public issue or pull request for a vulnerability.
+**Use GitHub's private report:** [Report a vulnerability](https://github.com/coalsi/camera-bridge/security/advisories/new)
+(the repository's *Security* tab). You can also email <security@camera-bridge.app>. Please do not open a public issue or
+pull request for a vulnerability.
 
 Include what you found, the Camera Bridge version (Camera Bridge ▸ About), macOS version, steps to reproduce, and what an
 attacker could do with it. If you need to share sensitive details, say so in a first message and we will agree on a safe way.
