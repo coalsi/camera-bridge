@@ -66,6 +66,8 @@ On any computer or phone on the same network open **http://camera-bridge.local**
 
 The first time, the page asks you to choose an administrator password. Until you do, it shows nothing else. Choose a long password: it protects your camera passwords.
 
+**Do this right away, on a network you trust.** A new box has no password yet, so whoever opens its page first can set one. On a home network that means only people already on it, and only until you finish this step. Don't plug a new box into a shared or public network. (A one-time setup code that must be typed before the first password can be set is supported by the program but not switched on in this version.)
+
 ## 5. Add your cameras
 
 1. **Add camera** (or **Discover**): the box looks for ONVIF cameras on the network. You can also enter a camera by hand: type, address, port, user name and password.
