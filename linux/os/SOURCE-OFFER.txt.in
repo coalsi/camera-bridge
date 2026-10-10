@@ -1,0 +1,40 @@
+Camera Bridge OS @VERSION@: written offer of source code
+==========================================================
+
+Camera Bridge OS is a Debian 13 ("trixie") system. Almost everything in it is free software from Debian, and a good part
+of that is licensed under the GNU General Public License (GPL), the GNU Lesser General Public License (LGPL) or similar
+licenses that give you the right to the source code. This note tells you how to get it.
+
+1. Where the source is
+
+   The exact list of installed packages is in /usr/share/camera-bridge/packages.txt on the running system, and is also
+   published next to this release as "camera-bridge-os-@VERSION@-packages.txt". Each line gives the binary package, its
+   version, the Debian source package it was built from and that source package's version.
+
+   Camera Bridge OS contains these packages unmodified, exactly as Debian publishes them. The corresponding source code
+   of every one of them is available from Debian:
+
+     * https://snapshot.debian.org/   (every version Debian ever published, by exact version number)
+     * https://deb.debian.org/debian/pool/   (the current archive)
+     * https://sources.debian.org/   (browse the source of a package)
+
+   For example, `apt-get source <source package>=<source version>` on a Debian system with deb-src enabled downloads it.
+
+2. If you would rather have it from us
+
+   For at least three years after the day this version of Camera Bridge OS was published, we will give anyone who asks a
+   complete machine-readable copy of the corresponding source code of the GPL and LGPL parts, on a physical medium or by
+   download. We may charge no more than the cost of doing that. Write to legal@camera-bridge.app and name the version
+   ("Camera Bridge OS @VERSION@").
+
+3. Our own programs
+
+   The Camera Bridge programs (camerabridged and the web interface) are published as source at
+   https://github.com/coalsi/camera-bridge under the PolyForm Noncommercial License 1.0.0 (see LICENSE next to this
+   file). They run ffmpeg as a separate program and do not contain GPL code. Notices for the third-party code they do
+   contain are in NOTICE and THIRD_PARTY_LICENSES.md.
+
+4. Licenses
+
+   Every Debian package keeps its license text in /usr/share/doc/<package>/copyright. A plain-language overview is in
+   OS-LICENSES.md next to this file.

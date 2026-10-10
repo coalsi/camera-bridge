@@ -154,6 +154,7 @@ jobs:
           $WARNING
 
           Download \`camera-bridge-os-$VERSION-amd64.img.xz\`, check it against \`.sha256\`, and write it to a USB stick or SSD with balenaEtcher.
+          Licenses and source code: \`SOURCE-OFFER.txt\` and \`camera-bridge-os-$VERSION-packages.txt\` (the exact packages), and docs/linux/LICENSES.md.
           Guide: docs/linux/USER-GUIDE.md. Updates inside the running system use \`SHA256SUMS\`, \`SHA256SUMS.sig\` and the \`cb-os_*\` files.
           EOF
           gh release create "$TAG" \
@@ -166,5 +167,7 @@ jobs:
             out/camera-bridge-os-"$VERSION"-amd64.img.xz.sig \
             out/SHA256SUMS \
             out/SHA256SUMS.sig \
+            out/camera-bridge-os-"$VERSION"-packages.txt \
+            out/SOURCE-OFFER.txt \
             out/cb-os_"$VERSION"_amd64.efi \
             out/cb-os_"$VERSION"_amd64_root.raw.zst

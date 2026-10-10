@@ -75,4 +75,9 @@ fi
 
 # The list of installed packages with versions (the dpkg database is hidden under the volatile /var at run time).
 mkdir -p /usr/share/camera-bridge
-dpkg-query -W -f='${Package} ${Version}\n' | sort >/usr/share/camera-bridge/packages.txt
+# Columns, separated by tabs: binary package, version, the Debian source package it was built from, and that source version
+# (the source code offer, /usr/share/doc/camera-bridge/SOURCE-OFFER.txt, relies on this list).
+{
+    printf '# binary package\tversion\tsource package\tsource version\n'
+    dpkg-query -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' | sort
+} >/usr/share/camera-bridge/packages.txt

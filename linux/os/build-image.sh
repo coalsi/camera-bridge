@@ -93,6 +93,14 @@ fi
 if [ "$stub" -eq 1 ]; then
     printf 'This is a TEST image with a stub daemon. Not for use.\n' >"$stage/usr/share/camera-bridge/STUB-IMAGE"
 fi
+# Our own license and notices, the license overview and the written source offer (GPL and LGPL parts of the system).
+repo_root=$HERE/../..
+docdir=$stage/usr/share/doc/camera-bridge
+for f in LICENSE NOTICE THIRD_PARTY_LICENSES.md; do
+    install -D -m 0644 "$repo_root/$f" "$docdir/$f"
+done
+install -D -m 0644 "$repo_root/docs/linux/LICENSES.md" "$docdir/OS-LICENSES.md"
+sed -e "s|@VERSION@|$version|g" "$HERE/SOURCE-OFFER.txt.in" >"$docdir/SOURCE-OFFER.txt"
 
 echo "==> rendering the partition layout (root slots $root_size, version $version)"
 for f in "$HERE"/repart/image/*.conf; do
@@ -148,6 +156,14 @@ cp --sparse=always "$raw" "$work/$img_name"
 cp "$uki" "$out/$uki_name"
 read -r start size <<<"$root_a"
 dd if="$raw" of="$work/root.raw" bs=512 skip="$start" count="$size" status=none
+# The package list and the source offer go next to the release files too (they are inside the image as well).
+packages_name=camera-bridge-os-$version-packages.txt
+debugfs -R "cat /usr/share/camera-bridge/packages.txt" "$work/root.raw" >"$out/$packages_name" 2>/dev/null
+[ -s "$out/$packages_name" ] || die "could not read the package list from the image"
+cp "$docdir/SOURCE-OFFER.txt" "$out/SOURCE-OFFER.txt"
+for f in LICENSE NOTICE OS-LICENSES.md; do
+    debugfs -R "stat /usr/share/doc/camera-bridge/$f" "$work/root.raw" >/dev/null 2>&1 || die "$f is missing from the image"
+done
 zstd -q -T0 -19 --long=27 -f "$work/root.raw" -o "$out/$root_name"
 rm -f "$work/root.raw"
 xz -T0 -6 -c "$work/$img_name" >"$out/$img_name.xz"
