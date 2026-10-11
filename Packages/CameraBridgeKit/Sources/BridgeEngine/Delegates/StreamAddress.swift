@@ -56,6 +56,24 @@ enum StreamAddress {
         return candidates.first?.address ?? local
     }
 
+    /// The accessory address of an IPv4 stream whose controller is this Mac itself (the Home app on the Mac that runs Camera
+    /// Bridge) and whose HAP connection came over another of this Mac's addresses: the controller's own address, which is what
+    /// it advertised. Home on this Mac may connect over any address the Bonjour record carries, a virtual bridge that a VM
+    /// created (`bridge100`, 192.168.139.3) included, and `accessoryAddress` would answer that one; but a packet from the bridge's
+    /// address to the Mac's own LAN address has no route (`EHOSTUNREACH` / `EHOSTDOWN`: the kernel clones a reject route for it
+    /// on the bridge), so the live view never starts. The Mac sending from its LAN address to itself is delivered locally, as
+    /// it is when Home connects over that address. IPv4 only: IPv6 between a bridge and the LAN address is delivered, and the
+    /// controller's exact address may be a temporary one that is about to expire. nil when the controller is not an address of
+    /// one of our interfaces (a tunnel's address is not ours: NordLynx hands every device 10.5.0.2), or is loopback or
+    /// link-local, or when the HAP connection itself came over loopback (answered as before).
+    static func localControllerAddress(_ controller: String, connectedOver localAddress: String, ipv6: Bool,
+                                       interfaces: [InterfaceAddress]) -> String? {
+        let address = canonical(controller)
+        guard !ipv6, !address.contains(":"), addressBytes(address) != nil, !isLoopback(address), !isLoopback(canonical(localAddress)),
+              interfaces.contains(where: { $0.address == address && !MacVPNDetector.isTunnelName($0.interface) }) else { return nil }
+        return address
+    }
+
     /// The IPv6 address of `candidates` a controller is most likely to reach us at: one in the controller's /64, else a stable
     /// global address, else a stable unique local one (fc00::/7); temporary (privacy) and deprecated addresses only when
     /// nothing else is routable (`getifaddrs` lists them in no useful order: a ULA, or a temporary address that is about to

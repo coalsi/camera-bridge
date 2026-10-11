@@ -10,6 +10,37 @@ struct StreamAddressSelectionTests {
         InterfaceAddress(interface: interface, address: address, prefixLength: 64, isTemporary: temporary, isDeprecated: deprecated)
     }
 
+    // MARK: The Home app on this Mac
+
+    @Test func aControllerThatIsOneOfThisMacsAddressesIsAnsweredWithThatAddress() {
+        let interfaces = [InterfaceAddress(interface: "en0", address: "192.0.2.69", prefixLength: 24),
+                          InterfaceAddress(interface: "bridge100", address: "192.168.139.3", prefixLength: 23),
+                          InterfaceAddress(interface: "utun4", address: "10.5.0.2", prefixLength: 32),
+                          InterfaceAddress(interface: "lo0", address: "127.0.0.1", prefixLength: 8)]
+        func answer(_ controller: String, over local: String = "192.168.139.3", ipv6: Bool = false, in list: [InterfaceAddress]? = nil) -> String? {
+            StreamAddress.localControllerAddress(controller, connectedOver: local, ipv6: ipv6, interfaces: list ?? interfaces)
+        }
+        #expect(answer("192.0.2.69") == "192.0.2.69", "Home on this Mac connected over a VM's bridge")
+        #expect(answer("192.0.2.69", over: "192.0.2.69") == "192.0.2.69", "over its own LAN address: the same answer as before")
+        #expect(answer("192.168.139.3", over: "192.0.2.69") == "192.168.139.3")
+        #expect(answer("192.0.2.20") == nil, "another machine")
+        #expect(answer("10.5.0.2") == nil, "a tunnel's address is a VPN client's, not this Mac")
+        #expect(answer("127.0.0.1") == nil)
+        #expect(answer("192.0.2.69", over: "127.0.0.1") == nil, "a HAP connection over loopback is answered as before")
+        #expect(answer("192.0.2.69", ipv6: true) == nil, "the other family")
+        #expect(answer("192.0.2.69", in: []) == nil)
+    }
+
+    @Test func theIPv6StreamOfTheHomeAppOnThisMacIsAnsweredAsBefore() {
+        // IPv6 between a bridge and the LAN address is delivered, and the controller's own address may be a temporary one.
+        let interfaces = [v6("en0", "fe80::10d8:11ba:b93c:fb02"), v6("en0", "2001:db8:4:7000:40b:e3c3:fe43:6f1d"),
+                          v6("bridge100", "fd07:b51a:cc66:0:a617:db5e:ab7:e9f1")]
+        for controller in ["fe80::10d8:11ba:b93c:fb02", "2001:db8:4:7000:40b:e3c3:fe43:6f1d"] {
+            #expect(StreamAddress.localControllerAddress(controller, connectedOver: "fd07:b51a:cc66:0:a617:db5e:ab7:e9f1", ipv6: true,
+                                                         interfaces: interfaces) == nil)
+        }
+    }
+
     // MARK: The IPv6 accessory address
 
     /// A user's Mac: getifaddrs lists a ULA before the global address, plus a deprecated and a current temporary one.

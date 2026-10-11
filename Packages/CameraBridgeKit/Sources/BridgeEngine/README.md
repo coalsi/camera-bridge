@@ -356,7 +356,7 @@ table is read with `sysctl(NET_RT_DUMP)` in `StreamAddress.routeDump()`. `Diagno
 `SendStrategy`: bound to the accessory address and scoped to its interface (`IP_BOUND_IF`), else bound only, else the wildcard. A session that
 ends `.controllerNotReceiving` (the controller's RTCP kept coming but its receiver reports showed no video arriving; `RTP`'s
 `ControllerReceptionMonitor`) moves that controller one step down for its next session; the choice is kept an hour and `networkChanged()`
-(for the runtime's network-change path) forgets it. `StreamAddress.accessoryAddress` prefers an IPv6 address in the controller's /64, else a
+(for the runtime's network-change path) forgets it. `The Home app on this Mac (an IPv4 controller that is one of this Mac's own non-tunnel addresses, its HAP connection over another address of the Mac, e.g. a VM's `bridge100`) is answered its own address (`StreamAddress.localControllerAddress`): a packet from the bridge's address to the Mac's LAN address has no route. `StreamAddress.accessoryAddress` prefers an IPv6 address in the controller's /64, else a
 stable global, else a stable ULA, never a temporary or deprecated one (`SIOCGIFAFLAG_IN6`). New `NetworkNotice.Kind`s: `.liveViewNotReceived`
 (a session ended blind; settled `.reached` when a later session of that controller received video), `.localNetworkDenied` (a fatal send
 errno EHOSTUNREACH / EPERM persisted) and `.dualHomedSubnet` (two interfaces hold addresses on one subnet; said once per subnet and hour).

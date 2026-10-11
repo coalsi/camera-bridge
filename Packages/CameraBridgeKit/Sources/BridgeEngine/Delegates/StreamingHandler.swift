@@ -185,8 +185,16 @@ actor StreamingHandler: CameraStreamingDelegate {
         let route = StreamAddress.controllerRoute(advertised: request.controllerAddress, peer: request.peerAddress,
                                                   zone: request.connectionZone, ipv6: request.isIPv6, interfaces: interfaces,
                                                   routes: loopbackOnly ? [] : routeTable())
-        let address = StreamAddress.accessoryAddress(localAddress: request.localAddress, ipv6: request.isIPv6, interfaces: interfaces,
-                                                     controller: route.host)
+        // The Home app on this very Mac is answered with its own address, whichever other address of ours it connected over: a
+        // virtual bridge's address (a VM's `bridge100`) cannot send to the Mac's LAN address.
+        let localController = loopbackOnly ? nil : StreamAddress.localControllerAddress(route.host, connectedOver: request.localAddress,
+                                                                                         ipv6: request.isIPv6, interfaces: interfaces)
+        let address = localController ?? StreamAddress.accessoryAddress(localAddress: request.localAddress, ipv6: request.isIPv6,
+                                                                       interfaces: interfaces, controller: route.host)
+        if let localController, localController != StreamAddress.canonical(request.localAddress) {
+            context.log.info("The Home app on this Mac connected over \(StreamAddress.canonical(request.localAddress)) and asked for a stream to its own "
+                             + "address \(localController); sending from \(localController) (from another address of this Mac the packets may have no route)")
+        }
         let host = loopbackOnly ? Self.bindHost(loopbackOnly: true, ipv6: request.isIPv6)
             : Self.bindHost(accessoryAddress: address, destination: route.host, ipv6: request.isIPv6, interfaces: interfaces)
         let peerKey = StreamAddress.canonical(request.peerAddress ?? request.controllerAddress)

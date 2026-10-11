@@ -263,5 +263,56 @@ import Testing
         await receiver.stop()
         await setup.feeder.stop()
     }
+
+    /// The Home app on this Mac connected over a VM's virtual bridge (the Bonjour record is on every interface): the stream is
+    /// answered, and sent, from the Mac's LAN address the controller advertised. From the bridge's address it has no route to the
+    /// Mac's own LAN address and the live view stays on "loading".
+    @Test func theHomeAppOnThisMacThatConnectedOverAVirtualBridgeGetsTheMacsOwnAddress() async throws {
+        let setup = makeSetup(interfaces: Self.home + [InterfaceAddress(interface: "bridge100", address: "192.168.139.3", prefixLength: 23)])
+        let receiver = try await SRTPTestReceiver.start()
+        let viaBridge = try await prepare(setup, receiver: receiver, controller: "192.0.2.5", peer: "192.168.139.3", local: "192.168.139.3")
+        #expect(viaBridge.accessoryAddress == "192.0.2.5")
+        // The same controller over the LAN address, and a controller on another machine reached over the bridge: as before.
+        let viaLAN = try await prepare(setup, receiver: receiver, controller: "192.0.2.5", peer: "192.0.2.5", local: "192.0.2.5")
+        #expect(viaLAN.accessoryAddress == "192.0.2.5")
+        let remote = try await prepare(setup, receiver: receiver, controller: "192.168.139.20", peer: "192.168.139.20", local: "192.168.139.3")
+        #expect(remote.accessoryAddress == "192.168.139.3", "a guest on the bridge is reached from the bridge's address")
+        await setup.handler.stopAll()
+        await receiver.stop()
+        await setup.feeder.stop()
+    }
+
+    /// With an address this machine really has, the sockets bind it and are scoped to its interface even though the HAP connection
+    /// came over another address (a VM's bridge): the video leaves from the address the controller was told.
+    @Test func theHomeAppOnThisMacIsSentVideoFromItsOwnAddressAndInterface() async throws {
+        let own = StreamAddress.interfaceAddresses().first {
+            !$0.isIPv6 && !$0.address.hasPrefix("127.") && !$0.address.hasPrefix("169.254.") && !MacVPNDetector.isTunnelName($0.interface)
+        }
+        guard let own else { return }   // a machine with no IPv4 address of its own (some CI sandboxes)
+        let interfaces = Self.loopback + [own, InterfaceAddress(interface: "bridge100", address: "192.168.139.3", prefixLength: 23)]
+        let setup = makeSetup(interfaces: interfaces)
+        let receiver = try await SRTPTestReceiver.start()
+        let sessionID = UUID()
+        let response = try await prepare(setup, receiver: receiver, controller: own.address, peer: "192.168.139.3", local: "192.168.139.3", sessionID: sessionID)
+        #expect(response.accessoryAddress == own.address)
+        let socketSetup = try #require(await setup.handler.socketSetup(sessionID))
+        #expect(socketSetup.strategy == .boundAndScoped && socketSetup.interface == own.interface, "\(socketSetup)")
+        let socket = try #require(await setup.handler.preparedVideoSocket(sessionID))
+        #expect(socket.transport.values.boundSource == own.address)
+        await setup.handler.stopAll()
+        await receiver.stop()
+        await setup.feeder.stop()
+    }
+
+    /// A HAP connection over loopback keeps the answer it always had.
+    @Test func aHAPConnectionOverLoopbackIsAnsweredAsBefore() async throws {
+        let setup = makeSetup(interfaces: Self.home)
+        let receiver = try await SRTPTestReceiver.start()
+        let response = try await prepare(setup, receiver: receiver, controller: "192.0.2.5", peer: "127.0.0.1", local: "127.0.0.1")
+        #expect(response.accessoryAddress == "127.0.0.1")
+        await setup.handler.stopAll()
+        await receiver.stop()
+        await setup.feeder.stop()
+    }
 }
 #endif
