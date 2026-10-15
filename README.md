@@ -141,7 +141,8 @@ Releases are built with `Tools/release.sh` (see [docs/distribution.md](docs/dist
 
 ## Support the project
 
-Camera Bridge is made by one person and is free for everyone at home. You can help by starring the repository, reporting a
+Camera Bridge is made by one person and is free for everyone at home. If it saves you an NVR or a cloud camera plan, you
+can [buy me a coffee on Ko-fi](https://ko-fi.com/coreysilvia). You can also help by starring the repository, reporting a
 camera that works (or doesn't) with a [camera support request](https://github.com/coalsi/camera-bridge/issues/new?template=camera_support_request.yml),
 and sending pull requests.
 
