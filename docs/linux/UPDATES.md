@@ -8,7 +8,7 @@ Camera Bridge OS updates the whole system as one unit, and keeps the previous ve
  1  boot partition (ESP, 512 MB, FAT)     systemd-boot + one unified kernel image (UKI) per installed version
  2  root A (2.5 GB, read-only)            system version N
  3  root B (2.5 GB, read-only)            empty, or the other version
- 4  data (the rest of the disk)           settings, HomeKit pairings, secrets, logs; updates never touch it
+ 4  data (the rest of the disk)           settings, HomeKit pairings, secrets, logs, recordings; updates never touch it
 ```
 
 A version consists of two files: the root file system image (`cb-root_<version>` is the label of the partition it lives in) and the UKI `cb-os_<version>.efi` (kernel, initrd and the kernel command line `root=PARTLABEL=cb-root_<version>`). Because each UKI names its own root partition by label, booting entry N always uses root N, whichever slot (A or B) it was written to.
@@ -19,7 +19,7 @@ A version consists of two files: the root file system image (`cb-root_<version>`
 2. **Download, unprivileged.** If automatic updates are on, or you press "Update now" in the web UI (or run `cb-update apply`), the files are fetched by a separate user (`cbupdate`) in a sandbox that can write only its own cache folder on the data partition. Fetched: `SHA256SUMS`, `SHA256SUMS.sig`, `cb-os_<version>_<arch>.efi`, `cb-os_<version>_<arch>_root.raw.zst`.
 3. **Verify, twice.** The list `SHA256SUMS` carries a [minisign](https://jedisct1.github.io/minisign/) signature made with the private release key. The matching public key is part of the system image (`/usr/share/camera-bridge/update-key.pub`). The downloader checks the signature and every file's SHA-256; then the root-privileged step checks everything again while copying the files into a staging folder only root can read, hashing the same bytes it writes, so a file cannot change between check and use. Any mismatch stops the update with nothing written.
 4. **Write to the idle slot.** `systemd-sysupdate` writes the new root image into the slot that is *not* running (never the one you are using) and puts the new UKI on the boot partition as `cb-os_<version>+3.efi`. The `+3` means "three boot attempts left".
-5. **Restart.** The new version starts at the next restart (immediately if you choose "restart now"; with automatic updates the box restarts by itself at 03:00 UTC). systemd-boot lowers the counter at every attempt (`+3` -> `+2-1` -> `+1-2` -> `+0-3`).
+5. **Restart.** The new version starts at the next restart (immediately if you choose "restart now"; with automatic updates the box restarts by itself at 03:00 in the bridge's time zone, `settings.timeZone` in config.json, else UTC; systemd's own `systemd-sysupdate` and `systemd-sysupdate-reboot` timers are masked, cb-update does all of it). systemd-boot lowers the counter at every attempt (`+3` -> `+2-1` -> `+1-2` -> `+0-3`).
 6. **Prove itself.** `camera-bridge-health.service` is required by `boot-complete.target`. It passes when `camerabridged` answers on `http://127.0.0.1/api/v1/status` with valid JSON, `avahi-daemon` is running and the data partition accepts writes. Only then `systemd-bless-boot` renames the entry to plain `cb-os_<version>.efi`: the new version is permanent.
 7. **Or fall back.** If the health check never passes (the daemon crashes, the system hangs or is powered off in the middle), the counter reaches zero after three attempts and systemd-boot starts the previous version again, which is still intact. The failed entry stays on the boot partition marked `+0-3` until the next update replaces it.
 
@@ -62,6 +62,7 @@ Version numbers are digits and dots (`0.1`, `0.2`, `1.0.1`); the newer number wi
 ## Limits to know
 
 * An update needs about 4 GB free on the data partition (download + staging) and two root slots of 2.5 GB. Use a disk of at least 16 GB.
+* Recordings share the data partition. Recording pauses while free space is below 8 GiB or 5% of the partition, whichever is more, which is well above the 4 GB an update needs, so recording leaves room for updates (user guide, section 11).
 * Secure Boot is not supported (the boot loader and the kernel images are not signed with a key your firmware knows). Turn Secure Boot off in the firmware.
 * Updates are fetched over HTTPS from `api.github.com` and `github.com`. If your network blocks them, update by flashing a new image; settings on the data partition are kept only if you install over the same disk with the installer (otherwise export them first).
 * A new version is only as safe as its release key: keep the private key offline. See BUILDING.md, "Release signing".

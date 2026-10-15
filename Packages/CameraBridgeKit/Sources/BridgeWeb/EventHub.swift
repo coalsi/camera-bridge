@@ -96,7 +96,7 @@ final class EventHub: Sendable {
     static func snapshotEvents(_ overview: BridgeOverview, now: Date = Date()) -> [ServerEvent] {
         var events = [event("bridge", overview.bridgeResource)]
         events.append(contentsOf: overview.cameraResources().map { event("camera", $0) })
-        events.append(event("notices", NoticeResource.resources(for: overview.networkNotices, now: now)))
+        events.append(event("notices", NoticeResource.resources(for: overview, now: now)))
         return events
     }
 
@@ -127,7 +127,7 @@ final class EventHub: Sendable {
                 cameras = Dictionary(overview.cameras.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 configurations = Dictionary(overview.configurations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 bridge = overview.bridgeResource
-                notices = NoticeResource.resources(for: overview.networkNotices, now: now).map(\.fingerprint)
+                notices = NoticeResource.resources(for: overview, now: now).map(\.fingerprint)
                 continue
             }
             if overview.bridgeResource != bridge {
@@ -159,7 +159,7 @@ final class EventHub: Sendable {
                     cameras[configuration.id] = status
                 }
             }
-            let currentNotices = NoticeResource.resources(for: overview.networkNotices, now: now)
+            let currentNotices = NoticeResource.resources(for: overview, now: now)
             if currentNotices.map(\.fingerprint) != notices {
                 notices = currentNotices.map(\.fingerprint)
                 broadcaster.yield(Self.event("notices", currentNotices))

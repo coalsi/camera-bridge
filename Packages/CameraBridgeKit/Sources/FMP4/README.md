@@ -74,6 +74,17 @@ Depends on MediaCore only (contract graph): no `BridgeSupport` import, so no log
 `MP4Box.headerSize` (+ defaulted `init` parameter), `payloadOffset`, `payloadSize`, `child(_:)`, `children(ofType:)`,
 `descendant(atPath:)`; `MP4BoxReader.box(atPath:in:)`, `MP4BoxReader.maximumDepth`.
 
+`FMP4Muxer.fragment(video:audio:nextDecodeTime:continuation:)` (NVR, 2026-10-10): with `continuation` true a fragment of a muxer that has already written one may start
+on a delta frame (the next 2.5 s piece of a long group of pictures); only the two keyframe-first guards relax. Reading the fragments back (NVR): `MovieFragmentReader` (`parse(moof:mdatPayloadSize:)`, `producerReferenceTime(prft:)`),
+`MovieFragmentHeader`, `TrackFragmentHeader`, `TrackSample`, `ProducerReferenceTime`, `FMP4InitReader` (`parse(_:)`), `FMP4InitInfo`, `FMP4FrameSlicer`
+(`videoFrames`, `audioFrames`, `frame(fromKeyframeBytes:info:start:)`). One parser for the recovery scanner and the player; every failure is `FMP4Error.malformedBox`.
+The readers are built: `MovieFragmentReader.parse(moof:)` accepts `tfhd` with `default-base-is-moof` and no base data offset, `tfdt` version 0 or 1, one or more `trun`s (version 0
+or 1, first-sample flags, `tfhd` defaults; a default the `tfhd` does not give is 0, which is what every `trex` this package writes says), at most moof size / 4 samples, no sample over 256 MB,
+sample data inside the declared `mdat`; anything else throws, a fuzzed or torn `moof` never traps. `FMP4InitReader.parse(_:)` returns the format in live order (`[SPS, PPS]`, `[VPS, SPS, PPS]`)
+equal to the `VideoFormat` the muxer was given, the track ids and timescales, and `byteCount`, the end of `moov` (the data may go on with fragments). `FMP4FrameSlicer` gives back
+byte-identical NAL units (the muxer removed in-band parameter sets and delimiters; the format carries them) with `pts`/`dts`/`wallClock` as 90 kHz ticks since 2001 derived from the fragment's start;
+an audio sample's instant is the video track's start plus the distance of the two `tfdt`s.
+
 ## Tests
 
 Structural tests with ffmpeg goldens; real media from VideoToolbox (software encoder, deterministic IDRs) and
@@ -82,7 +93,8 @@ AVAudioConverter; playback via `AVAssetReader` (all frames decode, duration ≈ 
 checked against VideoToolbox's own. Fragment length is checked on constant and variable GOPs (frame-rate drop, reconnect,
 alternating and irregular IDR spacing). Decode-time continuity is checked on jittered, bursty, variable-frame-rate timelines;
 SAR parsing on x264/x265/VideoToolbox SPSs and two synthetic SPSs that ffmpeg's `trace_headers` parses to the end.
-Fuzz and property tests use a seeded `SeededGenerator`, so any failing input can be regenerated.
+Fuzz and property tests use a seeded `SeededGenerator`, so any failing input can be regenerated. The readers are tested against the muxer's own output, hand-built headers, a recording
+cut at every byte, bit flips, and (macOS) `AVAssetReader` decoding VideoToolbox clips cut into continuation fragments, with sound, and cut back to the last whole fragment.
 
 ## References
 

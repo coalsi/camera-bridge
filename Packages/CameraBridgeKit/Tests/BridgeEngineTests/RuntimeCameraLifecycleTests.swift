@@ -17,11 +17,15 @@ final class ScriptedEventDriver: CameraDriver {
         let stream: AsyncStream<CameraEvent>
         let continuation: AsyncStream<CameraEvent>.Continuation
         let stopped: Box<Int>
+        let confirmed: Box<Int>
 
-        init(stopped: Box<Int>) {
+        init(stopped: Box<Int>, confirmed: Box<Int>) {
             (stream, continuation) = AsyncStream.makeStream(of: CameraEvent.self)
             self.stopped = stopped
+            self.confirmed = confirmed
         }
+
+        func credentialsConfirmed() { confirmed.update { $0 += 1 } }
 
         func events() -> AsyncStream<CameraEvent> { stream }
 
@@ -34,6 +38,7 @@ final class ScriptedEventDriver: CameraDriver {
     let vendor: CameraVendor = .demo
     let sourcesMade = Box(0)
     let sourcesStopped = Box(0)
+    let credentialsConfirmed = Box(0)
     private let current = Mutex<Source?>(nil)
 
     func emit(_ event: CameraEvent) {
@@ -44,7 +49,7 @@ final class ScriptedEventDriver: CameraDriver {
 
     func makeEventSource() -> (any CameraEventSource)? {
         sourcesMade.update { $0 += 1 }
-        let source = Source(stopped: sourcesStopped)
+        let source = Source(stopped: sourcesStopped, confirmed: credentialsConfirmed)
         current.withLock { $0 = source }
         return source
     }
@@ -740,6 +745,39 @@ final class Gate: Sendable {
         #expect(server.requests.filter { $0.method == "DESCRIBE" }.count == describes)
         #expect(driver.sourcesMade.value == 1, "the rejected event channel keeps waiting (\(driver.sourcesMade.value) sources made)")
         #expect(fixture.status(camera.id)?.lastError == SensorState.credentialsRejectedMessage)
+        await fixture.tearDown()
+        await server.stop()
+    }
+
+    /// Patio: a refused event login while the video plays does not mark the camera "rejected" (offline, "isn't answering"), and video that
+    /// signs in again retries the event channel at once instead of after its ten-minute wait.
+    @MainActor @Test(.timeLimit(.minutes(1))) func videoThatSignsInRetriesARefusedEventChannel() async throws {
+        var serverConfiguration = RTSPTestServer.Configuration()
+        serverConfiguration.credentials = HTTPCredentials(username: "admin", password: "s3cret")
+        let server = RTSPTestServer(source: syntheticSource(width: 320, height: 180, fps: 10, gop: .seconds(1), audio: nil),
+                                    transport: AppleNetworkTransport(), configuration: serverConfiguration)
+        try await server.start()
+        let driver = ScriptedEventDriver()
+        var tuning = EngineTuning.testing
+        tuning.aspectWait = .milliseconds(300)
+        tuning.driverFactory = { _, _, _ in driver }
+        let fixture = try await EngineFixture(tuning: tuning)
+        let engine = fixture.engine
+        var camera = Self.rtspCamera("Porch", server: server)
+        camera.username = "admin"
+        try await engine.addCamera(camera, password: "s3cret")
+        await engine.start()
+        #expect(await fixture.waitFor { fixture.status(camera.id)?.connection == .online })
+        #expect(await fixture.until { driver.sourcesMade.value == 1 })
+        driver.emit(.authenticationFailed)
+        #expect(await fixture.until { await engine.router.credentialsRejected(by: .camera, for: camera.id) })
+        let state = await engine.router.state(for: camera.id)
+        #expect(state?.connection == .online && state?.credentialsRejected == false && state?.lastError == nil, "the video proves the credentials")
+        #expect(state?.eventChannelConnected == false, "the event channel is down")
+        #expect(driver.credentialsConfirmed.value == 0)
+
+        server.dropConnections()   // the ingest signs in again
+        #expect(await fixture.waitFor(.seconds(20)) { driver.credentialsConfirmed.value == 1 })
         await fixture.tearDown()
         await server.stop()
     }

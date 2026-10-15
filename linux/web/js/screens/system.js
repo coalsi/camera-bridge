@@ -8,6 +8,7 @@ import { bytes, duration, timeAgo } from '../format.js';
 import { store } from '../store.js';
 import { banners } from './banners.js';
 import { inlineError, switchRow } from './common.js';
+import { askToPowerOff, powerOff as sendPowerOff } from '../power.js';
 
 const MODES = {
   installed: 'Camera Bridge OS',
@@ -28,12 +29,15 @@ const POLL_MS = 3000;
 const MAX_POLLS = 800;   // about 40 minutes: an update on a slow line
 
 export function renderSystem() {
-  const root = h('div', { class: 'stack' });
+  const root = h('div', { class: 'card-columns' });
   const bannerHost = banners();
   let info = null;
   let status = null;
   let update = null;
   let disks = null;
+  let drives = null;
+  let wifi = null;
+  let wifiNetworks = null;
   let copyData = true;
   let busy = '';
   let destroyed = false;
@@ -46,6 +50,7 @@ export function renderSystem() {
   async function load() {
     try {
       [info, status] = await Promise.all([get('system'), get('status')]);
+      wifi = await get('system/wifi').catch(() => null);
       update = info.update || null;
     } catch (error) {
       replace(root, inlineError(error.message));
@@ -85,12 +90,15 @@ export function renderSystem() {
     update = info.update || null;
   }
 
-  function aboutCard() {
+  /** The box and the bridge on it (the version and its notes are on About). */
+  function boxCard() {
     const row = (k, v) => v ? [h('dt', null, k), h('dd', null, v)] : null;
-    return h('div', { class: 'card' }, h('h2', null, info.product),
+    return h('div', { class: 'card' }, h('h2', null, 'This box'),
       h('dl', { class: 'kv' },
-        row('Version', `${info.version}${info.build && info.build !== 'development' ? ` (${info.build})` : ''}`),
-        row('Mode', MODES[info.mode] || info.mode), row('System', info.osName), row('Machine', info.hardware), row('Name on the network', info.hostname ? `${info.hostname.replace(/\.local\.?$/, '')}.local` : null),
+        row('Version', h('a', { href: '#/about' }, `${info.product} ${info.version}`)),
+        row('Mode', info.mode === 'installed' ? null : MODES[info.mode] || info.mode), row('Machine', info.hardware),
+        row('Running from', info.runningFromUSB === true ? 'The installer stick (USB)' : info.runningFromUSB === false ? 'Its own disk' : null),
+        row('Name on the network', info.hostname ? `${info.hostname.replace(/\.local\.?$/, '')}.local` : null),
         row('Bridge running for', duration(status.uptimeSeconds)),
         row('Cameras', `${status.cameras.total} (${status.cameras.online} live, ${status.cameras.paired} in Apple Home)`)),
       h('div', { class: 'row' },
@@ -133,7 +141,7 @@ export function renderSystem() {
           } }, busy === 'apply' ? spinner() : icon('download'), 'Install update') : null),
         info.canManage && typeof info.automaticUpdates === 'boolean'
           ? switchRow({
-            title: 'Install updates automatically', desc: 'The bridge checks every day, installs a new version and restarts at 03:00 UTC.', checked: info.automaticUpdates, disabled: !!busy,
+            title: 'Install updates automatically', desc: 'The bridge checks every day, installs a new version and restarts at 3 AM in its time zone (Settings).', checked: info.automaticUpdates, disabled: !!busy,
             onchange: (enabled) => run('auto', async () => { info = await post('system/auto-update', { enabled }); update = info.update || null; toast(enabled ? 'Automatic updates are on.' : 'Automatic updates are off.', 'ok'); }),
           }) : null]);
   }
@@ -148,19 +156,15 @@ export function renderSystem() {
   }
 
   async function powerOff() {
-    const ok = await confirmDialog({ title: 'Switch the bridge off?', body: 'Your cameras are unavailable in the Home app until you switch it on again at the machine.', confirm: 'Switch off', danger: true });
-    if (!ok) return;
-    run('poweroff', async () => {
-      await post('system/poweroff', { confirm: true });
-      toast('Switching off. You can unplug it when the lights have gone out.', 'ok', 8000);
-    });
+    if (!(await askToPowerOff())) return;
+    run('poweroff', sendPowerOff);
   }
 
   function restartCard() {
-    return h('div', { class: 'card' }, h('h2', null, 'Restart and switch off'), h('p', { class: 'desc' }, 'A restart takes a minute or two.'),
+    return h('div', { class: 'card' }, h('h2', null, 'Restart and power off'), h('p', { class: 'desc' }, 'A restart takes a minute or two. After a power off, switch the machine on again with its power button.'),
       h('div', { class: 'row' },
         h('button', { class: 'btn danger', type: 'button', disabled: !info.canReboot || !!busy, onclick: reboot }, busy === 'reboot' ? spinner() : icon('power'), 'Restart the bridge…'),
-        info.canManage ? h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: powerOff }, busy === 'poweroff' ? spinner() : icon('power'), 'Switch off…') : null),
+        info.canManage ? h('button', { class: 'btn danger', type: 'button', disabled: !!busy, onclick: powerOff }, busy === 'poweroff' ? spinner() : icon('power'), 'Power off…') : null),
       !info.canReboot ? h('p', { class: 'small muted' }, 'Not available when running as a plain program.') : null);
   }
 
@@ -197,6 +201,122 @@ export function renderSystem() {
           : h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: enableSSH }, busy === 'ssh' ? spinner() : null, 'Turn on SSH…')));
   }
 
+  // Wi-Fi ---------------------------------------------------------------------------------------------------------------------
+
+  const WIFI_STATES = {
+    online: 'On the network.',
+    hotspot: 'No network: the setup hotspot is open.',
+    searching: 'Looking for a network…',
+    'no-wifi': 'This computer has no Wi-Fi the bridge can use. It works with a network cable.',
+    'no-hotspot': 'No network, and this Wi-Fi chip cannot open the setup hotspot. Use a network cable.',
+  };
+
+  async function scanWifi() {
+    await run('wifi-scan', async () => { wifiNetworks = (await post('system/wifi/scan', {})).networks; });
+  }
+
+  async function joinWifi(ssid, open) {
+    let password = '';
+    if (!open) {
+      password = await promptDialog({ title: `Join “${ssid}”`, label: 'Wi-Fi password', type: 'password', confirm: 'Join and restart',
+        body: 'The bridge restarts and joins this network. If it can’t, it comes back on the network it is on now, or opens its setup hotspot.' });
+      if (password === undefined) return;
+    } else if (!(await confirmDialog({ title: `Join “${ssid}”?`, body: 'It is an open network (no password). The bridge restarts to join it.', confirm: 'Join and restart' }))) {
+      return;
+    }
+    run('wifi-join', async () => {
+      await post('system/wifi', { ssid, password });
+      toast(`Restarting to join “${ssid}”. Open http://camera-bridge.local on that network in a minute.`, 'ok', 15000);
+    });
+  }
+
+  async function forgetWifi(ssid) {
+    if (!(await confirmDialog({ title: `Forget “${ssid}”?`, body: 'The bridge stops joining this network by itself.', confirm: 'Forget' }))) return;
+    run('wifi-forget', async () => { await post('system/wifi/forget', { ssid }); wifi = await get('system/wifi'); });
+  }
+
+  function wifiCard() {
+    if (!info.canInstall || !wifi || wifi.state === 'unavailable') return null;
+    const where = wifi.wired ? 'Connected with a network cable.' : wifi.ssid ? `On the Wi-Fi network “${wifi.ssid}”.` : (WIFI_STATES[wifi.state] || wifi.message);
+    return h('div', { class: 'card' }, h('h2', null, 'Wi-Fi'),
+      h('p', { class: 'desc' }, 'The bridge joins a saved Wi-Fi network by itself. With no network cable and no network it can join, it opens its own setup network, “CameraBridge-…”: join it with a phone and a page asks which Wi-Fi to use.'),
+      h('p', { class: 'muted' }, where),
+      wifi.lastError ? h('p', { class: 'problems' }, wifi.lastError) : null,
+      wifi.saved.length ? h('div', { class: 'found' }, wifi.saved.map((ssid) => h('div', { class: 'row' },
+        h('span', null, ssid, ssid === wifi.ssid ? h('span', { class: 'small muted' }, ' · in use') : null),
+        h('button', { class: 'btn small', type: 'button', disabled: !!busy, onclick: () => forgetWifi(ssid) }, 'Forget')))) : null,
+      !wifi.hasWifi ? null : h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: scanWifi }, busy === 'wifi-scan' ? spinner() : icon('search'), 'Find Wi-Fi networks'),
+      wifiNetworks === null ? null : wifiNetworks.length === 0 ? h('p', { class: 'muted' }, 'No network was found.')
+        : h('div', { class: 'found' }, wifiNetworks.map((network) => h('div', { class: 'card disk' },
+          h('div', null, h('strong', null, network.ssid), h('div', { class: 'small muted' }, `${network.signal}%${network.security ? ` · ${network.security}` : ' · open'}`)),
+          h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: () => joinWifi(network.ssid, !network.security) }, 'Join…')))));
+  }
+
+  // Recording drive -------------------------------------------------------------------------------------------------------
+
+  const DRIVE_STATES = {
+    internal: 'Recording to this box’s own disk.',
+    mounted: 'Recording to the attached drive.',
+    missing: 'The recording drive is not attached. Nothing is recorded until it is plugged in again.',
+    working: 'Setting up the drive…',
+    failed: 'The last attempt did not work.',
+  };
+
+  async function loadDrives() {
+    await run('drives', async () => { drives = await get('system/recording-drives'); });
+  }
+
+  async function useDrive(disk, keepData) {
+    const phrase = disk.phrase || `ERASE ALL DATA ON ${disk.name}`;
+    if (keepData) {
+      const ok = await confirmDialog({ title: `Record to ${disk.name}?`, body: 'Its recordings stay where they are and new ones are added. The bridge restarts for a moment.', confirm: 'Record to this drive' });
+      if (!ok) return;
+    } else {
+      const ok = await phraseDialog({
+        title: `Erase ${disk.name} and record to it?`, phrase, confirm: 'Erase the drive and record to it',
+        body: `Everything on ${disk.name}${disk.model ? ` (${disk.model}, ${bytes(disk.sizeBytes)})` : ''} will be erased, and a new file system made for recordings. The bridge restarts for a moment. A drive made this way is for Camera Bridge: other computers may not be able to read it without extra software.`,
+      });
+      if (!ok) return;
+    }
+    run('drive', async () => {
+      await post('system/recording-drive', { targetID: disk.id, phrase: keepData ? '' : phrase, keepData });
+      toast('Setting up the drive. The bridge restarts when it is ready; this page may lose contact for a minute.', 'ok', 12000);
+      drives = null;
+    });
+  }
+
+  async function forgetDrive() {
+    const ok = await confirmDialog({ title: 'Record to this box’s own disk again?', body: 'The drive and everything on it stay as they are. New recordings go to the box’s own disk, which is usually much smaller.', confirm: 'Use the box’s own disk' });
+    if (!ok) return;
+    run('drive', async () => {
+      await post('system/recording-drive/forget', { confirm: true });
+      toast('Recording to the box’s own disk again. The bridge restarts for a moment.', 'ok', 10000);
+      drives = null;
+    });
+  }
+
+  function driveCard() {
+    if (!info.canInstall) return null;
+    const chosen = drives && (drives.state === 'mounted' || drives.state === 'missing');
+    return h('div', { class: 'card' }, h('h2', null, 'Recording drive'),
+      h('p', { class: 'desc' }, 'Record to an attached drive (USB or SATA, a hard disk or an SSD) instead of the box’s own disk. Plug it in, then find it here. Use a drive made for recordings: it is erased when you choose it here, unless it already is a Camera Bridge recording drive.'),
+      drives ? h('p', { class: drives.state === 'failed' ? 'problems' : 'muted' }, DRIVE_STATES[drives.state] || '', drives.state === 'failed' && drives.message ? ` ${drives.message}` : '') : null,
+      drives === null
+        ? h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: loadDrives }, busy === 'drives' ? spinner() : icon('search'), 'Find drives')
+        : [
+          drives.drives.length === 0 ? h('p', { class: 'muted' }, 'No other drive was found. Plug one in and look again.')
+            : h('div', { class: 'found' }, drives.drives.map((disk) => h('div', { class: 'card disk' },
+              h('div', null, h('strong', null, disk.name), h('div', { class: 'small muted' }, [disk.model, bytes(disk.sizeBytes), disk.isRecordingDrive ? 'a Camera Bridge recording drive' : disk.note].filter(Boolean).join(' · ')),
+                disk.eligible ? null : h('div', { class: 'small problems' }, disk.problems.join('. '))),
+              disk.eligible && disk.inUse !== true ? h('div', { class: 'row' },
+                disk.isRecordingDrive ? h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: () => useDrive(disk, true) }, 'Record to this drive') : null,
+                h('button', { class: 'btn danger', type: 'button', disabled: !!busy, onclick: () => useDrive(disk, false) }, 'Erase and record here…')) : null,
+              disk.inUse === true ? h('span', { class: 'small muted' }, 'in use now') : null))),
+          h('div', { class: 'row' },
+            h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: loadDrives }, busy === 'drives' ? spinner() : icon('search'), 'Look again'),
+            chosen ? h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: forgetDrive }, 'Use the box’s own disk again…') : null)]);
+  }
+
   // Installing to a disk --------------------------------------------------------------------------------------------------
 
   async function loadDisks() {
@@ -224,10 +344,12 @@ export function renderSystem() {
   function installCard() {
     if (!info.canInstall) return null;
     const installing = info.install?.state === 'running' || info.install?.state === 'queued';
+    // Running from its own disk already: nothing to install (unless an installation is under way or just ended, to show how it went).
+    if (info.runningFromUSB === false && !info.install) return null;
     return h('div', { class: 'card' }, h('h2', null, 'Install to a disk in this machine'),
       h('p', { class: 'desc' }, 'Running from a USB stick? Copy Camera Bridge OS to the machine’s own disk to run faster and without the stick. Everything on that disk is erased. The disk the bridge is running from is never offered.'),
       installProgress(),
-      switchRow({ title: 'Copy my cameras, settings and Home pairings', desc: 'Off: the new system starts empty and you set it up again. Do not run the stick again afterwards if you copy them.', checked: copyData, disabled: !!busy || installing, onchange: (v) => { copyData = v; } }),
+      switchRow({ title: 'Copy my cameras, settings, Home pairings and recordings', desc: 'Off: the new system starts empty and you set it up again. Do not run the stick again afterwards if you copy them. Copying recordings can take very long, so install first and record afterwards.', checked: copyData, disabled: !!busy || installing, onchange: (v) => { copyData = v; } }),
       disks === null
         ? h('button', { class: 'btn', type: 'button', disabled: !!busy || installing, onclick: loadDisks }, busy === 'disks' ? spinner() : icon('search'), 'Find disks')
         : disks.length === 0 ? h('p', { class: 'muted' }, 'No other disk was found.')
@@ -241,7 +363,7 @@ export function renderSystem() {
     const phrase = disk.phrase || `ERASE ALL DATA ON ${disk.name}`;
     const ok = await phraseDialog({
       title: `Install to ${disk.name}?`, phrase, confirm: 'Erase the disk and install',
-      body: `Everything on ${disk.name}${disk.model ? ` (${disk.model}, ${bytes(disk.sizeBytes)})` : ''} will be erased, then Camera Bridge OS is copied there${copyData ? ', with your cameras, settings and pairings' : ', empty'}. This can’t be undone. When it is done the machine switches off: remove the stick, then start it again.`,
+      body: `Everything on ${disk.name}${disk.model ? ` (${disk.model}, ${bytes(disk.sizeBytes)})` : ''} will be erased, then Camera Bridge OS is copied there${copyData ? ', with your cameras, settings, pairings and any recordings' : ', empty'}. This can’t be undone. When it is done the machine switches off: remove the stick, then start it again.`,
     });
     if (!ok) return;
     run('install', async () => {
@@ -256,7 +378,7 @@ export function renderSystem() {
   async function factoryReset() {
     const ok = await phraseDialog({
       title: 'Erase all settings?', phrase: 'RESET', confirm: 'Erase everything and restart',
-      body: 'This removes every camera, your password and all Home pairings from this bridge, then restarts it as new. Add the bridge to Apple Home again afterwards (remove the old one from Home first). Your cameras themselves are not touched.',
+      body: 'This removes every camera, your password, all Home pairings and every recording saved on this bridge, then restarts it as new. Add the bridge to Apple Home again afterwards (remove the old one from Home first). Your cameras themselves are not touched. The recordings cannot be brought back.',
     });
     if (!ok) return;
     run('reset', async () => {
@@ -268,12 +390,12 @@ export function renderSystem() {
   function resetCard() {
     if (!info.canManage) return null;
     return h('div', { class: 'card' }, h('h2', null, 'Start over'),
-      h('p', { class: 'desc' }, 'Erase all settings, camera passwords and Home pairings and set the bridge up again from the beginning.'),
+      h('p', { class: 'desc' }, 'Erase all settings, camera passwords, Home pairings and recordings and set the bridge up again from the beginning.'),
       h('button', { class: 'btn danger', type: 'button', disabled: !!busy, onclick: factoryReset }, busy === 'reset' ? spinner() : icon('trash'), 'Factory reset…'));
   }
 
   function draw() {
-    replace(root, aboutCard(), updateCard(), sshCard(), restartCard(), installCard(), resetCard());
+    replace(root, boxCard(), restartCard(), updateCard(), wifiCard(), sshCard(), driveCard(), installCard(), resetCard());
   }
 
   replace(root, h('div', { class: 'checking' }, spinner()));

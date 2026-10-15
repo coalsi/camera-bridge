@@ -1,0 +1,119 @@
+/* NVR grid page (#/nvr). Colours, radii and type come from the tokens in style.css. No inline styles are used anywhere: the layout is classes
+   and data-* attributes only (the page's Content-Security-Policy allows no style attribute). */
+
+.nvr-page { display: grid; gap: 14px; align-content: start; }
+.nvr-page > .breadcrumb { justify-self: start; margin-bottom: 0; }
+.nvr-page .page-head { margin-bottom: 0; }
+.nvr-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.nvr-pager .nvr-size { width: auto; min-height: 36px; padding-block: 4px; }
+.nvr-page-label { white-space: nowrap; }
+
+.nvr-notice {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--surface);
+}
+.nvr-notice[data-tone="warning"] { border-color: color-mix(in srgb, var(--warning) 50%, var(--border)); }
+.nvr-notice[data-kind="connecting"] { opacity: 0; animation: nvr-in 0.2s 1s forwards; }
+
+/* The grid: columns by tile count, no script involved. */
+.nvr-grid { display: grid; gap: 12px; grid-template-columns: repeat(var(--nvr-cols, 2), minmax(0, 1fr)); }
+.nvr-grid[data-count="1"] { --nvr-cols: 1; }
+.nvr-grid[data-count="2"], .nvr-grid[data-count="3"], .nvr-grid[data-count="4"] { --nvr-cols: 2; }
+.nvr-grid[data-count="5"], .nvr-grid[data-count="6"], .nvr-grid[data-count="7"], .nvr-grid[data-count="8"], .nvr-grid[data-count="9"] { --nvr-cols: 3; }
+.nvr-grid[data-count="10"], .nvr-grid[data-count="11"], .nvr-grid[data-count="12"], .nvr-grid[data-count="13"],
+.nvr-grid[data-count="14"], .nvr-grid[data-count="15"], .nvr-grid[data-count="16"] { --nvr-cols: 4; }
+/* Wide screens fit more across: five, six or seven cameras side by side. */
+@media (min-width: 1500px) {
+  .nvr-grid[data-count="5"], .nvr-grid[data-count="6"] { --nvr-cols: 5; }
+  .nvr-grid[data-count="7"], .nvr-grid[data-count="8"], .nvr-grid[data-count="9"] { --nvr-cols: 4; }
+}
+@media (max-width: 640px) {
+  .nvr-grid[data-count="2"] { --nvr-cols: 1; }
+  .nvr-grid[data-count="3"], .nvr-grid[data-count="4"], .nvr-grid[data-count="5"], .nvr-grid[data-count="6"],
+  .nvr-grid[data-count="7"], .nvr-grid[data-count="8"], .nvr-grid[data-count="9"], .nvr-grid[data-count="10"],
+  .nvr-grid[data-count="11"], .nvr-grid[data-count="12"], .nvr-grid[data-count="13"], .nvr-grid[data-count="14"],
+  .nvr-grid[data-count="15"], .nvr-grid[data-count="16"] { --nvr-cols: 2; }
+}
+
+/* A tile: picture on top, name and Record chip below. The whole tile is the link to the watch screen (the name's link is stretched). */
+/* `isolation` makes the tile one stacking context: the picture layers, the notes and the stretched link of the name below all compare inside it. */
+.nvr-tile {
+  position: relative; isolation: isolate; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.nvr-tile + .nvr-tile { margin-top: 0; }
+.nvr-tile:hover { border-color: var(--border-strong); }
+.nvr-tile[data-focus="true"] { border-color: var(--amber); }
+.nvr-tile:has(.nvr-open:focus-visible) { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+.nvr-media { position: relative; aspect-ratio: 16 / 9; background: #0c0c0e; overflow: hidden; }
+/* Bottom to top: two snapshot images (the one that just loaded is in front), the player, then notes. A <video> with no frame yet is transparent,
+   so the snapshot stays visible until the first recorded picture is shown. */
+.nvr-snap { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; z-index: 0; }
+.nvr-snap[data-front="true"] { opacity: 1; }
+.nvr-tile[data-snapshot="hidden"] .nvr-snap { visibility: hidden; }
+.nvr-stage { position: absolute; inset: 0; z-index: 1; }
+.nvr-stage video, .nvr-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: transparent; }
+.nvr-media[data-dim="true"] .nvr-snap, .nvr-media[data-dim="true"] .nvr-stage { filter: brightness(0.55); }
+
+.nvr-tile-note {
+  position: absolute; z-index: 3; left: 0; right: 0; display: grid; justify-items: center; gap: 4px; padding: 10px 12px;
+  text-align: center; color: #f3f3f4; background: rgb(12 12 14 / 0.78);
+}
+.nvr-tile-note[data-place="center"] { inset: 0; align-content: center; background: transparent; padding-top: 38px; }
+.nvr-tile-note[data-place="bottom"] { bottom: 0; }
+.nvr-tile-note-title { font-size: 0.95rem; overflow-wrap: anywhere; }
+.nvr-tile-note[data-tone="warning"] .nvr-tile-note-title { color: #f0b254; }
+.nvr-tile-note[data-tone="error"] .nvr-tile-note-title { color: #ff8a82; }
+.nvr-tile-note-detail { font-size: 0.85rem; color: #c8c8ce; overflow-wrap: anywhere; }
+/* The name's link is stretched over the whole tile (below the note, caption and chip, above the picture). The note, caption and chip let the pointer through
+   to it, so a click anywhere opens the camera; Try again is the one thing in the note that takes the pointer. */
+.nvr-tile-note, .nvr-caption, .nvr-badges { pointer-events: none; }
+.nvr-retry { pointer-events: auto; margin-top: 4px; }
+
+.nvr-caption {
+  position: absolute; z-index: 3; left: 8px; bottom: 8px; max-width: calc(100% - 16px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.85rem; font-weight: 650; font-variant-numeric: tabular-nums; padding: 3px 10px; border-radius: 99px;
+  background: rgb(15 15 17 / 0.85); color: #fff; border: 1px solid rgb(255 255 255 / 0.2);
+}
+.nvr-badges { position: absolute; z-index: 3; right: 8px; bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.nvr-badges .pill { background: rgb(15 15 17 / 0.82); border-color: rgb(255 255 255 / 0.12); backdrop-filter: blur(6px); }
+.nvr-badges .pill.recording { color: #ff6a61; }
+.nvr-badges .pill.warning { color: #f0b254; }
+.nvr-badges .pill.idle { color: #b4b4bc; }
+.nvr-busy { display: inline-flex; opacity: 0; animation: nvr-in 0.2s 0.3s forwards; }
+.nvr-busy .spinner { width: 22px; height: 22px; border-width: 2px; }
+@keyframes nvr-in { to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .nvr-busy, .nvr-notice[data-kind="connecting"] { animation: none; opacity: 1; }
+}
+
+.nvr-tile-bar { padding: 8px 12px; min-width: 0; }
+.nvr-tile-bar h3 { font-size: 0.98rem; min-width: 0; }
+.nvr-open { display: block; color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nvr-open::after { content: ""; position: absolute; inset: 0; z-index: 2; }
+.nvr-open:focus-visible { outline: none; }
+
+@media (max-width: 640px) {
+  .nvr-grid:not([data-count="1"]):not([data-count="2"]) .nvr-tile-note { padding: 6px 8px; }
+  .nvr-grid:not([data-count="1"]):not([data-count="2"]) .nvr-tile-note-title { font-size: 0.8rem; }
+  .nvr-grid:not([data-count="1"]):not([data-count="2"]) .nvr-tile-note-detail { font-size: 0.72rem; }
+  /* a small tile with a note over its picture has no room for the chip as well; the note says what matters */
+  .nvr-grid:not([data-count="1"]):not([data-count="2"]) .nvr-media[data-dim="true"] .nvr-badges { display: none; }
+}
+
+/* Transport and timeline */
+.nvr-controls { display: grid; gap: 12px; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.nvr-transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.nvr-readout { min-width: 9ch; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* At the live edge the readout is the Live indicator (screens/nvr.js renderTransport). */
+.nvr-readout[data-live="true"] { display: inline-flex; align-items: center; gap: 8px; color: #ff6a61; letter-spacing: 0.04em; text-transform: uppercase; }
+.nvr-readout[data-live="true"]::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: nvr-live-dot 2s ease-in-out infinite; }
+@keyframes nvr-live-dot { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .nvr-readout[data-live="true"]::before { animation: none; } }
+.nvr-grid-presets { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.nvr-grid-presets .btn[aria-pressed="true"] { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }
+@media (max-width: 640px) {
+  .nvr-grid-presets { margin-left: 0; width: 100%; }
+  .nvr-grid-presets .btn { flex: 1 1 auto; }
+}

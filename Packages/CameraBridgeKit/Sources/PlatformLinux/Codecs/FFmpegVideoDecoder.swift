@@ -205,7 +205,11 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
         guard let header = stream.header else {
             throw MediaCodecError.unsupported("the stream's parameter sets cannot be described to ffmpeg")
         }
-        let spec = FFmpegProcessSpec(executable: executable, arguments: FFmpegArguments.decoder(width: format.width, height: format.height),
+        let spec = FFmpegProcessSpec(executable: executable,
+                                     // CPU decoding: on the reference box (N150, five H.264 cameras) decoding on the GPU saved nothing measurable
+                                     // and copying the pictures back cost a little (2026-10-14). `runtime.hardwareDecodeDevice()` is there for
+                                     // cameras where it pays (HEVC, several 4K streams decoded all the time); measure before turning it on.
+                                     arguments: FFmpegArguments.decoder(width: format.width, height: format.height, hardwareDevice: nil),
                                      label: "video decoder")
         let session = try FFmpegSession(launcher: runtime.launcher, spec: spec)
         do {

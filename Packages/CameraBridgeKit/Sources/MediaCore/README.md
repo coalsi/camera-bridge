@@ -26,6 +26,9 @@ and `VideoTranscoding.preferSoftwareDecoding()` (defaults: nothing known, nothin
 `DecodedVideoFrame.pictureStatistics()` (default nil), `GOPQueue` (a bounded queue that drops whole GOPs), `MediaHub.newestGOP()` and
 `MediaHub.lastVideoArrival`.
 
+Recording (NVR, 2026-10-10, docs/CONTRACT_CHANGES.md): `MediaHub.discontinuityCount` (how many times `discontinuity()` was called; readable from any thread, so a
+recorder that sees it change knows the source reconnected).
+
 Timestamp overlay (2026-10-02, docs/CONTRACT_CHANGES.md): `OverlayPosition`, `OverlaySize`, `TimestampOverlaySettings`
 (Codable; every key defaults when missing or unreadable), `TimestampOverlayText` (the words: `make(at:settings:cameraName:locale:timeZone:)`,
 `uses24Hour(locale:)`, `systemUses24Hour`), `OverlayClock` with `PictureWallClock`, `FixedOverlayClock` and `OffsetOverlayClock`,

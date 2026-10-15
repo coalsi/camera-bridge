@@ -126,7 +126,13 @@ final class AppModel {
     /// Where the configuration and the logs live (Settings › Diagnostics › Show in Finder); the live app's folder in
     /// tests and previews too, where nothing is created there.
     @ObservationIgnored let dataDirectory: URL
-    var selection: ManagerSelection?
+    var selection: ManagerSelection? {
+        // Any navigation closes the single-camera viewer, a click on the page that is already selected included (an `onChange` would miss that).
+        didSet {
+            expandedCameraID = nil
+            expandedStart = nil
+        }
+    }
     /// The manager window's sheet (onboarding or Add Camera), if any.
     var presentedSheet: ManagerSheet?
     /// Which VPN banners were shown or dismissed (`NetworkNoticeThrottle`); remembered across launches.
@@ -240,6 +246,19 @@ final class AppModel {
             return AppModel(options: options, engine: BridgeEngine.preview(scenario: options.previewScenario), loginItems: InMemoryLoginItemService(), defaults: previewDefaults,
                             profileService: CameraProfileService())
         }
+        #if DEBUG
+        // A measurement run (`-isolatedEngine <directory>`, bundle identifier ending in .nvrtest): the real engine on a throwaway directory.
+        // Present but invalid arguments stop the app: they never fall through to the person's own bridge below.
+        switch IsolatedLaunchDecision.decide(defaults: defaults, bundleIdentifier: Bundle.main.bundleIdentifier) {
+        case .live:
+            break
+        case .refused(let refusal):
+            FileHandle.standardError.write(Data("CameraBridge: -isolatedEngine refused: \(refusal.localizedDescription)\n".utf8))
+            exit(2)
+        case .isolated(let run):
+            return launchingIsolated(options: options, run: run)
+        }
+        #endif
         let environment = BridgeEnvironment.live()
         // The Developer ID build is not sandboxed: take over the configuration and settings of the sandboxed build once.
         LegacySandboxMigration.migrate(bundleID: Bundle.main.bundleIdentifier ?? "com.coreysilvia.CameraBridge", home: FileManager.default.homeDirectoryForCurrentUser,
@@ -250,6 +269,24 @@ final class AppModel {
                         profileService: CameraProfileService(), dataDirectory: environment.dataDirectory)
     }
 
+    #if DEBUG
+    /// What `-isolatedEngine` set up (nil in every other mode): the seed and the probe read it.
+    @ObservationIgnored var isolatedRun: IsolatedEngineOptions?
+
+    /// The real engine on `BridgeEnvironment.testing(directory:)` (loopback only, in-memory secrets, no Bonjour, no power assertions), its own
+    /// defaults and log folder, a simulated login item and no profile download: nothing of the person's installed app is read or written.
+    private static func launchingIsolated(options: LaunchOptions, run: IsolatedEngineOptions) -> AppModel {
+        try? FileManager.default.createDirectory(at: run.directory, withIntermediateDirectories: true)
+        DiagnosticsCenter.shared.install(directory: run.directory.appending(path: "Diagnostics", directoryHint: .isDirectory))
+        var environment = BridgeEnvironment.testing(directory: run.directory)
+        environment.demoKeyframeSeconds = run.demoKeyframeSeconds
+        let model = AppModel(options: options, engine: BridgeEngine(environment: environment), loginItems: InMemoryLoginItemService(),
+                             defaults: IsolatedEngineOptions.defaults(), profileService: nil, dataDirectory: run.directory)
+        model.isolatedRun = run
+        return model
+    }
+    #endif
+
     /// Preview mode's and `#Preview`s' defaults, apart from the live app's.
     static var previewDefaults: UserDefaults { UserDefaults(suiteName: "CameraBridgePreviews") ?? UserDefaults() }
 
@@ -258,6 +295,7 @@ final class AppModel {
     static var launchDefaults: UserDefaults {
         #if DEBUG
         if LaunchOptions(defaults: .standard).usesPreviewEngine { return previewDefaults }
+        if IsolatedEngineOptions(defaults: .standard) != nil { return IsolatedEngineOptions.defaults() }
         #endif
         return .standard
     }
@@ -299,6 +337,11 @@ final class AppModel {
                     log.notice("The bridge starts after onboarding")
                     return
                 }
+                #if DEBUG
+                if let run = isolatedRun {
+                    do { try await IsolatedEngineSeed.apply(run, to: engine) } catch { log.error("The isolated run could not be set up: \(error.localizedDescription)") }
+                }
+                #endif
                 await engine.start()
                 showManagerForRecoveredConfiguration()
             }
@@ -381,10 +424,14 @@ final class AppModel {
         localNetworkRecheck = nil
         localNetworkRecheckRun = nil
         isRecheckingLocalNetworkAccess = false
+        await clipExport.cancelAndWait()
         guard !isPreview else { return }
         let engine = engine
         let stopped = await TimeLimit.run(Self.terminationTimeLimit) { await engine.stop() }
         if !stopped { log.warning("The bridge didn’t stop within 5 seconds; quitting anyway") }
+        #if DEBUG
+        if let run = isolatedRun { ProbeFiles(directory: run.directory).append("events", ["t": Date().timeIntervalSince1970, "event": "engine-stopped", "withinLimit": stopped]) }
+        #endif
     }
 
     // MARK: Navigation
@@ -430,18 +477,23 @@ final class AppModel {
     /// The camera shown in the full-window viewer (double-click or expand on the Overview, the camera page's full-screen
     /// button), nil when none is.
     var expandedCameraID: UUID?
+    /// Where the viewer starts (the NVR page opens a tile at its playhead); nil: live. Cleared with the viewer.
+    var expandedStart: ViewerStart?
 
-    func expandCamera(_ id: UUID) {
+    func expandCamera(_ id: UUID, start: ViewerStart? = nil) {
+        expandedStart = start
         expandedCameraID = id
     }
 
     func closeExpandedCamera() {
         expandedCameraID = nil
+        expandedStart = nil
     }
 
     /// Opens the camera's page (from a tile's info area or the viewer's "Open camera settings").
     func openCameraPage(_ id: UUID) {
         expandedCameraID = nil
+        expandedStart = nil
         selection = .camera(id)
     }
 
@@ -494,7 +546,7 @@ final class AppModel {
     /// menu item.
     var bridgeIssue: BridgeIssue? {
         BridgeIssue.current(state: engine.state, localNetworkAccess: engine.localNetworkAccess, configurationBackup: engine.configurationRecoveredFrom,
-                            webhookProblem: engine.webhookProblem)
+                            webhookProblem: engine.webhookProblem, nvrPause: BridgeIssue.nvrPause(storage: engine.nvrStorage, cameras: engine.cameras))
     }
 
     // MARK: Sensors in the sidebar
@@ -581,6 +633,8 @@ final class AppModel {
             await engine.acknowledgeConfigurationRecovery()
         case .webhookNotListening:
             await retryWebhook()
+        case .nvrStorage(let pause):
+            if case .noFolder = pause { await chooseNVRFolder() } else { openRecordingSettings() }
         }
     }
 
@@ -596,6 +650,7 @@ final class AppModel {
         switch issue {
         case .localNetworkDenied: presentLocalNetworkFix()
         case .webhookNotListening: showSettings()
+        case .nvrStorage: openRecordingSettings()
         case .startFailed, .configurationRecovered: showManager()
         }
     }
@@ -609,6 +664,12 @@ final class AppModel {
         case .paused: await engine.resume()
         case .stopped, .failed: await engine.start()
         }
+    }
+
+    /// Opens Settings on the Recording tab (the last tab used is remembered under `SettingsTab.storageKey`).
+    func openRecordingSettings() {
+        defaults.set(SettingsTab.recording.rawValue, forKey: SettingsTab.storageKey)
+        showSettings()
     }
 
     var keepMacAwake: Bool { engine.settings.keepMacAwake }
@@ -642,6 +703,140 @@ final class AppModel {
         } catch {
             fail(String(localized: "Couldn’t Change Settings"), error)
             return false
+        }
+    }
+
+    // MARK: Recording (the NVR)
+
+    /// The recordings folder as numbers (used, free, oldest, newest, why recording paused); nil before the first measurement.
+    var nvrStorage: ArchiveStorageStatus? { engine.nvrStorage }
+    /// Where recorded video is read from (the player, the timeline).
+    var archive: any ArchiveReading { engine.archive }
+
+    /// Saves clips of the recordings for the viewer's and the NVR page's clip bar: one export at a time, stopped (its partial file removed) when the app quits.
+    @ObservationIgnored lazy var clipExport = ClipExportModel(
+        exporter: ClipExporter(archive: engine.archive),
+        cameraNames: { [weak self] in Dictionary((self?.engine.cameras ?? []).map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first }) },
+        destinations: PanelClipDestinations(),
+        freeSpace: { ClipExportModel.availableSpace(at: $0) },
+        defaults: defaults, now: { Date() })
+
+    /// Asks where to store recordings: a folder chooser (directories only, "Choose", starting in Movies); nil when the person cancels. Tests inject one.
+    @ObservationIgnored var nvrFolderPicker: @MainActor () async -> URL? = AppModel.chooseFolderWithPanel
+    /// Replaces the check that a folder can hold recordings before it is saved (nil: the engine's `inspectArchiveFolder`, `ArchiveFolderCheck`: a folder,
+    /// writable, with at least its volume's floor free, which on the startup volume is `max(20 GiB, min(10%, 50 GiB))`; it throws a sentence). Tests inject one.
+    @ObservationIgnored var nvrFolderInspector: (@MainActor (URL) async throws -> Void)?
+
+    /// Record switches that were just flipped and are not in the engine's configuration yet: the switch shows them at once.
+    private(set) var pendingRecord: [UUID: Bool] = [:]
+    private(set) var pendingRecordSound: [UUID: Bool] = [:]
+
+    /// The Record switch's state: the pending value while a change is on its way, else the configuration's.
+    func isRecording(_ id: UUID) -> Bool { pendingRecord[id] ?? configuration(for: id)?.nvrEnabled ?? false }
+    func recordsSound(_ id: UUID) -> Bool { pendingRecordSound[id] ?? configuration(for: id)?.nvrRecordSound ?? false }
+    func isRecordChangePending(_ id: UUID) -> Bool { pendingRecord[id] != nil || pendingRecordSound[id] != nil }
+
+    /// Turns Record on or off for a camera. The first time (no folder chosen yet) it asks where to store recordings, checks the folder and saves it,
+    /// then turns Record on; Cancel, or a folder that cannot hold recordings (shown), changes nothing and the switch stays off.
+    func setNVRRecording(_ on: Bool, camera id: UUID) async {
+        guard !skipInPreview(String(localized: "Record")), let current = configuration(for: id), pendingRecord[id] == nil else { return }
+        guard on != current.nvrEnabled else { return }
+        pendingRecord[id] = on
+        defer { pendingRecord[id] = nil }
+        if on, engine.settings.nvrFolder == nil {
+            guard await chooseNVRFolder() else { return }
+        }
+        do {
+            try await engine.setNVR(cameraID: id, enabled: on)
+        } catch {
+            fail(on ? String(localized: "Couldn’t Turn On Record") : String(localized: "Couldn’t Turn Off Record"), error)
+        }
+    }
+
+    /// Moving to another bridge (Settings › Backup › Move to Camera Bridge OS): every camera stops recording and is turned off here, so the new
+    /// bridge is the only one that serves and records them. Their settings stay: turning a camera back on undoes it. Returns how many were stopped.
+    @discardableResult
+    func handOverToAnotherBridge() async -> Int {
+        guard !skipInPreview(String(localized: "Stop This Mac’s Bridge")) else { return 0 }
+        var stopped = 0
+        for camera in engine.configurations where camera.isEnabled || camera.nvrEnabled {
+            do {
+                if camera.nvrEnabled { try await engine.setNVR(cameraID: camera.id, enabled: false) }
+                if camera.isEnabled, var current = configuration(for: camera.id) {
+                    current.isEnabled = false
+                    current.nvrEnabled = false
+                    try await engine.updateCamera(current, password: nil)
+                }
+                stopped += 1
+            } catch {
+                fail(String(localized: "Couldn’t Stop “\(camera.name)”"), error)
+            }
+        }
+        log.notice("handed over to another bridge: \(stopped) camera(s) stopped on this Mac")
+        return stopped
+    }
+
+    /// Record sound for a camera (off by default; recorded only while the camera's audio is on).
+    func setNVRRecordSound(_ on: Bool, camera id: UUID) async {
+        guard !skipInPreview(String(localized: "Record Sound")), let current = configuration(for: id), pendingRecordSound[id] == nil else { return }
+        guard on != current.nvrRecordSound else { return }
+        pendingRecordSound[id] = on
+        defer { pendingRecordSound[id] = nil }
+        do {
+            try await engine.setNVR(cameraID: id, recordSound: on)
+        } catch {
+            fail(String(localized: "Couldn’t Change Record Sound"), error)
+        }
+    }
+
+    /// Asks where to store recordings, checks the folder and saves it (Settings › Recording › Choose, the banner's Choose Folder…, the first Record).
+    /// False when the person cancelled or the folder was refused (a refusal is shown, and nothing changes).
+    @discardableResult
+    func chooseNVRFolder() async -> Bool {
+        guard !skipInPreview(String(localized: "Choose Folder")) else { return false }
+        guard let folder = await nvrFolderPicker()?.standardizedFileURL else { return false }
+        do {
+            if let nvrFolderInspector {
+                try await nvrFolderInspector(folder)
+            } else {
+                _ = try await engine.inspectArchiveFolder(folder)
+            }
+        } catch {
+            fail(String(localized: "Can’t Record There"), error)
+            return false
+        }
+        return await updateSettings(String(localized: "Recordings Folder")) { $0.nvrFolder = folder.path }
+    }
+
+    /// Where the folder chooser starts: a mounted drive other than the startup volume when there is one, else Movies. The startup volume has to keep
+    /// `max(20 GiB, min(10%, 50 GiB))` free, which a big disk that is nearly full cannot; the check then says so, and starting on a drive saves the detour.
+    static func pickerStart(drives: [URL], movies: URL?) -> URL? { drives.first ?? movies }
+
+    /// The mounted volumes a person plugs in and out: not the startup volume, not hidden ones, by name.
+    static func mountedDrives() -> [URL] {
+        let keys: Set<URLResourceKey> = [.volumeIsRootFileSystemKey, .volumeIsBrowsableKey]
+        let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: Array(keys), options: [.skipHiddenVolumes]) ?? []
+        return volumes
+            .filter { url in
+                let values = try? url.resourceValues(forKeys: keys)
+                return values?.volumeIsRootFileSystem != true && values?.volumeIsBrowsable != false
+            }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    /// The default folder chooser: directories only, with New Folder, starting on a drive (else in Movies).
+    @MainActor
+    static func chooseFolderWithPanel() async -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = String(localized: "Choose")
+        panel.message = String(localized: "Choose where Camera Bridge stores recordings.")
+        panel.directoryURL = pickerStart(drives: mountedDrives(), movies: FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first)
+        return await withCheckedContinuation { continuation in
+            panel.begin { response in continuation.resume(returning: response == .OK ? panel.url : nil) }
         }
     }
 

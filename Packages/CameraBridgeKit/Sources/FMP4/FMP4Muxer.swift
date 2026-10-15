@@ -168,8 +168,18 @@ public struct FMP4Muxer: Sendable {
     /// fragment without audio samples has no audio traf. On a throw the muxer is unchanged.
     public mutating func fragment(video frames: [EncodedVideoFrame], audio audioFrames: [EncodedAudioFrame],
                                   nextDecodeTime: MediaTime?) throws -> Data {
+        try fragment(video: frames, audio: audioFrames, nextDecodeTime: nextDecodeTime, continuation: false)
+    }
+
+    /// `fragment(video:audio:nextDecodeTime:)` that may also start with a delta frame when `continuation` is true: the next piece of a group of
+    /// pictures that an earlier fragment of this muxer began (the NVR cuts a long group every 2.5 s). Only the two keyframe-first guards relax;
+    /// every other check stands, and the first fragment of a muxer must still start with a keyframe (`.fragmentMustStartWithKeyframe`). Decode
+    /// times must continue after the previous fragment's, and `nextDecodeTime` of the previous call chains the `tfdt`s as before.
+    public mutating func fragment(video frames: [EncodedVideoFrame], audio audioFrames: [EncodedAudioFrame],
+                                  nextDecodeTime: MediaTime?, continuation: Bool) throws -> Data {
         guard let firstFrame = frames.first else { throw FMP4Error.emptyFragment }
-        guard firstFrame.isKeyframe else { throw FMP4Error.fragmentMustStartWithKeyframe }
+        let mayStartOnDeltaFrame = continuation && state.lastVideoDecodeTime != nil
+        guard firstFrame.isKeyframe || mayStartOnDeltaFrame else { throw FMP4Error.fragmentMustStartWithKeyframe }
         var statistics = FragmentStatistics()
 
         // Samples.
@@ -185,7 +195,7 @@ public struct FMP4Muxer: Sendable {
             }
         }
         guard let first = samples.first?.frame else { throw FMP4Error.emptyFragment }
-        guard first.isKeyframe else { throw FMP4Error.fragmentMustStartWithKeyframe }
+        guard first.isKeyframe || mayStartOnDeltaFrame else { throw FMP4Error.fragmentMustStartWithKeyframe }
 
         // Video timing.
         let timescale = video.timescale

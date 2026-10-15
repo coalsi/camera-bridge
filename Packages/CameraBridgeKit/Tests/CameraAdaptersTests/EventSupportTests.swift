@@ -202,6 +202,60 @@ import Testing
         #expect(policy.delay(connected: false, lasted: .zero, error: nil) == .seconds(1))
     }
 
+    /// Patio: the event channel hit CameraBridge's 2-minute login pause (left from an earlier wrong password) and then waited ten minutes, though
+    /// the corrected password worked 36 s later.
+    @Test func aLoginPauseIsWaitedOutNotTheUnauthorizedDelay() {
+        var policy = ReconnectPolicy(backoff: Backoff(initial: .seconds(1), maximum: .seconds(60), jitter: 0), healthyAfter: .seconds(10),
+                                     minimumDelayAfterFailure: .zero, delayAfterUnauthorized: .seconds(600))
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        #expect(policy.delay(connected: false, lasted: .zero, error: CameraAdapterError.lockedOut(until: now.addingTimeInterval(36)), now: now) == .seconds(37))
+        #expect(policy.delay(connected: false, lasted: .zero, error: CameraAdapterError.lockedOut(until: now.addingTimeInterval(-5)), now: now) == .seconds(1),
+                "a pause that already ended: the margin only")
+        #expect(policy.delay(connected: false, lasted: .zero, error: CameraAdapterError.lockedOut(until: now.addingTimeInterval(1_800)), now: now) == .seconds(1_801),
+                "a camera's own lockout is waited out in full")
+        #expect(policy.delay(connected: false, lasted: .zero, error: CameraAdapterError.unauthorized, now: now) == .seconds(600))
+    }
+
+    /// The video signed in with the same credentials: the wait after a refused event login ends at once, but only once per streak of refusals
+    /// (video that flaps cannot turn into a login every few seconds and lock the camera).
+    @Test func confirmedCredentialsEndTheWaitAfterARefusedLoginOnce() async {
+        let attempts = Box(0)
+        var policy = Self.fastPolicy
+        policy.delayAfterUnauthorized = .seconds(600)
+        let source = SupervisedEventSource(label: "test", policy: policy) { _ in
+            attempts.update { $0 += 1 }
+            throw CameraAdapterError.unauthorized
+        }
+        let recorder = Recorder(source.events())
+        #expect(await eventually { attempts.value == 1 && recorder.values.contains(.authenticationFailed) })
+        source.credentialsConfirmed()
+        #expect(await eventually { attempts.value == 2 })
+        try? await Task.sleep(for: .milliseconds(100))
+        source.credentialsConfirmed()
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(attempts.value == 2, "refused again: the ten minutes are not cut short a second time")
+        await source.stop()   // ends the long wait too
+    }
+
+    /// A wake that comes while an attempt runs ends the wait that follows it (the video came up during the login).
+    @Test func aWakeDuringTheAttemptEndsTheNextWait() async {
+        let attempts = Box(0)
+        let gate = AsyncStream<Void>.makeStream()
+        var policy = Self.fastPolicy
+        policy.delayAfterUnauthorized = .seconds(600)
+        let source = SupervisedEventSource(label: "test", policy: policy) { _ in
+            attempts.update { $0 += 1 }
+            if attempts.value == 1 { for await _ in gate.stream { break } }
+            throw CameraAdapterError.unauthorized
+        }
+        _ = source.events()
+        #expect(await eventually { attempts.value == 1 })
+        source.credentialsConfirmed()
+        gate.continuation.yield()
+        #expect(await eventually { attempts.value == 2 })
+        await source.stop()
+    }
+
     @Test func stopHookRunsOnceAfterTheSessionEnds() async {
         let log = Box<[String]>([])
         let source = SupervisedEventSource(label: "test", policy: Self.fastPolicy, onStop: { log.update { $0.append("stop hook") } }) { context in

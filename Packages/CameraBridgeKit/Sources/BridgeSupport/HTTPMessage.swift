@@ -356,13 +356,17 @@ public enum HTTPSerializer {
         case 404: "Not Found"
         case 405: "Method Not Allowed"
         case 408: "Request Timeout"
+        case 409: "Conflict"
+        case 410: "Gone"
         case 413: "Payload Too Large"
         case 422: "Unprocessable Entity"
         case 429: "Too Many Requests"
         case 470: "Connection Authorization Required"
         case 500: "Internal Server Error"
         case 501: "Not Implemented"
+        case 502: "Bad Gateway"
         case 503: "Service Unavailable"
+        case 504: "Gateway Timeout"
         default: "Status \(status)"
         }
     }

@@ -22,7 +22,9 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
   `CameraDrivers.make(vendor:endpoint:credentials:mainStreamURL:subStreamURL:transport:cameraID:)` (the contract
   `make` plus the configured camera's ID, which everything the driver builds logs with; the contract overload passes
   nil) and `CameraDriver.close()` (a requirement with a default that does nothing: ends the camera sessions a driver
-  holds, Reolink's API login; the driver stays usable), W4 review round 4.
+  holds, Reolink's API login; the driver stays usable), W4 review round 4. `CleanPictureBackup`, `CleanPictureChange`, `CameraSettingsService.cleanPicture()` and `CameraSettingsService.restorePicture(_:)` (2026-10-14: every label the camera draws itself off through Hikvision ISAPI's overlays document, Reolink's `Osd` or ONVIF's text OSD elements, and back from the saved copy). `PosixTimeZone` (2026-10-14: `string(for:)` reads the POSIX TZ string at the end of a zone file, `hasDaylightSaving(_:)`; cameras take their time zone in that form) and `CameraSettingsService.setCameraTimeZone(posix:)`. `CameraEventSource.credentialsConfirmed()` (2026-10-13, a requirement
+  with a default that does nothing: the camera's video signed in with the same credentials, so a `SupervisedEventSource` waiting after a refused
+  login tries again now, once per streak of refusals).
 - `HomeKitReadinessAdvisor` (2026-10-01, docs/CONTRACT_CHANGES.md): grades a camera's ONVIF encoder settings and
   measured stream facts against HomeKit Secure Video's expectations (`evaluate`), with vendor-specific manual fix-up
   steps (`manualSteps`); `MeasuredStreamFacts`, `HomeKitReadinessCheck`, `HomeKitReadinessReport`. `CameraSettingsService`

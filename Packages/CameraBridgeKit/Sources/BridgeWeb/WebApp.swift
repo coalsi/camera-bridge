@@ -35,6 +35,13 @@ public struct WebConfiguration: Sendable {
     public var offersDemoCamera: Bool
     public var diagnosticsContext: @Sendable (_ launched: Date) -> DiagnosticsContext
     public var limits: HTTPServer.Limits
+    /// Where recordings may be stored (the box: its one built-in location); empty offers none, and no folder can then be chosen from the page.
+    public var archiveLocations: [ArchiveLocation]
+    /// Archive requests (fragment, init, keyframe, activity) served at once, in all and per peer address; the next gets `429 busy`.
+    public var maximumArchiveReads: Int
+    public var maximumArchiveReadsPerAddress: Int
+    /// The largest media answer: a fragment is at most 16 MiB (`ArchiveConstants.fragmentMaximumBytes`); a bigger one is `502 unreadable`.
+    public var maximumSegmentBytes: Int
 
     public init(dataDirectory: URL, staticDirectory: URL? = nil, port: UInt16 = 80, loopbackOnly: Bool = false, allowedHosts: [String] = [],
                 setupToken: String? = nil, product: String = "Camera Bridge OS", version: String = "0.1", build: String = "development",
@@ -52,11 +59,15 @@ public struct WebConfiguration: Sendable {
         self.secureCookies = secureCookies
         eventInterval = .milliseconds(500)
         liveFrameInterval = .milliseconds(700)
-        maximumLiveStreams = 6
-        maximumEventStreams = 24
+        maximumLiveStreams = 16
+        maximumEventStreams = 64
         liveLifetime = .seconds(900)
         offersDemoCamera = true
         limits = HTTPServer.Limits()
+        archiveLocations = []
+        maximumArchiveReads = 24
+        maximumArchiveReadsPerAddress = 16
+        maximumSegmentBytes = 16 * 1_048_576
         diagnosticsContext = { launched in
             var context = DiagnosticsContext.current(appVersion: version, appBuild: build, macModel: "unknown", launched: launched)
             context.appName = product
@@ -152,6 +163,8 @@ public final class WebApp: Sendable {
     let log = Log(category: "web")
     private let streams = Mutex(StreamCounts())
     let nestSignIns = Mutex<[String: NestSignIn]>([:])
+    /// What the NVR routes remember between requests (`WebApp+NVR.swift`): admission counters, per-file playback information, folder checks.
+    let archiveState = ArchiveWebState()
 
     struct StreamCounts {
         var live = 0
@@ -214,6 +227,8 @@ public final class WebApp: Sendable {
 
     private func dispatch(_ request: HTTPRequest) async -> HTTPResponse {
         guard Self.hostAllowed(request, extra: configuration.allowedHosts) else {
+            // While the setup hotspot is open every name points at the box: a phone that checks for a captive portal is sent to the setup page.
+            if let hotspot = system.setupHotspot() { return Self.captiveRedirect(to: hotspot) }
             return .text("Unrecognised host name. Use the bridge’s IP address or its .local name.\n", status: 421)
         }
         let path = request.path
@@ -321,8 +336,9 @@ public final class WebApp: Sendable {
     }
 
     static func addSecurityHeaders(to response: inout HTTPResponse, isAPI: Bool) {
-        response.headers["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
-            + "font-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        // `media-src 'self' blob:` is the one directive the NVR adds: the player's MediaSource object URL is a blob. Nothing else is widened.
+        response.headers["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; "
+            + "connect-src 'self'; font-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"

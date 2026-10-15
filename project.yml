@@ -25,8 +25,8 @@ settings:
     SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY: YES
     DEVELOPMENT_TEAM: XL4RAH5J96
     ENABLE_USER_SCRIPT_SANDBOXING: YES
-    MARKETING_VERSION: "1.0.1"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "1.1"
+    CURRENT_PROJECT_VERSION: "10"
   configs:
     Debug: { SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG $(inherited)" }
     Release: { SWIFT_COMPILATION_MODE: wholemodule }
@@ -50,6 +50,8 @@ targets:
       - package: CameraBridgeKit
         product: RTSP          # RTSPError, for readable error text (Model/CameraSetupService.swift)
       - package: CameraBridgeKit
+        product: FMP4          # the NVR's player reads recorded fragments (Model/Playback)
+      - package: CameraBridgeKit
         product: PlatformApple # TimestampOverlayPreview: the timestamp preview is drawn by the encoder's own renderer
       - package: Sparkle
         product: Sparkle       # App/Sources/Updates only (not in the logic-test bundle)
@@ -67,6 +69,18 @@ targets:
           Camera Bridge connects to the security cameras on your network and
           publishes them to the Apple Home app.
         NSBonjourServices: [_hap._tcp]
+        # Recording (the NVR): a program that is not sandboxed is asked by macOS the first time it reads a folder on a drive or in Documents, Desktop or
+        # Downloads. These are the words of that prompt (without them it is a generic one); docs/distribution.md.
+        NSRemovableVolumesUsageDescription: >-
+          Camera Bridge records your cameras to a drive you choose. It needs access to that drive to save recordings and play them back.
+        NSNetworkVolumesUsageDescription: >-
+          Camera Bridge records your cameras to a network drive you choose. It needs access to that drive to save recordings and play them back.
+        NSDocumentsFolderUsageDescription: >-
+          Camera Bridge records your cameras to a folder you choose. It needs access to your Documents folder when that folder is inside it.
+        NSDesktopFolderUsageDescription: >-
+          Camera Bridge records your cameras to a folder you choose. It needs access to your Desktop folder when that folder is inside it.
+        NSDownloadsFolderUsageDescription: >-
+          Camera Bridge records your cameras to a folder you choose. It needs access to your Downloads folder when that folder is inside it.
         # Sparkle 2 (App/Sources/Updates). SUPublicEDKey is the EdDSA public key of the update signatures: Tools/sparkle-generate-keys.sh
         # makes the key pair (private half in the maintainer's Keychain) and writes SPARKLE_PUBLIC_ED_KEY below. While it is empty the
         # app has no updater (Check for Updates… is disabled) rather than one that cannot verify anything.
@@ -129,6 +143,8 @@ targets:
         product: MediaCore
       - package: CameraBridgeKit
         product: RTSP
+      - package: CameraBridgeKit
+        product: FMP4
       - package: CameraBridgeKit
         product: PlatformApple
     settings:

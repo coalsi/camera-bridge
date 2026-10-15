@@ -1,0 +1,255 @@
+#!/bin/bash
+# cb-recording-drive: record to an attached drive (USB or SATA SSD / HDD, NVMe) instead of the box's own disk.
+#
+#   cb-recording-drive --list [--json]        the attached disks and which of them may be used, and why not
+#   cb-recording-drive --device /dev/sdb --confirm "ERASE ALL DATA ON sdb"
+#                                             erase the disk, make one ext4 file system (label CBRECORDINGS) and record there
+#   cb-recording-drive --device /dev/sdb --keep
+#                                             use a disk that already is a Camera Bridge recording drive, without erasing it
+#                                             (after a new install, or a drive moved from another box)
+#   cb-recording-drive --forget               go back to the box's own disk (the drive and its recordings are left untouched)
+#   cb-recording-drive --apply [--restart]    what the boot and the plugging in of the drive run: mount it (or, with a drive
+#                                             chosen but not plugged in, a read-only placeholder so nothing is written to the
+#                                             box's own disk by mistake); --restart then restarts the engine if that changed
+#
+# The recorder always writes to /var/lib/camera-bridge/recordings; this puts the drive there. The choice is kept in
+# /srv/system/recording-drive (the file system's UUID) on the data partition, so it survives updates and reboots.
+# THE ERASING FORM DESTROYS EVERYTHING ON THE DISK. Rules, all enforced here: no default disk; the typed phrase; refused:
+# the disk the system runs from, a disk with a mounted file system (unless it is our own drive), swap, a holder (RAID, LVM),
+# read-only disks, anything that is not a whole disk, disks under 64 GiB, odd device names. Everything is checked again
+# right before the first write.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export CB_TAG=cb-recording-drive
+# shellcheck source=../lib/camera-bridge/lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+MIN_BYTES=$((64 * 1024 * 1024 * 1024))
+DEVICE_RE='^/dev/(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$'
+LABEL=CBRECORDINGS
+TARGET=$CB_DATA/recordings
+CONFIG=$CB_SYSTEM/recording-drive
+STATUS_NAME=recording-drive
+
+device="" confirm="" keep=0 list=0 json=0 forget=0 apply=0 restart=0
+
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+
+drive_status() {
+    # drive_status STATE MESSAGE [JSON-EXTRA]: internal | mounted | missing | working | failed
+    cb_status "$STATUS_NAME" "$1" "$2" "${3:-{\}}"
+}
+
+die() {
+    cb_log "error: $*"
+    drive_status failed "$*" 2>/dev/null || true
+    exit 1
+}
+
+lsblk_json() { lsblk -J -b -o NAME,KNAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,RO,FSTYPE,LABEL,UUID,PARTLABEL,MOUNTPOINTS,PKNAME; }
+
+parent_disk() {
+    local dev=$1 type pk
+    type=$(lsblk -dno TYPE "$dev" 2>/dev/null || true)
+    if [ "$type" = "disk" ]; then basename "$dev"; return 0; fi
+    pk=$(lsblk -dno PKNAME "$dev" 2>/dev/null || true)
+    [ -n "$pk" ] && echo "$pk"
+}
+
+# Kernel names of the disks that hold the running system.
+boot_disks() {
+    local mp src
+    for mp in / /usr /efi /boot /srv /var/lib/camera-bridge; do
+        findmnt -n -o SOURCE --target "$mp" >/dev/null 2>&1 || continue
+        mountpoint -q "$mp" || [ "$mp" = / ] || continue
+        src=$(findmnt -n -o SOURCE --target "$mp" | head -1)
+        src=${src%%\[*}
+        [ -b "$src" ] || continue
+        parent_disk "$src" || true
+    done | sort -u
+}
+
+# The mount point the recorder uses is the one thing that may be mounted from the disk.
+mounted_elsewhere() {
+    local dev=$1
+    lsblk -nro MOUNTPOINTS "$dev" 2>/dev/null | grep -v '^$' | grep -vx "$TARGET" || true
+}
+
+disk_problems() {
+    local k=$1 dev size ro type boots held
+    dev=/dev/$k
+    [[ $dev =~ $DEVICE_RE ]] || { echo "not a supported disk name"; return 0; }
+    [ -b "$dev" ] || { echo "not a block device"; return 0; }
+    type=$(lsblk -dno TYPE "$dev" 2>/dev/null || true)
+    [ "$type" = "disk" ] || echo "not a whole disk (type '${type:-unknown}')"
+    ro=$(blockdev --getro "$dev" 2>/dev/null || echo 1)
+    [ "$ro" = "0" ] || echo "read-only"
+    size=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+    [ "$size" -ge "$MIN_BYTES" ] || echo "smaller than 64 GiB"
+    boots=$(boot_disks)
+    if grep -qx "$k" <<<"$boots"; then echo "this is the disk the system is running from"; fi
+    [ -n "$boots" ] || echo "cannot tell which disk the system runs from"
+    held=$(mounted_elsewhere "$dev")
+    [ -z "$held" ] || echo "a file system on it is in use ($(head -1 <<<"$held"))"
+    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -q "^$dev"; then echo "it is used as swap"; fi
+    if compgen -G "/sys/block/$k/holders/*" >/dev/null || compgen -G "/sys/block/$k/${k}*/holders/*" >/dev/null \
+        || compgen -G "/sys/block/$k/${k}p*/holders/*" >/dev/null; then
+        echo "in use by another device (RAID, LVM or device-mapper)"
+    fi
+}
+
+# partition_of DISK: the first partition's device path.
+partition_of() {
+    case $1 in
+        *[0-9]) echo "${1}p1" ;;
+        *) echo "${1}1" ;;
+    esac
+}
+
+current_uuid() { [ -r "$CONFIG" ] && tr -d '[:space:]' <"$CONFIG" || true; }
+
+list_disks() {
+    local data names k problems out="[]" entry current
+    current=$(current_uuid)
+    data=$(lsblk_json)
+    names=$(jq -r '.blockdevices[] | select(.type == "disk") | .kname | select(test("^(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$"))' <<<"$data")
+    for k in $names; do
+        problems=$(disk_problems "$k" | jq -R . | jq -s .)
+        entry=$(jq --arg k "$k" --argjson p "$problems" --arg label "$LABEL" --arg current "$current" '
+            .blockdevices[] | select(.kname == $k)
+            | { name: .kname, path: .path, model: (.model // ""), serial: (.serial // ""), transport: (.tran // ""),
+                removable: (.rm == true or .rm == "1" or .rm == 1), sizeBytes: (.size | tonumber? // 0),
+                partitions: [ (.children // [])[] | { name: .kname, sizeBytes: (.size | tonumber? // 0), fstype: (.fstype // ""), label: (.label // ""), partlabel: (.partlabel // "") } ],
+                isRecordingDrive: ([ (.children // [])[] | select(.label == $label and .fstype == "ext4") ] | length > 0),
+                inUse: ([ (.children // [])[] | select($current != "" and .uuid == $current) ] | length > 0),
+                eligible: ($p | length == 0), problems: $p,
+                phrase: ("ERASE ALL DATA ON " + .kname) }' <<<"$data")
+        out=$(jq --argjson e "$entry" '. + [$e]' <<<"$out")
+    done
+    if [ "$json" -eq 1 ]; then
+        jq '{disks: .}' <<<"$out"
+    else
+        jq -r '.[] | "\(.path)  \(.sizeBytes / 1073741824 | floor) GiB  \(.model)  \(.transport)\(if .removable then " removable" else "" end)\n    " + (if .eligible then "can be used" + (if .isRecordingDrive then " (already a recording drive)" else "" end) else "NOT usable: " + (.problems | join("; ")) end)' <<<"$out"
+    fi
+}
+
+# --- mounting ---------------------------------------------------------------------------------------------------------
+
+# What is mounted on the recording folder now: nothing, a placeholder ("tmpfs") or a device path.
+mounted_source() { findmnt -n -o SOURCE --mountpoint "$TARGET" 2>/dev/null | head -1 || true; }
+
+prepare_target() {
+    install -d -m 0700 -o camerabridge -g camerabridge "$TARGET"
+}
+
+do_apply() {
+    local uuid dev before after
+    before=$(mounted_source)
+    uuid=$(current_uuid)
+    if [ -z "$uuid" ]; then
+        # No drive chosen: the box's own disk. Take a placeholder or a stale drive away, if one is there.
+        if [ -n "$before" ]; then umount -l "$TARGET" || true; fi
+        drive_status internal "Recording to this box's own disk."
+        [ -z "$before" ] || [ "$restart" -eq 0 ] || systemctl restart camerabridged.service || true
+        return 0
+    fi
+    dev=$(blkid -U "$uuid" 2>/dev/null || true)
+    if [ -n "$dev" ] && [ -b "$dev" ]; then
+        if [ "$before" = "$dev" ]; then
+            drive_status mounted "Recording to the attached drive." "$(jq -n --arg uuid "$uuid" '{uuid: $uuid}')"
+            return 0
+        fi
+        while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
+        prepare_target
+        mount -t ext4 -o nodev,nosuid,noexec,noatime "$dev" "$TARGET" || die "the recording drive could not be mounted"
+        # A freshly made file system is owned by root.
+        chown camerabridge:camerabridge "$TARGET"
+        chmod 0700 "$TARGET"
+        drive_status mounted "Recording to the attached drive." "$(jq -n --arg uuid "$uuid" '{uuid: $uuid}')"
+    else
+        [ "$before" != "cb-recording-drive-missing" ] || { drive_status missing "The recording drive is not attached."; return 0; }
+        while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
+        prepare_target
+        # Nothing may be written to the box's own disk meanwhile: a read-only, empty placeholder.
+        mount -t tmpfs -o ro,size=64k,mode=0555,nodev,nosuid,noexec cb-recording-drive-missing "$TARGET"
+        drive_status missing "The recording drive is not attached."
+    fi
+    after=$(mounted_source)
+    if [ "$restart" -eq 1 ] && [ "$before" != "$after" ]; then
+        cb_log "the recording drive changed; restarting the engine"
+        systemctl restart camerabridged.service || true
+    fi
+}
+
+# --- choosing a drive -------------------------------------------------------------------------------------------------
+
+use_drive() {
+    local k part uuid problems
+    [[ $device =~ $DEVICE_RE ]] || die "that is not a disk this system can use ($device)"
+    k=${device#/dev/}
+    drive_status working "Looking at the disk."
+    problems=$(disk_problems "$k")
+    [ -z "$problems" ] || die "that disk can't be used: $(head -1 <<<"$problems")"
+    if [ "$keep" -eq 1 ]; then
+        part=$(lsblk -nrpo PATH,FSTYPE,LABEL "$device" | awk -v l="$LABEL" '$2 == "ext4" && $3 == l {print $1; exit}')
+        [ -n "$part" ] || die "that disk is not a Camera Bridge recording drive"
+    else
+        [ "$confirm" = "ERASE ALL DATA ON $k" ] || die "the confirmation sentence does not match"
+        drive_status working "Erasing the disk and making the file system. This takes a minute or two."
+        cb_log "erasing $device for recordings"
+        # Quiet the recorder first: it has the old place open.
+        systemctl stop camerabridged.service || true
+        while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
+        wipefs -a -f "$device" >/dev/null
+        printf 'label: gpt\n,,L\n' | sfdisk --quiet --wipe always "$device" || die "the disk could not be partitioned"
+        udevadm settle --timeout=30 || true
+        part=$(partition_of "$device")
+        for _ in $(seq 1 30); do [ -b "$part" ] && break; sleep 1; done
+        [ -b "$part" ] || die "the new partition did not appear"
+        mkfs.ext4 -q -F -L "$LABEL" -m 0 -T largefile "$part" || die "the file system could not be made"
+        udevadm settle --timeout=30 || true
+    fi
+    uuid=$(blkid -s UUID -o value "$part" 2>/dev/null || true)
+    [ -n "$uuid" ] || die "the drive has no identity (UUID)"
+    install -d -m 0755 "$CB_SYSTEM"
+    printf '%s\n' "$uuid" >"$CONFIG.new"
+    chmod 0644 "$CONFIG.new"
+    mv -f "$CONFIG.new" "$CONFIG"
+    systemctl stop camerabridged.service || true
+    restart=0
+    do_apply
+    systemctl start camerabridged.service || true
+    cb_log "recording to $part ($uuid)"
+}
+
+forget_drive() {
+    rm -f "$CONFIG"
+    systemctl stop camerabridged.service || true
+    restart=0
+    do_apply
+    systemctl start camerabridged.service || true
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --list) list=1 ;;
+        --json) json=1 ;;
+        --device) device=${2:?--device needs a path}; shift ;;
+        --confirm) confirm=${2:-}; shift ;;
+        --keep) keep=1 ;;
+        --forget) forget=1 ;;
+        --apply) apply=1 ;;
+        --restart) restart=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; cb_die "unknown option: $1" ;;
+    esac
+    shift
+done
+
+[ "$(id -u)" -eq 0 ] || cb_die "run as root"
+if [ "$list" -eq 1 ]; then list_disks
+elif [ "$apply" -eq 1 ]; then do_apply
+elif [ "$forget" -eq 1 ]; then forget_drive
+elif [ -n "$device" ]; then use_drive
+else usage >&2; exit 2
+fi

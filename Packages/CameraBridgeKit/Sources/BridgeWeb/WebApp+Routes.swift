@@ -14,6 +14,9 @@ extension WebApp {
         Route("GET", "session", .open) { app, ctx in await app.sessionInfo(ctx) },
         Route("POST", "auth/setup", .open, takesBody: true) { app, ctx in try await app.setup(ctx) },
         Route("POST", "auth/login", .open, takesBody: true) { app, ctx in try await app.login(ctx) },
+        // The setup hotspot's page (setup.html): answered only while the hotspot is open.
+        Route("GET", "setup/wifi", .open) { app, _ in try await app.setupWifi() },
+        Route("POST", "setup/wifi", .open, takesBody: true) { app, ctx in try await app.setupWifiJoin(ctx) },
         Route("POST", "auth/logout") { app, ctx in await app.logout(ctx) },
         Route("POST", "auth/password", takesBody: true) { app, ctx in try await app.changePassword(ctx) },
         // Cameras
@@ -25,6 +28,10 @@ extension WebApp {
         Route("DELETE", "cameras/:id") { app, ctx in try await app.deleteCamera(ctx) },
         Route("GET", "cameras/:id/snapshot") { app, ctx in try await app.snapshot(ctx) },
         Route("GET", "cameras/:id/live") { app, ctx in try await app.live(ctx) },
+        Route("GET", "live") { app, ctx in try await app.liveVideo(ctx) },
+        Route("POST", "cameras/:id/camera-clock", takesBody: true) { app, ctx in try await app.cameraClock(ctx) },
+        Route("POST", "cameras/:id/camera-time-zone", takesBody: true) { app, ctx in try await app.cameraTimeZone(ctx) },
+        Route("POST", "cameras/:id/clean-picture", takesBody: true) { app, ctx in try await app.cleanPicture(ctx) },
         Route("GET", "cameras/:id/pairing") { app, ctx in try await app.pairing(ctx) },
         Route("POST", "cameras/:id/reset-pairing") { app, ctx in try await app.resetPairing(ctx) },
         Route("POST", "cameras/:id/test-motion") { app, ctx in try await app.testMotion(ctx) },
@@ -49,11 +56,20 @@ extension WebApp {
         Route("POST", "system/reboot", takesBody: true) { app, ctx in try await app.systemReboot(ctx) },
         Route("GET", "system/disks") { app, _ in try await app.systemDisks() },
         Route("POST", "system/install", takesBody: true) { app, ctx in try await app.systemInstall(ctx) },
+        Route("GET", "system/recording-drives") { app, _ in try await app.systemRecordingDrives() },
+        Route("POST", "import/mac-backup/preview", takesBody: true) { app, ctx in try await app.importPreview(ctx) },
+        Route("POST", "import/mac-backup", takesBody: true) { app, ctx in try await app.importBackup(ctx) },
+        Route("GET", "system/wifi") { app, _ in await app.systemWifi() },
+        Route("POST", "system/wifi/scan", takesBody: true) { app, _ in try await app.systemWifiScan() },
+        Route("POST", "system/wifi", takesBody: true) { app, ctx in try await app.systemWifiJoin(ctx) },
+        Route("POST", "system/wifi/forget", takesBody: true) { app, ctx in try await app.systemWifiForget(ctx) },
+        Route("POST", "system/recording-drive", takesBody: true) { app, ctx in try await app.systemUseRecordingDrive(ctx) },
+        Route("POST", "system/recording-drive/forget", takesBody: true) { app, ctx in try await app.systemForgetRecordingDrive(ctx) },
         Route("POST", "system/poweroff", takesBody: true) { app, ctx in try await app.systemPowerOff(ctx) },
         Route("POST", "system/ssh", takesBody: true) { app, ctx in try await app.systemSSH(ctx) },
         Route("POST", "system/auto-update", takesBody: true) { app, ctx in try await app.systemAutomaticUpdates(ctx) },
         Route("POST", "system/factory-reset", takesBody: true) { app, ctx in try await app.systemFactoryReset(ctx) },
-    ]
+    ] + archiveRoutes
 
     // MARK: Status and session
 
@@ -117,7 +133,7 @@ extension WebApp {
             authenticated: true, state: StatusText.engineStateName(overview.state), stateText: StatusText.engineState(overview.state),
             uptimeSeconds: Int(Date().timeIntervalSince(launched)),
             cameras: CameraCounts(total: overview.configurations.count, online: overview.cameras.filter { $0.connection == .online }.count, paired: paired),
-            localNetwork: "\(overview.localNetworkAccess)", notices: NoticeResource.resources(for: overview.networkNotices),
+            localNetwork: "\(overview.localNetworkAccess)", notices: NoticeResource.resources(for: overview, now: Date()),
             configurationRecovered: overview.configurationRecovered, streamingHelperInstalled: overview.streamingHelperInstalled,
             sensorsBridge: overview.sensorsBridge.map { SensorsBridgeSummary(paired: $0.isPaired, accessoryCount: $0.accessoryCount) },
             system: SystemSummary(mode: info.mode, hostname: info.hostname, updateAvailable: info.update?.available ?? false,
@@ -175,7 +191,7 @@ extension WebApp {
         }
     }
 
-    private func tooManyAttempts(_ seconds: Int) -> APIError {
+    func tooManyAttempts(_ seconds: Int) -> APIError {
         APIError(status: 429, code: "too_many_attempts", message: "Too many wrong tries. Wait \(seconds) second\(seconds == 1 ? "" : "s") and try again.",
                  headers: [("Retry-After", String(seconds))])
     }
@@ -833,5 +849,69 @@ extension WebApp {
             throw APIError(status: 422, code: "reset_failed", message: ErrorText.describe(error))
         }
         return .empty()
+    }
+}
+
+// MARK: The camera's own clock
+
+extension WebApp {
+    private struct CameraClockBody: Decodable { var shown: Bool }
+    private struct CameraClockAnswer: Encodable { var shown: Bool; var summary: String }
+    private struct CameraTimeZoneAnswer: Encodable { var timeZone: String }
+
+    /// `POST cameras/:id/camera-clock {shown}`: the camera's own date and time on its picture, on or off (its vendor API, then ONVIF's OSD service).
+    func cameraClock(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let id = try ctx.uuid("id")
+        let body = try decode(CameraClockBody.self, from: ctx)
+        let change: CameraClockChange
+        do {
+            change = try await backend.setCameraClockShown(cameraID: id, shown: body.shown)
+        } catch EngineError.unknownCamera {
+            throw APIError.notFound("There is no camera with this identifier.")
+        } catch {
+            throw APIError(status: 422, code: "camera_clock_failed", message: ErrorText.describe(error))
+        }
+        guard change.succeeded else {
+            throw APIError(status: 422, code: "camera_clock_failed", message: "The camera did not change its clock: \(change.summary).")
+        }
+        return .json(CameraClockAnswer(shown: body.shown, summary: change.summary))
+    }
+
+    /// `POST cameras/:id/camera-time-zone`: the camera's clock in the bridge's time zone (so the time it draws is local).
+    func cameraTimeZone(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let id = try ctx.uuid("id")
+        do {
+            let posix = try await backend.setCameraTimeZone(cameraID: id)
+            return .json(CameraTimeZoneAnswer(timeZone: posix))
+        } catch EngineError.unknownCamera {
+            throw APIError.notFound("There is no camera with this identifier.")
+        } catch {
+            throw APIError(status: 422, code: "camera_time_zone_failed", message: ErrorText.describe(error))
+        }
+    }
+}
+
+// MARK: Clean picture
+
+extension WebApp {
+    private struct CleanPictureBody: Decodable { var clean: Bool }
+    private struct CleanPictureAnswer: Encodable { var clean: Bool; var summary: String }
+
+    /// `POST cameras/:id/clean-picture {clean}`: every label the camera draws itself off (the bridge draws its own), or back as they were.
+    func cleanPicture(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let id = try ctx.uuid("id")
+        let body = try decode(CleanPictureBody.self, from: ctx)
+        let change: CleanPictureChange
+        do {
+            change = try await backend.setCleanPicture(cameraID: id, clean: body.clean)
+        } catch EngineError.unknownCamera {
+            throw APIError.notFound("There is no camera with this identifier.")
+        } catch {
+            throw APIError(status: 422, code: "clean_picture_failed", message: ErrorText.describe(error))
+        }
+        guard change.succeeded else {
+            throw APIError(status: 422, code: "clean_picture_failed", message: "The camera did not change its labels: \(change.summary).")
+        }
+        return .json(CleanPictureAnswer(clean: body.clean, summary: change.summary))
     }
 }

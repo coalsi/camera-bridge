@@ -1,0 +1,119 @@
+/* The monitor (#/, #/monitor, #/nvr): a black wall of every camera with the recordings' controls under it (screens/nvr.js). Always dark,
+   whatever the page's appearance: it is for a screen that stays on. The dark colours are set on the wall itself, so everything inside it
+   (the tiles, the buttons, the timeline, which reads these variables to draw) is dark. No inline styles; classes and data-* attributes only. */
+
+.monitor {
+  --mon-bg: #000; --mon-panel: #0b0b0d; --mon-line: #1f1f25; --mon-text: #e8e8ea; --mon-dim: #8a8a93;
+  --bg: #000; --bg-raised: #0b0b0d; --surface: #0b0b0d; --surface-2: #1a1a1f; --border: #1f1f25; --border-strong: #3a3a42;
+  --text: #e8e8ea; --text-2: #b4b4bc; --text-3: #8a8a93; --link: #f0b254; --focus: #f0b254;
+  color-scheme: dark;
+  display: flex; flex-direction: column; gap: 10px; padding: 12px; height: calc(100vh - 56px); min-height: 600px;
+  background: var(--mon-bg); color: var(--mon-text); border-radius: var(--radius); position: relative;
+}
+.monitor:fullscreen { height: 100vh; border-radius: 0; padding: 10px; }
+.monitor h1 { font-size: 1.1rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--mon-dim); }
+.mon-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.mon-big-clock { font-size: 1.35rem; font-weight: 650; font-variant-numeric: tabular-nums; margin-left: auto; }
+.mon-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.monitor .btn { background: #15151a; border-color: #2c2c34; color: var(--mon-text); }
+.monitor .btn:hover { background: #1d1d24; }
+.monitor .btn.primary { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }
+.monitor .btn[aria-pressed="true"] { background: #2a2a33; border-color: #4a4a52; }
+.monitor .btn.primary[aria-pressed="true"] { background: #2a2a33; border-color: var(--amber); color: var(--mon-text); }
+.monitor select { width: auto; min-height: 32px; padding: 2px 30px 2px 10px; background-color: #15151a; color: var(--mon-text); border-color: #2c2c34; font-size: 0.85rem; }
+.mon-none { flex: 1; display: grid; place-items: center; gap: 12px; align-content: center; color: var(--mon-dim); }
+
+/* The wall: the tiles share the height that is left; a picture fits its tile (no cropping), the name and the clock sit on it. */
+.monitor .nvr-grid { flex: 1; min-height: 0; gap: 8px; grid-auto-rows: minmax(0, 1fr); }
+/* Columns for a wall that fills the screen (rows share the height): 2 across up to 4 tiles, 3 up to 9, 4 above. */
+.monitor .nvr-grid[data-count="1"] { --nvr-cols: 1; }
+.monitor .nvr-grid[data-count="2"], .monitor .nvr-grid[data-count="3"], .monitor .nvr-grid[data-count="4"] { --nvr-cols: 2; }
+.monitor .nvr-grid[data-count="5"], .monitor .nvr-grid[data-count="6"], .monitor .nvr-grid[data-count="7"],
+.monitor .nvr-grid[data-count="8"], .monitor .nvr-grid[data-count="9"] { --nvr-cols: 3; }
+.monitor .nvr-grid[data-count="10"], .monitor .nvr-grid[data-count="11"], .monitor .nvr-grid[data-count="12"], .monitor .nvr-grid[data-count="13"],
+.monitor .nvr-grid[data-count="14"], .monitor .nvr-grid[data-count="15"], .monitor .nvr-grid[data-count="16"] { --nvr-cols: 4; }
+@media (max-width: 640px) { .monitor .nvr-grid[data-count] { --nvr-cols: 1; } }
+/* One camera on the whole wall (a click on its tile). */
+.monitor .nvr-grid[data-solo="true"] { --nvr-cols: 1; grid-auto-rows: minmax(0, 1fr); }
+.monitor .nvr-grid[data-solo="true"] .nvr-tile { cursor: zoom-out; }
+.monitor .nvr-grid[data-solo="false"] .nvr-tile { cursor: zoom-in; }
+.monitor .nvr-grid[data-solo="true"] .nvr-media { aspect-ratio: auto; height: 100%; }
+.monitor .nvr-tile { border: 2px solid var(--mon-line); border-radius: 8px; background: var(--mon-panel); min-height: 0; }
+.monitor .nvr-tile[data-focus="true"] { border-color: #4a4a52; }
+.monitor .nvr-media { aspect-ratio: auto; flex: 1; min-height: 0; height: 100%; background: #000; }
+.monitor .nvr-tile-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: 8px 10px 14px; background: linear-gradient(#000c, #0000); border: 0; }
+.monitor .nvr-tile-bar h3 { font-size: 0.95rem; }
+.monitor .nvr-tile-bar a { color: #fff; text-shadow: 0 1px 2px #000; }
+.monitor .nvr-caption { font-size: 0.9rem; }
+
+/* Live video over the snapshot once it plays (live only: a recording plays in the stage). */
+.nvr-live { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; background: #000; visibility: hidden; }
+.nvr-tile[data-livevideo="true"] .nvr-live { visibility: visible; }
+.nvr-tile[data-livevideo="true"] .nvr-snap { visibility: hidden; }
+.nvr-tile[data-video="true"] .nvr-live { visibility: hidden; }
+
+/* Something happened at the camera: its border and a flag, for 12 s. */
+.mon-flag { padding: 2px 8px; border-radius: 999px; background: #ffd36b; color: #1a1407; font-weight: 700; font-size: 0.8rem; white-space: nowrap; }
+.nvr-tile[data-alert="motion"], .nvr-tile[data-alert="detection"] { border-color: #ffd36b; }
+.nvr-tile[data-alert="detection"] .mon-flag { background: #7fb2ff; }
+.nvr-tile[data-alert="doorbell"] { border-color: #ff6a61; }
+.nvr-tile[data-alert="doorbell"] .mon-flag { background: #ff6a61; color: #1a0605; }
+.nvr-tile[data-alert]:not([data-alert=""]) { animation: mon-pulse 1s ease-in-out 6; }
+@keyframes mon-pulse { 50% { box-shadow: 0 0 0 4px #ffd36b55; } }
+@media (prefers-reduced-motion: reduce) { .nvr-tile[data-alert] { animation: none !important; } }
+
+/* A notice for each new event, on top of the wall. */
+.mon-banners { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); z-index: 5; display: grid; gap: 6px; width: min(560px, 92%); pointer-events: none; }
+.mon-banner {
+  pointer-events: auto; display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; border-radius: 10px; text-decoration: none;
+  background: #1a1407ee; color: #fff; border: 1px solid #ffd36b; box-shadow: 0 6px 24px #000a;
+}
+.mon-banner[data-level="doorbell"] { background: #1a0605ee; border-color: #ff6a61; }
+.mon-banner[data-level="detection"] { background: #07121aee; border-color: #7fb2ff; }
+.mon-banner time { margin-left: auto; color: #c9c9d0; font-size: 0.82rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Under the wall: the recordings' controls and timeline, and the events list. */
+.mon-bottom { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 10px; flex: none; }
+.mon-timeline, .mon-activity { min-height: 0; display: flex; flex-direction: column; gap: 8px; background: var(--mon-panel); border: 1px solid var(--mon-line); border-radius: 8px; padding: 8px 10px; }
+.mon-activity { max-height: 260px; }
+.monitor .nvr-transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.monitor .nvr-readout { font-variant-numeric: tabular-nums; font-weight: 650; }
+.monitor .nvr-grid-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.monitor .nvr-pager { margin-left: auto; }
+.mon-timeline-head { display: flex; align-items: center; gap: 10px; }
+.mon-timeline-head strong { font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mon-dim); }
+.mon-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; font-size: 0.88rem; }
+.mon-item { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; padding: 6px 2px; border-top: 1px solid var(--mon-line); }
+.mon-item:first-child { border-top: 0; }
+.mon-item time { grid-column: 1 / -1; color: var(--mon-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.mon-item a { color: var(--mon-text); font-weight: 650; text-decoration: none; }
+.mon-item span { color: #c9c9d0; }
+.mon-item[data-level="doorbell"] span { color: #ff6a61; }
+.mon-item[data-level="detection"] span { color: #7fb2ff; }
+.mon-item[data-level="motion"] span { color: #ffd36b; }
+.mon-empty { color: var(--mon-dim); padding: 8px 2px; }
+
+@media (max-width: 1100px) {
+  .mon-bottom { grid-template-columns: minmax(0, 1fr); }
+  .mon-activity { max-height: 200px; }
+}
+@media (max-width: 900px) {
+  .monitor { height: auto; min-height: 0; }
+  .monitor .nvr-grid { grid-auto-rows: auto; }
+  .monitor .nvr-media { aspect-ratio: 16 / 9; height: auto; }
+}
+@media (max-width: 640px) { .mon-big-clock { margin-left: 0; font-size: 1.1rem; } }
+
+/* The video label (js/labels.js): the camera's name and the date and time as the bridge burns them into Apple Home's video and saved clips.
+   Its size follows the picture's height like the burned one (OverlaySize: 2.6, 3.2 or 4.2 % of the height). */
+.nvr-media, .preview { container-type: size; }
+
+/* A camera's sound (screens/nvr.js drawSound): a speaker at the bottom left of its picture while the wall is live; pressed for the camera that
+   plays aloud. */
+.nvr-sound {
+  position: absolute; z-index: 4; left: 8px; bottom: 8px; width: 34px; height: 34px; display: grid; place-items: center; padding: 0; cursor: pointer;
+  border-radius: 999px; border: 1px solid rgb(255 255 255 / 0.16); background: rgb(15 15 17 / 0.72); color: #e8e8ea; backdrop-filter: blur(6px);
+}
+.nvr-sound svg { width: 18px; height: 18px; }
+.nvr-sound:hover { background: rgb(40 40 46 / 0.9); }
+.nvr-sound[data-on="true"] { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }

@@ -1,0 +1,72 @@
+/* The watch screen and the timeline (task T10). Tokens come from style.css; nothing here sets a style attribute, the page's policy forbids them. */
+
+/* The stage: snapshot preview at the bottom, the video above it (see-through until a recorded frame has been shown), the hold canvas above that */
+.watch-stage {
+  position: relative; aspect-ratio: 16 / 9; background: #0c0c0e; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.watch-preview { position: absolute; inset: 0; }
+.watch-preview .preview { position: absolute; inset: 0; aspect-ratio: auto; border: 0; border-radius: 0; }
+.watch-video, .watch-hold {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: transparent; pointer-events: none;
+}
+.watch-video { opacity: 0; }
+.watch-stage[data-layer="video"] .watch-video { opacity: 1; }
+.watch-stage[data-layer="video"] .watch-preview .overlay { visibility: hidden; }   /* the preview's own buttons are under the video: not clickable either */
+.watch-badges { position: absolute; top: 10px; left: 10px; z-index: 3; display: flex; gap: 6px; pointer-events: none; }
+.watch-badges .pill { background: rgb(15 15 17 / 0.8); color: #e8e8ea; border-color: rgb(255 255 255 / 0.14); }
+.watch-badges .pill.live { color: #3ddc97; }
+.watch-badges .pill.recorded { color: #f0b254; }
+.watch-overlay {
+  position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 12px 14px; border-radius: 12px; color: #f3f3f4; background: rgb(12 12 14 / 0.94); border: 1px solid rgb(255 255 255 / 0.14);
+}
+.watch-overlay .text { flex: 1 1 220px; min-width: 0; }
+.watch-overlay p { margin: 2px 0 0; color: #c9c9d0; }
+.watch-overlay .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.watch-caption { margin: 10px 0 0; min-height: 1.4em; }
+.watch-transport { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 12px 0; }
+.watch-readout { display: flex; flex-direction: column; min-width: 10.5em; }
+.watch-time { font-variant-numeric: tabular-nums; font-weight: 650; }
+.watch-ago { font-variant-numeric: tabular-nums; }
+.watch-record { margin-left: auto; }
+.watch-gop { margin-top: 14px; }
+.watch-gop details { margin: 8px 0; }
+
+/* The timeline */
+.nvr-timeline { margin-top: 8px; }
+.nvr-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin-bottom: 8px; }
+.nvr-presets, .nvr-zoom { display: flex; flex-wrap: wrap; gap: 6px; }
+.nvr-preset[aria-pressed="true"] { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }
+.nvr-track {
+  position: relative; height: 116px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-raised);
+  touch-action: none; user-select: none; -webkit-user-select: none; cursor: ew-resize;
+}
+.nvr-track[aria-disabled="true"] { cursor: default; }
+.nvr-track:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.nvr-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.nvr-playhead {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 2px; margin-left: -1px; background: var(--text); pointer-events: none;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.35); will-change: transform;
+}
+.nvr-playhead::before {
+  content: ""; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top-color: var(--text); border-bottom-width: 0;
+}
+.nvr-bubble {
+  position: absolute; top: 26px; left: 0; width: 72px; margin-left: -36px; padding: 2px 0; text-align: center; pointer-events: none;
+  font: 600 0.75rem/1.3 var(--mono); background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 6px;
+}
+.nvr-track.is-scrubbing { cursor: grabbing; }
+.nvr-empty { margin: 8px 0 0; }
+.nvr-problem { margin: 8px 0 0; color: var(--warning); }
+
+/* The smart-codec dialog */
+.nvr-optimize .steps { margin: 6px 0 12px; }
+.nvr-optimize details { margin: 8px 0; }
+
+@media (max-width: 640px) {
+  .nvr-track { height: 96px; }
+  .watch-record { margin-left: 0; width: 100%; }
+  .watch-overlay { left: 8px; right: 8px; bottom: 8px; padding: 10px 12px; }
+}

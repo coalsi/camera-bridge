@@ -26,6 +26,10 @@ CoreMedia sample buffers marked "display immediately" for the app's `AVSampleBuf
 makes a new one when a keyframe brings another format; SEI NAL units left out), `LiveAudioSampleBuilder` does the same for AAC / AAC-ELD / Opus /
 G.711 / LPCM access units at a presentation time of the renderer's own timeline. One builder per consumer (not thread-safe).
 
+`Display/LiveSampleBuilders.swift` (2026-10-10, docs/CONTRACT_CHANGES.md): `LiveVideoSampleBuilder.sampleBuffer(for:decodeOnly:)` makes a sample that
+only primes the decoder (`kCMSampleAttachmentKey_DoNotDisplay`, not "display immediately"): the NVR player gives a scrub's lead-in frames to the
+display layer this way and marks only the target frame for display. `sampleBuffer(for:)` is unchanged (it is the same call with `decodeOnly` false).
+
 `TimestampOverlayPreview` (2026-10-02, docs/CONTRACT_CHANGES.md): the timestamp overlay on a still picture
 (`render(image:overlay:at:outputHeight:allowUpscaling:locale:timeZone:)`, `render(image:overlay:at:width:height:locale:timeZone:)`,
 `render(imageData:overlay:at:outputHeight:allowUpscaling:locale:timeZone:)`, `png(_:)`), drawn by the same renderer and

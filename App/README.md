@@ -176,6 +176,46 @@ References: spec §3, §7; research brief §2.3 M14; the research notes on sandb
 (Local Network, menu bar extra, SMAppService, IOPM); integration brief (hubs, iCloud+ tiers); Apple HIG.
 Acknowledgements: `Resources/Acknowledgements.md` (HAP-NodeJS, swift-crypto, BigInt).
 
+## NVR on the Mac: measuring and soaking it (`Tools/nvr-soak.sh`)
+
+Record, the timeline and the NVR page run on the engine's recorder and store (`Packages/CameraBridgeKit/Sources/BridgeEngine/NVR`). To measure them in the
+real app without touching an installed one, `Tools/nvr-soak.sh build` makes a copy of the app with another bundle identifier
+(`com.coreysilvia.CameraBridge.nvrtest`) and product name (`CameraBridgeNVRTest`) and runs it on a throwaway engine. Debug builds, and that Release build
+(which sets `DEBUG` for the app target only), accept:
+
+| Argument | What it does |
+|---|---|
+| `-isolatedEngine <directory>` | The real engine on `BridgeEnvironment.testing(directory:)`: in-memory secrets, loopback only, no Bonjour, no power assertions, its own defaults and log folder, a simulated login item, no profile download. It exits with status 2 when an argument is wrong, when the path is inside the installed app's data, or when the bundle identifier does not end in `.nvrtest`: it never falls back to the live engine (`Model/IsolatedEngine.swift`). |
+| `-isolatedDemoCameras N` | 0 to 9 demo cameras named "Soak 1" ... (1080p30 H.264, a keyframe every 2 s, a tone), HomeKit ports from `-isolatedBasePort` (default 38100). |
+| `-isolatedNVRFolder <folder>` | The existing recordings folder; Record is switched on for every demo camera. Without it nothing records and the first Record asks for a folder, as it does for a person. |
+| `-isolatedKeepDays`, `-isolatedMaxGB` | The retention limits (default 1 day, 10 GB). |
+| `-isolatedRecordAfterSeconds`, `-isolatedQuitAfterMinutes`, `-isolatedHeartbeatSeconds` | Record on later (to see what it costs), quit through Cmd-Q's path later, the interval of `probe/heartbeat.jsonl` (default 10 s). |
+| `-isolatedDemoKeyframeSeconds N` | The demo cameras key every N seconds (1 to 120) instead of every 2: a smart-codec stream (`BridgeEnvironment.demoKeyframeSeconds`). `CB_SOAK_DEMO_KEYFRAME=N` passes it from `Tools/nvr-soak.sh`. |
+| `-nvrProbe scrubcost,keyframe,exact,grid,play,drivehold` (`all`: the first five) | Headless scenarios over the recorded footage (`Debug/NVRProbe.swift`); one `probe/<scenario>.json` each. `drivehold` is the viewer under `Tools/nvr-soak.sh yank`. |
+| `-captureSettings YES` | A PNG of every Settings tab and `toolbar.json` (how many tabs the toolbar had to hide), then quits. |
+
+```sh
+export CB_SOAK_ROOT=<a new directory, never in the home folder>
+Tools/nvr-soak.sh build        # the measurement copy, Release, signed with the development identity
+Tools/nvr-soak.sh run          # the soak
+Tools/nvr-soak.sh yank         # a drive pulled while recording, then plugged in again
+Tools/nvr-soak.sh probe all    # the scrub, picture and play budgets
+Tools/nvr-soak.sh ui           # the manager window over 9 recording demo cameras, to try the screens by hand
+Tools/nvr-soak.sh external /Volumes/NAME [probe all]   # the soak (or the probes) on a drive you name (writes one new folder on it)
+```
+
+The soak: 8 demo cameras (about 6 Mbit/s each) record to a 24 GB sparse disk image for 2 hours with a limit of 10 GB, so retention runs from about minute 27;
+Record is switched on 3 minutes in (the first minutes are the baseline), the app is killed with `kill -9` at minute 60 and started again, and it quits by
+itself at minute 120. `Tools/nvr_soak_report.py` then prints, per launch, the memory and CPU, what Record costs, how long the archive took to be ready after
+the kill, the cameras that left the recording state, the lag of the newest footage, the bytes used, every sidecar against its mp4, ffmpeg decodes of six files
+(two of them repaired after the kill) and the footage lost at the kill. The demo camera is 1080p and about 6 Mbit/s; 4 MP and 8 MP streams, H.265, long
+keyframe intervals and B-frames are not covered by it.
+
+`probe` runs the 9 demo cameras into the same kind of image with a limit of 18 GB (`CB_SOAK_MAX_GB`): with 10 GB, retention trims the oldest footage while a
+scenario is still choosing its targets in it, and the exact-frame scenario then misses. The scenarios put a window of up to 1440 x 810 points on the main display
+(the layers must be on screen to be read back), so the display has to be awake. `CB_SOAK_CLASSIC=1` runs them on the renderer path of macOS 15 and 26, and
+`CB_SOAK_DEMO_KEYFRAME=12` on a smart-codec stream (a keyframe every 12 s).
+
 ## Camera types and integrations (2026-10-08; user docs `docs/integrations/`)
 
 - The Add Camera wizard starts on **Camera Type** (`Model/CameraType`, `Manager/AddCameraTypePages`): ONVIF/RTSP with automatic detection, brand presets (Hikvision, Reolink,
@@ -191,3 +231,27 @@ Acknowledgements: `Resources/Acknowledgements.md` (HAP-NodeJS, swift-crypto, Big
   `CameraConfiguration.integration`. The camera page's Connection group shows the service and **Replace Source… / Replace Key…** for them (`SecretReplacementSheet`); `CameraConfiguration.hasCameraInterface` /
   `displayAddress` (`Model/CameraInterface`) keep the Camera Settings, readiness and web-page parts for cameras that have an interface of their own.
 - Tests: `AddCameraTypeTests` (each type's flow through the model with `FakeSetupService`), `CameraInterfaceTests`.
+
+## NVR in the app (2026-10-10)
+
+The engine records (`BridgeEngine/NVR`); the app plays recordings back and manages them. The design is the Mac NVR design (not published).
+
+- `Model/Playback/` is all logic, compiled into the test bundle and tested with fakes and virtual time: `PlaybackClock` (one clock for every cell, counted in
+  `systemUptime`), `CellPlayback` (one worker task per camera: reads fragments through `ArchiveReading` and frames through the FMP4 readers, scrubs, plays, crosses
+  gaps, and gives the frames to the cell's renderer), `NVRCell` (one camera: its `LiveFeed` and its recorded playback take turns on one `LiveVideoRenderer`, with no
+  blank frame in between), `NVRSession` (the clock and one to nine cells), `NVRPageModel` / `NVRPanelModel` / `NVRGrid` / `NVRTileState`, and the timeline
+  (`TimelineViewport`, `TimelineTicks`, `TimelineModel`, `TimelineActivityModel`, `Waveform`). `LiveVideoRenderer` takes decode-only frames (`DoNotDisplay`), tags
+  every frame with the reset epoch it was queued under (a frame queued before a `reset()` or `clear()` is dropped) and reports `queued` and `restarts`.
+- `Viewer/{RecordedGrid,NVRTimelinePanel,TimelineScrubber,NVRParts}.swift` are the Overview's timeline and recorded grid and the timeline under the single-camera viewer, which now
+  sits in the manager's detail column; `Manager/{NVRRecordCard,SettingsRecordingTab}.swift` are the Record switches and Settings › Recording (`Model/RecordingSettings`).
+  `AppModel.setNVRRecording` asks where to store recordings the first time; `BridgeIssue.nvrStorage` is the banner.
+- Launch arguments (Debug builds only): `-previewEngine YES -demoScenario nvr` shows sample recordings (a daily rhythm of activity, a gap, a camera that stopped recording;
+  real playable video from one synthetic clip). `-nvrBenchmark b1,b2,b3,b5,b6 [-nvrBenchmarkSize 1920x1080] [-nvrBenchmarkQuit YES]` measures the display path on this Mac
+  (decode-only lead-ins, the flush dwell, concurrent decoders, 1x pacing, the whole recorded path over the sample archive) and writes
+  `$TMPDIR/CameraBridgeNVRBenchmark/report.txt`; `-nvrBenchmark b4 -nvrBenchmarkFolder <a copy of a recordings folder>` times reads from a real archive (on a copy: the
+  store repairs what it finds). `-captureScreenshots YES` also captures the recorded viewer and Settings › Recording.
+- Moving to Camera Bridge OS: Settings › Backup › Move to Camera Bridge OS exports the backup the box imports (Settings › Move from Camera Bridge for Mac there), and Stop This Mac’s Bridge (`AppModel.handOverToAnotherBridge`) turns every camera off and stops its recording, settings kept. Tests: `HandOverTests`.
+- Saving a clip: `Model/Clips/` (`ClipSelection`, `ClipExportModel`, `FileClipSink`, `ClipDestinations`, `ClipSentences`) plans and writes through the engine's `ClipExporter`; the Overview carries the timeline (a Timeline button shows or hides it; away from live the tiles show recordings through `RecordedGrid`) and `NVRPanelModel` holds the choice (Save Clip sets the start, the playhead is the end, C / Esc / Return), `ClipBar` and `ClipBand` draw it, and the NVR page's tiles carry a check while a clip is chosen. Tests: `ClipSelectionTests`, `ClipExportModelTests`, `FileClipSinkTests`, `NVRPanelClipTests`.
+- Tests: `AppModelNVRTests`, `AppModelNVRNavigationTests`, `CellPlayback*Tests` (virtual time, the starvation twin test), `NVRSessionTests`, `PlaybackClockTests`,
+  `Timeline*Tests`, `WaveformTests`, `NVRPageTests`, `RecordingSettingsTests`, `LiveVideoRendererEpochTests`, `LiveFeedHandoffTests`, `ArchiveFrameSourceTests` (the real FMP4
+  readers over the sample archive) and `NVRContractTests` (the declared seams).

@@ -488,6 +488,11 @@ actor CameraRuntime {
         return await stack?.server.sessionCount ?? 0
     }
 
+    /// The video signed in with the camera's credentials: the event channel, if it waits after a refused login, tries again now.
+    func confirmEventCredentials() {
+        eventSource?.credentialsConfirmed()
+    }
+
     /// Tells the router what the main stream is doing now: after an accessory that could not start made the camera read as
     /// offline, once it is up the stream's own state is the truth again.
     func reportStreamConnection() async {
@@ -844,7 +849,8 @@ actor CameraRuntime {
         let environment = dependencies.environment
         let tuning = dependencies.tuning
         if camera.vendor == .demo {
-            await makeIngest(main: StreamSources.demo(tuning.demoMain, codecs: environment.codecs, displayName: camera.name, audio: camera.audioEnabled),
+            await makeIngest(main: StreamSources.demo(tuning.demoMain.withKeyframeSeconds(environment.demoKeyframeSeconds), codecs: environment.codecs,
+                                                        displayName: camera.name, audio: camera.audioEnabled),
                              sub: StreamSources.demo(tuning.demoSub, codecs: environment.codecs, displayName: camera.name, audio: false), fallback: nil,
                              epoch: epoch)
             return
@@ -951,7 +957,7 @@ actor CameraRuntime {
         let onChange = dependencies.onChange
         let onLocalNetwork = dependencies.onLocalNetwork
         let remote = !Self.isLoopback(configuration.endpoint.host) && configuration.vendor != .demo
-        ingestEvents = Task {
+        ingestEvents = Task { [weak self] in
             for await event in events {
                 switch event {
                 case .state(.idle):
@@ -959,8 +965,12 @@ actor CameraRuntime {
                 case .state(.connecting):
                     await router.setStreamConnection(.connecting, for: cameraID)
                 case .state(.online):
+                    let eventsRefused = await router.credentialsRejected(by: .camera, for: cameraID)
                     await router.setStreamConnection(.online, for: cameraID)
                     if remote { onLocalNetwork(.granted) }
+                    // The video signed in with the camera's credentials: the event channel, waiting after a refused login, tries again
+                    // now (or when CameraBridge's login pause ends) instead of up to ten minutes later.
+                    if eventsRefused { await self?.confirmEventCredentials() }
                 case .state(.offline(let reason)):
                     await router.setStreamConnection(.offline(reason), for: cameraID)
                 case .unauthorized:

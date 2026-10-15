@@ -16,7 +16,13 @@ extension BridgeEngine {
     /// preview mode).
     public static func preview(scenario: PreviewScenario = .standard) -> BridgeEngine {
         let directory = FileManager.default.temporaryDirectory.appending(path: "CameraBridgePreview", directoryHint: .isDirectory)
-        return BridgeEngine(environment: .preview(directory: directory), snapshot: PreviewData.snapshot(now: Date(), scenario: scenario))
+        let environment = BridgeEnvironment.preview(directory: directory)
+        let now = Date()
+        var snapshot = PreviewData.snapshot(now: now, scenario: scenario)
+        if scenario == .nvr {
+            snapshot.archive = PreviewData.nvrArchive(now: now, codecs: environment.codecs)
+        }
+        return BridgeEngine(environment: environment, snapshot: snapshot)
     }
 }
 
@@ -37,6 +43,9 @@ public enum PreviewScenario: String, Sendable, CaseIterable {
     case errors
     /// Eight cameras, seven of them online (the Overview grid and live tiles at full size).
     case fleet
+    /// The eight fleet cameras with recordings (the NVR page and the timeline): a recording archive with a daily rhythm of activity, a gap, a camera
+    /// that stopped recording two days ago, and a younger one; sound recorded on the Driveway. Sample data in `PreviewArchive`.
+    case nvr
     /// An iPhone on a VPN asked for the Driveway's live view at 10.5.0.2; the stream went to its address on this network.
     case vpn
     /// The same, and the iPhone did not answer: video did not get through.
@@ -53,7 +62,7 @@ enum PreviewData {
     }
 
     static func snapshot(now: Date, scenario: PreviewScenario = .standard) -> BridgeEngine.Snapshot {
-        let cameras = scenario == .empty || scenario == .damagedConfig ? [] : (scenario == .fleet ? fleetCameras(now: now) : sampleCameras(now: now))
+        let cameras = scenario == .empty || scenario == .damagedConfig ? [] : (scenario == .fleet || scenario == .nvr ? fleetCameras(now: now) : sampleCameras(now: now))
         var snapshot = BridgeEngine.Snapshot()
         snapshot.state = .running
         snapshot.cameras = cameras.map(\.status)
@@ -84,9 +93,51 @@ enum PreviewData {
         case .macVPN:
             snapshot.macVPN = MacVPNStatus(interface: "utun4", address: "10.5.0.2", reason: .defaultRoute)
             snapshot.networkNotices = [NetworkNotice(kind: .macOnVPN, interfaceName: "utun4", date: now)]
+        case .nvr:
+            applyNVR(to: &snapshot, now: now)
         default: break
         }
         return snapshot
+    }
+
+    // MARK: NVR scenario
+
+    /// How long each fleet camera has recorded: seconds before now it began, and when it stopped (nil: still recording). Index = the fleet's order.
+    private static let nvrPlan: [(begin: TimeInterval, end: TimeInterval?)] = [
+        (6.2 * 86_400, nil), (6.2 * 86_400, nil), (6.2 * 86_400, nil), (6.2 * 86_400, nil), (6.2 * 86_400, nil),
+        (6.2 * 86_400, 2 * 86_400),   // Patio: Record was turned off two days ago
+        (1.4 * 86_400, nil),          // Garden: a young recording
+        (6.2 * 86_400, nil),          // Workshop: the camera is offline, its recordings are there
+    ]
+
+    private static func applyNVR(to snapshot: inout BridgeEngine.Snapshot, now: Date) {
+        for index in snapshot.cameras.indices {
+            let plan = nvrPlan[min(index, nvrPlan.count - 1)]
+            let recording = plan.end == nil
+            snapshot.configurations[index].nvrEnabled = recording
+            snapshot.configurations[index].nvrRecordSound = index == 0
+            if recording {
+                let online = snapshot.cameras[index].connection == .online
+                snapshot.cameras[index].nvr = CameraArchiveStatus(state: online ? .recording : .waiting("waiting for the camera"))
+            }
+            snapshot.cameras[index].mainStreamInfo = SourceStreamInfo(codec: "h264", width: 2_688, height: 1_520, fps: 20, bitrateKbps: 4_096)
+        }
+        snapshot.settings.nvrFolder = "/Volumes/Recordings/Camera Bridge"
+        snapshot.nvrStorage = ArchiveStorageStatus(folder: URL(fileURLWithPath: "/Volumes/Recordings/Camera Bridge"), usedBytes: 212_000_000_000,
+                                                   freeBytes: 1_310_000_000_000, totalBytes: 2_000_000_000_000, floorBytes: ArchiveConstants.otherVolumeFloorBytes,
+                                                   oldest: now.addingTimeInterval(-6.2 * 86_400), newest: now.addingTimeInterval(-2.5))
+    }
+
+    /// The archive of the `nvr` scenario: the fleet's recordings (`nvrPlan`), a 25 minute gap three hours ago, and a sample clip for the video.
+    static func nvrArchive(now: Date, codecs: any MediaCodecs) -> PreviewArchive {
+        let cameras = fleetCameras(now: now)
+        let recordings = cameras.enumerated().map { index, camera in
+            let plan = nvrPlan[min(index, nvrPlan.count - 1)]
+            return PreviewArchive.Recording(camera: camera.status.id, oldest: now.addingTimeInterval(-plan.begin),
+                                            newest: now.addingTimeInterval(-(plan.end ?? PreviewArchive.liveLag)), followsClock: plan.end == nil)
+        }
+        let gapStart = now.addingTimeInterval(-3 * 3_600)
+        return PreviewArchive(recordings: recordings, gap: gapStart..<gapStart.addingTimeInterval(25 * 60), codecs: codecs)
     }
 
     static let drivewayID = sampleID(1), frontDoorID = sampleID(2), garageID = sampleID(3), sideYardID = sampleID(4), demoID = sampleID(5)

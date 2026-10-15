@@ -548,17 +548,33 @@ private final class RouterHarness: Sendable {
 
     @Test func rejectedCredentialsTakeTheCameraOffline() async {
         let h = await RouterHarness()
-        await h.router.setStreamConnection(.online, for: h.cameraID)
         await h.send(.authenticationFailed)
         var state = await h.state()
         #expect(state.connection == .offline("Camera rejected the username or password"))
         #expect(state.lastError == "Camera rejected the username or password" && state.lastError == SensorState.credentialsRejectedMessage)
         #expect(state.credentialsRejected && state.isFault && !state.isActive && !state.isReachable)
         await h.router.setStreamConnection(.online, for: h.cameraID)
-        #expect(await h.state().credentialsRejected, "the stream working does not mean the event channel's login does")
+        state = await h.state()
+        #expect(!state.credentialsRejected && state.connection == .online && state.lastError == nil && state.isReachable,
+                "video that signs in with the same credentials proves them right")
+        #expect(state.eventChannelConnected == false && state.isFault, "the event channel stays down (a fault) until it connects")
         await h.send(.eventChannel(connected: true))
         state = await h.state()
         #expect(!state.credentialsRejected && state.connection == .online && state.lastError == nil && state.isActive)
+    }
+
+    /// A refused event login while the video plays (Patio: CameraBridge's own login pause after an earlier wrong password) is not "rejected".
+    @Test func aRefusedEventLoginWithLiveVideoKeepsTheCameraOnline() async {
+        let h = await RouterHarness()
+        await h.router.setStreamConnection(.online, for: h.cameraID)
+        await h.send(.authenticationFailed)
+        var state = await h.state()
+        #expect(!state.credentialsRejected && state.connection == .online && state.lastError == nil && state.isReachable)
+        #expect(state.eventChannelConnected == false && state.isFault && !state.isActive)
+        #expect(await h.router.credentialsRejected(by: .camera, for: h.cameraID), "the runtime still sees the refusal, to retry the channel")
+        await h.router.setStreamConnection(.offline("No answer"), for: h.cameraID)
+        state = await h.state()
+        #expect(state.credentialsRejected && state.connection == .offline(SensorState.credentialsRejectedMessage), "no video to prove otherwise")
     }
 
     @Test func rejectedStreamCredentialsClearWhenTheStreamComesBack() async {

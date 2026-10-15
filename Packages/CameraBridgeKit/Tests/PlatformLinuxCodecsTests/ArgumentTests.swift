@@ -161,6 +161,14 @@ import Testing
         #expect(arguments.suffix(5) == ["-f", "yuv4mpegpipe", "-pix_fmt", "yuv420p", "pipe:1"])
     }
 
+    @Test func decoderUsesTheGPUWhenGivenARenderNode() {
+        let arguments = FFmpegArguments.decoder(width: 1920, height: 1080, hardwareDevice: "/dev/dri/renderD128")
+        #expect(value(after: "-hwaccel", in: arguments) == "vaapi")
+        #expect(value(after: "-hwaccel_device", in: arguments) == "/dev/dri/renderD128")
+        #expect(arguments.firstIndex(of: "-hwaccel")! < arguments.firstIndex(of: "-i")!, "an input option: before -i")
+        #expect(!FFmpegArguments.decoder(width: 1920, height: 1080).contains("-hwaccel"))
+    }
+
     @Test func audioEncoderChoice() {
         let all: Set<String> = ["aac", "libopus", "pcm_alaw", "pcm_mulaw"]
         #expect(FFmpegArguments.audioEncoderOptions(AudioEncoderSettings(codec: .opus, sampleRate: 16_000), available: all)?.prefix(2) == ["-c:a", "libopus"])

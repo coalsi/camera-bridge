@@ -10,7 +10,7 @@ export function statePill(camera, extraClass = '') {
   if (!camera.isEnabled) { kind = 'idle'; text = 'Turned off'; }
   else if (!s) { kind = 'idle'; text = 'Starting'; pulse = true; }
   else if (s.connection === 'online') {
-    if (s.recordingNow) { kind = 'recording'; text = 'Recording'; }
+    if (s.recordingNow) { kind = 'recording'; text = 'Home recording'; }
     else if (s.motion) { kind = 'motion'; text = 'Motion'; }
     else { kind = 'live'; text = 'Live'; }
   } else if (s.connection === 'connecting') { kind = 'idle'; text = 'Connecting…'; pulse = true; }

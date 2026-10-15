@@ -1,0 +1,14 @@
+[Unit]
+Description=Open the setup hotspot when the box has no network
+Documentation=https://github.com/coalsi/camera-bridge
+After=NetworkManager.service camera-bridge-wifi-import.service systemd-networkd.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/cb-wifi --watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

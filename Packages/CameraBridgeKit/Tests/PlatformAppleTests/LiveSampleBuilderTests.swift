@@ -33,6 +33,19 @@ import Testing
         #expect(descriptions.dropFirst().allSatisfy { $0 === descriptions[0] }, "one format description for one stream")
     }
 
+    @Test func decodeOnlySamplesAreNeverDisplayed() throws {
+        let frames = try CodecFixtures.encodedStream(width: 320, height: 240, count: 3, bitrateKbps: 500, keyframeInterval: .seconds(1))
+        let builder = LiveVideoSampleBuilder()
+        for frame in frames {
+            let sample = try #require(try builder.sampleBuffer(for: frame, decodeOnly: true))
+            #expect(attachment(sample, kCMSampleAttachmentKey_DoNotDisplay) == true)
+            #expect(attachment(sample, kCMSampleAttachmentKey_DisplayImmediately) == nil, "DoNotDisplay is checked before DisplayImmediately; the second one is not set")
+            #expect((attachment(sample, kCMSampleAttachmentKey_NotSync) == true) == !frame.isKeyframe)
+            let shown = try #require(try builder.sampleBuffer(for: frame))
+            #expect(attachment(shown, kCMSampleAttachmentKey_DisplayImmediately) == true && attachment(shown, kCMSampleAttachmentKey_DoNotDisplay) == nil)
+        }
+    }
+
     @Test func aNewFormatGetsANewDescription() throws {
         let small = try CodecFixtures.encodedStream(width: 320, height: 240, count: 1, bitrateKbps: 500, keyframeInterval: .seconds(1))
         let large = try CodecFixtures.encodedStream(width: 640, height: 360, count: 1, bitrateKbps: 500, keyframeInterval: .seconds(1))

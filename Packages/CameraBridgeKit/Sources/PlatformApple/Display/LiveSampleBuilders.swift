@@ -19,6 +19,12 @@ public final class LiveVideoSampleBuilder {
     /// The access unit as a ready sample buffer marked "display immediately" (delta frames also `NotSync`), nil for a frame
     /// without picture data. Throws `MediaCodecError` when CoreMedia refuses the format's parameter sets or the data.
     public func sampleBuffer(for frame: EncodedVideoFrame) throws -> sending CMSampleBuffer? {
+        try sampleBuffer(for: frame, decodeOnly: false)
+    }
+
+    /// `sampleBuffer(for:)`, or with `decodeOnly` a sample that only primes the decoder: marked `DoNotDisplay` (decoded, never shown) and not
+    /// "display immediately" (a recorded clip's lead-in frames before the picture a scrub wants).
+    public func sampleBuffer(for frame: EncodedVideoFrame, decodeOnly: Bool) throws -> sending CMSampleBuffer? {
         let description: CMVideoFormatDescription
         if let current, current.format == frame.format {
             description = current.description
@@ -31,8 +37,8 @@ public final class LiveVideoSampleBuilder {
         guard let sample = made else { return nil }
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true), CFArrayGetCount(attachments) > 0 {
             let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+            let key = decodeOnly ? kCMSampleAttachmentKey_DoNotDisplay : kCMSampleAttachmentKey_DisplayImmediately
+            CFDictionarySetValue(dictionary, Unmanaged.passUnretained(key).toOpaque(), Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
         }
         return sample
     }

@@ -1,14 +1,21 @@
-// Bridge-wide settings: its name, the password, ports, the webhook, the timestamp for every camera, and the log.
+// Bridge-wide settings, in sections: General (name, time zone, password, sign out), Video and recording (one label on every camera,
+// recording), Apple Home and other systems (ports, webhook), Troubleshooting (the log). The appearance is the menu's button.
 import { get, patch, post } from '../api.js';
 import { confirmDialog, h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
+import { loadNVR } from '../nvr/lite.js';
 import { cameraList, store } from '../store.js';
 import { field, inlineError, selectField, switchRow } from './common.js';
+import { importMacCard } from './import-mac.js';
 
-export function renderSettings({ setTitle }) {
-  const root = h('div', { class: 'stack' });
+export function renderSettings({ params, setTitle }) {
+  const root = h('div', { class: 'settings' });
+  const recordingHost = h('div', { id: 'recording' });
+  const importCard = importMacCard();
+  let recording = null;   // the Recording card: { el, refresh, destroy }, made once and put back by every draw()
   let settings = null;
   let destroyed = false;
+  let wantsRecording = params?.[0] === 'recording';   // the address #/settings/recording scrolls to the card
 
   async function load() {
     try {
@@ -43,6 +50,56 @@ export function renderSettings({ setTitle }) {
       h('h2', null, 'This bridge'),
       h('p', { class: 'desc' }, 'The name shown at the top of this page.'),
       field('Name', name), h('button', { class: 'btn', type: 'submit' }, 'Save name'));
+  }
+
+  /** One look on every camera: the bridge's label style, whether Apple Home's video carries it, and clean pictures from the cameras.
+   *  Each change is saved on every camera at once (a camera's own page can still set it differently). */
+  function labelsCard() {
+    const first = cameraList()[0]?.timestampOverlay ?? {};
+    const style = { enabled: first.enabled ?? false, position: first.position ?? 'topRight', size: first.size ?? 'medium',
+      showCameraName: first.showCameraName ?? true, showDate: first.showDate ?? true, showSeconds: first.showSeconds ?? true, use24Hour: first.use24Hour ?? false };
+    const status = h('p', { class: 'small muted', role: 'status' });
+    async function everyCamera(word, work) {
+      const cameras = cameraList();
+      if (!cameras.length) { status.textContent = 'Add a camera first.'; return; }
+      status.textContent = `${word}…`;
+      const failed = [];
+      for (const camera of cameras) {
+        try { await work(camera); } catch (error) { failed.push(`${camera.name}: ${error.message}`); }
+      }
+      status.textContent = failed.length ? `Done, except ${failed.join('; ')}` : `Saved on ${cameras.length === 1 ? 'the camera' : `all ${cameras.length} cameras`}.`;
+    }
+    const apply = (partial) => { Object.assign(style, partial); everyCamera('Saving', (c) => patch(`cameras/${c.id}`, { timestampOverlay: { ...style } })); };
+    return h('div', { class: 'card' }, h('h2', null, 'Video label'),
+      h('p', { class: 'desc' }, 'The camera’s name and the date and time, the same on every camera: on the Monitor, on recordings, burned into saved clips and, if you want, into Apple Home’s video.'),
+      h('div', { class: 'inline-fields' },
+        selectField('Corner', [['topRight', 'Top right'], ['topLeft', 'Top left'], ['bottomRight', 'Bottom right'], ['bottomLeft', 'Bottom left']], style.position, (v) => apply({ position: v })),
+        selectField('Size', [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], style.size, (v) => apply({ size: v }))),
+      switchRow({ title: 'Camera name', checked: style.showCameraName, onchange: (v) => apply({ showCameraName: v }) }),
+      switchRow({ title: 'Date', checked: style.showDate, onchange: (v) => apply({ showDate: v }) }),
+      switchRow({ title: 'Seconds', checked: style.showSeconds, onchange: (v) => apply({ showSeconds: v }) }),
+      switchRow({ title: '24-hour time', checked: style.use24Hour, onchange: (v) => apply({ use24Hour: v }) }),
+      switchRow({ title: 'In Apple Home’s video', desc: 'Burns the label into what Apple Home shows and records. The bridge then converts the video instead of passing it through, which uses more of the box.',
+        checked: style.enabled, onchange: (v) => apply({ enabled: v }) }),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small', type: 'button', onclick: () => everyCamera('Turning the cameras’ own labels off', (c) => post(`cameras/${c.id}/clean-picture`, { clean: true })) },
+          'Turn off the cameras’ own labels')),
+      h('p', { class: 'small muted' }, 'Removes the clock and text each camera draws itself, so only this label shows. A camera’s page can put them back.'),
+      status);
+  }
+
+  /** The bridge's time zone: the timestamp it draws on video and the clocks it sets on cameras follow it. */
+  function timeZoneCard() {
+    const here = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const zones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [here];
+    const current = settings.timeZone || '';
+    const options = [...new Set([current, here, ...zones].filter(Boolean))].map((zone) => [zone, zone.replaceAll('_', ' ')]);
+    return h('div', { class: 'card' }, h('h2', null, 'Time zone'),
+      h('p', { class: 'desc' }, current
+        ? 'The timestamp the bridge draws on video, and the clocks it sets on cameras, use this time zone.'
+        : 'The bridge has no time zone yet, so it uses UTC. Choose yours.'),
+      selectField('Time zone', current ? options : [['', 'Not set (UTC)'], ...options], current, (zone) => { if (zone) change({ timeZone: zone }, 'Time zone saved.'); }),
+      current !== here ? h('button', { class: 'btn small', type: 'button', onclick: () => change({ timeZone: here }, 'Time zone saved.') }, `Use this device’s: ${here.replaceAll('_', ' ')}`) : null);
   }
 
   function passwordCard() {
@@ -98,32 +155,6 @@ export function renderSettings({ setTitle }) {
           h('span', { class: 'hint' }, 'Send it as “Authorization: Bearer <token>”. Each camera’s page lists its URLs.'))) : null);
   }
 
-  function overlayCard() {
-    const o = { enabled: false, position: 'topRight', size: 'medium', showCameraName: false, showDate: true, showSeconds: true, use24Hour: false };
-    const first = cameraList()[0]?.timestampOverlay;
-    if (first) Object.assign(o, first);
-    const set = (key) => (value) => { o[key] = value; };
-    return h('div', { class: 'card' }, h('h2', null, 'Timestamp on video'),
-      h('p', { class: 'desc' }, 'Draws the date and time on live view and recordings of every camera. You can also set it camera by camera. Turning it on makes the bridge convert the video instead of passing it through.'),
-      switchRow({ title: 'Show the timestamp', checked: o.enabled, onchange: set('enabled') }),
-      h('div', { class: 'inline-fields' },
-        selectField('Position', [['topRight', 'Top right'], ['topLeft', 'Top left'], ['bottomRight', 'Bottom right'], ['bottomLeft', 'Bottom left']], o.position, set('position')),
-        selectField('Size', [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], o.size, set('size'))),
-      switchRow({ title: 'Camera name', checked: o.showCameraName, onchange: set('showCameraName') }),
-      switchRow({ title: 'Date', checked: o.showDate, onchange: set('showDate') }),
-      switchRow({ title: 'Seconds', checked: o.showSeconds, onchange: set('showSeconds') }),
-      switchRow({ title: '24-hour time', checked: o.use24Hour, onchange: set('use24Hour') }),
-      h('button', { class: 'btn', type: 'button', disabled: !cameraList().length, onclick: async (e) => {
-        const button = e.currentTarget;
-        button.disabled = true;
-        try {
-          await Promise.all(cameraList().map((camera) => patch(`cameras/${camera.id}`, { timestampOverlay: o })));
-          toast(`Applied to ${cameraList().length} camera${cameraList().length === 1 ? '' : 's'}.`, 'ok');
-        } catch (error) { toast(error.message, 'error'); }
-        button.disabled = false;
-      } }, 'Apply to all cameras'));
-  }
-
   function diagnosticsCard() {
     return h('div', { class: 'card' }, h('h2', null, 'Log and tests'),
       selectField('Log detail', [['error', 'Errors only'], ['warning', 'Warnings'], ['notice', 'Notices'], ['info', 'Normal'], ['debug', 'Everything (for troubleshooting)']], settings.logLevel,
@@ -143,12 +174,38 @@ export function renderSettings({ setTitle }) {
       } }, 'Sign out'));
   }
 
+  /** The Recording card comes from the recording code, which is loaded on demand. Without it the rest of Settings still works. */
+  async function mountRecording() {
+    const nvr = await loadNVR();
+    if (destroyed) return;
+    recording = nvr ? nvr.storageCard() : null;
+    replace(recordingHost, recording ? recording.el
+      : h('div', { class: 'card' }, h('h2', null, 'Recording'), inlineError('The recording settings could not load. Reload the page to try again.')));
+    showRecording();
+  }
+
+  /** Scrolls to the Recording card once, when both it and the other settings are on the page. */
+  function showRecording() {
+    if (!wantsRecording || !settings || !recordingHost.firstChild || !recordingHost.isConnected) return;
+    wantsRecording = false;
+    recordingHost.scrollIntoView({ block: 'start' });
+    recordingHost.querySelector('h2')?.focus({ preventScroll: true });
+  }
+
   function draw() {
-    replace(root, nameCard(), passwordCard(), portsCard(), webhookCard(), overlayCard(), diagnosticsCard(), accountCard());
+    const section = (title, ...cards) => h('section', { class: 'settings-section' }, h('h2', { class: 'section-title' }, title), h('div', { class: 'card-columns' }, cards));
+    replace(root,
+      // Bringing cameras over from the Mac app is a first-day step: offered while the bridge has none.
+      section('General', nameCard(), timeZoneCard(), cameraList().length ? null : importCard, passwordCard(), accountCard()),
+      section('Video and recording', labelsCard(), recordingHost),
+      section('Apple Home and other systems', portsCard(), webhookCard()),
+      section('Troubleshooting', diagnosticsCard()));
+    showRecording();
   }
 
   replace(root, h('div', { class: 'checking' }, spinner()));
   load();
-  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Settings')), root), destroy() { destroyed = true; } };
+  mountRecording();
+  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Settings')), root), destroy() { destroyed = true; recording?.destroy(); } };
 }
 

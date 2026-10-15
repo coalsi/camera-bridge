@@ -198,6 +198,14 @@ final class FFmpegRuntime: Sendable {
         return stored
     }
 
+    /// The VA-API render node decoders use, or nil to decode on the CPU: the GPU decodes wherever it encodes (VA-API usable, not
+    /// turned off by configuration or after a failure). A camera stream the GPU cannot decode falls back to the CPU inside ffmpeg.
+    func hardwareDecodeDevice() -> String? {
+        guard configuration.videoEncoder != .software, let capabilities = try? capabilities(), capabilities.vaapiUsable,
+              !state.withLock({ $0.vaapiDisabled }) else { return nil }
+        return configuration.vaapiDevice
+    }
+
     /// The H.264 encoder for a new pipeline (logged when it changes).
     func videoBackend() throws -> FFmpegVideoBackend {
         let capabilities = try capabilities()

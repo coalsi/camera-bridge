@@ -529,3 +529,86 @@ VideoToolbox synthetic sources, ingest from `RTSPTestServer`, soft motion, and t
 `CameraRuntime` asks a `StreamHoldingDriver` for its local RTSP address (`attachStreams()`) instead of probing, and calls `releaseStreams()` when it stops; a go2rtc
 camera has no `CameraReachability` (it is reached on this Mac). `probeIntegration(…)` is the wizard's check; `beginIntegrationSetup()` / `endIntegrationSetup()` run
 go2rtc's sign-in pages on loopback; `isStreamingHelperInstalled` says whether the app bundle holds the helper.
+
+## Additions beyond the contract: the NVR (2026-10-10, docs/CONTRACT_CHANGES.md)
+
+Recording of the main stream to fragmented MP4 files (a `.cbidx` index beside each), and reading them back. Reading: `ArchiveReading` (`activity(camera:range:binCount:)`,
+`fragment(camera:containing:)`, `fragment(camera:startingAfter:)`, `fragment(camera:id:)`, `read(_:_:)`, `extent(camera:)`, `catalogVersion`, `isReady`),
+`ArchiveFragment` (`fileKey`, `index`, `backToKey`, `byteLength`, `id`), `ArchiveReadPart`, `ArchiveExtent`, `ArchiveActivity`, `ArchiveError`; `BridgeEngine.archive`.
+Status and storage: `ArchivePause`, `ArchiveRecordingState`, `ArchiveNote`, `CameraArchiveStatus`, `CameraStatus.nvr`, `ArchiveStorageStatus`, `BridgeEngine.nvrStorage`.
+Host policy and folder check: `ArchivePlatformPolicy`, `BridgeEnvironment.archivePolicy`, `BridgeEnvironment.demoKeyframeSeconds` (development only), `ArchiveFolderReport` (`floorBytes`), `ArchiveFolderCheck`, `ArchiveFolderError` (`belowFloor`),
+`BridgeEngine.inspectArchiveFolder(_:)`. Configuration: `CameraConfiguration.nvrEnabled`, `CameraConfiguration.nvrRecordSound`, `BridgeSettings.nvrFolder`,
+`BridgeSettings.nvrKeepDays`, `BridgeSettings.nvrMaxSizeGB`, `BridgeSettings.nvrKeepDaysRange`, `BridgeSettings.nvrMaxSizeGBRange`,
+`BridgeSettings.isValidNVRFolder(_:)` (old files decode unchanged; an unusable value takes its default). `BridgeEngine.setNVR(cameraID:enabled:recordSound:)` changes the two
+camera fields in place under the operations lock, never restarts the camera, and is the only place they change (`updateCamera` carries them forward; `needsRestart` ignores them).
+Shared constants and names: `ArchiveConstants`, `ArchiveIdentity` (`fileKey(forSegment:)`, `fragmentID(fileKey:index:)`, `parseFragmentID(_:)`), `ArchiveLayout`.
+Package-only: `ArchiveMedia` (the browser's video-only view of a file), `CBIndexFormat`, `CBIndexFile`. Internal: `NVRCoordinator`, `ArchiveStore`, `RecorderHost`, `ArchiveWriteTarget`.
+
+The recorder: `RecorderHost` starts one `CameraArchiveRecorder` per camera with Record on; it subscribes to the camera's `MediaHub` with `.prebuffer(.zero)`, cuts fragments at every keyframe, after 2.5 s of decode time,
+900 frames or 16 MiB (`FMP4Muxer.fragment(…continuation:)` for the pieces after a keyframe) and appends them to `<folder>/<camera directory>/<yyyy-MM-dd>/<HH-mm-ss>.mp4` through an `ArchiveFileWriter`, which does all disk
+work on the camera's own serial queue (the recorder never waits for a drive; 15 s or 256 MiB pending is a stall). A file has one anchor; fragment times are media times from it; a break (reconnect, decode time back or far forward,
+parameter-set or audio-format change, 15 s without video, 1 s of drift twice) closes it and the next keyframe opens a new one; 900 s or 2 GiB ends it at a keyframe without a gap. `FragmentIndexer` (package) measures a stored
+fragment for the index (`CBIndexFragmentRecord`, per-minute `CBIndexRollup`s) and is the only code that does, for the recorder and for a recovery scan. The camera folder is the sanitized camera name (the Mac) or the camera's UUID
+(the box), with `camera.json`; the recordings folder itself is never created.
+
+### ArchiveMedia (NVR)
+
+`ArchiveMedia` (package access, the browser's view of a recording) reads the init segments and fragments `FMP4Muxer` writes and gives the page video only:
+`mime(forInit:)` (`video/mp4; codecs="avc1.PPCCLL"` or `hvc1.…`, the string `MediaSource.isTypeSupported` wants), `videoInit(_:)` (the init segment without its
+sound track, byte for byte what a muxer without sound writes, or the input itself when there is none; with the picture size and whether sound was dropped) and
+`videoSegment(_:)` (a stored `prft` + `moof` + `mdat` as `moof` + `mdat` with the video samples only). Video is track 1 and sound is track 2; any other layout is
+refused with `ArchiveMedia.Failure.unsupported` or `.malformed`, the only errors it throws. Tests: `ArchiveMedia*Tests` in `BridgeEngineTests`.
+
+The store behind `BridgeEngine.archive` (NVR; `ArchiveStore`, internal): `start` returns at once while the folder is probed, unclosed files are repaired (`IndexScanner`: a
+torn tail is cut, the sidecar rebuilt) and the catalog is loaded from each file's sidecar header and per-minute rollups; `ArchiveReading.isReady` turns true when that is done, so
+nothing archive-related delays `engine.start()`. A fragment's `start` and `end` are whole milliseconds and abut; when files overlap the one that starts later wins. Closed files'
+fragment tables are read from their sidecars when a lookup needs them (the 256 most recent stay in memory); bytes are read on a 6-wide queue with a 5 s deadline, through at most 16
+open handles and a 64 MB cache, and a file that is unlinked while it is read stays readable through its handle. A drive probe every 5 s sets the pause recorders obey (`ArchivePause`: no
+folder, folder missing, below the floor with 1 GiB of hysteresis, writes refused, drive not answering) and publishes `BridgeEngine.nvrStorage`; a probe that hangs blocks one thread and
+nothing else. Retention (at start, every 60 s, after each file close and after a settings change) deletes closed own-pattern files with a valid sidecar in every camera directory that
+holds a `camera.json`: first those that ended before `nvrKeepDays`, then the oldest starts across all cameras down to `min(nvrMaxSizeGB x 1e9, total - 2 x floor)`; free space never causes
+a deletion, and a file a recorder has open is never touched. `ArchiveFolderCheck.inspect(_:policy:)` checks a folder on a probe queue of its own. No public or package symbol is added
+beyond the list above.
+
+Preview data for the NVR (2026-10-10, docs/CONTRACT_CHANGES.md): `PreviewScenario.nvr` (`-previewEngine YES -demoScenario nvr`, `camerabridged --preview nvr`) shows the eight fleet
+cameras with recordings: `BridgeEngine.preview(scenario:)` gives the engine an `archive` of made-up recordings (a daily rhythm of activity with bursts, a gap, a camera that stopped
+recording, real playable video from one synthetic clip), `nvrStorage` numbers and an NVR folder in the settings. Internal: `PreviewArchive`, `PreviewClip`.
+
+## Additions beyond the contract: exporting a clip (2026-10-12, docs/CONTRACT_CHANGES.md)
+
+Cutting a stretch of one camera's recordings into a normal MP4 (the export-clip design, `docs/superpowers/specs/2026-10-12-export-clip-design.md`; the planner, the writer and `ClipExporter` come with the tasks that follow and are listed here when they land). The read seam gains one part, `ArchiveReadPart.header`: the first `headerLength` bytes of a fragment, that is `prft` + `moof` + the 8-byte `mdat` header, so that the sample tables of a clip are planned from headers alone, before any video is read. `ArchiveStore` serves it on the same read queue, with the same checks and cache as the other parts; `PreviewArchive` refuses it. Public types: `ClipLimits` (`standard`: 2 hours per camera, 20 GiB in all, a gap up to 10 s is held), `ClipRequest`, `ClipGap`, `ClipPart`, `ClipPlan` (the exact size of every part before a byte is written; a fake in another target builds one with the public initializer), `ClipError`, `ClipSink` (where the bytes go), `ClipExporting` (what the Mac app and the box's routes call) and `ClipFileName` (`part`, `folder`, `archive`, `unique`: the names of a clip's file, of the folder a multi-camera export makes on the Mac and of the ZIP the browser gets). Package-only: `ClipSample`, `ClipCopy`, `ClipPartTables` and `ClipPlan.tables`, which is what the planner hands the writer. `ClipPlanner` (package; `ClipPlanner(archive:limits:sizing:)`, `plan(_:)`) turns a `ClipRequest` into a `ClipPlan` from fragment headers alone: the key picture at or before the start, parts where the camera's init bytes change, gaps held, skipped or refused by the limits, and the exact size of every part from the writer's sizing function. `ClipLayout` and `ClipSizing` (package; the boxes are made with a small `ClipBoxBuilder`) build the `ftyp`, the complete `moov` and the `mdat` header of a progressive MP4 from a part's tables, so the file's exact size is known before a picture is read (`co64` and a 64-bit `mdat` from 4 GiB); `ClipWriter` (package) writes them and then copies each fragment's pictures untouched, cancellable between fragments. `ClipExporter` (public) is the facade the Mac app and the box's routes call: `plan(_:)` and `export(_:part:to:progress:)`, with parts counted from 1.
+
+## The NVR (Sources/BridgeEngine/NVR)
+
+Recording the cameras' main streams and reading the recordings back (docs/CONTRACT_CHANGES.md 2026-10-10; the new public API is listed under "Additions beyond the contract: the NVR"). One `MediaHub` subscription per camera feeds one recorder; the store owns the catalog, the reads and the retention; the engine's own surface is `setNVR`, `archive` and `nvrStorage`.
+
+```
+MediaHub (per camera) ─► recorder ─► <recordings>/<camera folder>/<yyyy-MM-dd>/<HH-mm-ss>.mp4  (+ .cbidx when the file closes)
+                           ▲                                   │
+       RecorderHost ◄── NVRCoordinator ──► ArchiveStore ───────┴─► ArchiveReading (catalog, reads, activity) ─► the app, BridgeWeb
+```
+
+- **Time.** A file has one anchor: its first frame's wall clock, or the host's clock when that differs by more than 60 s. A fragment starts at anchor plus media time, so fragments abut exactly. A measured wall time more than 1 s off the derived one, twice in a row, ends the file.
+- **Fragments and files.** A fragment is cut at every keyframe or after 2.5 s, 900 frames or 16 MiB; one that does not start on a keyframe is a continuation fragment (`FMP4Muxer.fragment(video:audio:nextDecodeTime:continuation:)`). Any break (a reconnect seen through `MediaHub.discontinuityCount`, a decode time that steps back or far forward, a parameter-set or audio change, 900 s or 2 GiB at a keyframe, 15 s without video) flushes, writes the sidecar and closes the file; the next keyframe opens a new one.
+- **Safety.** The recorder never creates the recordings folder or a parent of it, only the camera and date folders. Files are 0600, folders 0700. Retention deletes only closed files with the exact own name and a valid sidecar, in every camera folder that holds a `camera.json`, never an open file, and never because free space is low. The `.cbidx` sidecar is a cache: the mp4 is the truth, and a missing or untrusted sidecar is rebuilt with `MovieFragmentReader`.
+- **Start.** `ArchiveStore.start` returns at once. Repair and the catalog load run in the background and `isReady` says when they are done, so nothing archive-related delays `engine.start()` (the daemon says `READY=1` after it).
+- **The host.** What only the host knows is `ArchivePlatformPolicy`: free space, which volume is the system volume, the floor, and how camera folders are named. The box: `statvfs` from BridgeDaemon, `max(8 GiB, 5%)`, the camera ID. The Mac: Foundation's volume attributes, `max(20 GiB, min(10%, 50 GiB))` on the startup volume, the camera name.
+
+| File | What |
+|---|---|
+| `ArchiveConstants.swift`, `ArchiveIdentity.swift` | The numbers the parts share; the file key, the fragment id and the name patterns |
+| `ArchiveReading.swift`, `ArchiveStatus.swift`, `ArchivePlatformPolicy.swift` | The reading seam; the status and storage values; what the host supplies |
+| `CBIndexFormat.swift` | The `.cbidx` v1 sidecar codec |
+| `NVRCoordinator.swift`, `ArchiveWriteTarget.swift` | The engine's one handle on the NVR; the seam between the recorders and the store |
+| `RecorderHost.swift`, `CameraArchiveRecorder.swift` and the files beside them | The recorders: file writing, folder naming, continuity rules |
+| `ArchiveStore.swift`, `FolderCheck.swift` and the files beside them | The store: catalog, index scanner and repair, retention, volume monitor, read queue, activity |
+| `ArchiveMedia.swift` | The browser's video-only view of a file (`package`) |
+
+## Additions beyond the contract: the bridge's time zone (2026-10-14, docs/CONTRACT_CHANGES.md)
+
+`BridgeSettings.timeZone` (an IANA identifier; nil: the system's) becomes the process's time zone when the settings load or change (`TZ` and
+Foundation's default, so the timestamp overlay and ffmpeg children follow it). `BridgeEngine.setCameraTimeZone(cameraID:)` sets a camera's clock to
+it through ONVIF `SetSystemDateAndTime` (a POSIX string from `PosixTimeZone`), so the date and time the camera draws itself is local time.
+
+`BridgeEngine.setCleanPicture(cameraID:clean:)` (2026-10-14) turns every label the camera draws itself off or back, keeping the saved copy in
+`CameraConfiguration.cleanPictureBackup` (engine-owned, like `hiddenCameraClock`).

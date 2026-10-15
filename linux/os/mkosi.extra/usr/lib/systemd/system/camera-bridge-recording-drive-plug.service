@@ -1,0 +1,10 @@
+[Unit]
+Description=A Camera Bridge recording drive was plugged in
+Documentation=https://github.com/coalsi/camera-bridge
+After=camera-bridge-recording-drive.service
+
+[Service]
+Type=oneshot
+# Mounts the drive and restarts the engine, if the drive was not in place already.
+ExecStart=/usr/sbin/cb-recording-drive --apply --restart
+TimeoutStartSec=120

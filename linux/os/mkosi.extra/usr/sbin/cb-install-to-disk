@@ -196,6 +196,9 @@ EOF
         if [ "$copy_data" -eq 1 ]; then
             echo "CopyFiles=/srv/camera-bridge:/camera-bridge"
             echo "CopyFiles=/srv/system:/system"
+        elif [ -d /srv/system/network-connections ]; then
+            # The Wi-Fi networks the box knows go along anyway: the installed box comes up on the same network.
+            echo "CopyFiles=/srv/system/network-connections:/system/network-connections"
         fi
     } >"$dir/30-data.conf"
 }

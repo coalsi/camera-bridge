@@ -191,10 +191,11 @@ import PlatformApple
         let ready = await eventually(timeout: .seconds(30)) { await feeder.hub.lastKeyframe != nil }
         #expect(ready)
         let provider = SnapshotProvider(cameraSnapshot: nil, codecs: codecs, hub: feeder.hub, log: Self.log)
-        try await Task.sleep(for: .seconds(2))
+        // Twice as long into the GOP as between the two snapshots: decoding the whole GOP again would decode about twice what continuing does.
+        try await Task.sleep(for: .seconds(4))
         let first = try await provider.snapshot(SnapshotRequest(width: 640, height: 360, reason: .event))
         let afterFirst = codecs.decoded.value
-        #expect(afterFirst >= 20, "decoded forward through the GOP: \(afterFirst) frames")
+        #expect(afterFirst >= 40, "decoded forward through the GOP: \(afterFirst) frames")
         try await Task.sleep(for: .seconds(2))
         let second = try await provider.snapshot(SnapshotRequest(width: 640, height: 360, reason: .event))
         let added = codecs.decoded.value - afterFirst

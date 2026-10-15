@@ -24,6 +24,9 @@ final class StreamCollector: Sendable {
 
     var text: String { chunks.value.joined() }
 
+    /// Ends the streaming body (as the browser going away would).
+    func cancel() { task.withLock { $0?.cancel() } }
+
     /// Waits until `predicate` holds for the text written so far.
     func wait(timeout: Duration = .seconds(5), _ predicate: (String) -> Bool) async -> Bool {
         await eventually(timeout: timeout) { predicate(text) }

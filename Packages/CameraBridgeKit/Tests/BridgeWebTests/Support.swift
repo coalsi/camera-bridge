@@ -32,6 +32,13 @@ final class FakeBackend: BridgeBackend {
         var passwords: [UUID: String] = [:]
         var probeCalls: [(vendor: CameraVendor?, host: String, username: String, password: String)] = []
         var sensorsBridge: SensorsBridgeStatus?
+        var archive: (any ArchiveReading)?
+        var nvrStorage: ArchiveStorageStatus?
+        var folderReport: Result<ArchiveFolderReport, any Error> = .success(ArchiveFolderReport(freeBytes: 200_000_000_000, totalBytes: 500_000_000_000))
+        var nvrError: (any Error)?
+        var optimization: Result<HomeKitOptimizationResult, any Error> = .failure(EngineError.cameraNotRunning)
+        var optimizeGate: AsyncGate?
+        var undoError: (any Error)?
     }
 
     let box = Mutex(State())
@@ -57,7 +64,7 @@ final class FakeBackend: BridgeBackend {
         box.withLock { state in
             BridgeOverview(state: state.state, cameras: state.configurations.map { status(for: $0, in: state) }, configurations: state.configurations,
                            sensorsBridge: state.sensorsBridge, localNetworkAccess: .granted, networkNotices: state.notices, settings: state.settings,
-                           webhookProblem: state.webhookProblem, streamingHelperInstalled: state.helperInstalled)
+                           webhookProblem: state.webhookProblem, streamingHelperInstalled: state.helperInstalled, nvrStorage: state.nvrStorage)
         }
     }
 
@@ -123,11 +130,41 @@ final class FakeBackend: BridgeBackend {
     func diagnosticsReport(context: DiagnosticsContext) async -> String {
         "Camera Bridge diagnostics\nApp: \(context.appName) \(context.appVersion)\n"
     }
+
+    var archive: (any ArchiveReading)? { read { $0.archive } }
+
+    func inspectArchiveFolder(_ path: String) async throws -> ArchiveFolderReport {
+        write { $0.calls.append("inspect:\(path)") }
+        return try read { $0.folderReport }.get()
+    }
+
+    func setNVR(cameraID: UUID, enabled: Bool?, recordSound: Bool?) async throws {
+        if let error = read({ $0.nvrError }) { throw error }
+        try box.withLock { state in
+            guard let index = state.configurations.firstIndex(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+            if let enabled { state.configurations[index].nvrEnabled = enabled }
+            if let recordSound { state.configurations[index].nvrRecordSound = recordSound }
+            state.calls.append("setNVR")
+        }
+    }
+
+    func optimizeForHomeKit(cameraID: UUID) async throws -> HomeKitOptimizationResult {
+        write { $0.calls.append("optimize") }
+        if let gate = read({ $0.optimizeGate }) { await gate.wait() }
+        return try read { $0.optimization }.get()
+    }
+
+    func undoHomeKitOptimization(cameraID: UUID) async throws {
+        write { $0.calls.append("undo") }
+        if let error = read({ $0.undoError }) { throw error }
+    }
 }
 
 /// A system that records what it was asked.
 final class FakeSystem: SystemControlling {
     let calls = Box<[String]>([])
+    /// The setup hotspot while the test says it is open.
+    let hotspot = Box<SetupHotspot?>(nil)
     let mode: String
 
     init(mode: String = "installed") { self.mode = mode }
@@ -152,6 +189,34 @@ final class FakeSystem: SystemControlling {
     func installTargets() async throws -> [InstallTarget] {
         [InstallTarget(id: "nvme0n1", name: "nvme0n1", model: "Acme 256", sizeBytes: 256_000_000_000, phrase: "ERASE ALL DATA ON nvme0n1")]
     }
+
+    func recordingDrives() async throws -> RecordingDriveReport {
+        RecordingDriveReport(state: "internal", message: "Recording to this box's own disk.",
+                             drives: [InstallTarget(id: "sdb", name: "sdb", model: "Elite", sizeBytes: 4_000_000_000_000, phrase: "ERASE ALL DATA ON sdb", isRecordingDrive: false, inUse: false)])
+    }
+
+    func useRecordingDrive(targetID: String, phrase: String, keepData: Bool) async throws {
+        calls.update { $0.append("drive:\(targetID):\(phrase):\(keepData)") }
+        if targetID == "bad" { throw SystemError("That disk can’t be used.") }
+    }
+
+    func forgetRecordingDrive() async throws { calls.update { $0.append("drive-forget") } }
+
+    func wifi() async -> WifiReport {
+        WifiReport(state: hotspot.value == nil ? "online" : "hotspot", message: "", ssid: hotspot.value == nil ? "Home" : nil, hotspot: hotspot.value, saved: ["Home"],
+                   lastError: hotspot.value == nil ? nil : "Couldn’t join “Home”.", hasWifi: true,
+                   networks: [WifiNetwork(ssid: "Home", signal: 70, security: "WPA2"), WifiNetwork(ssid: "Cafe", signal: 30, security: "")])
+    }
+
+    func scanWifi() async throws -> [WifiNetwork] { await wifi().networks }
+
+    func joinWifi(ssid: String, password: String, restart: Bool) async throws {
+        calls.update { $0.append("wifi:\(ssid):\(password.count):\(restart)") }
+    }
+
+    func forgetWifi(ssid: String) async throws { calls.update { $0.append("wifi-forget:\(ssid)") } }
+
+    func setupHotspot() -> SetupHotspot? { hotspot.value }
 
     func install(targetID: String, phrase: String, copyData: Bool) async throws {
         calls.update { $0.append("install:\(targetID):\(phrase):\(copyData)") }

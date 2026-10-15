@@ -19,13 +19,23 @@ public struct BridgeEnvironment: Sendable {
     public var loopbackOnly: Bool
     /// Tests may disable Bonjour.
     public var advertise: Bool
+    /// What the NVR needs from the host to find free space and to name folders (statvfs lives in BridgeDaemon only). nil on the Mac app: the
+    /// engine then reads Foundation's volume attributes and names camera folders after the camera.
+    public var archivePolicy: ArchivePlatformPolicy?
+    /// Development only (the daemon's hidden `--demo-keyframe-seconds`, accepted with `--dev` or `--preview`): the demo camera's main stream
+    /// keys every this many seconds instead of every 2, so the smart-codec path (the keyframe note above 10 s, the coarse caption above 4 s,
+    /// `typicalGOP`) runs through the real engine. nil, or a value outside 1...120, keeps 2 s.
+    public var demoKeyframeSeconds: Double?
 
-    public init(dataDirectory: URL, platform: PlatformServices, codecs: any MediaCodecs, loopbackOnly: Bool = false, advertise: Bool = true) {
+    public init(dataDirectory: URL, platform: PlatformServices, codecs: any MediaCodecs, loopbackOnly: Bool = false, advertise: Bool = true,
+                archivePolicy: ArchivePlatformPolicy? = nil, demoKeyframeSeconds: Double? = nil) {
         self.dataDirectory = dataDirectory
         self.platform = platform
         self.codecs = codecs
         self.loopbackOnly = loopbackOnly
         self.advertise = advertise
+        self.archivePolicy = archivePolicy
+        self.demoKeyframeSeconds = demoKeyframeSeconds
     }
 
     #if canImport(Darwin)

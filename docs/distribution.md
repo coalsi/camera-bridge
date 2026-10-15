@@ -30,6 +30,14 @@ access entitlements (outside the sandbox, a save panel needs none).
 `Info.plist` keeps `NSLocalNetworkUsageDescription` and `NSBonjourServices` (`_hap._tcp`): macOS asks for Local Network
 permission on first use. `NSAppTransportSecurity.NSAllowsLocalNetworking` allows plain HTTP to cameras on the LAN.
 
+`Info.plist` also carries the words of the permission prompts for recording (`NSRemovableVolumesUsageDescription`,
+`NSNetworkVolumesUsageDescription`, `NSDocumentsFolderUsageDescription`, `NSDesktopFolderUsageDescription`,
+`NSDownloadsFolderUsageDescription`). The app is not sandboxed, so macOS asks the first time it reads a folder on a drive or in
+one of those places, and without the keys the question is a generic one. The recordings folder is stored as a plain path
+(`BridgeSettings.nvrFolder`) and opened without a bookmark; that works only because the app is not sandboxed. A sandboxed build
+(the App Store route that was dropped) would need a security-scoped bookmark for every folder a person chooses. Recording adds
+no entitlement: the list above stays the two network entitlements, and `DistributionGuardTests` fails if it changes.
+
 ### Migration from the sandboxed build
 
 Earlier local builds were sandboxed, with data in `~/Library/Containers/com.coreysilvia.CameraBridge`. On the first launch

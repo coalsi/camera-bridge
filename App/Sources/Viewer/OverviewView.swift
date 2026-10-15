@@ -10,7 +10,12 @@ import SwiftUI
 struct OverviewView: View {
     let model: AppModel
     @State private var overview: OverviewModel
+    /// The timeline's playback: the same timeline and clip flow as a camera's viewer, over every camera. It never opens live pictures of its own (the
+    /// tiles do while the timeline is live); it plays recordings once the timeline is away from live.
+    @State private var page: NVRPageModel
     @State private var columns = 3
+    /// Whether the timeline is on screen (remembered; on at first).
+    @AppStorage("overviewShowsTimeline") private var showsTimeline = true
     private let activity = WindowActivity.shared
 
     init(model: AppModel) {
@@ -21,7 +26,14 @@ struct OverviewView: View {
         if let value = UserDefaults.standard.string(forKey: "demoLiveCap").flatMap({ Int($0) }) { cap = value }
         #endif
         _overview = State(initialValue: OverviewModel(defaults: model.preferences, cap: cap, makeSink: { LiveVideoRenderer() }, open: model.liveVideoOpener))
+        let session = NVRSession(archive: model.archive, clock: PlaybackClock(), makeSink: { LiveVideoRenderer() }, now: { ProcessInfo.processInfo.systemUptime },
+                                 sleep: CellPlayback.systemSleep, liveOpener: nil, liveStream: .sub)
+        let panel = NVRPanelModel(archive: model.archive, session: session, defaults: model.preferences, clipExport: model.clipExport)
+        _page = State(initialValue: NVRPageModel(panel: panel, defaults: model.preferences))
     }
+
+    /// The timeline is away from live: the tiles show recordings, and the live pictures stop.
+    private var showsRecordings: Bool { showsTimeline && !page.session.clock.isLive }
 
     var body: some View {
         let cameras = model.engine.cameras
@@ -30,13 +42,17 @@ struct OverviewView: View {
                 EmptyCamerasHero { model.showAddCamera() }
             } else {
                 VStack(spacing: 0) {
-                    OverviewHeader(overview: overview)
-                    if overview.layout.grid == nil {
+                    OverviewHeader(model: model, overview: overview, showsTimeline: $showsTimeline)
+                    if showsRecordings {
+                        RecordedGrid(model: model, page: page)
+                    } else if overview.layout.grid == nil {
                         autoGrid
                     } else {
-                        FixedOverviewGrid(model: model, overview: overview)
+                        FixedOverviewGrid(model: model, overview: overview, clip: showsTimeline ? page.panel : nil)
                     }
+                    if showsTimeline { NVRTimelinePanel(panel: page.panel) }
                 }
+                .background { if showsTimeline { clipShortcuts } }
                 .background {
                     OverviewEventMonitor(isActive: model.presentedSheet == nil && model.expandedCameraID == nil) { event in
                         switch event {
@@ -51,8 +67,9 @@ struct OverviewView: View {
         }
         .navigationTitle("Overview")
         .onAppear {
-            overview.isPageVisible = model.expandedCameraID == nil
+            overview.isPageVisible = model.expandedCameraID == nil && !showsRecordings
             overview.update(cameras: cameras)
+            page.update(cameras: cameras)
             #if DEBUG
             // `-demoPlayAll YES|NO` (UI review): Play All without clicking.
             if let value = UserDefaults.standard.string(forKey: "demoPlayAll") { overview.playAll = ["YES", "TRUE", "1"].contains(value.uppercased()) }
@@ -62,11 +79,52 @@ struct OverviewView: View {
             if let value = UserDefaults.standard.string(forKey: "demoShowOffline") { overview.showsOfflineCameras = ["YES", "TRUE", "1"].contains(value.uppercased()) }
             #endif
         }
-        .onDisappear { overview.stopAll() }
-        .onChange(of: cameras) { _, updated in overview.update(cameras: updated) }
+        .onDisappear { overview.stopAll(); page.stopAll() }
+        .onChange(of: cameras) { _, updated in overview.update(cameras: updated); page.update(cameras: updated) }
         // Nothing plays while the window cannot be seen, or while the single-camera viewer covers the page.
-        .onChange(of: activity.isVisible, initial: true) { _, visible in overview.isWindowVisible = visible }
-        .onChange(of: model.expandedCameraID) { _, expanded in overview.isPageVisible = expanded == nil }
+        .onChange(of: activity.isVisible, initial: true) { _, visible in
+            overview.isWindowVisible = visible
+            page.setCovered(!visible || model.expandedCameraID != nil)
+        }
+        .onChange(of: model.expandedCameraID) { _, expanded in
+            overview.isPageVisible = expanded == nil && !showsRecordings
+            page.setCovered(expanded != nil || !activity.isVisible)
+        }
+        // The live pictures stop while recordings are shown, and come back with Go Live.
+        .onChange(of: showsRecordings) { _, recordings in overview.isPageVisible = model.expandedCameraID == nil && !recordings }
+        // Hiding the timeline returns to live and drops a clip being chosen.
+        .onChange(of: showsTimeline) { _, shown in
+            if !shown { page.panel.cancelClip(); page.panel.goLive() }
+        }
+        .task {
+            while !Task.isCancelled {
+                if showsTimeline { page.panel.refresh(storagePause: model.nvrStorage?.pause) }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    /// The timeline's keys: Space plays or pauses, L goes live, C starts a clip, Esc drops it, Return saves it, Shift and Option with the arrows
+    /// step 10 s and 1 min (the plain arrows turn pages when there are some, else step 1 s).
+    private var clipShortcuts: some View {
+        ZStack {
+            Button("Play or Pause") { page.session.togglePlay() }.keyboardShortcut(.space, modifiers: [])
+            Button("Go Live") { page.panel.goLive() }.keyboardShortcut("l", modifiers: [])
+            Button("Save Clip") { page.panel.beginClip() }.keyboardShortcut("c", modifiers: [])
+            Button("Cancel Clip") { page.panel.cancelClip() }.keyboardShortcut(.cancelAction).disabled(!page.panel.isChoosingClip)
+            Button("Export Clip") { Task { await page.panel.exportClip() } }.keyboardShortcut(.return, modifiers: []).disabled(!page.panel.isChoosingClip)
+            Button("Back 10 s") { page.session.seek(by: -10) }.keyboardShortcut(.leftArrow, modifiers: .shift)
+            Button("Forward 10 s") { page.session.seek(by: 10) }.keyboardShortcut(.rightArrow, modifiers: .shift)
+            Button("Back 1 min") { page.session.seek(by: -60) }.keyboardShortcut(.leftArrow, modifiers: .option)
+            Button("Forward 1 min") { page.session.seek(by: 60) }.keyboardShortcut(.rightArrow, modifiers: .option)
+            if overview.layout.grid == nil || overview.pageCount <= 1 {
+                Button("Back 1 s") { page.session.seek(by: -1) }.keyboardShortcut(.leftArrow, modifiers: [])
+                Button("Forward 1 s") { page.session.seek(by: 1) }.keyboardShortcut(.rightArrow, modifiers: [])
+            }
+        }
+        .opacity(0)
+        .disabled(model.expandedCameraID != nil || model.presentedSheet != nil)
+        .accessibilityHidden(true)
     }
 
     private var autoGrid: some View {
@@ -74,7 +132,7 @@ struct OverviewView: View {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: OverviewModel.tileSpacing, alignment: .top), count: columns),
                       spacing: OverviewModel.tileSpacing) {
                 ForEach(overview.pageCameras) { camera in
-                    OverviewTile(model: model, overview: overview, status: camera)
+                    OverviewTile(model: model, overview: overview, status: camera, clip: showsTimeline ? page.panel : nil)
                 }
             }
             .padding(.horizontal, 28)
@@ -105,7 +163,9 @@ struct OverviewView: View {
 
 /// Title, the camera and live counts, the layout menu and the Play All toggle.
 private struct OverviewHeader: View {
+    let model: AppModel
     let overview: OverviewModel
+    @Binding var showsTimeline: Bool
 
     var body: some View {
         let live = overview.liveCount
@@ -121,6 +181,15 @@ private struct OverviewHeader: View {
             }
             Spacer(minLength: 12)
             OverviewLayoutMenu(overview: overview)
+            Button {
+                showsTimeline.toggle()
+            } label: {
+                Label("Timeline", systemImage: showsTimeline ? "film.stack.fill" : "film.stack")
+                    .frame(minWidth: 70)
+            }
+            .buttonStyle(.brand(.secondary, large: true))
+            .help(showsTimeline ? "Hide the timeline and the clip controls" : "Show the timeline: look back at every camera and save clips")
+            .accessibilityValue(Text(showsTimeline ? "Shown" : "Hidden"))
             PlayAllButton(isOn: Binding(get: { overview.playAll }, set: { overview.playAll = $0 }))
         }
         .padding(.horizontal, 28)
@@ -251,6 +320,7 @@ struct PlayAllButton: View {
 private struct FixedOverviewGrid: View {
     let model: AppModel
     let overview: OverviewModel
+    var clip: NVRPanelModel?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -284,7 +354,7 @@ private struct FixedOverviewGrid: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 HStack(alignment: .top, spacing: fit.spacing) {
                     ForEach(row) { camera in
-                        OverviewTile(model: model, overview: overview, status: camera, density: fit.density, fixedWidth: fit.tileWidth)
+                        OverviewTile(model: model, overview: overview, status: camera, density: fit.density, fixedWidth: fit.tileWidth, clip: clip)
                     }
                 }
             }

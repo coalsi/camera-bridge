@@ -167,6 +167,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ScreenshotCapture.isRequested {
             Task(priority: .userInitiated) { await ScreenshotCapture.run(model: model) }
         }
+        if SettingsCapture.isRequested {
+            Task(priority: .userInitiated) { await SettingsCapture.run(model: model) }
+        }
+        if let run = model.isolatedRun { NVRProbe.start(model: model, run: run) }
+        // `-nvrBenchmark b1,b2,b3,b5` (README, Debug builds only): the display path's measurements.
+        if let benchmarks = NVRBenchmark.requested {
+            Task(priority: .userInitiated) { await NVRBenchmark.run(benchmarks, model: model) }
+        }
         #endif
     }
 

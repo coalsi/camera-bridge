@@ -50,6 +50,10 @@ public final class Daemon {
     private var tokens: [LogSinkToken] = []
     private var logFeed = LogFeed()
     private var started = false
+    /// What the web interface talks to (the engine, wrapped for `--preview` and `--fake-discovery`); nil before `start()` and after `stop()`.
+    private(set) var backend: (any BridgeBackend)?
+    /// The places the web interface offers for recordings (`WebConfiguration.archiveLocations`); empty for `--preview`.
+    private(set) var archiveLocations: [ArchiveLocation] = []
 
     public init(options: DaemonOptions, environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.options = options
@@ -76,13 +80,24 @@ public final class Daemon {
         installLogging(directory: directory)
         log.notice("Camera Bridge OS \(DaemonInfo.version) (\(DaemonInfo.build(environment: environment))) starting")
 
+        // The NVR's folder. Nothing here can stop or delay the start: a folder that cannot be made is reported by the web interface and
+        // recording waits. A preview records nothing, so it makes no folder and offers none.
+        var recordingsFolder: URL?
+        if options.preview == nil {
+            let recordings = options.effectiveRecordingsDirectory(dataDirectory: directory)
+            if let problem = await RecordingsFolder.prepare(recordings, dataDirectory: directory, within: .seconds(5)) { log.warning("recordings: \(problem)") }
+            recordingsFolder = recordings
+        }
+
         let bridgeEnvironment = try Self.makeEnvironment(directory: directory, options: options)
         let engine = await makeEngine(environment: bridgeEnvironment)
         self.engine = engine
         if options.preview == nil { await engine.start() }
 
         var backend: any BridgeBackend = EngineBackend(engine: engine)
+        if options.preview != nil { backend = NoArchiveBackend(wrapping: backend) }
         if options.fakeDiscovery { backend = DemoDiscoveryBackend(wrapping: backend) }
+        self.backend = backend
         let folders = options.requestDirectories
         let system = RequestFileSystemControl(requestDirectory: folders.requests, statusDirectory: folders.status, product: DaemonInfo.product,
                                               version: DaemonInfo.version, build: DaemonInfo.build(environment: environment))
@@ -93,6 +108,8 @@ public final class Daemon {
                                              setupToken: options.setupToken, product: DaemonInfo.product, version: DaemonInfo.version,
                                              build: DaemonInfo.build(environment: environment))
         configuration.offersDemoCamera = options.offersDemoCamera
+        configuration.archiveLocations = recordingsFolder.map { RecordingsFolder.locations(recordings: $0) } ?? []
+        archiveLocations = configuration.archiveLocations
         let build = DaemonInfo.build(environment: environment)
         configuration.diagnosticsContext = { launched in
             var context = DiagnosticsContext.current(appVersion: DaemonInfo.version, appBuild: build, macModel: HostInfo.hardwareModel(), launched: launched)
@@ -113,6 +130,7 @@ public final class Daemon {
             return port
         } catch {
             await engine.stop()
+            self.backend = nil
             removeLogging()
             throw Failure.webInterface(String(describing: error))
         }
@@ -135,6 +153,7 @@ public final class Daemon {
             }
         }
         engine = nil
+        backend = nil
         webPort = nil
         removeLogging()
     }
@@ -183,7 +202,16 @@ public final class Daemon {
         return directory
     }
 
+    /// The platform's environment plus the NVR's policy (`DaemonArchivePolicy`): the data directory must exist, because the policy compares
+    /// the device the recordings are on with the data directory's.
     static func makeEnvironment(directory: URL, options: DaemonOptions) throws -> BridgeEnvironment {
+        var environment = try makePlatformEnvironment(directory: directory, options: options)
+        environment.archivePolicy = DaemonArchivePolicy.make(dataDirectory: directory)
+        environment.demoKeyframeSeconds = options.demoKeyframeSeconds
+        return environment
+    }
+
+    private static func makePlatformEnvironment(directory: URL, options: DaemonOptions) throws -> BridgeEnvironment {
         #if os(Linux)
         let log = Log(category: "daemon")
         let codecs = FFmpegMediaCodecs()
@@ -290,8 +318,23 @@ struct DemoDiscoveryBackend: BridgeBackend {
     func resetSensorsBridgePairing() async throws { try await base.resetSensorsBridgePairing() }
     func updateSettings(_ change: @Sendable @escaping (inout BridgeSettings) -> Void) async throws { try await base.updateSettings(change) }
     func snapshotJPEG(cameraID: UUID) async -> Data? { await base.snapshotJPEG(cameraID: cameraID) }
+    func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
+        try await base.liveVideo(cameraID: cameraID, stream: stream, displayWidth: displayWidth, audio: audio)
+    }
+    func setCameraClockShown(cameraID: UUID, shown: Bool) async throws -> CameraClockChange {
+        try await base.setCameraClockShown(cameraID: cameraID, shown: shown)
+    }
+    func setCameraTimeZone(cameraID: UUID) async throws -> String { try await base.setCameraTimeZone(cameraID: cameraID) }
+    func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange { try await base.setCleanPicture(cameraID: cameraID, clean: clean) }
     func triggerTestMotion(cameraID: UUID) async { await base.triggerTestMotion(cameraID: cameraID) }
     func pause() async { await base.pause() }
     func resume() async { await base.resume() }
     func diagnosticsReport(context: DiagnosticsContext) async -> String { await base.diagnosticsReport(context: context) }
+    var archive: (any ArchiveReading)? { base.archive }
+    func inspectArchiveFolder(_ path: String) async throws -> ArchiveFolderReport { try await base.inspectArchiveFolder(path) }
+    func setNVR(cameraID: UUID, enabled: Bool?, recordSound: Bool?) async throws {
+        try await base.setNVR(cameraID: cameraID, enabled: enabled, recordSound: recordSound)
+    }
+    func optimizeForHomeKit(cameraID: UUID) async throws -> HomeKitOptimizationResult { try await base.optimizeForHomeKit(cameraID: cameraID) }
+    func undoHomeKitOptimization(cameraID: UUID) async throws { try await base.undoHomeKitOptimization(cameraID: cameraID) }
 }

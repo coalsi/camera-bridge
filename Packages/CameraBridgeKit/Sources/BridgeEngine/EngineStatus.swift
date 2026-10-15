@@ -108,6 +108,8 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     /// The motion shadow test's numbers for this camera: nil when the test is off (`BridgeSettings.motionShadowTest`) or the
     /// camera does not use its own events for motion.
     public var motionShadow: MotionShadowStatus?
+    /// The NVR recording of this camera (`nvrEnabled`): off, waiting, recording or paused, with notes. Changes rarely (see `CameraArchiveStatus`).
+    public var nvr: CameraArchiveStatus
 
     public init(id: UUID, name: String, kind: CameraKind, vendor: CameraVendor, connection: ConnectionState = .idle,
                 eventChannelConnected: Bool = false, videoSummary: String? = nil, isPaired: Bool = false, setupCode: String = "",
@@ -115,7 +117,8 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
                 recordingNow: Bool = false, liveViewers: Int = 0, lastEvent: String? = nil, lastEventDate: Date? = nil, lastError: String? = nil,
                 recentEvents: [CameraEventRecord] = [], subStreamProblem: String? = nil, liveSessions: [LiveSessionStatus] = [],
                 recordingSession: RecordingSessionStatus? = nil, mainStreamInfo: SourceStreamInfo? = nil, subStreamInfo: SourceStreamInfo? = nil,
-                eventsNote: String? = nil, appViewers: Int = 0, homeKitNote: String? = nil, motionShadow: MotionShadowStatus? = nil) {
+                eventsNote: String? = nil, appViewers: Int = 0, homeKitNote: String? = nil, motionShadow: MotionShadowStatus? = nil,
+                nvr: CameraArchiveStatus = CameraArchiveStatus()) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -144,6 +147,7 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
         self.eventsNote = eventsNote
         self.homeKitNote = homeKitNote
         self.motionShadow = motionShadow
+        self.nvr = nvr
     }
 }
 

@@ -4,7 +4,7 @@ import BridgeSupport
 import SwiftUI
 
 /// The Settings window (⌘, and the sidebar's gear): the home of everything that is app-wide, one tab per area —
-/// General (login item, keep awake, welcome guide), HomeKit (the bridge and its accessories), Network (Local Network
+/// General (login item, keep awake, welcome guide), HomeKit (the bridge and its accessories), Recording (the NVR's folder and limits), Network (Local Network
 /// access, ports, this Mac's addresses), Webhook, Privacy (setup reports, camera profiles), Diagnostics (log level,
 /// export, data folder), Backup and About. Per-camera options stay on the camera's page; the HomeKit tab links there.
 ///
@@ -21,6 +21,9 @@ struct SettingsView: View {
             }
             Tab(SettingsTab.homeKit.title, systemImage: SettingsTab.homeKit.symbol, value: SettingsTab.homeKit) {
                 HomeKitSettingsTab(model: model)
+            }
+            Tab(SettingsTab.recording.title, systemImage: SettingsTab.recording.symbol, value: SettingsTab.recording) {
+                RecordingSettingsTab(model: model, showGeneral: { tab = .general })
             }
             Tab(SettingsTab.network.title, systemImage: SettingsTab.network.symbol, value: SettingsTab.network) {
                 NetworkSettingsTab(model: model, showWebhook: { tab = .webhook })

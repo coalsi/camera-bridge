@@ -248,6 +248,8 @@ struct CameraStatusResource: Encodable {
     var subStreamInfo: StreamInfoResource?
     var eventsNote: String?
     var homeKitNote: String?
+    /// The NVR recording of this camera; always present.
+    var nvr: NVRStatusResource
 
     init(_ status: CameraStatus) {
         connection = StatusText.connectionName(status.connection)
@@ -273,6 +275,33 @@ struct CameraStatusResource: Encodable {
         subStreamInfo = status.subStreamInfo.map(StreamInfoResource.init)
         eventsNote = status.eventsNote
         homeKitNote = status.homeKitNote
+        nvr = NVRStatusResource(status.nvr)
+    }
+}
+
+/// `CameraStatus.nvr` as the page reads it: `state` is off, waiting, recording or paused; `detail` the sentence under it; `pause` why recording
+/// is paused (`ArchivePause.code`); `notes` the lines that last ("sound could not be recorded", "keyframe every N s: scrubbing is slow"). Every key
+/// is always there.
+struct NVRStatusResource: Encodable {
+    struct Note: Encodable {
+        var id: String
+        var text: String
+    }
+
+    var state: String
+    var detail: OrNull<String>
+    var pause: OrNull<String>
+    var notes: [Note]
+
+    init(_ status: CameraArchiveStatus) {
+        switch status.state {
+        case .off: (state, pause) = ("off", OrNull(nil))
+        case .waiting: (state, pause) = ("waiting", OrNull(nil))
+        case .recording: (state, pause) = ("recording", OrNull(nil))
+        case .paused(let reason): (state, pause) = ("paused", OrNull(reason.code))
+        }
+        detail = OrNull(status.detail.map { Redact.string($0) })
+        notes = status.notes.map { Note(id: $0.id.rawValue, text: Redact.string($0.text)) }
     }
 }
 
@@ -317,6 +346,49 @@ struct NoticeResource: Encodable {
     var cameraID: UUID?
     var cameraName: String?
     var date: Date
+    /// What the notice's button does: "choose-folder" (the storage chooser) or "open-settings" (Settings > Recording); nil for a notice with no
+    /// button. Always encoded, as null when nil (a page that does not know the field ignores it).
+    var action: String?
+
+    private enum CodingKeys: String, CodingKey { case id, kind, severity, title, detail, cameraID, cameraName, date, action }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(severity, forKey: .severity)
+        try container.encode(title, forKey: .title)
+        try container.encode(detail, forKey: .detail)
+        try container.encodeIfPresent(cameraID, forKey: .cameraID)
+        try container.encodeIfPresent(cameraName, forKey: .cameraName)
+        try container.encode(date, forKey: .date)
+        try container.encode(action, forKey: .action)
+    }
+
+    /// Everything the banner shows: the network notices (below) and at most one storage notice, first. This is what the status answer, the
+    /// event stream's snapshot and its change detection all use.
+    static func resources(for overview: BridgeOverview, now: Date = Date()) -> [NoticeResource] {
+        var notices = resources(for: overview.networkNotices, now: now)
+        if let storage = storageNotice(for: overview, now: now) { notices.insert(storage, at: 0) }
+        return notices
+    }
+
+    /// "Recording Can't Continue" when recording is paused (or no folder is chosen), else "Recording Storage Almost Full" when less than
+    /// `ArchiveConstants.lowSpaceMarginBytes` is left above the floor; nil when no camera records or all is well. The low-space figure is whole
+    /// decimal gigabytes (rounded down), so the notice's text, which the event stream compares, changes at most once per gigabyte.
+    static func storageNotice(for overview: BridgeOverview, now: Date) -> NoticeResource? {
+        guard overview.configurations.contains(where: \.nvrEnabled) else { return nil }
+        let pause: ArchivePause? = overview.settings.nvrFolder == nil ? .noFolder : overview.nvrStorage?.pause
+        if let pause {
+            return NoticeResource(id: "nvr-storage", kind: "nvrStorage", severity: "warning", title: "Recording Can’t Continue",
+                                  detail: Redact.string(pause.readable), cameraID: nil, cameraName: nil, date: now,
+                                  action: pause == .noFolder ? "choose-folder" : "open-settings")
+        }
+        guard let storage = overview.nvrStorage, storage.totalBytes > 0, storage.spareBytes < ArchiveConstants.lowSpaceMarginBytes else { return nil }
+        return NoticeResource(id: "nvr-storage", kind: "nvrStorage", severity: "warning", title: "Recording Storage Almost Full",
+                              detail: "About \(storage.spareBytes / ArchiveConstants.gigabyte) GB are left before recording pauses.", cameraID: nil, cameraName: nil,
+                              date: now, action: "open-settings")
+    }
 
     /// The notices that apply and have something to say (the Mac app's `NetworkNoticeMessage`, in this bridge's words).
     static func resources(for notices: [NetworkNotice], now: Date = Date()) -> [NoticeResource] {
@@ -381,6 +453,7 @@ struct SettingsResource: Encodable {
     var webhookProblem: String?
     var logLevel: String
     var motionShadowTest: Bool
+    var timeZone: String?
 
     init(settings: BridgeSettings, bridgeName: String, webhookProblem: String?) {
         self.bridgeName = bridgeName
@@ -392,6 +465,7 @@ struct SettingsResource: Encodable {
         self.webhookProblem = webhookProblem
         logLevel = Self.levelName(settings.logLevel)
         motionShadowTest = settings.motionShadowTest
+        timeZone = settings.timeZone
     }
 
     static func levelName(_ level: LogLevel) -> String {

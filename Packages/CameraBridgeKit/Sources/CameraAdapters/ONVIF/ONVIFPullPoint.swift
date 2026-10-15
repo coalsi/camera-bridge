@@ -52,6 +52,18 @@ enum ONVIFPullPoint {
         return shorter >= minimumPullSeconds && shorter < current ? shorter : nil
     }
 
+    /// Whether a PullMessages failure means the camera closed the connection while it held the request. On Linux
+    /// (FoundationNetworking, curl) a connection closed with no answer is "bad server response" (URLError -1011) rather
+    /// than "connection lost", so it arrives as `.failed("… (URLError -1011)")`.
+    static func isDroppedRequest(_ error: any Error) -> Bool {
+        guard let error = error as? TransportError else { return false }
+        switch error {
+        case .closed: return true
+        case .failed(let message): return message.hasSuffix("(URLError -1011)")
+        default: return false
+        }
+    }
+
     /// How the camera answered a Renew fault.
     enum RenewFault: Equatable {
         /// The device does not implement Renew (some extend the subscription on every PullMessages): keep pulling.
@@ -184,7 +196,7 @@ enum ONVIFPullPoint {
             let notifications: [ONVIFNotification]
             do {
                 notifications = try await client.pullMessages(subscription, timeout: pullTimeout, messageLimit: timing.messageLimit)
-            } catch let error as TransportError where error == .closed {
+            } catch let error where isDroppedRequest(error) {
                 // The camera dropped the connection while it held the request: some close one after a fixed idle time
                 // (Tapo: 10 s) however long `Timeout` is. The subscription lives on: pull again, for less.
                 let elapsed = (ContinuousClock.now - started).timeInterval

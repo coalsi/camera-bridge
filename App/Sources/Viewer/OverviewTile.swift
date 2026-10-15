@@ -3,8 +3,8 @@ import BridgeEngine
 import SwiftUI
 
 /// One camera on the Overview: a 16:9 picture (the snapshot, or the live sub stream cropped to fit) with its own play/pause
-/// and expand buttons on hover, and below it the camera's name, address, status, viewers, last motion and recording state.
-/// Double-clicking the picture opens the single-camera viewer; the info area opens the camera's page.
+/// and Record buttons on hover, and below it the camera's name, address, status, viewers, last motion and recording state.
+/// Clicking the picture opens the single-camera viewer; the info area opens the camera's page.
 struct OverviewTile: View {
     let model: AppModel
     let overview: OverviewModel
@@ -13,6 +13,8 @@ struct OverviewTile: View {
     var density: OverviewGridMetrics.Density = .full
     /// The tile's width in a fixed layout; nil in Auto, where the grid decides.
     var fixedWidth: CGFloat?
+    /// The timeline's panel while it is shown: with a clip being chosen the tile carries a check and a click includes or leaves out the camera.
+    var clip: NVRPanelModel?
     @State private var isHovering = false
     @State private var isDropTarget = false
     private let store = SnapshotStore.shared
@@ -55,7 +57,7 @@ struct OverviewTile: View {
         let overlay = LiveOverlay.current(connection: status.connection, phase: feed.phase, isWanted: feed.isWanted)
         let canPlay = status.connection == .online
         let bottomRadius: CGFloat = density == .hidden ? radius : 0
-        let controlSize: CGFloat = (fixedWidth ?? 400) < 220 ? 32 : 46
+        let cornerSize: CGFloat = (fixedWidth ?? 400) < 220 ? 24 : 30
         let shape = UnevenRoundedRectangle(topLeadingRadius: radius, bottomLeadingRadius: bottomRadius, bottomTrailingRadius: bottomRadius,
                                            topTrailingRadius: radius, style: .continuous)
         return Color.clear
@@ -89,31 +91,35 @@ struct OverviewTile: View {
                         .allowsHitTesting(false)
                 }
             }
-            .overlay {
-                // Hover controls: play or pause this tile (over Play All), expand to the viewer.
-                ZStack {
+            .overlay(alignment: .topTrailing) {
+                // Hover controls: play or pause this tile (over Play All) and Record. A click anywhere else on the picture opens the viewer.
+                HStack(spacing: 6) {
                     if canPlay {
                         LiveIconButton(systemImage: feed.isWanted ? "pause.fill" : "play.fill",
-                                       label: feed.isWanted ? "Pause" : "Play", size: controlSize, isProminent: !feed.isWanted) {
+                                       label: feed.isWanted ? "Pause" : "Play", size: cornerSize, isProminent: !feed.isWanted) {
                             overview.toggle(status.id)
                         }
                     }
+                    NVRRecordButton(model: model, status: status, size: cornerSize)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .topTrailing) {
-                    LiveIconButton(systemImage: "arrow.up.left.and.arrow.down.right", label: "Open Viewer", size: controlSize < 40 ? 24 : 30) {
-                        model.expandCamera(status.id)
-                    }
-                    .padding(controlSize < 40 ? 6 : 10)
-                }
+                .padding(cornerSize < 28 ? 6 : 10)
                 .opacity(isHovering ? 1 : 0)
                 .animation(.easeOut(duration: 0.15), value: isHovering)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                RecChip(state: status.nvr.state, compact: true).padding(8).allowsHitTesting(false)
             }
             .animation(.easeOut(duration: 0.2), value: feed.phase)
             .clipShape(shape)
             .contentShape(shape)
             .onHover { isHovering = $0 }
-            .onTapGesture(count: 2) { model.expandCamera(status.id) }
+            .onTapGesture {
+                if let clip, clip.isChoosingClip { clip.toggleClipCamera(status.id) } else { model.expandCamera(status.id) }
+            }
+            .opacity(clip.map { $0.isChoosingClip && !$0.includesInClip(status.id) } == true ? 0.45 : 1)
+            .overlay(alignment: .topLeading) {
+                if let clip, clip.isChoosingClip { ClipCheck(included: clip.includesInClip(status.id)).padding(8).allowsHitTesting(false) }
+            }
             .task(id: feed.isWanted) {
                 // A live tile needs no snapshots; a stopped one keeps its picture fresh (the sidebar shares the fetch).
                 guard !feed.isWanted else { return }

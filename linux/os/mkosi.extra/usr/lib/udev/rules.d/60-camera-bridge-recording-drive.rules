@@ -1,0 +1,2 @@
+# A partition labelled CBRECORDINGS appears: mount it for the engine if it is the drive that was chosen.
+SUBSYSTEM=="block", ACTION=="add", ENV{DEVTYPE}=="partition", ENV{ID_FS_LABEL}=="CBRECORDINGS", ENV{ID_FS_TYPE}=="ext4", TAG+="systemd", ENV{SYSTEMD_WANTS}+="camera-bridge-recording-drive-plug.service"

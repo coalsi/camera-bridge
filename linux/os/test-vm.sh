@@ -7,9 +7,18 @@
 #
 #   --image FILE       the .img or .img.xz from build.sh
 #   --arch A           arm64 or amd64 (default: guessed from the file name)
-#   --disk-size SIZE   size the virtual disk is grown to before the first boot (default 16G; tests the first-boot growth)
-#   --tests LIST       comma separated subset of: boot,ssh-off,system,daemon,persist,requests,factory-reset,installer,install-boot,update
-#                      (default: all but update). update needs --update-dir.
+#   --disk-size SIZE   size the virtual disk is grown to before the first boot (default 32G; tests the first-boot growth). The nvr tests
+#                      need it: recording keeps 8 GiB free and the size cap is the partition minus 2 x 8 GiB, so a 16G disk holds nothing.
+#   --cpus N           virtual CPUs (default 2). The nvr tests encode the demo camera's 1080p picture in software: give it 4 if the host has them.
+#   --seed-files N     nvr-archive: recordings in the seeded archive (default 2000; the check of start-up time is the same with 50)
+#   --burst-from W     nvr: where the 40 simultaneous requests come from: host, guest or auto (default). QEMU's user-mode port forwarding, the
+#                      only way this script reaches the box, resets connections that arrive together on a macOS host (40 at once lose 12 to 16,
+#                      two at once lose one). guest runs the burst inside the box over ssh, on its own loopback, with the box's python3, and
+#                      leaves the burst out of conformance.mjs; host sends it from this computer. auto: guest on macOS, host elsewhere.
+#   --tests LIST       comma separated subset of: boot,ssh-off,system,persist,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,wifi,recording-drive,
+#                      installer,install-boot,update (default: all but update). update needs --update-dir. daemon and the three nvr tests need an image
+#                      with the real camerabridged (they are skipped for --stub-daemon). nvr, nvr-archive and nvr-faults are documented in
+#                      docs/linux/BUILDING.md; their web client is linux/os/test-nvr.py.
 #   --update-dir DIR   release files (SHA256SUMS, SHA256SUMS.sig, cb-os_*) of a NEWER version, built with the same --pubkey as the
 #                      image; served from a fake "GitHub API" on the host. See docs/linux/BUILDING.md ("Testing updates").
 #   --broken-dir DIR   (optional, with the update test) release files of a still newer version whose daemon never starts:
@@ -23,15 +32,20 @@
 # Exit status 0 only if every selected test passed.
 # shellcheck disable=SC2001,SC2012,SC2015,SC2016,SC2029,SC2054
 set -euo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-image="" arch="" disk_size=16G tests="" update_dir="" broken_dir="" boot_timeout="" work="" keep=0 leave=0
+image="" arch="" disk_size=32G cpus=2 seed_files=2000 burst_from=auto tests="" update_dir="" broken_dir="" boot_timeout="" work="" keep=0 leave=0
 http_port=18080 ssh_port=12222 api_port=18090
+box_web_port=80   # the port the daemon listens on inside the box (http_port on the host is forwarded to it)
 
 while [ $# -gt 0 ]; do
     case $1 in
         --image) image=$2; shift ;;
         --arch) arch=$2; shift ;;
         --disk-size) disk_size=$2; shift ;;
+        --cpus) cpus=$2; shift ;;
+        --seed-files) seed_files=$2; shift ;;
+        --burst-from) burst_from=$2; shift ;;
         --tests) tests=$2; shift ;;
         --update-dir) update_dir=$2; shift ;;
         --broken-dir) broken_dir=$2; shift ;;
@@ -39,7 +53,7 @@ while [ $# -gt 0 ]; do
         --work) work=$2; shift ;;
         --keep) keep=1 ;;
         --leave-running) leave=1; keep=1 ;;
-        -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -50,11 +64,18 @@ die() { echo "error: $*" >&2; exit 1; }
 if [ -z "$arch" ]; then
     case $image in *arm64*) arch=arm64 ;; *amd64*) arch=amd64 ;; *) die "cannot tell the architecture from the file name; use --arch" ;; esac
 fi
-[ -n "$tests" ] || tests="boot,ssh-off,system,daemon,persist,requests,factory-reset,installer,install-boot"
+[ -n "$tests" ] || tests="boot,ssh-off,system,persist,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,wifi,recording-drive,installer,install-boot"
+case $seed_files in ''|*[!0-9]*) die "--seed-files must be a number" ;; esac
+case $cpus in ''|*[!0-9]*) die "--cpus must be a number" ;; esac
 for tool in qemu-img curl ssh ssh-keygen; do command -v "$tool" >/dev/null || die "$tool is required"; done
 
 host_os=$(uname -s)
 host_arch=$(uname -m)
+case $burst_from in
+    auto) if [ "$host_os" = Darwin ]; then burst_from=guest; else burst_from=host; fi ;;
+    host|guest) ;;
+    *) die "--burst-from must be host, guest or auto" ;;
+esac
 case $arch in
     amd64) qemu="qemu-system-x86_64" ;;
     arm64) qemu="qemu-system-aarch64" ;;
@@ -96,6 +117,7 @@ work=$(cd "$work" && pwd)
 # Only ever remove files this script itself creates (the folder may have been given by the user).
 rm -f "$work"/disk.raw "$work"/target.raw "$work"/vars.fd "$work"/id_ed25519 "$work"/id_ed25519.pub "$work"/cred.txt \
     "$work"/serial.log "$work"/qemu.log "$work"/status.json
+rm -rf "$work"/nvr
 qemu_pid=""
 api_pid=""
 ctl_path="/tmp/cbvm-$$.ctl"   # kept short: unix socket paths are limited to ~100 characters
@@ -151,7 +173,7 @@ start_vm() {
         amd64) args+=(-machine "q35,accel=$accel" -cpu max) ;;
         arm64) if [ "$accel" = tcg ]; then args+=(-machine virt -cpu max); else args+=(-machine "virt,accel=$accel" -cpu host); fi ;;
     esac
-    args+=(-smp 2 -m 2048 -display none -serial "file:$work/serial.log")
+    args+=(-smp "$cpus" -m 2048 -display none -serial "file:$work/serial.log")
     args+=(-drive "if=pflash,format=raw,unit=0,file=$fw_code,readonly=on")
     args+=(-drive "if=pflash,format=raw,unit=1,file=$work/vars.fd")
     for d in "$@"; do
@@ -226,6 +248,112 @@ wait_ssh() {
 dump_serial() { echo "  --- last serial output ---"; tail -40 "$work/serial.log" | sed 's/^/  | /'; }
 
 selected() { case ",$tests," in *",$1,"*) return 0 ;; esac; return 1; }
+
+# --- helpers of the nvr tests (their web client is test-nvr.py; docs/linux/BUILDING.md describes the tests) ---------------------
+nvr_dir="$work/nvr" nvr_ready=0 admin_pw=""
+rec=/var/lib/camera-bridge/recordings
+
+ensure_admin_pw() { [ -n "$admin_pw" ] || admin_pw=$(openssl rand -hex 16); }
+
+is_stub_daemon() { ssh_has 'test -e /usr/bin/camerabridged && grep -q "^#!/usr/bin/python3" /usr/bin/camerabridged && echo stub' '^stub$'; }
+
+# nvr_phase PHASE [ARGS...]: runs one phase of test-nvr.py against the forwarded web port; its "ok  " and "FAIL " lines become results here.
+nvr_phase() {
+    local line before=$failed
+    ensure_admin_pw
+    mkdir -p "$nvr_dir"
+    rm -f "$nvr_dir/rc"
+    while IFS= read -r line; do
+        case $line in
+            "ok  "*) ok "${line#ok  }" ;;
+            "FAIL "*) no "${line#FAIL }" ;;
+            *) echo "        $line" ;;
+        esac
+    done < <(CB_TEST_PASSWORD="$admin_pw" python3 -I "$HERE/test-nvr.py" "$@" --base "http://127.0.0.1:$http_port" --dir "$nvr_dir" 2>&1; echo "$?" >"$nvr_dir/rc")
+    [ "$(cat "$nvr_dir/rc" 2>/dev/null || echo 1)" -eq 0 ] || [ "$failed" -gt "$before" ] || no "test-nvr.py $1 failed without saying why (see the lines above)"
+}
+
+# nvr_state KEY: a value test-nvr.py keeps between phases (the camera's id).
+nvr_state() { python3 -I "$HERE/test-nvr.py" state --key "$1" --dir "$nvr_dir"; }
+
+# nvr_burst: the 40 simultaneous requests (phase burst). The only way this script reaches the box is QEMU's user-mode port forwarding, and on a
+# macOS host that resets connections which arrive together (measured on the arm64 image: 40 health requests at once lose 12 to 16, two at once
+# lose one, 300 one after the other lose none). With --burst-from guest (the default on macOS) the same test-nvr.py therefore runs inside the box,
+# on the box's own loopback, with the box's python3 (/usr/bin/python3 is there: Debian's systemd-ukify depends on it), and what it prints is
+# read as for any phase. With --burst-from host (the default elsewhere) the phase runs here, as it always did. The session (cookie and CSRF token
+# of this run's throw-away box) is copied into the box's /tmp for the length of the phase and removed again.
+nvr_burst() {
+    if [ "${burst_from:-host}" = host ]; then nvr_phase burst; return; fi
+    local line rc=1 before=$failed
+    echo "        (the burst runs inside the box: QEMU's user-mode port forwarding resets connections that arrive together on this host)"
+    if ! ssh_has 'command -v python3 >/dev/null && echo yes' '^yes$'; then
+        no "the burst cannot run inside the box: it has no python3 (--burst-from host sends it from this computer instead)"
+        return
+    fi
+    rm -rf "$nvr_dir/inside"
+    mkdir -p "$nvr_dir/inside"
+    cp "$HERE/test-nvr.py" "$nvr_dir/inside/test-nvr.py"
+    cp "$nvr_dir/state.json" "$nvr_dir/inside/state.json"
+    if ! tar --format=ustar -C "$nvr_dir/inside" -cf - test-nvr.py state.json | ssh_run 'rm -rf /tmp/nvr-inside; mkdir -m 700 /tmp/nvr-inside && tar -C /tmp/nvr-inside -xf -'; then
+        rm -rf "$nvr_dir/inside"
+        no "the burst cannot run inside the box: test-nvr.py could not be copied there"
+        return
+    fi
+    rm -rf "$nvr_dir/inside"
+    while IFS= read -r line; do
+        case $line in
+            "ok  "*) ok "${line#ok  }" ;;
+            "FAIL "*) no "${line#FAIL }" ;;
+            "rc="[0-9]*) rc=${line#rc=} ;;
+            *) echo "        $line" ;;
+        esac
+    done < <(ssh_run "cd /tmp/nvr-inside && python3 -I test-nvr.py burst --base http://127.0.0.1:${box_web_port:-80} --dir /tmp/nvr-inside --inside-box 2>&1; echo rc=\$?")
+    ssh_run 'rm -rf /tmp/nvr-inside' || true
+    [ "$rc" -eq 0 ] || [ "$failed" -gt "$before" ] || no "test-nvr.py burst (inside the box) failed without saying why (see the lines above)"
+}
+
+# nvr_setup: sign in, add the demo camera, choose the folder, switch Record on and wait for 20 s of video. Once per run.
+nvr_setup() {
+    [ "$nvr_ready" -eq 0 ] || return 0
+    nvr_ready=1
+    nvr_phase session
+    nvr_phase add-camera
+    nvr_phase folder-required
+    nvr_phase choose-folder
+    nvr_phase record-on --seconds 20
+}
+
+# nvr_decode FILE LABEL: the box's own ffmpeg decodes what the API served (init segment + fragments, as the browser would append them).
+nvr_decode() {
+    local out streams frames before=$failed
+    ssh_run 'cat >/tmp/nvr-served.mp4' <"$1"
+    out=$(ssh_run 'ffmpeg -v error -i /tmp/nvr-served.mp4 -f null - 2>&1; echo "status=$?"' || true)
+    if [ "$out" = "status=0" ]; then ok "ffmpeg on the box decodes $2 without a message"; else no "ffmpeg on the box reported on $2: $(echo "$out" | head -3 | tr '\n' '|')"; fi
+    streams=$(ssh_run "ffprobe -v error -show_entries stream=codec_name,codec_type -of csv=p=0 /tmp/nvr-served.mp4 2>/dev/null | tr ',' '\\n' | sort | tr '\\n' ' '" || true)
+    if [ "$streams" = "h264 video " ]; then ok "$2 holds one stream: h264 video"; else no "$2 holds these streams: ${streams:-none}"; fi
+    frames=$(ssh_run 'ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 /tmp/nvr-served.mp4 2>/dev/null' || true)
+    case $frames in ''|*[!0-9]*) no "$2: ffprobe counted \"$frames\" frames" ;; *) if [ "$frames" -ge 10 ]; then ok "$2 has $frames frames"; else no "$2 has only $frames frames"; fi ;; esac
+    ssh_run 'rm -f /tmp/nvr-served.mp4' || true
+    if [ "$failed" -gt "$before" ]; then mkdir -p "$nvr_dir/diag"; cp "$1" "$nvr_dir/diag/failed-$(basename "$1")"; fi   # test pattern video, no secret: kept for the owner of the muxer
+}
+
+# nvr_seconds ACTION: runs `systemctl ACTION camerabridged` on the box (Type=notify: it returns when the daemon said READY=1) and prints
+# how many seconds that took.
+nvr_seconds() {
+    local started=$SECONDS
+    ssh_run "systemctl $1 camerabridged" >/dev/null 2>&1 || true
+    echo $((SECONDS - started))
+}
+
+# nvr_diag LABEL: what a person needs to understand a failed run without the VM (CI uploads the folder).
+nvr_diag() {
+    mkdir -p "$nvr_dir/diag"
+    ssh_run 'journalctl -u camerabridged --no-pager -o short-iso | tail -n 500' >"$nvr_dir/diag/$1-journal.txt" 2>&1 || true
+    ssh_run 'uptime; df -h /srv; free -m; systemctl status camerabridged --no-pager | head -n 20; ls -lR /var/lib/camera-bridge/recordings | head -n 150' >"$nvr_dir/diag/$1-box.txt" 2>&1 || true
+}
+
+# nvr_journal_lines: lines the daemon has logged in this boot.
+nvr_journal_lines() { ssh_run 'journalctl -u camerabridged -b --no-pager -o cat | wc -l' | tr -d ' '; }
 
 
 # --- the update test ------------------------------------------------------------------------------------------------------
@@ -474,7 +602,7 @@ fi
 
 if selected daemon; then
     echo "==> the daemon (needs an image built with the real camerabridged, not --stub-daemon)"
-    if ssh_has 'test -e /usr/bin/camerabridged && grep -q "^#!/usr/bin/python3" /usr/bin/camerabridged && echo stub' '^stub$'; then
+    if is_stub_daemon; then
         echo "  (skipped: this image has the stub daemon)"
     else
         ssh_has 'systemctl show camerabridged -p Type -p ActiveState' 'Type=notify' && ssh_has 'systemctl is-active camerabridged' '^active$' && ok "camerabridged is a Type=notify service and active" || no "camerabridged is not active (or not Type=notify)"
@@ -520,7 +648,8 @@ for wanted in (True, False):
     code, answer = call("POST", "/api/v1/system/auto-update", {"enabled": wanted})
     print("auto", wanted, code, answer.get("automaticUpdates"))
 PY
-        pw=$(openssl rand -hex 16)
+        ensure_admin_pw   # the nvr tests sign in with the same password
+        pw=$admin_pw
         out=$(python3 "$work/api-client.py" "$http_port" "$pw" 2>&1 || true)
         echo "$out" | sed 's/^/        /'
         grep -q '^setup 201' <<<"$out" && ok "first-run setup through the API" || no "setup through the API failed"
@@ -530,6 +659,198 @@ PY
         ssh_has 'cat /run/camera-bridge/status/update-check.json' '"state": *"(ok|failed)"' && ok "the request reached the root helper (status/update-check.json ends ok or failed)" || no "no status for the update-check request"
         ssh_has 'ls /run/camera-bridge/requests | wc -l' '^0$' && ok "the request folder is empty again (nothing left behind, no temporary files)" || no "request files were left behind"
         ssh_has 'journalctl -u camerabridged --no-pager -o cat' 'Sandbox|denied|Operation not permitted' && no "the daemon logged a sandbox or permission problem" || ok "no sandbox or permission errors in the daemon's log"
+    fi
+fi
+
+if selected nvr; then
+    echo "==> the NVR: record, read it back over HTTP, sound, the limits of the unit"
+    if is_stub_daemon; then
+        echo "  (skipped: this image has the stub daemon)"
+    else
+        nvr_setup
+        cam=$(nvr_state camera | tr 'a-f' 'A-F')
+        # What the daemon made on the data partition: as the camerabridge user, private, on the data partition itself.
+        ssh_has "stat -c %U:%G:%a $rec" '^camerabridge:camerabridge:700$' && ok "the recordings folder was made by the daemon: camerabridge, mode 700" || no "the recordings folder is not camerabridge:camerabridge 700"
+        [ "$(ssh_run "findmnt -no SOURCE -T $rec | sed 's/\[.*//'")" = "$(ssh_run "findmnt -no SOURCE /srv | sed 's/\[.*//'")" ] && ok "it is on the data partition" || no "the recordings folder is not on the data partition"
+        [ "$(ssh_run "ls -A $rec")" = "$cam" ] && ok "it holds one folder, named after the camera's ID in upper case" || no "the recordings folder holds: $(ssh_run "ls -A $rec" | tr '\n' ' ')"
+        ssh_run "jq -e --arg id '$(nvr_state camera)' '(.id | ascii_downcase) == \$id and (.name | length) > 0' $rec/$cam/camera.json" >/dev/null 2>&1 && ok "camera.json names the camera (id and name)" || no "camera.json is missing or wrong"
+        [ "$(ssh_run "ls $rec/$cam | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}\$' | tail -1")" = "$(ssh_run 'date -u +%F')" ] && ok "the day folder is today's date in UTC" || no "no day folder for today"
+        names=$(ssh_run "find $rec/$cam -type f -name '*.mp4'")
+        if [ -n "$names" ] && ! echo "$names" | grep -Evq '/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{2}-[0-9]{2}-[0-9]{2}(-[0-9]+)?\.mp4$'; then ok "recordings are named <day>/<HH-mm-ss>.mp4"; else no "a recording is not named <day>/<HH-mm-ss>.mp4 (or there is none)"; fi
+        [ -z "$(ssh_run "find $rec \\( -type f -o -type d \\) -perm /077")" ] && ok "every file is 0600 and every folder 0700" || no "a file or folder under the recordings is readable by others"
+        nvr_phase fetch
+        nvr_decode "$nvr_dir/served.mp4" "the served init segment and fragments"
+        nvr_phase security
+        nvr_phase sound-on
+        nvr_decode "$nvr_dir/served-sound.mp4" "a file with sound as served (video only)"
+        lines_before=$(nvr_journal_lines)
+        nvr_burst
+        lines_after=$(nvr_journal_lines)
+        [ $((lines_after - lines_before)) -le 10 ] && ok "100 archive requests added $((lines_after - lines_before)) lines to the daemon's log" || no "100 archive requests added $((lines_after - lines_before)) lines to the daemon's log"
+        # The unit is exactly what it was: recording needed no new right.
+        props=$(ssh_run 'systemctl show camerabridged -p User -p ProtectSystem -p NoNewPrivileges -p UMask -p DevicePolicy' | sort | tr '\n' ' ')
+        [ "$props" = "DevicePolicy=closed NoNewPrivileges=yes ProtectSystem=strict UMask=0077 User=camerabridge " ] && ok "the unit still says: camerabridge, ProtectSystem=strict, NoNewPrivileges, UMask=0077, DevicePolicy=closed" || no "the unit's hardening changed: $props"
+        [ "$(ssh_run 'systemctl show camerabridged -p ReadWritePaths --value | tr " " "\n" | sort | tr "\n" " "')" = "/run/camera-bridge/requests /var/lib/camera-bridge " ] && ok "it may write /var/lib/camera-bridge and the request folder, nothing else" || no "ReadWritePaths of the unit is: $(ssh_run 'systemctl show camerabridged -p ReadWritePaths --value')"
+        exposure=$(ssh_run 'systemd-analyze security camerabridged.service --no-pager 2>/dev/null | tail -1' || true)
+        echo "        $exposure"
+        case $exposure in *"Overall exposure level"*) ok "systemd-analyze security still reports on camerabridged" ;; *) no "systemd-analyze security printed: $exposure" ;; esac
+        # The contract checker of T07 against the real box, all its groups: the same contract read by an independent tool.
+        conformance="$HERE/../web-dev/conformance.mjs"
+        if [ ! -f "$conformance" ]; then
+            echo "  (conformance.mjs skipped: $conformance does not exist)"
+        elif ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -lt 22 ]; then
+            echo "  (conformance.mjs skipped: it needs Node 22 or newer on the host)"
+        elif grep -qi '^x-cb-stand-in:' < <(curl -sS -D - -o /dev/null --max-time 5 "http://127.0.0.1:$http_port/api/v1/health" 2>/dev/null || true); then
+            # test-nvr.py's FakeBox (its self-test, and the dry run of this script without a VM) answers what the phases above need, not the
+            # whole contract, and says so in this header. The daemon never sends it, so on a box this branch is never taken.
+            echo "  (conformance.mjs skipped on purpose: this server is the stand-in of test-nvr.py, not the daemon)"
+        else
+            conformance_status=0
+            # Everything conformance.mjs asks, it asks one thing at a time, which a port forward carries; only its burst of 40 needs more. When the burst
+            # ran inside the box (nvr_burst above), conformance.mjs leaves its own out (it reports that as skipped), so that nothing is asked of the
+            # forward that it cannot do and no reset is mistaken for a finding.
+            conformance_args=(--all)
+            [ "${burst_from:-host}" != guest ] || conformance_args+=(--no-burst)
+            CB_PASSWORD="$admin_pw" node "$conformance" "http://127.0.0.1:$http_port" "${conformance_args[@]}" >"$nvr_dir/conformance.txt" 2>&1 || conformance_status=$?
+            echo "        $(tail -n 1 "$nvr_dir/conformance.txt" | cut -c1-200)"
+            grep -A1 '^skip  admission' "$nvr_dir/conformance.txt" | cut -c1-200 | sed 's/^/        /' || true
+            if [ "$conformance_status" -eq 0 ]; then
+                ok "conformance.mjs (T07) finds the box within the contract"
+            else
+                no "conformance.mjs (T07) exited with $conformance_status"
+                grep FAIL "$nvr_dir/conformance.txt" | head -10 | cut -c1-240 | sed 's/^/          | /'
+                mkdir -p "$nvr_dir/diag"; cp "$nvr_dir/conformance.txt" "$nvr_dir/diag/conformance.txt"
+            fi
+        fi
+        ssh_run 'journalctl -u camerabridged -b --no-pager -o short-iso' >"$nvr_dir/journal.txt" 2>&1 || true
+        if grep -Eq 'Sandbox|denied|Operation not permitted|EPERM' "$nvr_dir/journal.txt"; then no "the daemon logged a sandbox or permission problem"; grep -E 'Sandbox|denied|Operation not permitted|EPERM' "$nvr_dir/journal.txt" | head -3 | cut -c1-200 | sed 's/^/          | /'; else ok "no sandbox or permission errors in the daemon's log"; fi
+        nvr_phase leakscan --journal "$nvr_dir/journal.txt"
+        nvr_diag nvr
+    fi
+fi
+
+if selected nvr-archive; then
+    echo "==> the NVR: a large archive, a torn recording, start-up, retention, a reboot"
+    if is_stub_daemon; then
+        echo "  (skipped: this image has the stub daemon)"
+    elif [ "$seed_files" -eq 0 ]; then
+        echo "  (skipped: --seed-files 0)"
+    else
+        nvr_setup
+        nvr_phase record-off
+        # Every recording is closed (has its sidecar) once Record is off. Then take the sidecars, to choose the template from.
+        n=0
+        while [ $n -lt 30 ] && [ "$(ssh_run "find $rec -name '*.mp4' | wc -l" | tr -d ' ')" != "$(ssh_run "find $rec -name '*.cbidx' | wc -l" | tr -d ' ')" ]; do n=$((n + 1)); sleep 1; done
+        [ "$(ssh_run "find $rec -name '*.mp4' | wc -l" | tr -d ' ')" = "$(ssh_run "find $rec -name '*.cbidx' | wc -l" | tr -d ' ')" ] && ok "every recording has its sidecar once Record is off ($(ssh_run "find $rec -name '*.mp4' | wc -l" | tr -d ' ') files)" || no "a recording has no sidecar 30 s after Record was switched off"
+        rm -rf "$nvr_dir/closed" "$nvr_dir/seed"
+        mkdir -p "$nvr_dir/closed"
+        ssh_run "cd $rec && find . -name '*.cbidx' -print0 | tar --null -T - -cf -" | tar -C "$nvr_dir/closed" -xf -
+        # Start-up time with the small archive of this run, then the same with the big one: the archive must not be on the way to READY=1.
+        base_seconds=$(nvr_seconds restart)
+        status_ok=0; curl -fsS --max-time 4 "http://127.0.0.1:$http_port/api/v1/status" >/dev/null 2>&1 && status_ok=1
+        [ "$status_ok" -eq 1 ] && ok "after a restart the daemon said READY and /api/v1/status answered, $base_seconds s" || no "after a restart /api/v1/status did not answer"
+        nvr_phase plan-seed --seed-files "$seed_files"
+        # shellcheck disable=SC1091
+        . "$nvr_dir/seed/plan.env"
+        ssh_run 'systemctl stop camerabridged' >/dev/null 2>&1 || true
+        ssh_run 'rm -rf /var/lib/camera-bridge/nvr-seed; runuser -u camerabridge -- mkdir -m 700 /var/lib/camera-bridge/nvr-seed'
+        tar --format=ustar -C "$nvr_dir/seed" -cf - manifest.txt sidecars | ssh_run 'runuser -u camerabridge -- tar -C /var/lib/camera-bridge/nvr-seed -xf -'
+        { cat "$nvr_dir/seed/plan.env"; python3 -I "$HERE/test-nvr.py" vm-script --name tear; } | ssh_run 'runuser -u camerabridge -- bash -s' | sed 's/^/        /'
+        ssh_run 'cat /var/lib/camera-bridge/nvr-seed/torn-head.mp4' >"$nvr_dir/torn-head.mp4"
+        sha_before=$(ssh_run 'cat /var/lib/camera-bridge/nvr-seed/torn.sha')
+        { cat "$nvr_dir/seed/plan.env"; python3 -I "$HERE/test-nvr.py" vm-script --name seed; } | ssh_run 'runuser -u camerabridge -- bash -s' | sed 's/^/        /'
+        [ "$(ssh_run "find $rec/$CAM_DIR -type f -name '*.mp4' | wc -l" | tr -d ' ')" -ge $((SEED_N + OLD_N + 1)) ] && ok "$SEED_N recordings, $OLD_N expired ones and a torn one are on the data partition" || no "the seeded archive is not where it should be"
+        start_seconds=$(nvr_seconds start)
+        ok "the daemon said READY $start_seconds s after systemctl start with the big archive (after $base_seconds s with the small one)"
+        [ "$start_seconds" -le $((base_seconds + 15)) ] && ok "the archive did not delay the start (limit: the small archive's time plus 15 s)" || no "start took $start_seconds s with the big archive against $base_seconds s with the small one"
+        ssh_has 'systemctl show camerabridged -p ActiveState --value' '^active$' && ok "the unit is active (Type=notify: READY=1 was sent)" || no "the unit is not active"
+        worst=0
+        for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            t=$(curl -fsS -o /dev/null -w '%{time_total}' --max-time 3 "http://127.0.0.1:$http_port/api/v1/health" 2>/dev/null) || t=99
+            [ "$(awk -v a="$t" -v b="$worst" 'BEGIN { print (a > b) }')" = 1 ] && worst=$t
+            sleep 1
+        done
+        [ "$(awk -v a="$worst" 'BEGIN { print (a < 2) }')" = 1 ] && ok "/api/v1/health answered 12 times in the first 12 s, the slowest in ${worst}s, while the archive loaded" || no "/api/v1/health took ${worst}s while the archive loaded"
+        nvr_phase wait-ready
+        # The torn recording: cut to its last whole fragment, a new sidecar, nothing else changed.
+        torn="$rec/$CAM_DIR/$TEAR_REL"
+        [ "$(ssh_run "wc -c <$torn.mp4 | tr -d ' '")" = "$TEAR_KEEP" ] && ok "the torn recording was cut back to its last whole fragment ($TEAR_KEEP bytes)" || no "the torn recording is $(ssh_run "wc -c <$torn.mp4 | tr -d ' '") bytes, expected $TEAR_KEEP"
+        [ "$(ssh_run "sha256sum $torn.mp4 | cut -d' ' -f1")" = "$sha_before" ] && ok "the bytes that were kept are the bytes that were recorded" || no "the repair changed the bytes it kept"
+        ssh_run "cat $torn.cbidx" >"$nvr_dir/repaired.cbidx" 2>/dev/null || no "the torn recording has no sidecar after the repair"
+        nvr_phase wait-oldest
+        ssh_has "ls -A $rec/$CAM_DIR/$OLD_FOREIGN_DAY | tr '\n' ' '" '^00-00-01\.mp4 keep-me\.txt $' && ok "retention removed the expired recordings and left a foreign file and a link alone" || no "the expired day holds: $(ssh_run "ls -A $rec/$CAM_DIR/$OLD_FOREIGN_DAY" | tr '\n' ' ')"
+        ssh_run "test -L $rec/$CAM_DIR/$OLD_FOREIGN_DAY/00-00-01.mp4 && test -f $rec/$CAM_DIR/$OLD_FOREIGN_DAY/keep-me.txt" && ok "the link and the foreign file are still what they were" || no "the link or the foreign file changed"
+        ssh_run "test ! -e $rec/$CAM_DIR/$OLD_EMPTY_DAY" && ok "a day folder that became empty was removed" || no "the empty day folder is still there"
+        [ "$(ssh_run "find $rec/$CAM_DIR -type f -name '*.mp4' | wc -l" | tr -d ' ')" -ge $((SEED_N + 1)) ] && ok "no recent recording was deleted (the size cap and the age rule left $SEED_N seeds alone)" || no "recent recordings are missing"
+        nvr_phase verify-seed
+        # Record again, then a clean reboot: everything closed before is still there, byte for byte, and Record is still on.
+        nvr_phase record-on --seconds 6
+        ssh_run "cd $rec/$CAM_DIR && find . -name '*.cbidx' -printf '%p %s\n' | sort" >"$nvr_dir/before.txt"
+        ssh_run 'systemctl reboot' >/dev/null 2>&1 || true
+        rm -f "$ctl_path"
+        sleep 15
+        wait_http "$boot_timeout" || { no "web UI did not come back after the reboot"; dump_serial; exit 1; }
+        wait_ssh || { no "ssh did not come back after the reboot"; exit 1; }
+        ssh_run "cd $rec/$CAM_DIR && find . -name '*.cbidx' -printf '%p %s\n' | sort" >"$nvr_dir/after.txt"
+        [ -z "$(LC_ALL=C comm -23 <(LC_ALL=C sort "$nvr_dir/before.txt") <(LC_ALL=C sort "$nvr_dir/after.txt"))" ] && ok "after a reboot every recording that was closed before is there with the same size ($(wc -l <"$nvr_dir/before.txt" | tr -d ' ') sidecars)" || no "recordings changed or went missing across the reboot"
+        nvr_phase persisted
+        nvr_phase wait-recording --seconds 6
+        nvr_diag nvr-archive
+    fi
+fi
+
+if selected nvr-faults; then
+    echo "==> the NVR: free space, the banner, and a power cut while recording"
+    if is_stub_daemon; then
+        echo "  (skipped: this image has the stub daemon)"
+    else
+        nvr_setup
+        nvr_phase wait-recording --seconds 6
+        total=$(ssh_run "df -B1 --output=size /srv | tail -1" | tr -d ' ')
+        floor=$(( total / 20 > 8589934592 ? total / 20 : 8589934592 ))
+        avail=$(ssh_run "df -B1 --output=avail /srv | tail -1" | tr -d ' ')
+        files_before=$(ssh_run "find $rec -name '*.mp4' | wc -l" | tr -d ' ')
+        # 3 GiB above the floor: the low-space notice. Half a GiB below it: recording pauses, and nothing is deleted to make room.
+        ssh_run "fallocate -l $((avail - floor - 3221225472)) /srv/system/nvr-ballast" && ok "free space is now about 3 GiB above the floor" || no "could not fill the data partition for the low-space check"
+        nvr_phase notices --expect low
+        ssh_run "fallocate -l $((avail - floor + 536870912)) /srv/system/nvr-ballast" || no "could not fill the data partition any further"
+        nvr_phase notices --expect full
+        [ "$(ssh_run "find $rec -name '*.mp4' | wc -l" | tr -d ' ')" -ge "$files_before" ] && ok "nothing was deleted to make room" || no "recordings disappeared while the disk was full"
+        ssh_run 'rm -f /srv/system/nvr-ballast'
+        nvr_phase notices --expect none
+        nvr_phase wait-recording --seconds 6
+        # The power cut: more than 30 s into the open file, so that the recorder's fsync has run at least once.
+        sleep 35
+        open_file=$(ssh_run "ls -t $rec/*/*/*.mp4 | head -1")
+        echo "  (power cut)"
+        kill -9 "$qemu_pid" 2>/dev/null || true
+        wait "$qemu_pid" 2>/dev/null || true
+        kill_qemu_pidfile
+        qemu_pid=""
+        rm -f "$ctl_path"
+        start_vm yes "$work/disk.raw"
+        wait_http "$boot_timeout" || { no "web UI did not come back after the power cut"; dump_serial; exit 1; }
+        wait_ssh || { no "ssh did not come back after the power cut"; exit 1; }
+        ok "the box came back after the power cut"
+        ssh_has 'systemctl show camerabridged -p NRestarts --value' '^0$' && ok "the daemon started once and stayed up" || no "the daemon restarted after the power cut"
+        nvr_phase wait-ready
+        side="${open_file%.mp4}.cbidx"
+        size=$(ssh_run "wc -c <$open_file | tr -d ' '")
+        if ssh_run "test -f $side"; then
+            ssh_run "cat $side" >"$nvr_dir/cut.cbidx"
+            nvr_phase check-sidecar --file "$nvr_dir/cut.cbidx" --size "$size"
+        else
+            no "the recording that was open at the power cut has no sidecar after the start"
+        fi
+        missing=$(ssh_run 'bash -s' <<'EOS'
+cd /var/lib/camera-bridge/recordings
+find . -name '*.mp4' -type f -size +0 | while IFS= read -r f; do [ -f "${f%.mp4}.cbidx" ] || echo "$f"; done
+EOS
+)
+        [ "$(echo "$missing" | grep -c .)" -le 1 ] && ok "every recording has a sidecar except at most the one being written now" || no "recordings without a sidecar after the start: $(echo "$missing" | tr '\n' ' ')"
+        nvr_phase wait-recording --seconds 6
+        nvr_phase fetch
+        nvr_diag nvr-faults
     fi
 fi
 
@@ -556,15 +877,109 @@ if selected factory-reset; then
     echo "==> factory reset through the marker file on the boot partition"
     key_before=$(ssh_run 'sha256sum /var/lib/camera-bridge/secrets/master.key | cut -d" " -f1')
     esp=$(ssh_run 'bootctl --print-esp-path')
+    recordings_before=$(ssh_run "find $rec -type f 2>/dev/null | wc -l" | tr -d ' ')
+    if selected nvr || selected nvr-archive || selected nvr-faults; then
+        if is_stub_daemon; then echo "  (no recordings are expected: the stub daemon records nothing)"
+        elif [ "${recordings_before:-0}" -gt 0 ]; then ok "recordings exist before the factory reset ($recordings_before files)"
+        else no "the nvr tests left no recordings to erase"; fi
+    fi
     ssh_run "echo keepme > /var/lib/camera-bridge/testfile; touch $esp/camera-bridge-factory-reset; sync; systemctl reboot" >/dev/null 2>&1 || true
     sleep 15
     wait_http "$boot_timeout" || { no "web UI did not come back after the reset"; dump_serial; exit 1; }
     wait_ssh || { no "ssh did not come back after the reset"; exit 1; }
     ssh_run 'test ! -e /var/lib/camera-bridge/testfile' && ok "settings were erased" || no "settings survived the factory reset"
+    [ "$(ssh_run "find $rec -mindepth 1 2>/dev/null | wc -l" | tr -d ' ')" = 0 ] && ok "recordings were erased too (the folder is empty or gone)" || no "recordings survived the factory reset"
     ssh_run "test ! -e $esp/camera-bridge-factory-reset" && ok "marker file was removed (no reset loop)" || no "marker file still there"
     key_after=$(ssh_run 'sha256sum /var/lib/camera-bridge/secrets/master.key | cut -d" " -f1')
     [ "$key_before" != "$key_after" ] && ok "a new secrets key was generated" || no "secrets key unchanged"
     ssh_run 'test -e /var/lib/camera-bridge/first-run' && ok "first-run marker is back" || no "first-run marker missing after reset"
+fi
+
+if selected wifi; then
+    echo "==> Wi-Fi: saved networks, the Wi-Fi file on the boot partition, the setup hotspot (two simulated radios)"
+    ssh_has 'systemctl is-active NetworkManager' '^active' && ok "NetworkManager runs" || no "NetworkManager is not running"
+    ssh_has 'cat /run/camera-bridge/status/wifi.json' '"(online|searching|no-wifi)"' && ok "the Wi-Fi watcher reports a state" || no "no Wi-Fi state was written"
+    ssh_has 'cat /run/camera-bridge/status/wifi.json' '"state": *"hotspot"' && no "a hotspot opened although a network cable is in" || ok "with a network cable no hotspot opens"
+    if ssh_run 'modprobe mac80211_hwsim radios=2' >/dev/null 2>&1; then
+        for _ in $(seq 1 20); do ssh_has 'nmcli -t -f TYPE,STATE device' '^wifi:(disconnected|unavailable)' && break; sleep 1; done
+        ssh_run 'nmcli -t -f DEVICE,TYPE,STATE device' | sed 's/^/        /'
+        esp=$(ssh_run 'bootctl --print-esp-path')
+        ssh_run "printf 'network=TestNet\\r\\npassword=sesame-12345\\r\\n' > '$esp/Camera-Bridge-WiFi.TXT' && systemctl restart camera-bridge-wifi-import" || true
+        ssh_has "ls '$esp'" 'Camera-Bridge-WiFi' && no "the Wi-Fi file is still on the boot partition" || ok "the Wi-Fi file was read and deleted"
+        ssh_has 'nmcli -t -f NAME connection show' '^TestNet$' && ok "the network in the file was saved" || no "the network in the file was not saved"
+        ssh_has 'journalctl --no-pager -b | grep -c sesame-12345' '^0$' && ok "the password never reached the log" || no "the Wi-Fi password is in the log!"
+        ssh_run 'cb-wifi --forget TestNet; rm -f /srv/system/wifi-pending' >/dev/null 2>&1 || true
+        ssh_run 'systemctl stop camera-bridge-wifi'   # it would close the hotspot at once: the VM has a network cable
+        if ssh_run 'cb-wifi --hotspot-now' >/dev/null 2>&1; then
+            ok "the setup hotspot opens on the first radio"
+            hotspot=$(ssh_run "jq -r '.hotspot.ssid' /run/camera-bridge/status/wifi.json")
+            case $hotspot in CameraBridge-????) ok "the hotspot is called $hotspot" ;; *) no "unexpected hotspot name '$hotspot'" ;; esac
+            client=$(ssh_run "nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '\$2==\"wifi\" && \$3!=\"connected\" {print \$1; exit}'")
+            ssh_run "nmcli device wifi rescan ifname $client >/dev/null 2>&1; sleep 6; nmcli device wifi connect '$hotspot' ifname $client" | sed 's/^/        /' || true
+            ssh_has "ip -4 addr show $client" 'inet 10\.42\.0\.' && ok "a phone (the second radio) gets an address from the hotspot" || no "the second radio got no address from the hotspot"
+            ssh_has "resolvectl query -i $client captive.apple.com 2>&1" '10\.42\.0\.1' && ok "every name points at the box on the hotspot" || no "names do not point at the box"
+            ssh_has "curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: captive.apple.com' http://10.42.0.1/hotspot-detect.html" '^302 http://10\.42\.0\.1/setup\.html$' \
+                && ok "a captive-portal check is sent to the setup page" || no "the captive-portal check is not redirected"
+            ssh_has "curl -s http://10.42.0.1/api/v1/setup/wifi" "$hotspot" && ok "the setup page's API answers on the hotspot" || no "the setup API does not answer"
+            ssh_has "curl -s -o /dev/null -w '%{http_code}' http://10.42.0.1/setup.html" '^200$' && ok "setup.html is served" || no "setup.html is not served"
+            ssh_run "nmcli device disconnect $client; nmcli connection down id cb-setup-hotspot; nmcli connection delete id '$hotspot'" >/dev/null 2>&1 || true
+        else
+            no "the setup hotspot did not open on a simulated radio"
+        fi
+        ssh_run 'systemctl start camera-bridge-wifi; modprobe -r mac80211_hwsim' >/dev/null 2>&1 || true
+    else
+        no "mac80211_hwsim is not available: the Wi-Fi test cannot run"
+    fi
+fi
+
+if selected recording-drive; then
+    echo "==> recording drive: record to a second (virtual) disk"
+    stop_vm
+    qemu-img create -f raw "$work/rec.raw" 70G >/dev/null
+    fresh_vars
+    start_vm yes "$work/disk.raw" "$work/rec.raw"
+    wait_http "$boot_timeout" && wait_ssh || { no "VM with a recording disk did not come up"; dump_serial; exit 1; }
+    ssh_run 'cb-recording-drive --list' | sed 's/^/        /'
+    ssh_has 'cb-recording-drive --list --json' '"name": *"vdb"' && ok "the recording drive lists the second disk" || no "the second disk is not listed"
+    [ "$(ssh_run "cb-recording-drive --list --json | jq -r '.disks[] | select(.name==\"vdb\") | .eligible'")" = true ] && ok "the second disk is usable" || no "the second disk is not usable"
+    ssh_has 'cb-recording-drive --list --json' '"name": *"vda"' && [ "$(ssh_run "cb-recording-drive --list --json | jq -r '.disks[] | select(.name==\"vda\") | .eligible'")" = false ] && ok "the disk the system runs from is refused" || no "the boot disk is not refused"
+    before=$(ssh_run 'sfdisk -d /dev/vdb 2>&1 | sha256sum' || true)
+    out=$(ssh_run 'cb-recording-drive --device /dev/vdb --confirm "yes please" 2>&1' || true)
+    case $out in *"does not match"*) ok "a wrong sentence is refused" ;; *) no "a wrong sentence was not refused: $out" ;; esac
+    [ "$(ssh_run 'sfdisk -d /dev/vdb 2>&1 | sha256sum')" = "$before" ] && ok "a refused choice wrote nothing" || no "a refused choice changed the disk!"
+    out=$(ssh_run 'cb-recording-drive --device /dev/vda --confirm "ERASE ALL DATA ON vda" 2>&1' || true)
+    case $out in *"can't be used"*) ok "the boot disk cannot be erased" ;; *) no "the boot disk was not refused: $out" ;; esac
+    ssh_run 'cb-recording-drive --device /dev/vdb --confirm "ERASE ALL DATA ON vdb" 2>&1' | tail -3 | sed 's/^/        /' || true
+    [ "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/recordings')" = /dev/vdb1 ] && ok "the drive is mounted where the recorder writes" || no "the drive is not mounted on the recordings folder"
+    ssh_has 'cat /run/camera-bridge/status/recording-drive.json' '"mounted"' && ok "the status says mounted" || no "the status does not say mounted"
+    ssh_run 'runuser -u camerabridge -- sh -c "echo on-the-drive > /var/lib/camera-bridge/recordings/probe && sync"' && ok "the engine's user can write to the drive" || no "the engine's user cannot write to the drive"
+    ssh_has 'findmnt -no OPTIONS /var/lib/camera-bridge/recordings' 'noexec' && ok "the drive is mounted noexec" || no "the drive is not noexec"
+    ssh_has 'systemctl is-active camerabridged' 'active' && ok "the engine runs with the drive" || no "the engine is not running after the drive was chosen"
+    ssh_run 'systemctl reboot' >/dev/null 2>&1 || true
+    sleep 15
+    wait_http "$boot_timeout" && wait_ssh || { no "the box did not come back after a reboot with a recording drive"; dump_serial; exit 1; }
+    [ "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/recordings')" = /dev/vdb1 ] && ok "the drive is mounted again after a reboot" || no "the drive was not mounted after a reboot"
+    [ "$(ssh_run 'cat /var/lib/camera-bridge/recordings/probe')" = on-the-drive ] && ok "what was written to the drive is still there" || no "the probe file is gone"
+    stop_vm
+    fresh_vars
+    start_vm yes "$work/disk.raw"
+    wait_http "$boot_timeout" && wait_ssh || { no "the box did not come up without its recording drive"; dump_serial; exit 1; }
+    [ "$(ssh_run 'findmnt -no FSTYPE /var/lib/camera-bridge/recordings')" = tmpfs ] && ok "without the drive a read-only placeholder is in its place" || no "no placeholder where the drive was"
+    ssh_run 'runuser -u camerabridge -- sh -c "echo x > /var/lib/camera-bridge/recordings/nope" 2>/dev/null' && no "the engine could write without the drive" || ok "nothing can be written without the drive"
+    ssh_has 'cat /run/camera-bridge/status/recording-drive.json' '"missing"' && ok "the status says the drive is missing" || no "the status does not say missing"
+    stop_vm
+    fresh_vars
+    start_vm yes "$work/disk.raw" "$work/rec.raw"
+    wait_http "$boot_timeout" && wait_ssh || { no "the box did not come up with its drive back"; dump_serial; exit 1; }
+    [ "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/recordings')" = /dev/vdb1 ] && ok "the drive is back in place when plugged in again" || no "the drive was not mounted again"
+    ssh_run 'cb-recording-drive --forget 2>&1' | tail -2 | sed 's/^/        /' || true
+    [ -z "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/recordings')" ] && ok "forgetting the drive puts recording back on the box's own disk" || no "the drive is still mounted after forgetting it"
+    ssh_has 'cat /run/camera-bridge/status/recording-drive.json' '"internal"' && ok "the status says internal" || no "the status does not say internal"
+    # The tests after this one expect the box running from its own disk alone, as before.
+    stop_vm
+    fresh_vars
+    start_vm yes "$work/disk.raw"
+    wait_http "$boot_timeout" && wait_ssh || { no "the box did not come back after the recording drive test"; dump_serial; exit 1; }
 fi
 
 if selected installer; then

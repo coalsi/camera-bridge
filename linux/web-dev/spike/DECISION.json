@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "decidedAt": "2026-10-11T05:03:19.818Z",
+  "go": true,
+  "floor": false,
+  "floorFor": [
+    "safari-mac",
+    "firefox-mac",
+    "ipad-safari",
+    "iphone-safari"
+  ],
+  "evidence": {
+    "chrome-mac": "device",
+    "safari-mac": "none",
+    "firefox-mac": "none",
+    "ipad-safari": "none",
+    "iphone-safari": "none"
+  },
+  "keyStep": {
+    "default": "off",
+    "chrome-mac": "on",
+    "safari-mac": "off",
+    "firefox-mac": "off",
+    "ipad-safari": "off",
+    "iphone-safari": "off"
+  },
+  "iphone": "cannot-play",
+  "tileCap": {
+    "default": 4,
+    "chrome-mac": 1,
+    "safari-mac": 4,
+    "firefox-mac": 4,
+    "ipad-safari": 4,
+    "iphone-safari": 2
+  },
+  "holdCanvas": {
+    "default": true,
+    "chrome-mac": false,
+    "safari-mac": true,
+    "firefox-mac": true,
+    "ipad-safari": true,
+    "iphone-safari": true
+  },
+  "mimeChange": "recreate",
+  "jumpProtocol": "abort+offset+init",
+  "seekMarginMs": 700,
+  "reasons": {
+    "chrome-mac": {
+      "holdCanvas": "the element keeps its picture after its range is removed",
+      "keyStep": "key pictures right, best drag step p95 34.6 ms",
+      "tileCap": "8 MP tiles that held 16 fps: 1"
+    },
+    "safari-mac": {
+      "holdCanvas": "not measured: keep the canvas",
+      "keyStep": "no run for this browser class",
+      "tileCap": "no run: the addendum default"
+    },
+    "firefox-mac": {
+      "holdCanvas": "not measured: keep the canvas",
+      "keyStep": "no run for this browser class",
+      "tileCap": "no run: the addendum default"
+    },
+    "ipad-safari": {
+      "holdCanvas": "not measured: keep the canvas",
+      "keyStep": "no run for this browser class",
+      "tileCap": "no run: the addendum default"
+    },
+    "iphone-safari": {
+      "holdCanvas": "not measured: keep the canvas",
+      "keyStep": "no run for this browser class",
+      "tileCap": "no run: the addendum default",
+      "iphone": "no run"
+    }
+  }
+}

@@ -33,14 +33,14 @@ camerabridged        Swift daemon: BridgeEngine + web API (one process, user cam
   ├─ go2rtc          helper for Ring / Nest / Wyze / Tuya (started on demand)
   └─ ffmpeg          codecs (started per stream)
 avahi-daemon         mDNS (HomeKit advertising)
-camerabridge-web     not a process: camerabridged serves the web UI itself on :80 (and :443 with a local certificate)
+camerabridge-web     not a process: camerabridged serves the web UI itself on :80, plain HTTP (nothing listens on :443; HTTPS is a later option)
 ```
 
-State lives in `/var/lib/camera-bridge` (a separate data partition, so updates never touch it): `config.json`, `hap/`, `secrets/` (the encrypted items and `master.key`), `Diagnostics/`. This is the same layout the Mac app uses in `~/Library/Application Support/CameraBridge`.
+State lives in `/var/lib/camera-bridge` (a separate data partition, so updates never touch it): `config.json`, `hap/`, `secrets/` (the encrypted items and `master.key`), `Diagnostics/`, and `recordings/` (the NVR's files, once Record is on). This is the same layout the Mac app uses in `~/Library/Application Support/CameraBridge`.
 
 ## Web API (served by `camerabridged`)
 
-JSON over HTTP on port 80 (`http://camera-bridge.local`). Types follow the Mac app's models (`CameraConfiguration`, `CameraStatus`, `DiscoveredCamera`, `NetworkNotice`) and its words (`StatusText`, the Add Camera wizard's pages and messages), so the two UIs say the same things. Errors are `{"error": "<code>", "message": "<a sentence for the person>", "field": "<input, when one is to blame>"}` with the usual status codes (400 invalid, 401 unauthorized, 403 csrf / cross_origin / setup_required, 404, 409, 415, 422 the engine refused, 429 too_many_attempts or too_many_streams, 503 no_picture). Every answer carries `Cache-Control: no-store` and the security headers.
+JSON over HTTP on port 80 (`http://camera-bridge.local`). Types follow the Mac app's models (`CameraConfiguration`, `CameraStatus`, `DiscoveredCamera`, `NetworkNotice`) and its words (`StatusText`, the Add Camera wizard's pages and messages), so the two UIs say the same things. Errors are `{"error": "<code>", "message": "<a sentence for the person>", "field": "<input, when one is to blame>"}` with the usual status codes (400 invalid, 401 unauthorized, 403 csrf / cross_origin / setup_required, 404 (`gap`: nothing recorded at that time), 409 (`folder_required`, `confirm_required`), 410 gone, 415, 422 the engine refused (`folder_rejected`), 429 too_many_attempts, too_many_streams or busy, 502 unreadable, 503 no_picture or archive_unavailable, 504 drive_slow). Every answer carries `Cache-Control: no-store` and the security headers.
 
 Sessions: the `cb_session` cookie (see Security). Everything needs a session except the rows marked "open". Requests that change something also carry `X-CSRF-Token` (from `/session`, `/auth/login` or `/auth/setup`) and `Content-Type: application/json`.
 
@@ -61,11 +61,20 @@ GET    /api/v1/cameras/{id}
 PATCH  /api/v1/cameras/{id}           name, isEnabled, username, password, endpoint{host,ports,useHTTPS}, mainStreamURL, subStreamURL, motionSource,
                                       motionSensitivity, motionHoldSeconds, sensors{}, audioEnabled, twoWayAudio, liveStreamMode, liveQualityMode,
                                       liveMaxBitrateOverride, recordingStreamMode, recordingQualityMode, timestampOverlay{}
+PATCH  /api/v1/cameras/{id}/nvr       {enabled?, recordSound?}: Record on or off, Record sound on or off, in place (the camera is not restarted);
+                                      409 folder_required until a place for recordings was chosen
 DELETE /api/v1/cameras/{id}
 GET    /api/v1/cameras/{id}/snapshot  JPEG (503 + Retry-After while there is none)
-GET    /api/v1/cameras/{id}/live      multipart/x-mixed-replace JPEGs, about one a second, at most 15 minutes, at most 6 at a time
+GET    /api/v1/cameras/{id}/live      multipart/x-mixed-replace JPEGs (the fallback where a browser cannot play live video), at most 15 minutes
+POST   /api/v1/cameras/{id}/clean-picture {clean}       every label the camera draws itself off (clock, name, text, logo), or back as saved
+POST   /api/v1/cameras/{id}/camera-clock {shown}        the camera's own on-screen date and time on or off (vendor API, then ONVIF OSD)
+POST   /api/v1/cameras/{id}/camera-time-zone            the camera's clock set to the bridge's time zone (ONVIF SetSystemDateAndTime): {timeZone: POSIX string}
+GET    /api/v1/live?cameras=<id>,…&stream=sub|main|automatic[&width=]   live video of 1 to 32 cameras in one answer: the cameras' own H.264/HEVC as fragmented MP4, framed per camera (type, camera, length; see BridgeWeb/WebApp+LiveVideo.swift); at most 16 live answers at a time
 GET    /api/v1/cameras/{id}/pairing   {accessoryName, paired, setupCode, setupURI, qrSVG, blocker?, blockerMessage?, blockerAction?}
 POST   /api/v1/cameras/{id}/reset-pairing
+POST   /api/v1/cameras/{id}/optimize        {confirm: true}: the HomeKit optimizer for this camera (one at a time, 20 to 40 s; it can lower the bit rate,
+                                      change H.265 to H.264 and restarts the camera) -> {applied, failed, canUndo, mayNeedRecordingReEnabled, scoreBefore, scoreAfter}
+POST   /api/v1/cameras/{id}/optimize/undo   -> 204
 POST   /api/v1/cameras/{id}/test-motion
 POST   /api/v1/discover               ONVIF WS-Discovery -> {cameras: [{host, name, hardware, onvifPort, alreadyAdded}]}
 POST   /api/v1/probe                  the same body as POST /cameras (no choices needed) -> {ok: true, vendor, model, streams, capabilities, suggestions,
@@ -73,6 +82,15 @@ POST   /api/v1/probe                  the same body as POST /cameras (no choices
 POST   /api/v1/integrations/unifi/cameras   {host, apiKey, ...} -> the console's cameras
 POST   /api/v1/integrations/nest/authorize  {projectID, clientID} -> {url};  .../nest/connect {projectID, clientID, clientSecret, code} -> {session, cameras}
 GET    /api/v1/sensors-bridge         same shape as pairing; POST /api/v1/sensors-bridge/reset-pairing
+GET    /api/v1/nvr/storage            where recordings go and the numbers: state, keepDays, maxSizeGB, used / free / total / floor / room bytes, effective maximum, oldest, newest
+GET    /api/v1/nvr/storage/locations  the places this bridge offers (one on the box) with free space and any problem; the browser sends the id, never a path
+PATCH  /api/v1/nvr/storage            {location?, keepDays?, maxSizeGB?, confirm?}: choose the place and the limits; 409 confirm_required when it would delete recordings
+GET    /api/v1/nvr/cameras            {serverTime, catalogVersion, cameras: [{id, oldest, newest, typicalGOP}]}: what is recorded
+GET    /api/v1/nvr/activity?cameras=&from=&binMs=&bins=      the timeline's activity per camera (coverage, bytes per second, typical)
+GET    /api/v1/nvr/cameras/{id}/fragments?at=ms[&ahead=n] | ?after=id[&limit=n]    which pieces to play: ids, times, sizes and the codec string
+GET    /api/v1/nvr/cameras/{id}/fragments/{fid}         one piece, video only, as fragmented MP4 (at most 16 MiB; no Range; HEAD is 405)
+GET    /api/v1/nvr/cameras/{id}/fragments/{fid}/init    the matching initialization segment
+GET    /api/v1/nvr/cameras/{id}/keyframe?at=ms          the whole key piece of the group of pictures that contains the time; X-CB-Part describes it
 GET    /api/v1/settings               {bridgeName, basePort, sensorsBridgePort, webhookEnabled, webhookPort, webhookToken, webhookProblem, logLevel, motionShadowTest}
 PATCH  /api/v1/settings               the same keys (+ regenerateWebhookToken)
 POST   /api/v1/bridge/pause | resume
@@ -85,6 +103,20 @@ POST   /api/v1/system/update          {action: "check" | "apply"}: check answers
                                       then GET /system follows update.state (downloading -> ready, or error)
 POST   /api/v1/system/reboot | poweroff   {confirm: true} -> 202
 GET    /api/v1/system/disks           {disks: [{id, name, model, sizeBytes, note, eligible, problems[], phrase}]}: the installer's own list, usable or not
+GET    /api/v1/system/recording-drives  {state: internal|mounted|missing|working|failed, message, drives: [{id, name, model, sizeBytes, note, eligible, problems[], phrase, isRecordingDrive, inUse}]}: the attached disks that could take recordings, and where recordings go now
+POST   /api/v1/system/recording-drive   {targetID, phrase?, keepData?}: phrase is "ERASE ALL DATA ON <disk name>" (erases and makes an ext4 file system labelled CBRECORDINGS); keepData: use a disk that already is a Camera Bridge recording drive as it is; -> 202
+POST   /api/v1/system/recording-drive/forget  {confirm: true}: back to the box's own disk, the drive left alone; -> 202
+GET    /api/v1/nvr/cameras/:id/clip-plan?from=ms&to=ms&tz=Zone  {camera, cameraName, parts: [{index, start, end, leadInMs, bytes, samples, fileName}], gaps: [{from, to, held}], soundOmitted, bytes, durationMs}: what a clip of that camera in that range would be, from the recordings' headers only
+GET    /api/v1/nvr/cameras/:id/clip?from=ms&to=ms&tz=Zone&part=1   one MP4 (chunked, `attachment`): the clip's part as planned, exactly `bytes` long, the video copied untouched
+POST   /api/v1/import/mac-backup/preview  {file: <the Mac app's .camerabridge-backup JSON>} -> {cameras: [{id, name, vendor, host, username, record, enabled, alreadySetUp}], unreadable, appVersion, exportedAt}
+POST   /api/v1/import/mac-backup          {file, passwords: {<camera id>: <password>}} -> {added[], addedOff[], alreadySetUp[], failed: [{name, message}], recordingPlaceChosen}: cameras keep their id, get a port of this box, are on only with a password; Record on with no place chosen yet picks the box's own storage
+GET    /api/v1/system/wifi           {state, message, ssid, hotspot, saved[], lastError, hasWifi, wired, networks[]}: how the box is on the network
+POST   /api/v1/system/wifi/scan      {} -> {networks: [{ssid, signal, security}]}: networks in range, strongest first
+POST   /api/v1/system/wifi           {ssid, password}: save the network and restart to join it; -> 202
+POST   /api/v1/system/wifi/forget    {ssid}; -> 204
+GET    /api/v1/setup/wifi            (no session; only while the setup hotspot is open, else 409) {hotspot, networks, saved, lastError, needsAdminPassword, bridgeName}
+POST   /api/v1/setup/wifi            (no session; only while the hotspot is open) {ssid, password, adminPassword?}: adminPassword is required once the bridge has one; -> 202, the box restarts
+                                     While the hotspot is open, a request to any unknown host name is answered 302 -> http://10.42.0.1/setup.html (captive portal).
 POST   /api/v1/system/install         {targetID, phrase, copyData?}: phrase is "ERASE ALL DATA ON <disk name>", typed by the person; -> 202, progress in GET /system install
 POST   /api/v1/system/ssh             {enabled, authorizedKeys?}: key login for root, plain public keys only (up to 20) -> the system
 POST   /api/v1/system/auto-update     {enabled} -> the system
@@ -118,10 +150,28 @@ Rules it keeps: the file name always comes from a fixed list (`Request`), never 
 ```
 camerabridged [--data-dir /var/lib/camera-bridge] [--port 80] [--static-dir|--web-root /usr/share/camera-bridge/web] [--loopback-only]
               [--allowed-host NAME] [--setup-token-file PATH] [--run-dir /run/camera-bridge] [--os-request-dir DIR] [--os-status-dir DIR]
-              [--log-level info] [--hap-base-port N] [--sensors-port N] [--dev] [--preview [scenario]] [--fake-discovery] [--no-demo-camera]
+              [--recordings-dir DIR] [--log-level info] [--hap-base-port N] [--sensors-port N] [--dev] [--preview [scenario]] [--fake-discovery]
+              [--no-demo-camera]
 ```
 
-Every flag has a variable; a flag wins. The image's unit sets `CAMERABRIDGE_DATA_DIR`, `CAMERABRIDGE_WEB_ROOT`, `CAMERABRIDGE_HTTP_PORT`, `CAMERABRIDGE_RUN_DIR`, `CAMERABRIDGE_OS_REQUEST_DIR` and `CAMERABRIDGE_OS_STATUS_DIR` (the request and status folders default to `requests` and `status` in the run folder); the older `CAMERA_BRIDGE_*` spellings (`_DATA_DIR`, `_PORT`, `_STATIC_DIR`, `_LOOPBACK_ONLY`, `_ALLOWED_HOSTS`, `_SETUP_TOKEN`, `_LOG_LEVEL`) still work, and the `CAMERABRIDGE_*` name wins when both are set. It logs to standard output (journald priorities when under systemd; the engine's diagnostics log in `<data>/Diagnostics` as always), sends `READY=1` once the web interface listens, `WATCHDOG=1` every WatchdogSec/3 (10 s for the image's `WatchdogSec=30`) while the engine runs and the interface listens (use `Type=notify`, `WatchdogSec=`), and shuts down on SIGTERM or SIGINT: web interface first, then the engine, within 10 seconds. `GET /api/v1/status` needs no sign-in (the image's boot health check uses it). `--setup-token-file` makes first-run setup ask for a code the image prints on the console, so nobody else on the network can claim a new bridge.
+Every flag has a variable; a flag wins. The image's unit sets `CAMERABRIDGE_DATA_DIR`, `CAMERABRIDGE_WEB_ROOT`, `CAMERABRIDGE_HTTP_PORT`, `CAMERABRIDGE_RUN_DIR`, `CAMERABRIDGE_OS_REQUEST_DIR` and `CAMERABRIDGE_OS_STATUS_DIR` (the request and status folders default to `requests` and `status` in the run folder); `CAMERABRIDGE_RECORDINGS_DIR` (or `--recordings-dir`) is optional and not set by the unit; the older `CAMERA_BRIDGE_*` spellings (`_DATA_DIR`, `_PORT`, `_STATIC_DIR`, `_LOOPBACK_ONLY`, `_ALLOWED_HOSTS`, `_SETUP_TOKEN`, `_LOG_LEVEL`) still work, and the `CAMERABRIDGE_*` name wins when both are set. It logs to standard output (journald priorities when under systemd; the engine's diagnostics log in `<data>/Diagnostics` as always), sends `READY=1` once the web interface listens, `WATCHDOG=1` every WatchdogSec/3 (10 s for the image's `WatchdogSec=30`) while the engine runs and the interface listens (use `Type=notify`, `WatchdogSec=`), and shuts down on SIGTERM or SIGINT: web interface first, then the engine, within 10 seconds. `GET /api/v1/status` needs no sign-in (the image's boot health check uses it). `--setup-token-file` makes first-run setup ask for a code the image prints on the console, so nobody else on the network can claim a new bridge.
+
+### Recordings (the NVR)
+
+The recorder, the catalog and the retention rules live in the engine (`BridgeEngine/NVR`) and are the same on the Mac and on the box; the daemon supplies what only the host knows. The folder is `recordings` inside the data directory (`/var/lib/camera-bridge/recordings`, which is `/srv/camera-bridge/recordings` on the data partition) unless `--recordings-dir` names a full path. The daemon makes the folder as the unprivileged user (0700) before the engine starts; inside the data directory it makes missing levels, anywhere else only the folder itself and only when its parent exists, so an unplugged drive cannot be re-invented on the system disk. The recorder never makes the folder or a parent of it. The web interface offers that one folder as the location `builtin` (the browser sends the id, never a path). Free space comes from `statvfs` (`f_bavail`); the data directory's device (`st_dev`) is the system volume, which keeps `max(8 GiB, 5% of the partition)` free (recording pauses below it and resumes 1 GiB above it) because settings, HomeKit keys, the journal and `cb-update`'s 4 GB share that partition; a folder on another device keeps 2 GiB. Camera folders are named by the camera's UUID, `camera.json` inside carries the name. Starting never waits for the archive: the store repairs unclosed files and loads its catalog in the background, and `READY=1` does not depend on it (`TimeoutStartSec=120`; three unblessed boots roll the OS back). The hardened unit lets the daemon write only inside `/var/lib/camera-bridge`, so a recordings folder anywhere else needs the unit changed; that comes with external drives. `--preview` has no recordings and no archive.
+
+### Recordings in the browser
+
+Recorded video reaches the page as small pieces, and the browser's own video decoder does the decoding; the box decodes nothing. The box serves plain HTTP, and the browser features for decoding in script (WebCodecs) exist only on secure pages, so the page uses Media Source Extensions, which work on any page. `linux/web/README.md` lists the modules.
+
+- **Pieces.** The recorder cuts every file into fragments of at most 2.5 s: at every keyframe, or 2.5 s into a long group of pictures. `GET /nvr/cameras/{id}/fragments?at=ms` returns the plan for a moment: the fragment that holds it, the key fragment its group of pictures starts in, and the next few, each with an opaque id (`<12 hex digits>.<index>`, stable across restarts), its times and size, and per file the codec string (`mime`), the picture size, the file's `anchor` time and which fragment's `/init` to fetch. The page appends the init segment and the pieces to one MediaSource per tile. The box serves video only: `ArchiveMedia` (in `BridgeEngine/NVR`, because `BridgeWeb` may not import `FMP4`) drops the `prft` box and, for a file with sound, the audio track.
+- **Dragging** the timeline: where the browser's row of `POLICY_TABLE` (`js/nvr/planner.js`) has key steps on (at present Chrome on a Mac, the only class the browser spike ran on a device), the page fetches `GET /nvr/cameras/{id}/keyframe?at=ms`, the whole key fragment of the moment's group of pictures, and shows its first picture; in every other browser the picture arrives only after the pointer pauses. About 80 ms after the pointer stops, the page fetches the pieces from there to the moment and shows the exact frame. Releasing plays: `fragments?after=<id>` keeps the buffer a few seconds ahead.
+- **Time.** Every time on the wire is Unix epoch milliseconds from the box's clock. The page measures its offset from `serverTime` in `GET /nvr/cameras` (polled every second while a recordings screen is open) and uses it for every "now". A file's media time maps to epoch time through its `anchor`; the page adds a fixed base so that buffer times stay positive.
+- **Live** is the recorded edge, played 6 s behind the box's time. With Record off or paused the page falls back to the snapshot preview (`GET /cameras/{id}/snapshot`, a new picture every 5 s).
+- **Banners.** The `notices` event (and `GET /status`) carries one more notice while Record is on for a camera: id `nvr-storage`, "Recording Can’t Continue" with the reason and an `action` (`choose-folder` or `open-settings`), or "Recording Storage Almost Full" when less than 5 GiB remains above the floor. Older pages ignore the new `action` field.
+- **When the recordings are out of reach.** A read answers `410 gone` when the piece is no longer there (retention took it, or its drive is away), `504 drive_slow` (with `Retry-After: 2`) when the disk did not answer within 5 s, and `502 unreadable` when the piece cannot be read (a damaged piece, or a file that was open when its volume vanished). The page asks the status which it is: a 504 always means the drive, and a 410 or a 502 means the drive while the camera's `status.nvr.pause` is `folderMissing`. The tile then keeps its last picture, stops the clock, says "The recordings drive isn’t connected." and looks again every 5 s with one small read; when the box answers, playback starts again from the same place. Without that pause, a 410 makes the page ask for a new plan once (retention changed the catalog), and a 410 or a 502 after that is shown as a part that cannot be read.
+- **Limits.** The archive routes (`fragments`, `keyframe`, `activity`) allow 8 requests in flight in all and 6 per peer address (`maximumArchiveReads`, `maximumArchiveReadsPerAddress`); the next gets `429 busy` with `Retry-After: 1` at once, and `503 archive_unavailable` while the store loads (the daemon does not wait for it to start). An answer is at most 16 MiB. The page keeps to 3 byte fetches and 1 JSON request at a time and does not abort one to cancel it, because a buffered answer cannot be cancelled on the box; it gives up on a request only when the screen is left or after 8 s without an answer.
+- **Security.** Every NVR route needs the session cookie; GET needs no CSRF token, PATCH and POST need the usual one. The browser sends ids and times, never a path. Footage is `Cache-Control: no-store`, HEAD on a media route is 405, and the Content-Security-Policy gains exactly `media-src 'self' blob:`. No credential, path or camera address appears in an answer, a log line or a URL.
 
 ## Security
 
@@ -129,9 +179,9 @@ Every flag has a variable; a flag wins. The image's unit sets `CAMERABRIDGE_DATA
 - First boot: no admin yet. The UI asks you to set a password on first visit (and the setup code, when the image has one). Until then the API offers only `/status`, `/session`, `/health` and `/auth/setup`.
 - Passwords: PBKDF2-HMAC-SHA256, 600,000 rounds, 16-byte salt per password (swift-crypto), 8 to 256 bytes. Wrong guesses: 5 free per address, then a 15 s lockout that doubles up to 15 min; 60 failures from anywhere slow everyone for a minute. Comparisons are constant time.
 - Sessions are random 256-bit tokens in `HttpOnly; SameSite=Strict` cookies, kept server-side only as SHA-256 hashes (`<data>/web/auth.json`, 0600), 7 days idle, 30 days at most, signed out by a password change. Changing requests need a matching `Origin`, the session's HMAC-derived `X-CSRF-Token` and a JSON content type.
-- Strict headers: a Content-Security-Policy that allows only the bridge's own files (no inline script or style), `nosniff`, no referrer, no framing, same-origin resource and opener policies.
+- Strict headers: a Content-Security-Policy that allows only the bridge's own files (no inline script or style; `media-src 'self' blob:` lets the page play video it assembled itself), `nosniff`, no referrer, no framing, same-origin resource and opener policies.
 - Camera passwords, cloud sources and HomeKit keys are in the encrypted secret store; none appears in an answer, the log, the diagnostics or the web interface's files.
-- `nftables` default-deny inbound except 80, 443 (UI), the HAP ports (21100–21199), mDNS and SSH only if enabled.
+- `nftables` default-deny inbound except 80 (UI), 443 (open for the later HTTPS option; nothing listens there yet), the HAP ports (21100–21199), mDNS and SSH only if enabled.
 - No telemetry. The only outbound calls are to the cameras, Apple's push relay (through the HomeKit hub), GitHub for update checks, and go2rtc's cloud sources if you add Ring or Nest.
 
 ## Operating system
@@ -151,6 +201,8 @@ Packages/CameraBridgeKit/Sources/BridgeWeb/       portable HTTP server + JSON AP
 Packages/CameraBridgeKit/Sources/BridgeDaemon/    the daemon's logic: flags, systemd, logging, the system helper (testable)
 Packages/CameraBridgeKit/Sources/camerabridged/   the daemon (executable; only a main)
 linux/web/                                        the web UI (static files; no build step needed at runtime)
+linux/web-tests/                                  tests of the web UI's pure modules (Node); outside linux/web because the image copies that whole directory
+linux/web-dev/                                    web UI development tools: a dev server for the recording routes, fixtures, the conformance check, the lint
 linux/os/                                         mkosi config, systemd units, sysupdate, installer, first-boot
 docs/linux/                                       this file, the user guide, the build guide
 ```
@@ -160,4 +212,5 @@ docs/linux/                                       this file, the user guide, the
 - macOS: `swift test` in `Packages/CameraBridgeKit` runs everything that is portable, including `BridgeWeb`.
 - The UI on a Mac: `swift run camerabridged --dev --data-dir /tmp/cb-dev --fake-discovery` (in `Packages/CameraBridgeKit`), then open `http://127.0.0.1:8080`. It runs the real engine with demo cameras, nothing advertised, the HomeKit ports from 38100; `--preview` serves the engine's sample data instead.
 - Linux: `Tools/linux-test.sh` runs the same tests in a Swift container (Docker or OrbStack). CI does it on every push.
+- Web UI: `node --test 'linux/web-tests/*.test.mjs'` from the repository root runs the tests of the page's pure modules (Node 22 or later, no packages; the quotes matter). `linux/web-dev/` has the dev server and the conformance check against a running daemon (`linux/web/README.md`).
 - OS image: `linux/os/build.sh` (needs Linux and root) or the GitHub Actions workflow.

@@ -495,7 +495,7 @@ export function renderAdd({ navigate }) {
       pairing.el,
       w.kind === 'doorbell' && w.probe?.ringsThroughWebhook
         ? h('div', { class: 'banner info' }, icon('info'), h('div', { class: 'text' }, 'Rings from this camera come through the webhook. Turn it on in Settings and send it a doorbell event from your other system.')) : null,
-      h('div', { class: 'wizard-actions' }, h('a', { class: 'btn', href: '#/add' }, 'Add another camera'), h('a', { class: 'btn primary', href: '#/' }, 'Done')));
+      h('div', { class: 'wizard-actions' }, h('a', { class: 'btn', href: '#/add' }, 'Add another camera'), h('a', { class: 'btn primary', href: '#/cameras' }, 'Done')));
   }
 
   const STEP_TITLES = {
@@ -504,7 +504,7 @@ export function renderAdd({ navigate }) {
   };
   const STEP_VIEWS = { type: typeStep, discover: discoverStep, connect: connectStep, check: checkStep, name: nameStep, motion: motionStep, extras: extrasStep, review: reviewStep, pair: pairStep };
 
-  replace(root, backLink('#/', 'Cameras'), progress, body);
+  replace(root, backLink('#/cameras', 'Cameras'), progress, body);
   replace(body, h('div', { class: 'checking' }, spinner()));
   get('camera-types').then((catalog) => { w.catalog = catalog; show('type'); }).catch((error) => replace(body, inlineError(error.message)));
 

@@ -10,6 +10,11 @@ mkdir -p "$dir"
     echo "Web UI:   http://camera-bridge.local"
     ip -4 -o addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); printf "          http://%s   (%s)\n", a[1], $2 }'
     ip -4 -o addr show scope link 2>/dev/null | awk '{ split($4, a, "/"); printf "          http://%s   (%s, no router found)\n", a[1], $2 }'
+    hotspot=$(jq -r 'select(.state == "hotspot") | .hotspot.ssid // empty' /run/camera-bridge/status/wifi.json 2>/dev/null || true)
+    if [ -n "$hotspot" ]; then
+        echo
+        echo "No network yet: join the Wi-Fi \"$hotspot\" with a phone to set up the box."
+    fi
     echo
 } >"$dir/50-camera-bridge.issue.new"
 mv -f "$dir/50-camera-bridge.issue.new" "$dir/50-camera-bridge.issue"

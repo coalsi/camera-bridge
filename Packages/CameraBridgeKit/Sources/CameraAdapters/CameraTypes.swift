@@ -110,6 +110,14 @@ public protocol CameraEventSource: Sendable {
     /// Self-reconnecting (Backoff). Emits .eventChannel(connected:) on (dis)connect.
     func events() -> AsyncStream<CameraEvent>
     func stop() async
+    /// The camera accepted these credentials elsewhere (its video signed in): a channel that waits after a refused login tries again now
+    /// (or when CameraBridge's short login pause ends) instead of after the long wait that protects cameras from lockouts. Once per
+    /// streak of refusals; the default does nothing.
+    func credentialsConfirmed()
+}
+
+extension CameraEventSource {
+    public func credentialsConfirmed() {}
 }
 
 public protocol TalkbackSink: Sendable {

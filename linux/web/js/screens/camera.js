@@ -3,6 +3,9 @@ import { del, get, patch, post } from '../api.js';
 import { confirmDialog, debounce, h, promptDialog, replace, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { timeAgo } from '../format.js';
+import { showLabel } from '../labels.js';
+import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
+import { loadNVR, nvrSupported } from '../nvr/lite.js';
 import { putCamera, store, subscribe } from '../store.js';
 import { banners } from './banners.js';
 import { backLink, field, homeState, inlineError, selectField, statePill, switchRow } from './common.js';
@@ -64,8 +67,10 @@ export function renderCamera({ params, navigate, setTitle }) {
   let camera = store.cameras.get(id);
   let destroyed = false;
   let pairing = null;
+  let recordHandle = null;   // the Record card (from the recording code, which may fail to load)
   let live = false;
   let pictureTimer = null;
+  let previewStop = null;   // stops the clock of the preview on screen
   const saveState = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' });
   let pending = {};
 
@@ -110,10 +115,46 @@ export function renderCamera({ params, navigate, setTitle }) {
   // MARK: Pieces
 
   function previewCard() {
+    previewStop?.();   // the card this one replaces stops its clock
     const img = h('img', { alt: `Picture from ${camera.name}`, hidden: true });
     const placeholder = h('div', { class: 'placeholder' }, h('div', null, icon('camera', { size: 34 }), h('div', null, 'Waiting for a picture…')));
     const toggle = h('button', { class: 'btn small', type: 'button' });
     const note = h('span', { class: 'pill plain' });
+    // The time of the picture: "Updated 6:27:14 PM" for a snapshot, the time now ("Live · 6:27:14 PM") while the live picture plays.
+    const stamp = h('span', { class: 'video-label', hidden: true });   // the camera's name and the date and time, as the bridge burns them
+    let stampTimer = null;
+    let autoTried = false;   // the live preview starts by itself once, when the camera is online
+    const stopStamp = () => { clearInterval(stampTimer); stampTimer = null; };
+    // Real live video (the camera's own H.264/HEVC through /api/v1/live) where the browser plays it; the picture stream otherwise.
+    const video = h('video', { class: 'preview-video', muted: true, playsinline: true, hidden: true, 'aria-label': `Live video from ${camera.name}` });
+    let liveVideo = null;     // { request, player } while the real video runs
+    const stopVideo = () => {
+      liveVideo?.request.close();
+      liveVideo?.player.destroy();
+      liveVideo = null;
+      video.hidden = true;
+    };
+    const startVideo = () => {
+      const player = createLivePlayer(video, {
+        onPlaying: () => { video.hidden = false; img.hidden = true; placeholder.hidden = true; },
+        onProblem: () => { stopVideo(); if (live) startPictures(); },
+      });
+      const width = Math.round((video.parentElement?.clientWidth || 960) * (window.devicePixelRatio || 1));
+      const request = openLive([id], {
+        stream: 'automatic', width,
+        onMessage: (index, message) => {
+          if (message.kind === 'meta') player.meta(message.json);
+          else if (message.kind === 'init') player.init(message.bytes);
+          else if (message.kind === 'delta' || message.kind === 'keyframe') player.media(message.bytes, message.kind === 'keyframe');
+        },
+      });
+      liveVideo = { request, player };
+    };
+    const startPictures = () => {
+      img.hidden = false; placeholder.hidden = true;
+      img.src = `/api/v1/cameras/${id}/live?t=${Date.now()}`;
+      replace(note, 'Live preview · about one picture a second');
+    };
     const showSnapshot = () => {
       if (live || document.hidden) return;
       const s = camera.status;
@@ -123,17 +164,30 @@ export function renderCamera({ params, navigate, setTitle }) {
         return;
       }
       const next = new Image();
-      next.onload = () => { img.src = next.src; img.hidden = false; placeholder.hidden = true; };
+      next.onload = () => {
+        img.src = next.src; img.hidden = false; placeholder.hidden = true;
+        if (!live) { stopStamp(); showLabel(stamp, camera, Date.now()); }
+      };
       next.src = `/api/v1/cameras/${id}/snapshot?t=${Date.now()}`;
     };
     const setLive = (on) => {
       live = on;
       if (on) {
-        img.hidden = false; placeholder.hidden = true;
-        img.src = `/api/v1/cameras/${id}/live?t=${Date.now()}`;
+        if (liveSupported()) {
+          replace(note, 'Live video');
+          startVideo();
+        } else {
+          startPictures();
+        }
         replace(toggle, icon('pause'), 'Stop live preview');
-        replace(note, 'Live preview · about one picture a second');
+        const tick = () => showLabel(stamp, camera, Date.now());
+        tick();
+        stopStamp();
+        stampTimer = setInterval(tick, 1000);
+
       } else {
+        stopStamp();
+        stopVideo();
         img.removeAttribute('src');
         replace(toggle, icon('play'), 'Start live preview');
         replace(note, 'Picture refreshes every few seconds');
@@ -142,10 +196,17 @@ export function renderCamera({ params, navigate, setTitle }) {
     };
     img.addEventListener('error', () => { if (live) { toast('The live preview stopped. The camera may be offline.'); setLive(false); } });
     toggle.addEventListener('click', () => setLive(!live));
+    // Plays by itself when the camera is online; if it is not yet, the picture timer below starts it once it is.
+    const online = () => camera.isEnabled && camera.status?.connection === 'online';
     setLive(false);
     clearInterval(pictureTimer);
-    pictureTimer = setInterval(showSnapshot, 5000);
-    return h('div', null, h('div', { class: 'preview' }, img, placeholder, h('div', { class: 'overlay' }, note, toggle)));
+    pictureTimer = setInterval(() => {
+      showSnapshot();
+      if (!autoTried && !live && online()) { autoTried = true; setLive(true); }
+    }, 5000);
+    if (online()) { autoTried = true; setLive(true); }
+    previewStop = () => { stopStamp(); stopVideo(); };
+    return h('div', null, h('div', { class: 'preview' }, img, video, placeholder, stamp, h('div', { class: 'overlay' }, note, toggle)));
   }
 
   function tiles() {
@@ -157,7 +218,7 @@ export function renderCamera({ params, navigate, setTitle }) {
       tile('Camera events', cameraEventsText(camera), s?.eventsNote),
       tile('Picture', s?.videoSummary || 'No picture yet', s?.subStreamProblem ? `Sub stream: ${s.subStreamProblem}` : null),
       tile('Live view', viewersText(s), viewersDetail(s)),
-      tile('Recording', recording, s?.recordingEnabled ? null : 'Turn it on for this camera in the Home app'),
+      tile('Home recording', recording, s?.recordingEnabled ? null : 'Turn it on for this camera in the Home app'),
       tile('Last event', s?.lastEvent || 'None yet', s?.lastEventDate ? timeAgo(s.lastEventDate) : null));
   }
 
@@ -216,32 +277,51 @@ export function renderCamera({ params, navigate, setTitle }) {
 
   function qualityCard() {
     const overlay = camera.timestampOverlay.enabled ? ' The Camera Bridge timestamp is on, so live view and recordings always use the video encoder.' : '';
-    return h('div', { class: 'card' }, h('h2', null, 'Live view and recording'),
+    return h('div', { class: 'card' }, h('h2', null, 'Live view and Home recording'),
       selectField('Live view stream', [['automatic', 'Automatic'], ['alwaysMain', 'Always main stream'], ['alwaysSub', 'Always sub stream']], camera.liveStreamMode, (v) => save({ liveStreamMode: v })),
       selectField('Live view quality', [['matchHomeKitRequest', 'Match Home app request'], ['originalQuality', 'Original quality']], camera.liveQualityMode, (v) => save({ liveQualityMode: v }),
         { hint: `Original quality sends the camera’s own H.264 untouched when possible, ignoring what the Home app asked for; it falls back to matching the request for HEVC cameras or ones that use B-frames.${overlay}` }),
       camera.liveQualityMode === 'matchHomeKitRequest' ? selectField('Maximum bit rate', BITRATES, camera.liveMaxBitrateOverride, (v) => save({ liveMaxBitrateOverride: v }),
         { hint: 'Caps what the bridge sends while it converts the picture. Automatic keeps what Home asks for.' }) : null,
-      selectField('Recording stream', [['automatic', 'Automatic (main stream)'], ['main', 'Main stream'], ['sub', 'Sub stream']], camera.recordingStreamMode, (v) => save({ recordingStreamMode: v })),
-      selectField('Recording quality', [['matchHubRequest', 'Match Home hub request'], ['originalWhenPossible', 'Original when possible']], camera.recordingQualityMode, (v) => save({ recordingQualityMode: v }),
+      selectField('Home recording stream', [['automatic', 'Automatic (main stream)'], ['main', 'Main stream'], ['sub', 'Sub stream']], camera.recordingStreamMode, (v) => save({ recordingStreamMode: v })),
+      selectField('Home recording quality', [['matchHubRequest', 'Match Home hub request'], ['originalWhenPossible', 'Original when possible']], camera.recordingQualityMode, (v) => save({ recordingQualityMode: v }),
         { hint: 'HomeKit Secure Video records motion clips. Changing the recording stream or quality changes what the Home app thinks this camera supports; you may need to turn recording off and back on for this camera in the Home app afterward.' }),
       camera.status?.liveSessions?.length ? h('div', null, h('h3', { class: 'section-title' }, 'Watching now'), h('ul', { class: 'events' }, camera.status.liveSessions.map((s, i) => h('li', null, h('span', null, `Viewer ${i + 1}`), h('span', { class: 'muted' }, describeSession(s)))))) : null,
-      camera.status?.recordingSession ? h('p', { class: 'small muted' }, `Recording now: ${describeSession(camera.status.recordingSession)}`) : null);
+      camera.status?.recordingSession ? h('p', { class: 'small muted' }, `Home recording now: ${describeSession(camera.status.recordingSession)}`) : null);
   }
 
   function overlayCard() {
     const o = camera.timestampOverlay;
     const set = (partial) => { Object.assign(camera.timestampOverlay, partial); save({ timestampOverlay: partial }); };
-    return h('div', { class: 'card' }, h('h2', null, 'Timestamp on video'),
-      h('p', { class: 'desc' }, 'Draws the date and time on live view and on recordings, in the bridge’s clock, so every camera shows the same time whatever its own clock says. Turning it on makes the bridge convert the video instead of passing it through.'),
-      switchRow({ title: 'Show the timestamp', checked: o.enabled, onchange: (v) => { set({ enabled: v }); renderAll(); } }),
-      o.enabled ? h('div', null,
-        selectField('Position', [['topRight', 'Top right'], ['topLeft', 'Top left'], ['bottomRight', 'Bottom right'], ['bottomLeft', 'Bottom left']], o.position, (v) => set({ position: v })),
-        selectField('Size', [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], o.size, (v) => set({ size: v })),
-        switchRow({ title: 'Camera name', checked: o.showCameraName, onchange: (v) => set({ showCameraName: v }) }),
-        switchRow({ title: 'Date', checked: o.showDate, onchange: (v) => set({ showDate: v }) }),
-        switchRow({ title: 'Seconds', checked: o.showSeconds, onchange: (v) => set({ showSeconds: v }) }),
-        switchRow({ title: '24-hour time', checked: o.use24Hour, onchange: (v) => set({ use24Hour: v }) })) : null);
+    const clean = Boolean(camera.cleanPictureBackup);
+    const position = [['topRight', 'Top right'], ['topLeft', 'Top left'], ['bottomRight', 'Bottom right'], ['bottomLeft', 'Bottom left']];
+    return h('div', { class: 'card' }, h('h2', null, 'Labels on video'),
+      h('p', { class: 'desc' }, 'The bridge draws the camera’s name and the date and time the same way everywhere: on the Monitor, on recordings as you play them, burned into saved clips and, if you choose, into Apple Home’s video.'),
+      switchRow({
+        title: 'Clean picture from the camera', checked: clean,
+        onchange: async (on) => {
+          try {
+            await post(`cameras/${id}/clean-picture`, { clean: on });
+            toast(on ? 'The camera’s own labels are off: only the bridge’s show.' : 'The camera’s own labels are back.', 'ok');
+          } catch (error) { toast(error.message, 'error'); }
+        },
+      }),
+      h('p', { class: 'small muted' }, 'Turns off everything the camera draws itself (its clock, name, text and logo) through its own API or ONVIF, and puts it back as it was when turned off again.'),
+      h('h3', { class: 'section-title' }, 'The bridge’s label'),
+      selectField('Corner', position, o.position, (v) => set({ position: v })),
+      selectField('Size', [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], o.size, (v) => set({ size: v })),
+      switchRow({ title: 'Camera name', checked: o.showCameraName, onchange: (v) => set({ showCameraName: v }) }),
+      switchRow({ title: 'Date', checked: o.showDate, onchange: (v) => set({ showDate: v }) }),
+      switchRow({ title: 'Seconds', checked: o.showSeconds, onchange: (v) => set({ showSeconds: v }) }),
+      switchRow({ title: '24-hour time', checked: o.use24Hour, onchange: (v) => set({ use24Hour: v }) }),
+      switchRow({ title: 'Burn it into Apple Home’s video', checked: o.enabled, onchange: (v) => { set({ enabled: v }); renderAll(); } }),
+      h('p', { class: 'small muted' }, 'Apple Home’s live view and Home recordings then carry the label. The bridge converts that video (at Home’s size) instead of passing it through.'),
+      h('button', { class: 'btn small', type: 'button', onclick: async () => {
+        try {
+          const answer = await post(`cameras/${id}/camera-time-zone`, {});
+          toast(`The camera’s clock is set to the bridge’s time zone (${answer.timeZone}).`, 'ok');
+        } catch (error) { toast(error.message, 'error'); }
+      } }, icon('refresh'), 'Set the camera’s own clock to the bridge’s time zone'));
   }
 
   function connectionCard() {
@@ -312,6 +392,7 @@ export function renderCamera({ params, navigate, setTitle }) {
   const right = h('div', { class: 'stack' });
   const statusHost = h('div');
   const homeHost = h('div');
+  const homeBottomHost = h('div');   // a camera that is already in Apple Home keeps its card here, below everything that needs attention
 
   function renderStatus() {
     if (!camera) return;
@@ -336,13 +417,20 @@ export function renderCamera({ params, navigate, setTitle }) {
     pairing?.destroy(); pairing = null;
     replace(left, previewCard(), statusHost, eventsCard());
     renderStatus();
-    const hook = await webhookCard();
+    const [hook, nvr] = await Promise.all([webhookCard(), nvrSupported(camera) ? loadNVR() : null]);
     if (destroyed) return;
-    replace(homeHost, homeCard());
-    replace(right, motionCard(), audioCard(), qualityCard(), overlayCard(), hook, connectionCard(),
+    recordHandle?.destroy();
+    recordHandle = nvr ? nvr.recordCard(camera) : null;
+    const home = homeCard();
+    if (camera.status?.paired) { replace(homeHost); replace(homeBottomHost, home); } else { replace(homeBottomHost); replace(homeHost, home); }
+    replace(right, recordHandle?.el, motionCard(), audioCard(), qualityCard(), overlayCard(), hook, connectionCard(),
       h('div', { class: 'card' }, h('h2', null, 'Remove'), h('p', { class: 'desc' }, 'Removes the camera from Camera Bridge. Remove it from the Home app as well.'),
         h('button', { class: 'btn danger', type: 'button', onclick: removeCamera }, icon('trash'), 'Remove camera…')));
   }
+
+  // What counts as the camera's structure: everything but its status and the two Record flags. The Record card follows those in place, so
+  // pressing Record never rebuilds the page (the preview keeps running) or takes keyboard focus away from the switch.
+  const structure = (c) => JSON.stringify({ ...c, status: null, nvrEnabled: null, nvrRecordSound: null });
 
   const stop = subscribe((kind, detail) => {
     if (destroyed) return;
@@ -353,15 +441,15 @@ export function renderCamera({ params, navigate, setTitle }) {
       renderHead();
       renderStatus();
       // The structure only changes when something other than a status moved (another browser edited it).
-      if (before && JSON.stringify({ ...before, status: null }) !== JSON.stringify({ ...detail, status: null }) && !Object.keys(pending).length) renderAll();
+      if (before && structure(before) !== structure(detail) && !Object.keys(pending).length) renderAll();
     }
   });
 
   if (!camera) {
-    replace(root, backLink('#/', 'Cameras'), h('div', { class: 'empty' }, h('h2', null, 'This camera was removed'), h('a', { class: 'btn primary', href: '#/' }, 'Back to your cameras')));
+    replace(root, backLink('#/cameras', 'Cameras'), h('div', { class: 'empty' }, h('h2', null, 'This camera was removed'), h('a', { class: 'btn primary', href: '#/cameras' }, 'Back to your cameras')));
     return { el: root, destroy() { destroyed = true; stop(); bannerHost.destroy(); } };
   }
-  replace(root, backLink('#/', 'Cameras'), headingHost, bannerHost, homeHost, h('div', { class: 'layout-2' }, left, right));
+  replace(root, backLink('#/cameras', 'Cameras'), headingHost, bannerHost, homeHost, h('div', { class: 'layout-2' }, left, right), homeBottomHost);
   renderAll();
 
   return {
@@ -370,8 +458,10 @@ export function renderCamera({ params, navigate, setTitle }) {
       destroyed = true;
       flush.flush();
       clearInterval(pictureTimer);
+      previewStop?.();
       stop();
       pairing?.destroy();
+      recordHandle?.destroy();
       bannerHost.destroy();
       for (const img of root.querySelectorAll('img')) img.removeAttribute('src');   // closes a live preview
     },

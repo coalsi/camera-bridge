@@ -42,12 +42,18 @@ public struct RequestFileSystemControl: SystemControlling {
         case factoryReset = "factory-reset"
         case installList = "install-list"
         case installToDisk = "install-to-disk"
+        case driveList = "drive-list"
+        case driveUse = "drive-use"
+        case driveForget = "drive-forget"
+        case wifiScan = "wifi-scan"
+        case wifiJoin = "wifi-join"
+        case wifiForget = "wifi-forget"
     }
 
     /// The files the system publishes.
     private enum StatusFile {
         case job(Request)
-        case update, system, installCandidates, installToDisk
+        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, wifi, wifiNetworks
 
         var name: String {
             switch self {
@@ -56,6 +62,10 @@ public struct RequestFileSystemControl: SystemControlling {
             case .system: "system.json"
             case .installCandidates: "install-candidates.json"
             case .installToDisk: "install-to-disk.json"
+            case .recordingDrive: "recording-drive.json"
+            case .recordingDriveCandidates: "recording-drive-candidates.json"
+            case .wifi: "wifi.json"
+            case .wifiNetworks: "wifi-networks.json"
             }
         }
     }
@@ -78,12 +88,29 @@ public struct RequestFileSystemControl: SystemControlling {
         public var hostname: String?
         public var hardware: String?
         public var architecture: String?
+        /// The system runs from a USB drive (the installer stick), not from the machine's own disk. nil when it can't be told.
+        public var runningFromUSB: Bool?
 
-        public init(osName: String? = nil, hostname: String? = nil, hardware: String? = nil, architecture: String? = nil) {
+        public init(osName: String? = nil, hostname: String? = nil, hardware: String? = nil, architecture: String? = nil, runningFromUSB: Bool? = nil) {
             self.osName = osName
             self.hostname = hostname
             self.hardware = hardware
             self.architecture = architecture
+            self.runningFromUSB = runningFromUSB
+        }
+
+        /// Whether the device mounted at `/` (from `/proc/self/mountinfo`) sits on USB: `devicePath` gives a block device's real path in
+        /// /sys (`/sys/devices/pci…/usb2/…/block/sdb/sdb2`).
+        static func runningFromUSB(mountInfo: String, devicePath: (String) -> String?) -> Bool? {
+            for line in mountInfo.split(separator: "\n") {
+                let fields = line.split(separator: " ")
+                guard fields.count > 4, fields[4] == "/", let dash = fields.firstIndex(of: "-"), fields.index(dash, offsetBy: 2) < fields.endIndex else { continue }
+                let source = String(fields[fields.index(dash, offsetBy: 2)])
+                guard source.hasPrefix("/dev/") else { return nil }
+                guard let path = devicePath(String(source.dropFirst(5))) else { return nil }
+                return path.contains("/usb")
+            }
+            return nil
         }
 
         public static func current() -> HostFacts {
@@ -93,8 +120,15 @@ public struct RequestFileSystemControl: SystemControlling {
             var machine = utsname()
             let architecture = uname(&machine) == 0
                 ? withUnsafeBytes(of: &machine.machine) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) } : nil
+            let usb = (try? String(contentsOfFile: "/proc/self/mountinfo", encoding: .utf8)).flatMap { info in
+                runningFromUSB(mountInfo: info) { name in
+                    let link = "/sys/class/block/\(name)"
+                    guard FileManager.default.fileExists(atPath: link) else { return nil }
+                    return URL(fileURLWithPath: link).resolvingSymlinksInPath().path
+                }
+            }
             return HostFacts(osName: HostInfo.operatingSystemName(), hostname: host?.isEmpty == false ? host : nil,
-                             hardware: HostInfo.hardwareModel(), architecture: architecture)
+                             hardware: HostInfo.hardwareModel(), architecture: architecture, runningFromUSB: usb)
         }
     }
 
@@ -132,7 +166,7 @@ public struct RequestFileSystemControl: SystemControlling {
         let system: SystemFile? = read(.system)
         return SystemInfo(product: product, version: system?.version.flatMap { $0.isEmpty ? nil : $0 } ?? version, build: build, mode: "installed",
                           osName: facts.osName, hostname: facts.hostname, hardware: facts.hardware, architecture: facts.architecture,
-                          canUpdate: true, canReboot: true, canInstall: true, update: currentUpdate(), canManage: true,
+                          canUpdate: true, canReboot: true, canInstall: true, update: currentUpdate(), canManage: true, runningFromUSB: facts.runningFromUSB,
                           sshEnabled: system?.sshEnabled, automaticUpdates: system?.autoUpdate, install: installProgress())
     }
 
@@ -309,6 +343,8 @@ public struct RequestFileSystemControl: SystemControlling {
             var eligible: Bool?
             var problems: [String]?
             var phrase: String?
+            var isRecordingDrive: Bool?
+            var inUse: Bool?
         }
 
         struct Partition: Decodable {
@@ -367,7 +403,8 @@ public struct RequestFileSystemControl: SystemControlling {
         if !eligible, let first = problems.first { notes.append("can’t be used: " + first) }
         let model = disk.model.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0.trimmingCharacters(in: .whitespaces) }
         return InstallTarget(id: disk.name, name: disk.name, model: model, sizeBytes: disk.sizeBytes ?? 0, note: notes.isEmpty ? nil : notes.joined(separator: " · "),
-                             eligible: eligible, problems: problems, phrase: "ERASE ALL DATA ON \(disk.name)")
+                             eligible: eligible, problems: problems, phrase: "ERASE ALL DATA ON \(disk.name)",
+                             isRecordingDrive: disk.isRecordingDrive, inUse: disk.inUse)
     }
 
     public func install(targetID: String, phrase: String, copyData: Bool) async throws {
@@ -387,6 +424,127 @@ public struct RequestFileSystemControl: SystemControlling {
         }
         try submit(.installToDisk, Body(device: "/dev/\(targetID)", phrase: expected, copyData: copyData, poweroff: true, dryRun: false))
         try await awaitPickup(.installToDisk)
+    }
+
+    // MARK: Recording drives
+
+    /// What `cb-recording-drive --apply` and the drive jobs write to `status/recording-drive.json`.
+    private struct DriveFile: Decodable {
+        var state: String?
+        var message: String?
+    }
+
+    public func recordingDrives() async throws -> RecordingDriveReport {
+        try requireAvailable("Choosing a recording drive is only possible on Camera Bridge OS.")
+        let since = floorToSecond(now())
+        try submit(.driveList, Empty())
+        try await awaitPickup(.driveList)
+        for _ in 0...pollCount(timing.shortJob) {
+            if let modified = modificationDate(.recordingDriveCandidates), modified >= since, let list: Candidates = read(.recordingDriveCandidates) {
+                let current: DriveFile? = read(.recordingDrive)
+                return RecordingDriveReport(state: current?.state ?? "internal", message: current?.message ?? "Recording to this box's own disk.",
+                                            drives: list.disks.compactMap(Self.target))
+            }
+            if let job: JobFile = read(.job(.driveList)), job.state == "failed", let at = job.date, at >= since {
+                throw SystemError(Self.sentence(job.message ?? "The system couldn’t look at its disks."))
+            }
+            try await Task.sleep(for: timing.pollInterval)
+            if Task.isCancelled { throw CancellationError() }
+        }
+        throw SystemError("The system took too long to look at its disks.")
+    }
+
+    public func useRecordingDrive(targetID: String, phrase: String, keepData: Bool) async throws {
+        try requireAvailable("Choosing a recording drive is only possible on Camera Bridge OS.")
+        guard Self.isDiskName(targetID) else { throw SystemError("That isn’t a disk the system knows.") }
+        let expected = "ERASE ALL DATA ON \(targetID)"
+        if !keepData, phrase != expected { throw SystemError("The sentence doesn’t match. Type it exactly: \(expected)") }
+        // The system's own list, fresh: the disk must be on it and usable. (The helper checks everything again before it writes.)
+        guard let disk = try await recordingDrives().drives.first(where: { $0.id == targetID }) else { throw SystemError("That isn’t a disk the system knows.") }
+        guard disk.eligible else { throw SystemError("That disk can’t be used: \(disk.problems.first ?? "the system refuses it").") }
+        if keepData, disk.isRecordingDrive != true { throw SystemError("That disk isn’t a Camera Bridge recording drive, so it has to be erased first.") }
+        struct Body: Encodable {
+            var device: String
+            var phrase: String
+            var keepData: Bool
+        }
+        try submit(.driveUse, Body(device: "/dev/\(targetID)", phrase: keepData ? "" : expected, keepData: keepData))
+        try await awaitPickup(.driveUse)
+    }
+
+    public func forgetRecordingDrive() async throws {
+        try requireAvailable("Choosing a recording drive is only possible on Camera Bridge OS.")
+        try submit(.driveForget, Empty())
+        try await awaitPickup(.driveForget)
+    }
+
+    // MARK: Wi-Fi
+
+    /// What `cb-wifi` writes to `status/wifi.json`.
+    private struct WifiFile: Decodable {
+        var state: String?
+        var message: String?
+        var ssid: String?
+        var hotspot: SetupHotspot?
+        var lastError: String?
+        var saved: [String]?
+        var hasWifi: Bool?
+        var wired: Bool?
+    }
+
+    private struct NetworksFile: Decodable {
+        var networks: [WifiNetwork]?
+    }
+
+    public func wifi() async -> WifiReport {
+        guard isAvailable else { return WifiReport(state: "unavailable", message: "Wi-Fi is managed by Camera Bridge OS.") }
+        let file: WifiFile? = read(.wifi)
+        let networks: NetworksFile? = read(.wifiNetworks)
+        return WifiReport(state: file?.state ?? "searching", message: file?.message ?? "Looking for a network.", ssid: file?.ssid.flatMap { $0.isEmpty ? nil : $0 },
+                          hotspot: file?.state == "hotspot" ? file?.hotspot : nil, saved: file?.saved ?? [], lastError: file?.lastError.flatMap { $0.isEmpty ? nil : $0 },
+                          hasWifi: file?.hasWifi ?? false, wired: file?.wired ?? false, networks: networks?.networks ?? [])
+    }
+
+    public func scanWifi() async throws -> [WifiNetwork] {
+        try requireAvailable("Wi-Fi is managed by Camera Bridge OS.")
+        try await runShortJob(.wifiScan, Empty(), failure: "The system couldn’t look for Wi-Fi networks.")
+        let networks: NetworksFile? = read(.wifiNetworks)
+        return networks?.networks ?? []
+    }
+
+    /// 1 to 32 bytes, no control characters: what a Wi-Fi network name can be.
+    static func isNetworkName(_ name: String) -> Bool {
+        (1...32).contains(name.utf8.count) && !name.unicodeScalars.contains { $0.properties.generalCategory == .control }
+    }
+
+    /// Empty (an open network) or 8 to 63 characters without control characters.
+    static func isWifiPassword(_ password: String) -> Bool {
+        password.isEmpty || ((8...63).contains(password.count) && !password.unicodeScalars.contains { $0.properties.generalCategory == .control })
+    }
+
+    public func joinWifi(ssid: String, password: String, restart: Bool) async throws {
+        try requireAvailable("Wi-Fi is managed by Camera Bridge OS.")
+        guard Self.isNetworkName(ssid) else { throw SystemError("A network name has 1 to 32 characters.") }
+        guard Self.isWifiPassword(password) else { throw SystemError("A Wi-Fi password has 8 to 63 characters (or none, for an open network).") }
+        struct Body: Encodable {
+            var ssid: String
+            var password: String
+            var reboot: Bool
+        }
+        try submit(.wifiJoin, Body(ssid: ssid, password: password, reboot: restart))
+        try await awaitPickup(.wifiJoin)
+    }
+
+    public func forgetWifi(ssid: String) async throws {
+        try requireAvailable("Wi-Fi is managed by Camera Bridge OS.")
+        guard Self.isNetworkName(ssid) else { throw SystemError("A network name has 1 to 32 characters.") }
+        struct Body: Encodable { var ssid: String }
+        try await runShortJob(.wifiForget, Body(ssid: ssid), failure: "The system couldn’t forget that network.")
+    }
+
+    public func setupHotspot() -> SetupHotspot? {
+        guard isAvailable, let file: WifiFile = read(.wifi), file.state == "hotspot" else { return nil }
+        return file.hotspot
     }
 
     // MARK: Writing requests

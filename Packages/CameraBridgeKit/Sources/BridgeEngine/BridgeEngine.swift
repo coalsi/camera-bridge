@@ -115,6 +115,13 @@ public final class BridgeEngine {
     /// (Creation itself is atomic per Keychain account across every store, the accessory servers' included:
     /// `HAPStore.loadOrCreateIdentity()`.)
     private nonisolated let identityAccess = Mutex(Set<UUID>())
+    /// The NVR behind its one handle (`NVRCoordinator`): the store and the recorders. The hook points below are its only callers.
+    @ObservationIgnored let nvr: NVRCoordinator
+    /// Where recorded video is read from (the app's player, the web interface's routes). Not ready until the store has loaded its catalog
+    /// after `start()`; `ArchiveReading.isReady`.
+    public nonisolated let archive: any ArchiveReading
+    /// The recordings folder as numbers, nil before the first measurement (refreshed with the cameras' status, at most every 5 s).
+    public private(set) var nvrStorage: ArchiveStorageStatus?
     /// Bumped by every operation that changes what `refreshStatus` reads (cameras, runtimes, the sensors bridge, the
     /// state): a refresh that read before it publishes nothing (the operation refreshes again).
     @ObservationIgnored private var statusGeneration = 0
@@ -145,6 +152,9 @@ public final class BridgeEngine {
         logs = LogCollector(signal: changes)
         go2rtcManager = Go2RTCManager.standard(launcher: environment.platform.helpers, transport: environment.platform.transport,
                                                dataDirectory: environment.dataDirectory)
+        let coordinator = NVRCoordinator(environment: environment, signal: changes)
+        nvr = coordinator
+        archive = coordinator.reader
         // Settings and cameras are shown before the first start (a missing or unreadable file is handled by `start`).
         if let configuration = try? store.load() {
             storedSettings = configuration.settings
@@ -168,6 +178,9 @@ public final class BridgeEngine {
         var configurationRecoveredFrom: URL?
         var networkNotices: [NetworkNotice] = []
         var macVPN: MacVPNStatus?
+        /// A preview engine's synthetic archive and storage numbers (`-demoScenario nvr`).
+        var archive: (any ArchiveReading)?
+        var nvrStorage: ArchiveStorageStatus?
     }
 
     /// An engine that shows `snapshot` (SwiftUI previews); its operations do nothing.
@@ -181,6 +194,10 @@ public final class BridgeEngine {
         logs = LogCollector(signal: changes)
         go2rtcManager = Go2RTCManager.standard(launcher: environment.platform.helpers, transport: environment.platform.transport,
                                                dataDirectory: environment.dataDirectory)
+        let coordinator = NVRCoordinator(environment: environment, signal: changes, previewArchive: snapshot.archive)
+        nvr = coordinator
+        archive = coordinator.reader
+        nvrStorage = snapshot.nvrStorage
         state = snapshot.state
         cameras = snapshot.cameras
         configurations = snapshot.configurations
@@ -430,8 +447,10 @@ public final class BridgeEngine {
             throw error
         }
         storedSettings = settings
+        Self.applyTimeZone(settings.timeZone)
         if old.logLevel != settings.logLevel { applyLogLevel() }
         guard isActive else { return }
+        await nvr.settingsChanged(from: old, to: settings)   // a new folder reloads the catalog, new limits run the janitor
         if old.keepMacAwake != settings.keepMacAwake { power.setKeepAwake(settings.keepMacAwake) }
         if old.motionShadowTest != settings.motionShadowTest {
             for runtime in Array(runtimes.values) { await runtime.setMotionShadowTest(settings.motionShadowTest) }
@@ -489,6 +508,9 @@ public final class BridgeEngine {
             var camera = configuration.withoutStreamCredentials
             if camera.hapPort == 0 { camera.hapPort = old.hapPort }
             camera.hiddenCameraClock = old.hiddenCameraClock   // the engine owns it (`setCameraClockHidden`); a form never carries it back
+            camera.cleanPictureBackup = old.cleanPictureBackup   // and this one (`setCleanPicture`)
+            camera.nvrEnabled = old.nvrEnabled                 // and `setNVR` owns these two: an edit made from a stale copy never undoes Record
+            camera.nvrRecordSound = old.nvrRecordSound
             updated[index] = camera
             updated = PortAllocator.assignPorts(to: updated, settings: storedSettings)
             let credentials = credentials, id = camera.id
@@ -560,6 +582,33 @@ public final class BridgeEngine {
                 statusInputsChanged()
             }
             log.notice("Removed camera \(camera.name)")
+            await refreshStatus()
+        }
+    }
+
+    /// Turns the NVR recording of a camera on or off and/or its sound, in place: the camera is never restarted (its HomeKit accessory, live views
+    /// and ingest are untouched). The one place `nvrEnabled` and `nvrRecordSound` change; `updateCamera` carries them forward. Allowed without a
+    /// recordings folder (the camera then shows `paused(.noFolder)`); asking for the folder is the caller's job. A change of the sound switch
+    /// replaces the camera's recorder (a new file starts). Waits behind other configuration operations, a HomeKit optimization included.
+    public func setNVR(cameraID: UUID, enabled: Bool? = nil, recordSound: Bool? = nil) async throws {
+        guard !isPreview else { return }
+        try await operations.withLock {
+            try await ensureLoaded()
+            guard let index = configurations.firstIndex(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+            let old = configurations[index]
+            var camera = old
+            if let enabled { camera.nvrEnabled = enabled }
+            if let recordSound { camera.nvrRecordSound = recordSound }
+            guard camera != old else { return }
+            var updated = configurations
+            updated[index] = camera
+            try await save(BridgeConfiguration(settings: storedSettings, cameras: updated))
+            configurations = updated
+            statusInputsChanged()
+            if camera.nvrEnabled != old.nvrEnabled {
+                log.notice("Recording \(camera.nvrEnabled ? "turned on" : "turned off") for \(camera.name)")
+            }
+            if isActive, let runtime = runtimes[cameraID] { await nvr.apply(camera, previous: old, hub: runtime.hub) }
             await refreshStatus()
         }
     }
@@ -824,7 +873,14 @@ public final class BridgeEngine {
         return try await operations.withLock {
             guard let camera = configurations.first(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
             if hidden, camera.hiddenCameraClock != nil { return CameraClockChange(succeeded: true, method: nil, backup: camera.hiddenCameraClock) }
-            if !hidden, camera.hiddenCameraClock == nil { return CameraClockChange(succeeded: true, method: nil) }
+            // Shown, but not hidden by the bridge: a Hikvision or Reolink camera can still turn its clock on through its own API (it may have been
+            // off from the factory or the camera's own page). Others are left as they are.
+            let showOwn: HiddenCameraClock? = switch camera.vendor {
+            case .hikvision: HiddenCameraClock(method: .hikvisionISAPI, wasShown: true)
+            case .reolink: HiddenCameraClock(method: .reolinkAPI, wasShown: true)
+            default: nil
+            }
+            if !hidden, camera.hiddenCameraClock == nil, showOwn == nil { return CameraClockChange(succeeded: true, method: nil) }
             if hidden, let known = clockUnsupported[cameraID] { return known }
             let credentials = credentials
             let secrets = try await Self.offMain { try credentials.credentials(for: camera) }
@@ -833,7 +889,7 @@ public final class BridgeEngine {
             let change: CameraClockChange
             if hidden {
                 change = try await service.hideCameraClock()
-            } else if let backup = camera.hiddenCameraClock {
+            } else if let backup = camera.hiddenCameraClock ?? showOwn {
                 change = try await service.restoreCameraClock(backup)
             } else {
                 return CameraClockChange(succeeded: true, method: nil)
@@ -845,6 +901,29 @@ public final class BridgeEngine {
             guard change.succeeded, let index = configurations.firstIndex(where: { $0.id == cameraID }) else { return change }
             configurations[index].hiddenCameraClock = hidden ? change.backup : nil
             log.info("\(camera.name): the camera's own clock is \(hidden ? "hidden" : "shown again") (\(change.summary))")
+            await persist()
+            return change
+        }
+    }
+
+    /// "Clean picture": every label the camera draws itself (clock, name, text lines, logo) off (`clean`), so the bridge's own timestamp and name
+    /// are the only ones, the same on every camera; or back as they were. The backup is kept in `CameraConfiguration.cleanPictureBackup`, which
+    /// only the engine writes. Throws `EngineError.unknownCamera`, `CameraOfflineError` for an unreachable camera, and `CancellationError`.
+    public func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange {
+        guard !isPreview else { throw EngineError.cameraNotRunning }
+        if runtimes[cameraID]?.isUnreachable == true { throw CameraOfflineError() }
+        return try await operations.withLock {
+            guard let camera = configurations.first(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+            if clean, camera.cleanPictureBackup != nil { return CleanPictureChange(succeeded: true, summary: "already clean") }
+            if !clean, camera.cleanPictureBackup == nil { return CleanPictureChange(succeeded: true, summary: "already as the camera had it") }
+            let credentials = credentials
+            let secrets = try await Self.offMain { try credentials.credentials(for: camera) }
+            let service = CameraSettingsService(endpoint: camera.endpoint, credentials: secrets, cameraID: cameraID, vendor: camera.vendor,
+                                                mainStreamURL: camera.mainStreamURL, preferredMethod: camera.preferredConfigMethod)
+            let change = if clean { try await service.cleanPicture() } else { try await service.restorePicture(camera.cleanPictureBackup!) }
+            guard change.succeeded, let index = configurations.firstIndex(where: { $0.id == cameraID }) else { return change }
+            configurations[index].cleanPictureBackup = clean ? change.backup : nil
+            log.info("\(camera.name): the camera's own labels are \(clean ? "off" : "back") (\(change.summary))")
             await persist()
             return change
         }
@@ -1355,6 +1434,7 @@ public final class BridgeEngine {
         startStatusLoop()
         await startSensorsBridge()
         await startWebhookReporting(storedSettings)
+        nvr.start(settings: storedSettings)   // returns at once: repair and catalog load run in the background (the daemon waits for this function)
         await startRuntimes(configurations.filter(\.isEnabled))
         startNetworkMonitoring()
         startHeartbeat()
@@ -1375,12 +1455,14 @@ public final class BridgeEngine {
         cancelAccessoryRetries()
         await stopWebhook()
         webhookProblem = nil
+        await nvr.detachAll()   // recorders flush and close while the hubs still deliver (`stopServices` clears `runtimes` without `stopRuntime`)
         let running = Array(runtimes.values)
         runtimes.removeAll()
         statusInputsChanged()
         await withTaskGroup(of: Void.self) { group in
             for runtime in running { group.addTask { await runtime.stop() } }
         }
+        await nvr.stop()
         await stopSensorsBridge()
         await go2rtcManager.stop()   // the helper and its sign-in page end with the bridge
         storedIdentities.removeAll()
@@ -1415,6 +1497,7 @@ public final class BridgeEngine {
             }
             let runtime = CameraRuntime(configuration: camera, credentials: secrets, dependencies: runtimeDependencies())
             runtimes[camera.id] = runtime
+            await nvr.attach(camera, hub: runtime.hub)   // the recorder subscribes to the main stream's hub; samples arrive once the ingest runs
             started.append((camera, runtime, reservedPorts(excluding: camera.id)))
         }
         if !started.isEmpty { statusInputsChanged() }
@@ -1455,6 +1538,7 @@ public final class BridgeEngine {
                     continue
                 }
                 runtimes[id] = nil
+                await nvr.detach(id)
                 statusInputsChanged()
                 let delay = scheduleAccessoryRetry(id)
                 log.error("The HomeKit accessory of \(configurations[index].name) could not start: \(error); trying again in \(MediaFit.seconds(delay)) s")
@@ -1519,6 +1603,7 @@ public final class BridgeEngine {
     /// `limit`: wait at most this long for the runtime to stop (a runtime that does not answer may never).
     private func stopRuntime(_ cameraID: UUID, within limit: Duration? = nil) async {
         cancelAccessoryRetries(cameraID)
+        await nvr.detach(cameraID)   // before the runtime stops: the recorder flushes its group and closes the file
         guard let runtime = runtimes.removeValue(forKey: cameraID) else { return }
         if let limit {
             _ = try? await withDeadline(limit, followsCancellation: false) { await runtime.stop() }
@@ -1974,6 +2059,7 @@ public final class BridgeEngine {
         var statuses: [CameraStatus] = []
         for camera in configurations {
             var status = CameraStatus(id: camera.id, name: camera.name, kind: camera.kind, vendor: camera.vendor)
+            status.nvr = nvr.status(for: camera, folderChosen: storedSettings.nvrFolder != nil)
             if let sensor = await router.state(for: camera.id) { sensor.apply(to: &status) }
             if let runtime = runtimes[camera.id] {
                 let runtimeStatus = await runtime.status()
@@ -2023,6 +2109,8 @@ public final class BridgeEngine {
             await tuning.afterSensorsBridgeStatus?()
         }
         guard generation == statusGeneration else { return }   // an operation changed what was read: it refreshes again
+        let storage = nvr.storageStatus()
+        if storage != nvrStorage { nvrStorage = storage }
         if statuses != cameras { cameras = statuses }
         if let bridge, bridge === self.bridge, let bridgeStatus, bridgeStatus != sensorsBridge { sensorsBridge = bridgeStatus }
     }
@@ -2153,6 +2241,7 @@ public final class BridgeEngine {
         let (configuration, recovered) = loadedConfiguration
         guard !loaded else { return }
         storedSettings = configuration.settings
+        Self.applyTimeZone(storedSettings.timeZone)
         configurations = configuration.cameras
         loaded = true
         if !existed, !environment.platform.power.hasBattery {
@@ -2200,12 +2289,55 @@ public final class BridgeEngine {
         return ports
     }
 
+    /// Makes `identifier` the process's time zone (the timestamp overlay and every date the bridge formats follow it; ffmpeg children inherit
+    /// `TZ`). nil leaves the system's.
+    static func applyTimeZone(_ identifier: String?) {
+        guard let identifier, TimeZone(identifier: identifier) != nil else { return }
+        setenv("TZ", identifier, 1)
+        NSTimeZone.resetSystemTimeZone()
+        if let zone = TimeZone(identifier: identifier) { NSTimeZone.default = zone }
+    }
+
+    /// Sets the camera's clock to the bridge's time zone (`BridgeSettings.timeZone`, else the system's), so the date and time the camera draws on its
+    /// picture is local. Returns the POSIX zone it was given; throws `EngineError` for an unknown camera or a zone the system cannot describe, and
+    /// `EngineError.invalidSettings` with the camera's answer when it refused.
+    public func setCameraTimeZone(cameraID: UUID) async throws -> String {
+        guard !isPreview else { throw EngineError.cameraNotRunning }
+        guard let camera = configurations.first(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+        let identifier = storedSettings.timeZone ?? TimeZone.current.identifier
+        guard let posix = PosixTimeZone.string(for: identifier) else {
+            throw EngineError.invalidSettings("this system has no description of the time zone \(identifier)")
+        }
+        let credentials = credentials
+        let secrets = try await Self.offMain { try credentials.credentials(for: camera) }
+        let service = CameraSettingsService(endpoint: camera.endpoint, credentials: secrets, cameraID: cameraID, vendor: camera.vendor,
+                                            mainStreamURL: camera.mainStreamURL, preferredMethod: camera.preferredConfigMethod)
+        if let failure = try await service.setCameraTimeZone(posix: posix) {
+            throw EngineError.invalidSettings("the camera did not take the time zone: \(failure)")
+        }
+        log.info("\(camera.name): the camera's clock is in \(identifier) now (\(posix))")
+        return posix
+    }
+
     private static func validate(_ settings: BridgeSettings) throws {
         if settings.webhookPort != 0, settings.webhookPort == settings.sensorsBridgePort {
             throw EngineError.invalidSettings("the webhook and the sensors bridge need different ports")
         }
+        if let zone = settings.timeZone, TimeZone(identifier: zone) == nil {
+            throw EngineError.invalidSettings("\(zone) is not a time zone")
+        }
         if settings.webhookEnabled, settings.webhookToken.count < 16 {
             throw EngineError.invalidSettings("the webhook token must have at least 16 characters")
+        }
+        let days = BridgeSettings.nvrKeepDaysRange, size = BridgeSettings.nvrMaxSizeGBRange
+        if !days.contains(settings.nvrKeepDays) {
+            throw EngineError.invalidSettings("recordings are kept for \(days.lowerBound) to \(days.upperBound) days")
+        }
+        if !size.contains(settings.nvrMaxSizeGB) {
+            throw EngineError.invalidSettings("the recordings limit is \(size.lowerBound) to \(size.upperBound) GB")
+        }
+        if let folder = settings.nvrFolder, !BridgeSettings.isValidNVRFolder(folder) {
+            throw EngineError.invalidSettings("the recordings folder must be a full path")
         }
     }
 
@@ -2245,6 +2377,9 @@ public final class BridgeEngine {
         // The overlay's look is applied in place; turning it on or off changes the video path (passthrough or transcode).
         if comparable.timestampOverlay.enabled == old.timestampOverlay.enabled { comparable.timestampOverlay = old.timestampOverlay }
         comparable.hiddenCameraClock = old.hiddenCameraClock
+        comparable.cleanPictureBackup = old.cleanPictureBackup
+        comparable.nvrEnabled = old.nvrEnabled               // Record and Record sound are applied in place (`setNVR`): never a restart
+        comparable.nvrRecordSound = old.nvrRecordSound
         if paired { comparable.name = old.name }
         return comparable != old
     }

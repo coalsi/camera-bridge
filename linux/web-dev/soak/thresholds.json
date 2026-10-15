@@ -1,0 +1,14 @@
+{
+  "clients": { "maxNetworkErrors": 0, "maxWrongAnswers": 0, "maxUnexpectedStatuses": 0, "stormKeyPicturesPerSecondMin": 20, "loopLagMsMax": 250, "loopLagBucketsShareMax": 0.01 },
+  "health": { "p99MsMax": 100, "maxMsMax": 1000, "failuresMax": 0 },
+  "latency": { "kinds": ["key", "fragment"], "windowSec": 300, "minSamplesPerWindow": 200, "maxRatio": 1.25, "slackMs": 2, "busyP99MsMax": 50, "busyMinSamples": 100 },
+  "rss": { "settleSec": 900, "maxSlopeMBPerHour": 5, "maxGrowthRatio": 1.15, "afterStormRatioMax": 1.15, "afterStormWithinSec": 300 },
+  "fds": { "spreadAbsMax": 20, "spreadShareMax": 0.1, "maxSlopePerHour": 5, "cooldownExtraMax": 20, "cooldownAfterSec": 90 },
+  "threads": { "spreadMax": 16 },
+  "connections": { "establishedMax": 64, "closeWaitMax": 8, "cooldownExtraMax": 2, "cooldownAfterSec": 90 },
+  "recorder": { "recordingShareMin": 0.995, "rollWaitSec": 6, "graceSec": 60, "catalogStallSecMax": 10, "edgeLagP99SecMax": 3.5, "edgeLagStormExtraSecMax": 0.5 },
+  "storage": { "slackBytesPerCamera": 1100000000, "lowSpaceMarginBytes": 6442450944, "retentionJudgedAfterSec": 1500 },
+  "events": { "graceSec": 60, "cameraPerCameraPerHourMax": 20, "noticesPerHourMax": 10 },
+  "watchdog": { "maxGapSec": 20, "readyCount": 1 },
+  "log": { "maxLinesPerHourBase": 100, "maxLinesPerHourPerCamera": 20, "stormExtraLinesMax": 5, "secretPatterns": ["cb_session", "x-csrf", "csrf[-_ ]?token", "set-cookie", "authorization:", "cookie:"] }
+}

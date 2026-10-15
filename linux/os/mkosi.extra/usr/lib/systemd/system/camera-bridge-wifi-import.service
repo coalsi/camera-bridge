@@ -1,0 +1,14 @@
+[Unit]
+Description=Save the Wi-Fi network given in camera-bridge-wifi.txt on the boot partition
+Documentation=https://github.com/coalsi/camera-bridge
+After=NetworkManager.service local-fs.target
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/cb-wifi --import
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

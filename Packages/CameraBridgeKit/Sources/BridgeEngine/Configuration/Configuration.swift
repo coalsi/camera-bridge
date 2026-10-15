@@ -109,15 +109,22 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
     /// Set while CameraBridge has turned the camera's own on-screen date/time off (`BridgeEngine.setCameraClockHidden`):
     /// how, and what it takes to put it back.
     public var hiddenCameraClock: HiddenCameraClock?
+    /// Set while "Clean picture" has turned every label the camera draws itself off (`BridgeEngine.setCleanPicture`): what to write back.
+    public var cleanPictureBackup: CleanPictureBackup?
     /// How the camera reaches its service, for a camera behind a cloud account or a console (`CameraVendor.go2rtc`,
     /// `.unifi`): the service and plain facts about the camera. Nothing secret; the service's token, key or source address is the
     /// camera's Keychain "password". nil for every other camera.
     public var integration: IntegrationSettings?
+    /// Record this camera's main stream to the recordings folder (the NVR). Changed only by `BridgeEngine.setNVR(cameraID:enabled:recordSound:)`;
+    /// `updateCamera` carries it forward from the stored camera. Not HomeKit Secure Video (`recordingStreamMode`, `recordingQualityMode`).
+    public var nvrEnabled: Bool
+    /// Also record the camera's sound (AAC), when `audioEnabled` is on. Same rules as `nvrEnabled`.
+    public var nvrRecordSound: Bool
 
     /// Defaults: no stream URLs, camera events for motion (sensitivity 0.5, 20 s hold), no sensors, audio on,
     /// two-way audio off, port 0 (allocated by the engine), enabled, empty device info, capabilities unknown,
     /// automatic live/recording stream selection, quality matched to what HomeKit/the hub asked for, no bit rate override,
-    /// timestamp overlay off, the camera's own clock untouched.
+    /// timestamp overlay off, the camera's own clock untouched, NVR recording off (sound off).
     public init(id: UUID = UUID(), name: String, kind: CameraKind, vendor: CameraVendor, endpoint: CameraEndpoint, username: String) {
         self.id = id
         self.name = name
@@ -148,14 +155,17 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         self.preferredConfigMethod = nil
         self.timestampOverlay = TimestampOverlaySettings()
         self.hiddenCameraClock = nil
+        self.cleanPictureBackup = nil
         self.integration = nil
+        self.nvrEnabled = false
+        self.nvrRecordSound = false
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind, vendor, endpoint, username, mainStreamURL, subStreamURL, motionSource, motionSensitivity, motionHoldSeconds
         case sensors, audioEnabled, twoWayAudio, hapPort, isEnabled, manufacturer, model, serialNumber, firmware, capabilities
         case liveStreamMode, liveQualityMode, liveMaxBitrateOverride, recordingStreamMode, recordingQualityMode
-        case preferredConfigMethod, timestampOverlay, hiddenCameraClock, integration
+        case preferredConfigMethod, timestampOverlay, hiddenCameraClock, cleanPictureBackup, integration, nvrEnabled, nvrRecordSound
     }
 
     public init(from decoder: any Decoder) throws {
@@ -196,7 +206,10 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         preferredConfigMethod = value(.preferredConfigMethod, default: nil)
         timestampOverlay = value(.timestampOverlay, default: timestampOverlay)
         hiddenCameraClock = value(.hiddenCameraClock, default: nil)
+        cleanPictureBackup = value(.cleanPictureBackup, default: nil)
         integration = value(.integration, default: nil)
+        nvrEnabled = value(.nvrEnabled, default: nvrEnabled)
+        nvrRecordSound = value(.nvrRecordSound, default: nvrRecordSound)
         if !unreadable.isEmpty {
             Log(category: "Engine", cameraID: id).warning("\(name): unreadable \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }
@@ -224,9 +237,29 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
     /// The motion shadow test: built-in motion detection runs next to the camera events of every camera that uses them and
     /// the two are compared (`CameraStatus.motionShadow`). It never changes what reaches HomeKit. Off by default.
     public var motionShadowTest: Bool
+    /// Where the NVR stores recordings: an absolute path (`isValidNVRFolder`); nil until the person chooses one. The engine never creates this
+    /// folder or any parent of it. Not part of `ConfigurationBackup`, so a restore cannot point at a missing folder.
+    public var nvrFolder: String?
+    /// Recordings that ended more than this many days ago are deleted (`nvrKeepDaysRange`).
+    public var nvrKeepDays: Int
+    /// All recordings together are kept under this many decimal gigabytes (1e9 bytes), oldest first (`nvrMaxSizeGBRange`).
+    public var nvrMaxSizeGB: Int
+    /// The bridge's time zone (an IANA identifier, "America/Phoenix"): the time the timestamp overlay draws and cameras are set to. nil: the system's
+    /// (on Camera Bridge OS that is UTC, so the web page sets it from the browser that signs in first).
+    public var timeZone: String?
+
+    public static let nvrKeepDaysRange = 1...365
+    public static let nvrMaxSizeGBRange = 10...100_000
+
+    /// An absolute path of at most 1024 UTF-8 bytes with no control character and no `..` component.
+    public static func isValidNVRFolder(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), path.utf8.count <= 1_024 else { return false }
+        guard !path.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else { return false }
+        return !path.split(separator: "/", omittingEmptySubsequences: true).contains("..")
+    }
 
     /// Webhook off (port 21090, random 32-hex-digit token), keep-awake off, sensors bridge on 21099,
-    /// log level info, camera HAP ports from 21100, motion shadow test off.
+    /// log level info, camera HAP ports from 21100, motion shadow test off, no recordings folder, keep 7 days, at most 500 GB.
     public init() {
         webhookEnabled = false
         webhookPort = 21_090
@@ -237,9 +270,16 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         logLevel = .info
         basePort = 21_100
         motionShadowTest = false
+        nvrFolder = nil
+        nvrKeepDays = 7
+        nvrMaxSizeGB = 500
+        timeZone = nil
     }
 
-    private enum CodingKeys: String, CodingKey { case webhookEnabled, webhookPort, webhookToken, keepMacAwake, sensorsBridgePort, logLevel, basePort, motionShadowTest }
+    private enum CodingKeys: String, CodingKey {
+        case webhookEnabled, webhookPort, webhookToken, keepMacAwake, sensorsBridgePort, logLevel, basePort, motionShadowTest
+        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone
+    }
 
     public init(from decoder: any Decoder) throws {
         self.init()
@@ -261,6 +301,17 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         logLevel = value(.logLevel, default: logLevel)
         basePort = value(.basePort, default: basePort)
         motionShadowTest = value(.motionShadowTest, default: motionShadowTest)
+        // The NVR values: one this build cannot accept (a hand-edited 0 days, a relative or empty path) takes its default, logged by key name.
+        if let folder: String = value(.nvrFolder, default: nil) {
+            if Self.isValidNVRFolder(folder) { nvrFolder = folder } else { unreadable.append(CodingKeys.nvrFolder.stringValue) }
+        }
+        let keepDays = value(.nvrKeepDays, default: nvrKeepDays)
+        if Self.nvrKeepDaysRange.contains(keepDays) { nvrKeepDays = keepDays } else { unreadable.append(CodingKeys.nvrKeepDays.stringValue) }
+        let maxSize = value(.nvrMaxSizeGB, default: nvrMaxSizeGB)
+        if Self.nvrMaxSizeGBRange.contains(maxSize) { nvrMaxSizeGB = maxSize } else { unreadable.append(CodingKeys.nvrMaxSizeGB.stringValue) }
+        if let zone: String = value(.timeZone, default: nil) {
+            if TimeZone(identifier: zone) != nil { timeZone = zone } else { unreadable.append(CodingKeys.timeZone.stringValue) }
+        }
         if !unreadable.isEmpty {
             Log(category: "Engine").warning("Unreadable settings \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }

@@ -23,9 +23,9 @@ export CB_TAG=cb-system
 REQUESTS=$CB_RUN/requests
 JOBS=$CB_RUN/jobs
 MAX_REQUEST_BYTES=65536
-ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk"
+ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget wifi-scan wifi-join wifi-forget"
 # Jobs that change disks or the running system image take this lock; only one at a time.
-HEAVY_JOBS=" update-apply install-to-disk factory-reset "
+HEAVY_JOBS=" update-apply install-to-disk factory-reset drive-use drive-forget "
 
 SSH_DIR=$CB_SYSTEM/ssh
 KEY_RE='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+={0,3}( [^[:cntrl:]]{0,100})?$'
@@ -109,7 +109,7 @@ cmd_auto_update() {
 # --- reset / power ----------------------------------------------------------------------------------------------------
 
 wipe_settings() {
-    cb_wipe_dir_contents "$CB_DATA"
+    cb_wipe_dir_contents "$CB_DATA" || true   # -xdev: a recording drive mounted below it is left alone
     rm -f "$CB_SYSTEM/first-boot-done" "$CB_SYSTEM/auto-update" "$SSH_DIR/enabled"
     sync
 }
@@ -247,6 +247,26 @@ run_job_body() {
             [ "$(jq -r '.dryRun == true' "$args")" = "true" ] && extra+=(--dry-run)
             /usr/sbin/cb-install-to-disk --device "$device" --confirm "$phrase" --status-name install-to-disk "${extra[@]}"
             ;;
+        drive-list) /usr/sbin/cb-recording-drive --list --json >"$CB_STATUS/recording-drive-candidates.json.new" \
+                        && chmod 0644 "$CB_STATUS/recording-drive-candidates.json.new" \
+                        && mv -f "$CB_STATUS/recording-drive-candidates.json.new" "$CB_STATUS/recording-drive-candidates.json" ;;
+        drive-use)
+            device=$(jq -r '.device // ""' "$args")
+            phrase=$(jq -r '.phrase // ""' "$args")
+            if [ "$(jq -r '.keepData == true' "$args")" = "true" ]; then
+                /usr/sbin/cb-recording-drive --device "$device" --keep
+            else
+                /usr/sbin/cb-recording-drive --device "$device" --confirm "$phrase"
+            fi
+            ;;
+        drive-forget) /usr/sbin/cb-recording-drive --forget ;;
+        wifi-scan) /usr/sbin/cb-wifi --scan --json >/dev/null ;;
+        wifi-join)
+            # The password stays in the argument file (root-only, removed after the job); it is never logged.
+            jq '{ssid: (.ssid // ""), password: (.password // "")}' "$args" | /usr/sbin/cb-wifi --join
+            if [ "$(jq -r '.reboot == true' "$args")" = "true" ]; then systemctl reboot --no-block; fi
+            ;;
+        wifi-forget) /usr/sbin/cb-wifi --forget "$(jq -r '.ssid // ""' "$args")" ;;
         *) cb_die "unhandled job $name" ;;
     esac
 }

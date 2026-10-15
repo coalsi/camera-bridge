@@ -7,8 +7,20 @@ import SwiftUI
 /// crops what overflows (grid tiles, cropped to 16:9). Transparent until the first picture arrives, so the snapshot placed
 /// under it shows meanwhile (`LiveFeed.hasPicture`).
 struct LiveVideoView: NSViewRepresentable {
-    let feed: LiveFeed
+    /// The renderer whose layer is hosted: a live feed's, or a cell's (the NVR hosts the renderer that serves both its live feed and its
+    /// recorded playback, and owns the view's opacity itself).
+    let renderer: LiveVideoRenderer?
     var gravity: AVLayerVideoGravity = .resizeAspect
+
+    init(feed: LiveFeed, gravity: AVLayerVideoGravity = .resizeAspect) {
+        renderer = feed.sink as? LiveVideoRenderer
+        self.gravity = gravity
+    }
+
+    init(renderer: LiveVideoRenderer?, gravity: AVLayerVideoGravity = .resizeAspect) {
+        self.renderer = renderer
+        self.gravity = gravity
+    }
 
     #if DEBUG
     /// `-demoStillLive YES` (screenshots with sample data): live tiles, the camera page and the viewer keep showing the camera's
@@ -20,12 +32,12 @@ struct LiveVideoView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> HostView {
         let view = HostView()
-        view.host(renderer: feed.sink as? LiveVideoRenderer, gravity: gravity)
+        view.host(renderer: renderer, gravity: gravity)
         return view
     }
 
     func updateNSView(_ view: HostView, context: Context) {
-        view.host(renderer: feed.sink as? LiveVideoRenderer, gravity: gravity)
+        view.host(renderer: renderer, gravity: gravity)
     }
 
     static func dismantleNSView(_ view: HostView, coordinator: ()) {

@@ -51,7 +51,8 @@ enum ScreenshotCapture {
                     // `-captureFinalTab streams` leaves the window on that tab afterwards (a still of one page at the captured size).
                     UserDefaults.standard.set(UserDefaults.standard.string(forKey: "captureFinalTab") ?? CameraTab.overview.rawValue, forKey: "cameraDetailTab")
                 } else {
-                    try await pause()
+                    // The NVR page's live tiles need a few seconds to get their first picture (the preview engine encodes its test pattern first).
+                    try await pause(seconds: name == "nvr" ? 8 : 1)
                     try write(window, to: directory.appending(path: "manager-\(index + 1)-\(name).png"))
                 }
             }
@@ -119,7 +120,16 @@ enum ScreenshotCapture {
             try write(window, to: directory.appending(path: "viewer-\(slug(first.name)).png"))
             model.closeExpandedCamera()
             try await pause()
+            // `-demoScenario nvr`: the same camera an hour ago (a recorded picture, the timeline with its waveform and the gap).
+            if model.engine.archive.extent(camera: first.id) != nil {
+                model.expandCamera(first.id, start: ViewerStart(time: Date().addingTimeInterval(-3_600), playing: false))
+                try await pause(seconds: 9)   // the sample clip is encoded the first time it is read
+                try write(window, to: directory.appending(path: "viewer-\(slug(first.name))-recorded.png"))
+                model.closeExpandedCamera()
+                try await pause()
+            }
         }
+        try await captureSettingsRecording(model: model, to: directory)
 
         for (name, sheet) in [("vpn-help", ManagerSheet.vpnHelp)] {
             model.presentedSheet = sheet
@@ -128,6 +138,19 @@ enum ScreenshotCapture {
             model.presentedSheet = nil
             try await pause()
         }
+    }
+
+    /// Settings › Recording (and how nine tabs fit the window): the Settings window on that tab.
+    private static func captureSettingsRecording(model: AppModel, to directory: URL) async throws {
+        UserDefaults.standard.set(SettingsTab.recording.rawValue, forKey: SettingsTab.storageKey)
+        model.showSettings()
+        try await pause(seconds: 1.5)
+        guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue.lowercased().contains("settings") == true && $0.isVisible }) else {
+            log.error("Settings window not found")
+            return
+        }
+        try write(window, to: directory.appending(path: "settings-recording.png"))
+        window.close()
     }
 
     /// Every Add Camera page, driven through the preview fixtures (a discovered Hikvision camera), in its own window.
@@ -175,7 +198,7 @@ enum ScreenshotCapture {
     }
 
     /// The whole window (title bar and toolbar included), as the app draws it.
-    private static func write(_ window: NSWindow, to url: URL) throws {
+    static func write(_ window: NSWindow, to url: URL) throws {
         guard let view = window.contentView?.superview ?? window.contentView else { return }
         try write(view: view, to: url)
     }

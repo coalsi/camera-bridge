@@ -9,21 +9,21 @@ The daemon runs as user `camerabridge` (uid 931) from `camerabridged.service` (`
 | Environment variable | Value | Meaning |
 |---|---|---|
 | `CAMERABRIDGE_PLATFORM` | `linux-os` | running on Camera Bridge OS |
-| `CAMERABRIDGE_DATA_DIR` | `/var/lib/camera-bridge` | the data directory (the data partition; `config.json`, `hap/`, `secrets/`, `Diagnostics/`) |
+| `CAMERABRIDGE_DATA_DIR` | `/var/lib/camera-bridge` | the data directory (the data partition; `config.json`, `hap/`, `secrets/`, `Diagnostics/`, `recordings/`) |
 | `CAMERABRIDGE_WEB_ROOT` | `/usr/share/camera-bridge/web` | static web UI files |
 | `CAMERABRIDGE_HTTP_PORT` | `80` | web port (the unit grants `CAP_NET_BIND_SERVICE`) |
 | `CAMERABRIDGE_RUN_DIR` | `/run/camera-bridge` | runtime folder |
 | `CAMERABRIDGE_OS_REQUEST_DIR` | `/run/camera-bridge/requests` | where to drop privileged requests (below) |
 | `CAMERABRIDGE_OS_STATUS_DIR` | `/run/camera-bridge/status` | where the OS publishes status files (read-only for the daemon) |
 
-More can be set in `/etc/camera-bridge/camerabridged.env` (read by the unit if present).
+More can be set in `/etc/camera-bridge/camerabridged.env` (read by the unit if present). The unit does not set `CAMERABRIDGE_RECORDINGS_DIR`: the NVR's recordings go to `recordings` inside the data directory (`/var/lib/camera-bridge/recordings`), which the daemon creates itself as `camerabridge` (0700) and which the unit already lets it write. A recordings folder anywhere else is outside `ReadWritePaths` and would need a unit change (external drives, later).
 
 Process requirements of the unit:
 
 * `Type=notify`: send `READY=1` (sd_notify) once the web port is listening.
 * `WatchdogSec=30`: send `WATCHDOG=1` at least every 15 s, or systemd kills and restarts the daemon. (If the daemon cannot do this, relax `WatchdogSec` in `units/camerabridged.service.in`.)
 * `GET http://127.0.0.1/api/v1/status` must answer with a JSON document without authentication: `camera-bridge-health.service` uses it to decide whether a boot is good (a new OS version that fails this three times is rolled back automatically).
-* Writes only to `/var/lib/camera-bridge`, `/tmp` (private) and the request folder; everything else is read-only (`ProtectSystem=strict`). `HOME=/var/lib/camera-bridge`.
+* Writes only to `/var/lib/camera-bridge` (recordings included: `/var/lib/camera-bridge/recordings`), `/tmp` (private) and the request folder; everything else is read-only (`ProtectSystem=strict`). `HOME=/var/lib/camera-bridge`.
 * Allowed: TCP/UDP over IPv4/IPv6, Unix sockets (D-Bus for avahi's `dns_sd` compat library), netlink (`RTMGRP_*` monitoring), the GPU render node (`/dev/dri/renderD*`, group `render`). Not allowed: raw/packet sockets, namespaces, `CAP_*` other than `CAP_NET_BIND_SERVICE`.
 * The secret store key is created by the OS at first boot: `/var/lib/camera-bridge/secrets/master.key` (32 random bytes, mode 0600, owner `camerabridge`). The daemon should use it (and create it itself if absent).
 * `/var/lib/camera-bridge/first-run` exists (a timestamp) until the daemon decides setup is finished; the OS creates it again after a factory reset.
@@ -42,9 +42,15 @@ The daemon never runs as root. To ask for something privileged (from the web UI)
 | `ssh-enable` | `{"authorizedKeys": "ssh-ed25519 AAAA... comment\n..."}` | enables key-only root SSH (plain public keys only, up to 20) |
 | `ssh-disable` | `{}` | |
 | `reboot`, `poweroff` | `{}` | |
-| `factory-reset` | `{"confirm": "RESET"}` | erases `/var/lib/camera-bridge`, reboots |
+| `factory-reset` | `{"confirm": "RESET"}` | erases `/var/lib/camera-bridge` (the recordings too), reboots |
+| `drive-list` | `{}` | writes `status/recording-drive-candidates.json` (the attached disks, usable or not, and which already are recording drives) |
+| `drive-use` | `{"device": "/dev/sdb", "phrase": "ERASE ALL DATA ON sdb", "keepData": false}` | records to that disk: with the phrase it is erased and gets one ext4 file system labelled `CBRECORDINGS`; with `keepData` an existing recording drive is used as it is. The drive is mounted on `/var/lib/camera-bridge/recordings` (the choice, a file-system UUID, is kept in `/srv/system/recording-drive`; a drive that is chosen but not attached is replaced by a read-only placeholder so nothing is written to the box's own disk by mistake; `camera-bridge-recording-drive.service` does it at boot, a udev rule when a `CBRECORDINGS` partition appears). Progress in `status/recording-drive.json` (`internal`, `mounted`, `missing`, `working`, `failed`) |
+| `drive-forget` | `{}` | goes back to the box's own disk; the drive and its recordings are left alone |
+| `wifi-scan` | `{}` | writes `status/wifi-networks.json` (the networks in range, strongest first) |
+| `wifi-join` | `{"ssid": "Home", "password": "…", "reboot": true}` | saves the network (NetworkManager keyfile in `/srv/system/network-connections`) and restarts; the password is never logged. If the box is not online about 30 s after it starts, `cb-wifi --watch` reports the failure (`status/wifi.json` `lastError`) and opens the setup hotspot |
+| `wifi-forget` | `{"ssid": "Home"}` | forgets a saved network |
 | `install-list` | `{}` | writes `status/install-candidates.json` (the disks and why they are or are not usable) |
-| `install-to-disk` | `{"device": "/dev/nvme0n1", "phrase": "ERASE ALL DATA ON nvme0n1", "copyData": true, "poweroff": true, "dryRun": false}` | copies the running system to that disk. The UI must make the user type the phrase; the installer checks it again. |
+| `install-to-disk` | `{"device": "/dev/nvme0n1", "phrase": "ERASE ALL DATA ON nvme0n1", "copyData": true, "poweroff": true, "dryRun": false}` | copies the running system to that disk (with `copyData`, the settings and the recordings folder too). The UI must make the user type the phrase; the installer checks it again. |
 
 Status files (world-readable JSON written atomically by the root side; each has `state`, `message`, `updatedAt`):
 

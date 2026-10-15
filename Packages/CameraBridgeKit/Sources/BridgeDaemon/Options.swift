@@ -16,6 +16,13 @@ public struct DaemonOptions: Equatable, Sendable {
     public var webLoopbackOnly = false
     /// Development: the engine on loopback only, nothing advertised, secrets in memory (what a Mac always does).
     public var development = false
+    /// `--lan`, with `--dev` only: the web interface listens on every interface again (the one thing `--dev` took away), for a person who tests with
+    /// their own devices by the Mac's LAN name. The engine stays on loopback, nothing is advertised, secrets stay in memory, the HomeKit and
+    /// sensors ports stay at their explicit development values. Never for an unattended run.
+    public var lan = false
+    /// `--demo-keyframe-seconds N`, with `--dev` or `--preview` only (hidden): the demo camera's main stream keys every N seconds (1...120) instead of
+    /// every 2, so the smart-codec path runs through the real engine (`BridgeEnvironment.demoKeyframeSeconds`).
+    public var demoKeyframeSeconds: Double?
     /// Show the engine's sample data (five cameras, nothing is started) instead of running the bridge.
     public var preview: String?
     public var hapBasePort: UInt16?
@@ -28,6 +35,9 @@ public struct DaemonOptions: Equatable, Sendable {
     public var osRequestDirectory: URL?
     /// Where the system publishes its status files.
     public var osStatusDirectory: URL?
+    /// Where the NVR keeps recordings (`--recordings-dir`, `CAMERABRIDGE_RECORDINGS_DIR`): a full path the engine can store as its folder
+    /// (`BridgeSettings.isValidNVRFolder`). nil: `recordings` inside the data directory (`effectiveRecordingsDirectory(dataDirectory:)`).
+    public var recordingsDirectory: URL?
     public var logLevel: LogLevel = .info
     /// Dev only: the Add Camera page finds three sample cameras (RFC 5737 addresses) instead of searching the network.
     public var fakeDiscovery = false
@@ -42,6 +52,12 @@ public struct DaemonOptions: Equatable, Sendable {
         let run = runDirectory ?? URL(fileURLWithPath: Self.defaultRunDirectory, isDirectory: true)
         return (osRequestDirectory ?? run.appending(path: "requests", directoryHint: .isDirectory),
                 osStatusDirectory ?? run.appending(path: "status", directoryHint: .isDirectory))
+    }
+
+    /// The folder the NVR records into: `recordingsDirectory`, else `recordings` inside `dataDirectory` (the box:
+    /// /var/lib/camera-bridge/recordings, on the data partition).
+    public func effectiveRecordingsDirectory(dataDirectory: URL) -> URL {
+        recordingsDirectory ?? dataDirectory.appending(path: "recordings", directoryHint: .isDirectory)
     }
 
     public struct UsageError: Error, Equatable, CustomStringConvertible, Sendable {
@@ -60,6 +76,7 @@ public struct DaemonOptions: Equatable, Sendable {
                                  (also --web-root)
           --loopback-only        serve the web interface on 127.0.0.1 only
           --dev                  development: loopback only, nothing advertised on the network, secrets kept in memory
+          --lan                  with --dev: let the web interface listen on every interface (to test with your own devices; stop it afterwards)
           --preview [SCENARIO]   serve the engine's sample data (standard, empty, network-denied, damaged-config); starts nothing
           --hap-base-port N      first HomeKit accessory port (default 21100)
           --sensors-port N       the sensors bridge's port (0: any free port)
@@ -68,14 +85,15 @@ public struct DaemonOptions: Equatable, Sendable {
           --run-dir PATH         the operating system's runtime folder (default \(defaultRunDirectory))
           --os-request-dir PATH  where requests for the system's root helper are written (default: requests in the run folder)
           --os-status-dir PATH   where the system publishes its status (default: status in the run folder)
+          --recordings-dir PATH  where the NVR keeps recordings, a full path (default: recordings inside the data directory)
           --log-level LEVEL      debug, info, notice, warning or error (default info)
           --fake-discovery       development: the Add Camera page finds sample cameras
           --no-demo-camera       leave the demo camera out of the camera types
           --version, --help
 
         Environment (flags win): CAMERABRIDGE_DATA_DIR, CAMERABRIDGE_HTTP_PORT, CAMERABRIDGE_WEB_ROOT, CAMERABRIDGE_RUN_DIR,
-        CAMERABRIDGE_OS_REQUEST_DIR, CAMERABRIDGE_OS_STATUS_DIR (what Camera Bridge OS sets), and CAMERA_BRIDGE_DATA_DIR, _PORT,
-        _STATIC_DIR, _LOOPBACK_ONLY, _ALLOWED_HOSTS (comma separated), _SETUP_TOKEN, _LOG_LEVEL.
+        CAMERABRIDGE_OS_REQUEST_DIR, CAMERABRIDGE_OS_STATUS_DIR (what Camera Bridge OS sets), CAMERABRIDGE_RECORDINGS_DIR (optional),
+        and CAMERA_BRIDGE_DATA_DIR, _PORT, _STATIC_DIR, _LOOPBACK_ONLY, _ALLOWED_HOSTS (comma separated), _SETUP_TOKEN, _LOG_LEVEL.
 
         """
 
@@ -97,6 +115,7 @@ public struct DaemonOptions: Equatable, Sendable {
         if let (_, value) = variable("CAMERABRIDGE_RUN_DIR") { options.runDirectory = URL(fileURLWithPath: value, isDirectory: true) }
         if let (_, value) = variable("CAMERABRIDGE_OS_REQUEST_DIR") { options.osRequestDirectory = URL(fileURLWithPath: value, isDirectory: true) }
         if let (_, value) = variable("CAMERABRIDGE_OS_STATUS_DIR") { options.osStatusDirectory = URL(fileURLWithPath: value, isDirectory: true) }
+        if let (name, value) = variable("CAMERABRIDGE_RECORDINGS_DIR") { options.recordingsDirectory = try recordingsDirectory(value, name: name) }
         if let (_, value) = variable("CAMERABRIDGE_LOOPBACK_ONLY", "CAMERA_BRIDGE_LOOPBACK_ONLY"), ["1", "true", "yes"].contains(value.lowercased()) {
             options.webLoopbackOnly = true
         }
@@ -127,6 +146,12 @@ public struct DaemonOptions: Equatable, Sendable {
                 portGiven = true
             case "--static-dir", "--web-root": options.staticDirectory = URL(fileURLWithPath: try value(), isDirectory: true)
             case "--loopback-only": options.webLoopbackOnly = true
+            case "--lan": options.lan = true
+            case "--demo-keyframe-seconds":
+                guard let seconds = Double(try value()), seconds.isFinite, (1.0...120.0).contains(seconds) else {
+                    throw UsageError(message: "\(name) needs a number of seconds from 1 to 120.")
+                }
+                options.demoKeyframeSeconds = seconds
             case "--dev":
                 options.development = true
                 options.webLoopbackOnly = true
@@ -154,6 +179,7 @@ public struct DaemonOptions: Equatable, Sendable {
             case "--run-dir": options.runDirectory = URL(fileURLWithPath: try value(), isDirectory: true)
             case "--os-request-dir": options.osRequestDirectory = URL(fileURLWithPath: try value(), isDirectory: true)
             case "--os-status-dir": options.osStatusDirectory = URL(fileURLWithPath: try value(), isDirectory: true)
+            case "--recordings-dir": options.recordingsDirectory = try recordingsDirectory(try value(), name: name)
             case "--log-level": options.logLevel = try level(try value(), name: name)
             case "--fake-discovery": options.fakeDiscovery = true
             case "--no-demo-camera": options.offersDemoCamera = false
@@ -163,12 +189,28 @@ public struct DaemonOptions: Equatable, Sendable {
             }
         }
         if options.development, !portGiven { options.port = 8080 }
+        if options.lan {
+            guard options.development else { throw UsageError(message: "--lan only goes with --dev: it opens a development daemon to the network.") }
+            options.webLoopbackOnly = false
+        }
+        if options.demoKeyframeSeconds != nil, !options.development, options.preview == nil {
+            throw UsageError(message: "--demo-keyframe-seconds only goes with --dev or --preview.")
+        }
         return options
     }
 
     private static func port(_ text: String, name: String, allowZero: Bool = false) throws -> UInt16 {
         guard let value = UInt16(text), allowZero || value != 0 else { throw UsageError(message: "\(name) needs a port number from 1 to 65535.") }
         return value
+    }
+
+    /// A full path the engine can keep as `BridgeSettings.nvrFolder`: relative paths would depend on the daemon's working directory, and the
+    /// message never repeats the value.
+    private static func recordingsDirectory(_ text: String, name: String) throws -> URL {
+        guard BridgeSettings.isValidNVRFolder(text) else {
+            throw UsageError(message: "\(name) needs a full path: it starts with /, has no “..” and no control characters, and is at most 1024 bytes long.")
+        }
+        return URL(fileURLWithPath: text, isDirectory: true)
     }
 
     private static func level(_ text: String, name: String) throws -> LogLevel {

@@ -1,0 +1,19 @@
+/* The clip bar and the marks on the grid's tiles while a clip is being chosen (js/nvr/clip.js). */
+.nvr-clipbar { display: grid; gap: 6px; padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--accent, #f5a623); background: color-mix(in srgb, var(--accent, #f5a623) 10%, transparent); }
+.nvr-clipbar[hidden] { display: none; }
+.nvr-clip-main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.nvr-clip-main > svg { width: 18px; height: 18px; flex: none; }
+.nvr-clip-spacer { flex: 1 1 auto; }
+.nvr-clip-hint, .nvr-clip-line { margin: 0; }
+.nvr-clip-failed { color: var(--danger, #e5484d); }
+.nvr-tile[data-clip="in"]::after, .nvr-tile[data-clip="out"]::after {
+  content: ''; position: absolute; left: calc(50% - 20px); top: calc(50% - 20px); width: 40px; height: 40px; border-radius: 50%; box-sizing: border-box; pointer-events: none; z-index: 3;
+  border: 2px solid #fff; background: rgba(0, 0, 0, 0.35);
+}
+.nvr-tile[data-clip="in"]::after { background: var(--accent, #f5a623) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E") center / 80% no-repeat; border-color: var(--accent, #f5a623); }
+.nvr-tile[data-clip="out"] .nvr-media { opacity: 0.45; }
+.nvr-tile[data-clip] { cursor: pointer; }
+.nvr-clip-labels { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem; white-space: nowrap; cursor: pointer; }
+/* The cameras of a clip on the wall: one tick box each (js/nvr/clip.js). */
+.nvr-clip-cams { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 8px; }
+.nvr-clip-cam { display: inline-flex; align-items: center; gap: 6px; font-size: 0.88rem; white-space: nowrap; cursor: pointer; }

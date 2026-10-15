@@ -25,6 +25,10 @@ on:
         description: 'Use the stub daemon instead of building camerabridged (OS-only test build, never released)'
         type: boolean
         default: false
+      smoke_tests:
+        description: 'Tests of the QEMU boot test, comma separated (empty: all of them; see linux/os/test-vm.sh --help)'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -42,6 +46,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: shellcheck, nft -c, systemd-analyze verify, repart, mkosi summary
         run: linux/os/test-static.sh
+      - name: Self-test of the NVR test client (linux/os/test-nvr.py)
+        run: python3 -I linux/os/test-nvr.py selftest
 
   build:
     name: Build image (amd64)
@@ -62,6 +68,11 @@ jobs:
           if [ "$REF_TYPE" = tag ]; then version="${REF_NAME#os-v}"; else version="$INPUT_VERSION"; fi
           if ! [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]]; then echo "::error::bad version '$version'"; exit 1; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Make room on the runner
+        # The image (with the Wi-Fi firmware) and its build need more than the runner's free disk: drop the preinstalled toolchains this job never uses.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h / | tail -1
       - name: Build (camerabridged with Swift, image with mkosi)
         env:
           VERSION: ${{ steps.v.outputs.version }}
@@ -94,6 +105,9 @@ jobs:
         with:
           name: camera-bridge-os-${{ needs.build.outputs.version }}-amd64
           path: out
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'   # linux/web-dev/conformance.mjs (the nvr test runs it against the box)
       - name: Install QEMU and OVMF
         run: |
           sudo apt-get update
@@ -107,13 +121,29 @@ jobs:
       - name: Boot the image and check it
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          SMOKE_TESTS: ${{ github.event.inputs.smoke_tests }}
         run: |
-          tests=boot,ssh-off,system,persist,requests,factory-reset,installer,install-boot
+          # daemon, nvr, nvr-archive and nvr-faults skip themselves on an image with the stub daemon.
+          tests=${SMOKE_TESTS:-boot,ssh-off,system,persist,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,installer,install-boot}
+          case $tests in *[!a-z,-]*) echo "::error::the test list may only hold letters, commas and hyphens"; exit 1 ;; esac
           if [ ! -w /dev/kvm ]; then tests=boot,ssh-off; fi
-          linux/os/test-vm.sh --image "out/camera-bridge-os-$VERSION-amd64.img.xz" --arch amd64 --tests "$tests" --work "$RUNNER_TEMP/vm" --keep
+          cpus=$(nproc); if [ "$cpus" -gt 4 ]; then cpus=4; fi
+          linux/os/test-vm.sh --image "out/camera-bridge-os-$VERSION-amd64.img.xz" --arch amd64 --tests "$tests" --disk-size 32G --cpus "$cpus" \
+              --work "$RUNNER_TEMP/vm" --keep
       - name: Serial log on failure
         if: failure()
         run: tail -n 200 "$RUNNER_TEMP/vm/serial.log" || true
+      - name: Keep the VM logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-logs-${{ needs.build.outputs.version }}
+          path: |
+            ${{ runner.temp }}/vm/serial.log
+            ${{ runner.temp }}/vm/qemu.log
+            ${{ runner.temp }}/vm/nvr/diag/
+          if-no-files-found: ignore
+          retention-days: 7
 
   release:
     name: Publish GitHub Release
@@ -124,6 +154,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: linux/web/js/release-notes.js
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: camera-bridge-os-${{ needs.build.outputs.version }}-amd64
@@ -140,18 +174,27 @@ jobs:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          # Versions before 1.0 are pre-releases: the box's updater skips them and the notes say what has been tested.
+          # Versions before 1.0 are betas, published as pre-releases: a box on a beta takes the next one (cb-update's beta channel), a box on
+          # 1.0 or later only full releases.
           PRERELEASE=()
           WARNING=""
           case "$VERSION" in 0.*)
             PRERELEASE=(--prerelease)
-            WARNING="**Pre-release.** This image builds and boots in automated tests on virtual machines (Intel and ARM), including first start, install to a second disk, updates and automatic rollback. It has not been tried on real hardware yet: USB boot, hardware video encoding and pairing with the Home app on a real box are still to be confirmed. Please report what you find in an issue."
+            WARNING="**Beta.** Camera Bridge OS runs every day on the reference box (Beelink Mini S, Intel N150, 12 GB) and passes automated tests on virtual machines, including install to a disk, updates and automatic rollback. The interface is still being refined before 1.0. Please report what you find in an issue."
             ;;
           esac
+          # What changed, from the notes the page's About shows (linux/web/js/release-notes.js), when they have this version.
+          CHANGES=$(node --input-type=module -e "
+            const { notesFor } = await import('./linux/web/js/release-notes.js');
+            const entry = notesFor(process.env.VERSION);
+            if (entry) console.log('## ' + entry.title + '\n\n' + entry.items.map((item) => '- ' + item).join('\n'));
+          " 2>/dev/null || true)
           cat > notes.md <<EOF
           Camera Bridge OS $VERSION (amd64).
 
           $WARNING
+
+          $CHANGES
 
           Download \`camera-bridge-os-$VERSION-amd64.img.xz\`, check it against \`.sha256\`, and write it to a USB stick or SSD with balenaEtcher.
           Licenses and source code: \`SOURCE-OFFER.txt\` and \`camera-bridge-os-$VERSION-packages.txt\` (the exact packages), and docs/linux/LICENSES.md.

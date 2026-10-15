@@ -21,6 +21,7 @@ Website: <https://www.camera-bridge.app> · Documentation: <https://docs.camera-
 - Finds ONVIF cameras on your network, checks how ready a camera is for HomeKit Secure Video and can fix common
   encoder settings for you.
 - Watch your cameras in the app too: an overview grid and a single-camera viewer, no Home app needed.
+- Optionally records the cameras' full-quality video to a folder you choose (a Record switch per camera, with limits on age and size) and plays it back in the app with a timeline you can scrub, per camera or all cameras on one shared playhead.
 - Runs from the menu bar. Settings for launch at login, keeping the Mac awake, a local webhook for other motion
   sources, backup and restore of the configuration, and an exportable diagnostics log.
 - Updates itself (Sparkle) from signed, notarized releases. Camera passwords stay in your Mac's keychain, and nothing
@@ -61,7 +62,7 @@ Then follow the welcome guide: allow Local Network access, add a camera, scan it
 
 The same engine also runs on Linux. **Camera Bridge OS** is a small Debian-based system you flash to a USB stick (or
 install to the SSD of a mini PC such as an Intel N100/N150 box): plug in your cameras, open `http://camera-bridge.local`
-in a browser, add them, and pair them in the Home app. It is in development; the design is in
+in a browser, add them, and pair them in the Home app. The box can also record the cameras' full-quality video and play it back in the page, with a timeline (a Record switch per camera; see [docs/linux/USER-GUIDE.md](docs/linux/USER-GUIDE.md)). It is in development; the design is in
 [docs/linux/ARCHITECTURE.md](docs/linux/ARCHITECTURE.md). Releases of the Mac app are tagged `v*` and releases of the
 Linux system `os-v*`, from this one repository and one engine.
 

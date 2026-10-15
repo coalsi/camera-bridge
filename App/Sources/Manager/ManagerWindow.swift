@@ -51,15 +51,6 @@ struct ManagerWindow: View {
         } message: { message in
             Text(message.detail)
         }
-        .overlay {
-            // The single-camera viewer fills the whole window (sidebar included).
-            if let id = model.expandedCameraID {
-                SingleCameraViewer(model: model, cameraID: id)
-                    .id(id)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeOut(duration: 0.2), value: model.expandedCameraID)
         .overlay(alignment: .bottom) {
             NoticeBanner(text: model.notice)
         }
@@ -163,7 +154,21 @@ private struct BridgeToggleButton: View {
 private struct ManagerDetail: View {
     let model: AppModel
 
+    /// The single-camera viewer covers the page in the detail column (the sidebar and the banners above stay usable); the page stays mounted under
+    /// it, so a page that plays (the NVR page) can hold its place and let go of its decoders meanwhile.
     var body: some View {
+        ZStack {
+            page
+            if let id = model.expandedCameraID {
+                SingleCameraViewer(model: model, cameraID: id)
+                    .id(id)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.expandedCameraID)
+    }
+
+    @ViewBuilder private var page: some View {
         switch model.selection {
         case .camera(let id):
             if let configuration = model.configuration(for: id) {

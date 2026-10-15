@@ -15,12 +15,17 @@ import Synchronization
 /// decodes a delta frame whose reference it never saw. One task owns the layer's render-synchronizer receiver and feeds it
 /// in order, waiting while the layer is not ready (the replay of the newest GOP arrives as a burst); the frames waiting are
 /// capped, and a backlog that long is dropped for the next keyframe. `layer` is hosted by `LiveVideoView`.
-nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
+///
+/// Recorded video (the NVR's `CellPlayback`) uses the same renderer through `ArchiveVideoSink`: a frame can be decode-only (it primes the
+/// decoder and is never shown), every frame carries the reset epoch it was queued under (a frame queued before a `reset()` or `clear()` is
+/// dropped, however late the task reaches it), and `queued` and `restarts` tell a producer how far behind the layer is.
+nonisolated final class LiveVideoRenderer: ArchiveVideoSink, @unchecked Sendable {
     /// Frames waiting for the layer; beyond this the oldest are lost and the picture restarts at the next keyframe.
     static let maximumPending = 300
 
     private enum Command: Sendable {
-        case frame(EncodedVideoFrame)
+        /// `epoch`: `Control.resetEpoch` when the frame was queued.
+        case frame(EncodedVideoFrame, epoch: Int, decodeOnly: Bool)
         /// Look at the shared control state (a reset or clear was requested).
         case wake
     }
@@ -30,6 +35,10 @@ nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
         var resetEpoch = 0
         var clearEpoch = 0
         var framesLost = false
+        /// Frames `show` accepted that the task has not taken from the queue yet.
+        var queued = 0
+        /// Times the task discarded its queue by itself (not for `reset()` and `clear()`).
+        var restarts = 0
     }
 
     private final class ControlBox: Sendable {
@@ -37,18 +46,30 @@ nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
     }
 
     let layer: AVSampleBufferDisplayLayer
-    private let synchronizer = AVSampleBufferRenderSynchronizer()
+    private let synchronizer: AVSampleBufferRenderSynchronizer
     private let commands: AsyncStream<Command>.Continuation
     private let control = ControlBox()
     private let audio = LiveAudioPlayer()
     private let pump: Task<Void, Never>
 
     @MainActor
-    init() {
-        layer = AVSampleBufferDisplayLayer()
+    convenience init() {
+        let layer = AVSampleBufferDisplayLayer()
+        let synchronizer = AVSampleBufferRenderSynchronizer()
+        self.init(layer: layer, synchronizer: synchronizer, output: VideoOutputs.make(renderer: layer.sampleBufferRenderer, synchronizer: synchronizer))
+    }
+
+    /// Tests: the pictures go to `output` instead of the layer (which is still made, and hosted the same way). Not main-actor: the first use of
+    /// the display frameworks takes most of a second, and tests that measure real time on the main actor must not wait for it.
+    nonisolated convenience init(output: any VideoOutput) {
+        self.init(layer: AVSampleBufferDisplayLayer(), synchronizer: AVSampleBufferRenderSynchronizer(), output: output)
+    }
+
+    private nonisolated init(layer: AVSampleBufferDisplayLayer, synchronizer: AVSampleBufferRenderSynchronizer, output: any VideoOutput) {
+        self.layer = layer
+        self.synchronizer = synchronizer
         layer.videoGravity = .resizeAspect
         layer.backgroundColor = NSColor.clear.cgColor
-        let output = VideoOutputs.make(renderer: layer.sampleBufferRenderer, synchronizer: synchronizer)
         synchronizer.rate = 1
         let (stream, continuation) = AsyncStream.makeStream(of: Command.self, bufferingPolicy: .bufferingNewest(Self.maximumPending))
         commands = continuation
@@ -63,13 +84,35 @@ nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
         pump.cancel()
     }
 
+    #if DEBUG
+    /// Measurement runs (`NVRProbe`): stops or restarts the synchronizer's clock. `displayedPicture()` returns nothing while the rate is not 0 (SDK
+    /// header of `copyDisplayedPixelBuffer`); the pictures are display-immediately, so they are still shown at rate 0.
+    nonisolated func setProbeMode(_ on: Bool) { synchronizer.rate = on ? 0 : 1 }
+    #endif
+
     // MARK: LiveVideoSink
 
     func show(_ frame: EncodedVideoFrame) {
-        if case .dropped = commands.yield(.frame(frame)) {
-            control.state.withLock { $0.framesLost = true }
+        show(frame, decodeOnly: false)
+    }
+
+    /// The epoch is read here, when the frame is queued: a `reset()` or `clear()` after this call makes the frame stale, and the task drops it.
+    func show(_ frame: EncodedVideoFrame, decodeOnly: Bool) {
+        let epoch = control.state.withLock { state -> Int in
+            state.queued += 1
+            return state.resetEpoch
+        }
+        if case .dropped(let lost) = commands.yield(.frame(frame, epoch: epoch, decodeOnly: decodeOnly)) {
+            control.state.withLock { state in
+                state.framesLost = true
+                if case .frame = lost { state.queued -= 1 }   // the queue dropped its oldest frame to make room
+            }
         }
     }
+
+    var queued: Int { control.state.withLock { $0.queued } }
+
+    var restarts: Int { control.state.withLock { $0.restarts } }
 
     func play(_ frame: EncodedAudioFrame) {
         audio.play(frame)
@@ -86,7 +129,10 @@ nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
     }
 
     func clear() {
-        control.state.withLock { $0.clearEpoch += 1 }
+        control.state.withLock { state in
+            state.clearEpoch += 1
+            state.resetEpoch += 1   // a frame queued before the clear must not bring the picture back
+        }
         commands.yield(.wake)
         audio.silence()
     }
@@ -109,8 +155,14 @@ nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
         for await command in commands {
             // Resets and clears requested since the last command, and frames lost to a full queue.
             let now = control.state.withLock { state -> Control in
-                defer { state.framesLost = false }
-                return state
+                if case .frame = command { state.queued -= 1 }
+                var snapshot = state
+                if state.framesLost {
+                    state.framesLost = false
+                    state.restarts += 1
+                }
+                snapshot.restarts = state.restarts
+                return snapshot
             }
             if now.clearEpoch != seen.clearEpoch {
                 await output.flush(removingDisplayedImage: true)
@@ -120,13 +172,15 @@ nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
                 needsKeyframe = true
             }
             seen = now
-            guard case .frame(let frame) = command else { continue }
+            guard case .frame(let frame, let epoch, let decodeOnly) = command else { continue }
+            // Queued before the latest reset or clear: it belongs to a picture that was dropped (the keyframe gate below would let a stale keyframe through).
+            guard epoch >= now.resetEpoch else { continue }
             if needsKeyframe {
                 guard frame.isKeyframe else { continue }
                 needsKeyframe = false
             }
             do {
-                guard let sample = try builder.sampleBuffer(for: frame) else { continue }
+                guard let sample = try builder.sampleBuffer(for: frame, decodeOnly: decodeOnly) else { continue }
                 switch try await output.enqueue(sample) {
                 case .enqueued:
                     break
@@ -134,9 +188,11 @@ nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
                     // The decoder was reset (sleep, GPU change): start over at the next keyframe.
                     await output.flush(removingDisplayedImage: false)
                     needsKeyframe = true
+                    control.state.withLock { $0.restarts += 1 }
                 case .failed(let error):
                     await output.flush(removingDisplayedImage: false)
                     needsKeyframe = true
+                    control.state.withLock { $0.restarts += 1 }
                     if !loggedFailure {
                         loggedFailure = true
                         log.warning("The live picture failed to display (\(error)); waiting for the next keyframe")
@@ -147,6 +203,7 @@ nonisolated final class LiveVideoRenderer: LiveVideoSink, @unchecked Sendable {
             } catch {
                 // The format (parameter sets) was refused, or the layer failed: nothing to show until the next keyframe.
                 needsKeyframe = true
+                control.state.withLock { $0.restarts += 1 }
                 if !loggedFailure {
                     loggedFailure = true
                     log.warning("A live picture could not be shown (\(error)); waiting for the next keyframe")

@@ -95,6 +95,11 @@ import Testing
     @Test func aCameraThatDropsALongPollEarlyGetsAShorterOne() {
         // Tapo: the connection is closed after ~10.3 s whatever Timeout says (PT1M asked).
         #expect(ONVIFPullPoint.shorterPullSeconds(droppedAfter: 10.3, current: 60) == 7)
+        // A dropped request as macOS and as Linux report it; other failures are not one.
+        #expect(ONVIFPullPoint.isDroppedRequest(TransportError.closed))
+        #expect(ONVIFPullPoint.isDroppedRequest(TransportError.failed("HTTP request failed (URLError -1011)")))
+        #expect(!ONVIFPullPoint.isDroppedRequest(TransportError.failed("HTTP request failed (URLError -1001)")))
+        #expect(!ONVIFPullPoint.isDroppedRequest(TransportError.timedOut))
         // Dropped almost at once: nothing to learn, the subscription is probably gone.
         #expect(ONVIFPullPoint.shorterPullSeconds(droppedAfter: 0.4, current: 60) == nil)
         #expect(ONVIFPullPoint.shorterPullSeconds(droppedAfter: 2.0, current: 60) == nil)

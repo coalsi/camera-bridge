@@ -10,6 +10,15 @@ struct DemoStream: Sendable, Equatable {
     var height: Int
     var fps: Int
     var keyframeInterval: Duration
+
+    /// This stream with the keyframe interval a development run asked for (`BridgeEnvironment.demoKeyframeSeconds`); nil, NaN or a value
+    /// outside 1...120 seconds keeps the stream as it is.
+    func withKeyframeSeconds(_ seconds: Double?) -> DemoStream {
+        guard let seconds, seconds.isFinite, (1.0...120.0).contains(seconds) else { return self }
+        var stream = self
+        stream.keyframeInterval = .seconds(seconds)
+        return stream
+    }
 }
 
 /// Where a camera's video comes from (plan W3-1 item 1): RTSP main and sub streams (URLs from the configuration, the

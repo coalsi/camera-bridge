@@ -108,6 +108,24 @@ extension CameraSettingsService {
         case failed(CameraConfigFailure)
     }
 
+    /// Puts the camera's clock in `posixTimeZone` (ONVIF `SetSystemDateAndTime`), so the date and time it draws on its picture is local time. Returns
+    /// nil when it worked, else why not. Throws only `CancellationError`.
+    public func setCameraTimeZone(posix posixTimeZone: String) async throws -> String? {
+        // Reolink cameras refuse ONVIF's SetSystemDateAndTime to their ONVIF user; their own API changes daylight saving (the offset they
+        // already have from their setup is kept).
+        if vendor == .reolink, try await setReolinkDaylightSaving(PosixTimeZone.hasDaylightSaving(posixTimeZone)) == nil { return nil }
+        guard let client = await client() else { return "the camera has no ONVIF device service" }
+        do {
+            try await client.setTimeZone(posix: posixTimeZone)
+            log.info("Set the camera's time zone to \(posixTimeZone)")
+            return nil
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return Redact.string(String(describing: error))
+        }
+    }
+
     /// Hides the camera's own date/time overlay. Never throws for a camera that refuses (see the result); throws only
     /// `CancellationError`.
     public func hideCameraClock() async throws -> CameraClockChange {
@@ -181,6 +199,28 @@ extension CameraSettingsService {
             guard try await api.dateTimeOverlayEnabled(inputChannel: input) == false else { return .failed(.didNotStick) }
         }
         return .done(HiddenCameraClock(method: .hikvisionISAPI, wasShown: shown))
+    }
+
+    /// GetTime, then SetTime with only `Dst.enable` changed (to `daylightSaving`). nil when it worked (or was already so), else why not.
+    private func setReolinkDaylightSaving(_ daylightSaving: Bool) async throws -> String? {
+        let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
+        defer { Task { await api.logout() } }
+        do {
+            let answer = try await api.command("GetTime")
+            guard var dst = answer["Dst"]?.object, let enable = dst["enable"]?.int else { return "no daylight saving in GetTime" }
+            let wanted = daylightSaving ? 1 : 0
+            if enable == wanted { return nil }
+            dst["enable"] = .number(Double(wanted))
+            _ = try await api.command("SetTime", param: .object(["Dst": .object(dst)]))
+            let check = try await api.command("GetTime")
+            guard check["Dst"]?.object?["enable"]?.int == wanted else { return "the camera kept its daylight saving" }
+            log.info("Turned the camera's daylight saving \(daylightSaving ? "on" : "off") through its own API")
+            return nil
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return Redact.string(String(describing: error))
+        }
     }
 
     private func hideViaReolink() async throws -> ClockOutcome {

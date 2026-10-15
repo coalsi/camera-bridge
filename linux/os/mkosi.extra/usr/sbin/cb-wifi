@@ -1,0 +1,227 @@
+#!/bin/bash
+# cb-wifi: Wi-Fi for Camera Bridge OS (NetworkManager does the radio work; wired Ethernet is systemd-networkd's).
+#
+#   cb-wifi --import             at boot: a file camera-bridge-wifi.txt in the root of the boot partition (the USB stick as a Mac or PC
+#                                sees it) with the lines "network=<name>" and "password=<password>" is saved as a network to join, then
+#                                deleted. The password never reaches the log.
+#   cb-wifi --scan [--json]      the networks in range (name, signal, security), strongest first
+#   cb-wifi --join               join a network: the name and password are read from the JSON on stdin {"ssid", "password"}; saved for the
+#                                next boot (the caller restarts the box)
+#   cb-wifi --forget NAME        forget a saved network
+#   cb-wifi --watch              the service: when the box has no network about 30 s after it started (no wired address, no Wi-Fi it can
+#                                join), it opens the setup hotspot "CameraBridge-XXXX" (open, 10.42.0.1); every name a phone asks for points
+#                                at the box, so the setup page opens by itself. As soon as the box has a network again the hotspot goes.
+#   cb-wifi --hotspot-now        open the setup hotspot at once (tests)
+#
+# Status for the web page: /run/camera-bridge/status/wifi.json and wifi-networks.json.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export CB_TAG=cb-wifi
+# shellcheck source=../lib/camera-bridge/lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+GRACE=${CB_WIFI_GRACE:-30}
+RETRY=${CB_WIFI_RETRY:-300}
+HOTSPOT=cb-setup-hotspot
+HOTSPOT_ADDRESS=10.42.0.1
+PENDING=$CB_SYSTEM/wifi-pending
+FILE_NAME=camera-bridge-wifi.txt
+last_error=""
+
+wifi_device() { nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" {print $1; exit}'; }
+
+online() { [ -n "$(ip -4 route show default 2>/dev/null)" ]; }
+
+hotspot_active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx "$HOTSPOT"; }
+
+hotspot_name() {
+    local mac
+    mac=$(tr -d ':' <"/sys/class/net/$1/address" 2>/dev/null | tr '[:lower:]' '[:upper:]')
+    echo "CameraBridge-${mac: -4}"
+}
+
+saved_networks() {
+    nmcli -t -f NAME,TYPE connection show 2>/dev/null | sed 's/\\:/\x01/g' | awk -F: '$2 == "802-11-wireless" {gsub("\x01", ":", $1); print $1}' | grep -vx "$HOTSPOT" || true
+}
+
+connected_ssid() {
+    local dev=$1
+    nmcli -t -f GENERAL.CONNECTION device show "$dev" 2>/dev/null | sed -n 's/^GENERAL.CONNECTION://p' | grep -vx "$HOTSPOT" | grep -v '^--$' || true
+}
+
+scan_json() {
+    local dev=$1
+    nmcli device wifi rescan ifname "$dev" >/dev/null 2>&1 || true
+    sleep 4
+    nmcli -t -f SSID,SIGNAL,SECURITY device wifi list ifname "$dev" 2>/dev/null \
+        | sed 's/\\:/\x01/g; s/\\\\/\\/g' \
+        | awk -F: 'BEGIN { OFS = "\t" } $1 != "" { gsub("\x01", ":", $1); print $1, $2, $3 }' \
+        | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {ssid: .[0], signal: (.[1] | tonumber? // 0), security: (.[2] // "")})
+                    | map(select(.ssid | startswith("CameraBridge-") | not)) | group_by(.ssid) | map(max_by(.signal)) | sort_by(-.signal)'
+}
+
+write_networks() {
+    local list=$1
+    cb_status wifi-networks ok "networks in range" "$(jq -n --argjson n "$list" '{networks: $n}')"
+}
+
+write_state() {
+    # write_state STATE MESSAGE [DEVICE]
+    local state=$1 message=$2 dev=${3:-} ssid="" hotspot="" saved
+    [ -z "$dev" ] || ssid=$(connected_ssid "$dev")
+    if [ "$state" = hotspot ] && [ -n "$dev" ]; then hotspot=$(hotspot_name "$dev"); fi
+    saved=$(saved_networks | jq -R -s 'split("\n") | map(select(length > 0))')
+    cb_status wifi "$state" "$message" "$(jq -n --arg ssid "$ssid" --arg hotspot "$hotspot" --arg address "$HOTSPOT_ADDRESS" --arg error "$last_error" \
+        --argjson saved "$saved" --arg device "$dev" --argjson wired "$(wired && echo true || echo false)" \
+        '{ssid: $ssid, hotspot: (if $hotspot == "" then null else {ssid: $hotspot, address: $address} end), lastError: $error, saved: $saved,
+          hasWifi: ($device != ""), wired: $wired}')"
+}
+
+wired() { ip -4 route show default 2>/dev/null | grep -qv ' dev wl'; }
+
+start_hotspot() {
+    local dev=$1 name
+    name=$(hotspot_name "$dev")
+    nmcli connection delete id "$HOTSPOT" >/dev/null 2>&1 || true
+    nmcli connection add type wifi ifname "$dev" con-name "$HOTSPOT" autoconnect no ssid "$name" \
+        802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 6 \
+        ipv4.method shared ipv4.addresses "$HOTSPOT_ADDRESS/24" ipv6.method disabled >/dev/null
+    if nmcli connection up id "$HOTSPOT" >/dev/null 2>&1; then
+        cb_log "opened the setup hotspot $name"
+        return 0
+    fi
+    cb_log "this Wi-Fi chip could not open the setup hotspot"
+    return 1
+}
+
+stop_hotspot() { nmcli connection down id "$HOTSPOT" >/dev/null 2>&1 || true; }
+
+stations() { iw dev "$1" station dump 2>/dev/null | grep -c '^Station' || true; }
+
+# --- saving networks --------------------------------------------------------------------------------------------------
+
+save_network() {
+    # save_network NAME PASSWORD: replaces a saved network of that name
+    local name=$1 password=$2
+    [ -n "$name" ] && [ "${#name}" -le 32 ] || cb_die "a network name has 1 to 32 characters"
+    if [ -n "$password" ] && { [ "${#password}" -lt 8 ] || [ "${#password}" -gt 63 ]; }; then cb_die "a Wi-Fi password has 8 to 63 characters"; fi
+    nmcli connection delete id "$name" >/dev/null 2>&1 || true
+    if [ -n "$password" ]; then
+        nmcli connection add type wifi ifname '*' con-name "$name" ssid "$name" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$password" \
+            connection.autoconnect yes connection.autoconnect-priority 10 >/dev/null
+    else
+        nmcli connection add type wifi ifname '*' con-name "$name" ssid "$name" connection.autoconnect yes >/dev/null
+    fi
+    install -d -m 0755 "$CB_SYSTEM"
+    printf '%s\n' "$name" >"$PENDING"
+    cb_log "saved the Wi-Fi network '$name'"
+}
+
+do_import() {
+    local esp file name="" password="" key value line
+    esp=$(cb_esp) || true
+    [ -n "$esp" ] && [ -d "$esp" ] || return 0
+    file=$(find "$esp" -maxdepth 1 -type f -iname "$FILE_NAME" 2>/dev/null | head -1)
+    [ -n "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%$'\r'}
+        line=${line#$'\xef\xbb\xbf'}
+        case $line in ''|'#'*) continue ;; esac
+        key=$(printf '%s' "${line%%=*}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        value=${line#*=}
+        case $key in
+            network|ssid|name|wifi) name=$value ;;
+            password|psk|pass|key) password=$value ;;
+        esac
+    done <"$file"
+    rm -f -- "$file"
+    sync
+    if [ -z "$name" ]; then cb_log "the Wi-Fi file had no network= line; it was removed"; return 0; fi
+    save_network "$name" "$password"
+    nmcli connection up id "$name" >/dev/null 2>&1 || cb_log "'$name' is not in range yet; it is joined when it is"
+}
+
+do_join() {
+    local args name password
+    args=$(cat)
+    name=$(jq -r '.ssid // ""' <<<"$args")
+    password=$(jq -r '.password // ""' <<<"$args")
+    save_network "$name" "$password"
+}
+
+# --- the watcher ------------------------------------------------------------------------------------------------------
+
+do_watch() {
+    local dev last_retry=0 now list
+    write_state searching "Looking for a network."
+    sleep "$GRACE"
+    while true; do
+        dev=$(wifi_device)
+        if online && ! hotspot_active; then
+            rm -f "$PENDING"
+            last_error=""
+            write_state online "On the network." "$dev"
+            sleep 10
+            continue
+        fi
+        if online && hotspot_active; then stop_hotspot; continue; fi
+        if [ -z "$dev" ]; then write_state no-wifi "No network: plug in a network cable (this computer has no Wi-Fi the box can use)."; sleep 30; continue; fi
+        if [ -f "$PENDING" ]; then
+            last_error="Couldn't join “$(head -1 "$PENDING")”. Check the password, and that the network is in range."
+            rm -f "$PENDING"
+        fi
+        now=$(date +%s)
+        if ! hotspot_active; then
+            list=$(scan_json "$dev")
+            write_networks "$list"
+            if start_hotspot "$dev"; then
+                write_state hotspot "Join the Wi-Fi network $(hotspot_name "$dev") to set up the box." "$dev"
+            else
+                write_state no-hotspot "No network, and this Wi-Fi chip cannot open a setup hotspot: plug in a network cable." "$dev"
+                sleep 60
+                continue
+            fi
+            last_retry=$now
+        elif [ $((now - last_retry)) -ge "$RETRY" ] && [ "$(stations "$dev")" -eq 0 ] && [ -n "$(saved_networks)" ]; then
+            # Nobody is on the hotspot: look for a saved network again (the radio cannot do both at once).
+            last_retry=$now
+            stop_hotspot
+            list=$(scan_json "$dev")
+            write_networks "$list"
+            while IFS= read -r name; do
+                if jq -e --arg n "$name" 'any(.[]; .ssid == $n)' <<<"$list" >/dev/null; then
+                    nmcli connection up id "$name" >/dev/null 2>&1 && break
+                fi
+            done < <(saved_networks)
+            continue
+        fi
+        sleep 10
+    done
+}
+
+do_hotspot_now() {
+    local dev
+    dev=$(wifi_device)
+    [ -n "$dev" ] || cb_die "no Wi-Fi device"
+    write_networks "$(scan_json "$dev")"
+    start_hotspot "$dev" || cb_die "the hotspot could not be opened"
+    write_state hotspot "Join the Wi-Fi network $(hotspot_name "$dev") to set up the box." "$dev"
+}
+
+[ "$(id -u)" -eq 0 ] || cb_die "run as root"
+case ${1:-} in
+    --import) do_import ;;
+    --scan)
+        dev=$(wifi_device)
+        [ -n "$dev" ] || { [ "${2:-}" = --json ] && echo '[]'; exit 0; }
+        list=$(scan_json "$dev")
+        write_networks "$list"
+        if [ "${2:-}" = --json ]; then echo "$list"; else jq -r '.[] | "\(.signal)%  \(.ssid)  \(.security)"' <<<"$list"; fi
+        ;;
+    --join) do_join ;;
+    --forget) nmcli connection delete id "${2:?--forget needs a network name}" >/dev/null 2>&1 || true ;;
+    --watch) do_watch ;;
+    --hotspot-now) do_hotspot_now ;;
+    -h|--help|'') sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) cb_die "unknown option: $1" ;;
+esac

@@ -24,8 +24,9 @@ public actor HTTPServer {
         public var maxBodySize = 256 * 1024
         public var maxHeadSize = 16 * 1024
         public var maxHeaderCount = 64
-        public var maxConnections = 128
-        public var maxConnectionsPerAddress = 48
+        // Sized for a Camera Bridge OS box (4 cores, 12 GB, the minimum since 2026-10-14): a monitor wall, the NVR grid and several pages open at once.
+        public var maxConnections = 512
+        public var maxConnectionsPerAddress = 128
         public var firstByteTimeout: Duration = .seconds(10)
         public var requestTimeout: Duration = .seconds(20)
         public var idleTimeout: Duration = .seconds(30)

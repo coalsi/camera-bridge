@@ -61,6 +61,7 @@ public actor MediaHub {
     private let now: @Sendable () -> ContinuousClock.Instant
     private let wallNow: @Sendable () -> Date
     private let offsetTracker = WallClockOffsetTracker()
+    private let discontinuities = Mutex(0)
     private let log: Log
     private let subscribers = SubscriberRegistry()
 
@@ -167,6 +168,10 @@ public actor MediaHub {
     /// time, and until frames arrived. Readable from any thread (the overlay's clock asks for it at every picture).
     public nonisolated var wallClockOffset: TimeInterval { offsetTracker.offset }
 
+    /// How many times `discontinuity()` was called: a recorder that sees it change knows the source reconnected, whatever it missed in between.
+    /// Readable from any thread.
+    public nonisolated var discontinuityCount: Int { discontinuities.withLock { $0 } }
+
     /// Frames per second over the most recent (up to 90) video decode times (`dts ?? pts`).
     public var measuredFrameRate: Double? {
         guard recentVideoTimes.count >= 2, let first = recentVideoTimes.first, let last = recentVideoTimes.last, last > first else { return nil }
@@ -184,6 +189,7 @@ public actor MediaHub {
     /// formats are those of the reconnected source once it delivers: one without audio leaves `audioFormat` nil (a
     /// recording then records silence instead of declaring an audio track that never gets a sample).
     public func discontinuity() {
+        discontinuities.withLock { $0 &+= 1 }
         ring.removeAll()
         ringBytes = 0
         newestArrival = nil

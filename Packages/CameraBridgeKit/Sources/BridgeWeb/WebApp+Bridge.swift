@@ -22,6 +22,7 @@ extension WebApp {
         var regenerateWebhookToken: Bool?
         var logLevel: String?
         var motionShadowTest: Bool?
+        var timeZone: String?
     }
 
     func patchSettings(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -46,6 +47,10 @@ extension WebApp {
                 throw authError(failure)
             }
         }
+        if let zone = patch.timeZone, TimeZone(identifier: zone) == nil {
+            throw APIError.badRequest("That is not a time zone.", field: "timeZone")
+        }
+        let zone = patch.timeZone
         let token = patch.regenerateWebhookToken == true ? Secrets.hex(Secrets.randomBytes(16)) : nil
         let (basePort, sensorsPort, webhookEnabled, webhookPort, shadow) = (patch.basePort, patch.sensorsBridgePort, patch.webhookEnabled, patch.webhookPort, patch.motionShadowTest)
         let newLevel = level
@@ -58,6 +63,7 @@ extension WebApp {
                 if let token { settings.webhookToken = token }
                 if let newLevel { settings.logLevel = newLevel }
                 if let shadow { settings.motionShadowTest = shadow }
+                if let zone { settings.timeZone = zone }
             }
         } catch {
             throw APIError(status: 422, code: "settings_failed", message: ErrorText.describe(error))
@@ -148,7 +154,7 @@ extension WebApp {
 
     // MARK: System
 
-    private func systemFailure(_ error: any Error) -> APIError {
+    func systemFailure(_ error: any Error) -> APIError {
         if let failure = error as? SystemError { return APIError.conflict("system_error", failure.message) }
         return APIError(status: 500, code: "system_error", message: "The system couldn’t do that. The log has the details.")
     }
@@ -234,6 +240,51 @@ extension WebApp {
             try await system.install(targetID: target, phrase: phrase, copyData: body.copyData ?? true)
         } catch {
             log.warning("install failed: \(ErrorText.logDescription(error))")
+            throw systemFailure(error)
+        }
+        return .empty(202)
+    }
+
+    func systemRecordingDrives() async throws -> HTTPResponse {
+        do {
+            return .json(try await system.recordingDrives())
+        } catch {
+            throw systemFailure(error)
+        }
+    }
+
+    private struct RecordingDriveRequest: Decodable {
+        var targetID: String?
+        /// What the person typed: "ERASE ALL DATA ON <disk name>" (not needed with `keepData`).
+        var phrase: String?
+        var keepData: Bool?
+    }
+
+    func systemUseRecordingDrive(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let body = try decode(RecordingDriveRequest.self, from: ctx)
+        guard let target = body.targetID, !target.isEmpty else { throw APIError.badRequest("Choose the drive to record to.", field: "targetID") }
+        let keep = body.keepData ?? false
+        let phrase = body.phrase ?? ""
+        guard keep || (!phrase.isEmpty && phrase.utf8.count <= 200) else {
+            throw APIError.badRequest("Type the sentence shown to confirm that the drive may be erased.", field: "phrase")
+        }
+        do {
+            log.notice("recording drive chosen from the web interface")
+            try await system.useRecordingDrive(targetID: target, phrase: phrase, keepData: keep)
+        } catch {
+            log.warning("choosing the recording drive failed: \(ErrorText.logDescription(error))")
+            throw systemFailure(error)
+        }
+        return .empty(202)
+    }
+
+    func systemForgetRecordingDrive(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let body = try decode(Confirmation.self, from: ctx)
+        guard body.confirm == true else { throw APIError.badRequest("Confirm that recording should go back to the box's own disk.", field: "confirm") }
+        do {
+            log.notice("recording back to the box's own disk requested from the web interface")
+            try await system.forgetRecordingDrive()
+        } catch {
             throw systemFailure(error)
         }
         return .empty(202)

@@ -31,10 +31,20 @@
 	<array>
 		<string>_hap._tcp</string>
 	</array>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Camera Bridge records your cameras to a folder you choose. It needs access to your Desktop folder when that folder is inside it.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Camera Bridge records your cameras to a folder you choose. It needs access to your Documents folder when that folder is inside it.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Camera Bridge records your cameras to a folder you choose. It needs access to your Downloads folder when that folder is inside it.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Corey Silvia</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Camera Bridge connects to the security cameras on your network and publishes them to the Apple Home app.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Camera Bridge records your cameras to a network drive you choose. It needs access to that drive to save recordings and play them back.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Camera Bridge records your cameras to a drive you choose. It needs access to that drive to save recordings and play them back.</string>
 	<key>SUFeedURL</key>
 	<string>https://www.camera-bridge.app/appcast.xml</string>
 	<key>SUPublicEDKey</key>

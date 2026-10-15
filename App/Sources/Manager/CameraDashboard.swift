@@ -52,6 +52,7 @@ struct CameraDashboard: View {
                     VStack(spacing: 16) {
                         CameraHero(model: model, cameraID: cameraID, status: status, configuration: configuration)
                         CameraProblems(status: status, configuration: configuration)
+                        NVRRecordCard(model: model, cameraID: cameraID, status: status, configuration: configuration, readiness: readiness)
                         CameraActionRow(model: model, cameraID: cameraID, configuration: configuration, readiness: readiness,
                                         showingCameraSettings: $showingCameraSettings)
                     }
@@ -67,6 +68,7 @@ struct CameraDashboard: View {
             } else {
                 CameraHero(model: model, cameraID: cameraID, status: status, configuration: configuration)
                 CameraProblems(status: status, configuration: configuration)
+                NVRRecordCard(model: model, cameraID: cameraID, status: status, configuration: configuration, readiness: readiness)
                 CameraActionRow(model: model, cameraID: cameraID, configuration: configuration, readiness: readiness,
                                 showingCameraSettings: $showingCameraSettings)
                 CameraStatTiles(status: status, configuration: configuration, readiness: readiness, navigate: navigate,

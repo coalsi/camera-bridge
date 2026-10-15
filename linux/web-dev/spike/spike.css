@@ -1,0 +1,36 @@
+:root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; --warn: #9a6700; --muted: #6e7781; }
+body { font: 14px/1.4 -apple-system, system-ui, sans-serif; margin: 0; padding: 12px; }
+main { max-width: 980px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+h1 small { color: var(--muted); font-weight: normal; font-size: 12px; }
+h2 { font-size: 15px; margin: 18px 0 6px; }
+.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0; }
+button { font: inherit; padding: 8px 14px; min-height: 36px; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+td, th { border-bottom: 1px solid #8884; padding: 3px 6px; text-align: left; vertical-align: top; word-break: break-word; }
+th { width: 34%; color: var(--muted); font-weight: normal; }
+td.bad { color: var(--bad); font-weight: 600; }
+ol#cases { padding-left: 0; list-style: none; margin: 0; }
+ol#cases li { border-bottom: 1px solid #8884; padding: 6px 0; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row .title { flex: 1; }
+.badge { display: inline-block; min-width: 54px; text-align: center; padding: 2px 6px; border-radius: 10px; font-size: 12px; background: #8883; }
+.badge.pass { background: var(--ok); color: #fff; }
+.badge.fail { background: var(--bad); color: #fff; }
+.badge.running { background: var(--warn); color: #fff; }
+.badge.skip, .badge.info { background: var(--muted); color: #fff; }
+details pre { max-height: 320px; overflow: auto; font-size: 11px; background: #8881; padding: 6px; }
+/* The stage and the tiles stay in the corner of the viewport: a browser does not paint video that is scrolled out of view, which would make every frame count as dropped. */
+body { padding-bottom: 260px; }
+#stagebox { position: fixed; right: 8px; bottom: 8px; display: flex; gap: 6px; align-items: flex-end; background: #000; padding: 4px; z-index: 5; }
+video#stage { width: 240px; height: 135px; background: #111; display: block; }
+#tiles { display: grid; grid-template-columns: repeat(3, 96px); gap: 3px; }
+#tiles:empty { display: none; }
+#tiles video { width: 96px; height: 54px; background: #111; }
+@media (max-width: 640px) {
+  video#stage { width: 128px; height: 72px; }
+  #tiles { grid-template-columns: repeat(3, 56px); }
+  #tiles video { width: 56px; height: 32px; }
+  body { padding-bottom: 150px; }
+}
+pre#log { font-size: 11px; max-height: 240px; overflow: auto; background: #8881; padding: 6px; white-space: pre-wrap; }

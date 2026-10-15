@@ -37,6 +37,10 @@ systemctl enable \
     camera-bridge-factory-reset.service \
     camera-bridge-ssh.service \
     camera-bridge-credentials.service \
+    camera-bridge-recording-drive.service \
+    NetworkManager.service \
+    camera-bridge-wifi-import.service \
+    camera-bridge-wifi.service \
     camera-bridge-request.path \
     camera-bridge-update.timer \
     camera-bridge-banner.timer \
@@ -58,6 +62,9 @@ mkdir -p /etc/systemd/system-generators
 ln -sf /dev/null /etc/systemd/system-generators/systemd-ssh-generator
 # Nothing needs to wait for the first clock sync (the daemon copes with a clock that is corrected later).
 systemctl mask chrony-wait.service >/dev/null
+# Updates are cb-update's (signed releases, the owner's automatic-updates switch, restart at 03:00 local). systemd's own timers
+# would check on their own and, worse, restart the box at 04:10 UTC after an update the owner chose to restart later.
+systemctl mask systemd-sysupdate.timer systemd-sysupdate-reboot.timer >/dev/null
 # The box never sleeps; no weekly file system scrubs on a USB stick.
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target e2scrub_all.timer e2scrub_reap.service >/dev/null 2>&1 || true
 
@@ -81,3 +88,7 @@ mkdir -p /usr/share/camera-bridge
     printf '# binary package\tversion\tsource package\tsource version\n'
     dpkg-query -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' | sort
 } >/usr/share/camera-bridge/packages.txt
+
+# NetworkManager only waits for Wi-Fi in the background: the boot never waits for it (Ethernet is systemd-networkd's).
+systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
+systemctl mask NetworkManager-wait-online.service

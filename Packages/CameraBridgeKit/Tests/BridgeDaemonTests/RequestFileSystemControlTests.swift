@@ -27,7 +27,7 @@ final class FakeRootHelper: @unchecked Sendable {
     typealias Behavior = @Sendable (FakeRootHelper, _ name: String, _ body: Data) async -> Void
 
     static let allowed: Set<String> = ["ssh-enable", "ssh-disable", "auto-update", "update-check", "update-apply", "reboot", "poweroff", "factory-reset",
-                                       "install-list", "install-to-disk"]
+                                       "install-list", "install-to-disk", "drive-list", "drive-use", "drive-forget", "wifi-scan", "wifi-join", "wifi-forget"]
 
     let requests: URL
     let status: URL
@@ -169,6 +169,13 @@ extension FakeRootHelper {
                 helper.refreshSystem(version: current, ssh: ssh, auto: request["enabled"] as? Bool ?? false)
             case "install-list":
                 helper.writeData("install-candidates.json", candidates)
+                if fixedStatus { helper.writeStatus(name, "ok", "done") }
+            case "wifi-scan":
+                helper.writeData("wifi-networks.json", (try? JSONSerialization.data(withJSONObject: ["networks": [["ssid": "Home", "signal": 80, "security": "WPA2"]], "state": "ok"])) ?? Data())
+                helper.writeStatus(name, "ok", "done")
+            case "drive-list":
+                helper.writeData("recording-drive-candidates.json", candidates)
+                helper.writeStatus("recording-drive", "internal", "Recording to this box's own disk.")
                 if fixedStatus { helper.writeStatus(name, "ok", "done") }
             case "install-to-disk":
                 for step in ["checking", "partitioning", "copying", "done"] {
@@ -517,6 +524,82 @@ struct Rig {
         #expect(await rig.system.info().install?.step == "done")
     }
 
+    // MARK: Recording drives
+
+    private static func drive(_ name: String, recordingDrive: Bool = false, problems: [String] = []) -> [String: Any] {
+        var disk = FakeRootHelper.disk(name, model: "Elite Pro", size: 4_000_000_000_000, problems: problems)
+        disk["isRecordingDrive"] = recordingDrive
+        disk["inUse"] = false
+        return disk
+    }
+
+    @Test func recordingDrivesComeFromTheHelpersListWithTheStateOfTheRecordingPlace() async throws {
+        let rig = try Rig(helper: FakeRootHelper.image(disks: [Self.drive("sdb"), Self.drive("sdc", recordingDrive: true), Self.drive("sda", problems: ["this is the disk the system is running from"])]))
+        defer { rig.finish() }
+        let report = try await rig.system.recordingDrives()
+        #expect(report.state == "internal" && report.message.contains("own disk"))
+        #expect(report.drives.map(\.id) == ["sdb", "sdc", "sda"])
+        #expect(report.drives[0].isRecordingDrive == false && report.drives[1].isRecordingDrive == true && report.drives[2].eligible == false)
+        #expect(rig.helper?.names() == ["drive-list"])
+    }
+
+    @Test func choosingARecordingDriveNeedsTheSentenceAndAUsableDisk() async throws {
+        let rig = try Rig(helper: FakeRootHelper.image(disks: [Self.drive("sdb"), Self.drive("sdc", recordingDrive: true), Self.drive("sda", problems: ["this is the disk the system is running from"])]))
+        defer { rig.finish() }
+        for phrase in ["", "erase all data on sdb", "ERASE ALL DATA ON sdb ", "ERASE ALL DATA ON sdc"] {
+            await #expect(throws: SystemError.self, "\(phrase)") { try await rig.system.useRecordingDrive(targetID: "sdb", phrase: phrase, keepData: false) }
+        }
+        for target in ["", "../../dev/sda", "sdb1", "sdb; reboot", "/dev/sdb"] {
+            await #expect(throws: SystemError.self, "\(target)") { try await rig.system.useRecordingDrive(targetID: target, phrase: "ERASE ALL DATA ON \(target)", keepData: false) }
+        }
+        await #expect(throws: SystemError.self) { try await rig.system.useRecordingDrive(targetID: "sda", phrase: "ERASE ALL DATA ON sda", keepData: false) }
+        await #expect(throws: SystemError.self, "a disk that is not a recording drive cannot be kept") { try await rig.system.useRecordingDrive(targetID: "sdb", phrase: "", keepData: true) }
+        #expect(rig.helper?.names().filter { $0 == "drive-use" }.isEmpty == true, "nothing destructive was ever requested")
+    }
+
+    @Test func aTypedSentenceErasesAndAKeptDriveNeedsNone() async throws {
+        let rig = try Rig(helper: FakeRootHelper.image(disks: [Self.drive("sdb"), Self.drive("sdc", recordingDrive: true)]))
+        defer { rig.finish() }
+        try await rig.system.useRecordingDrive(targetID: "sdb", phrase: "ERASE ALL DATA ON sdb", keepData: false)
+        try await rig.system.useRecordingDrive(targetID: "sdc", phrase: "", keepData: true)
+        let bodies = try #require(rig.helper?.bodies("drive-use"))
+        #expect(bodies == [["device": "/dev/sdb", "phrase": "ERASE ALL DATA ON sdb", "keepData": false] as NSDictionary,
+                           ["device": "/dev/sdc", "phrase": "", "keepData": true] as NSDictionary], "exactly these values and nothing else")
+        try await rig.system.forgetRecordingDrive()
+        #expect(rig.helper?.names().contains("drive-forget") == true)
+    }
+
+    // MARK: Wi-Fi
+
+    @Test func theWifiStateAndTheHotspotComeFromTheHelpersStatusFile() async throws {
+        let rig = try Rig(helper: FakeRootHelper.image(disks: []))
+        defer { rig.finish() }
+        #expect(rig.system.setupHotspot() == nil, "no status file: no hotspot")
+        rig.helper?.writeStatus("wifi", "hotspot", "Join CameraBridge-1A2B", extra: ["ssid": "", "hotspot": ["ssid": "CameraBridge-1A2B", "address": "10.42.0.1"],
+                                                                                  "lastError": "Couldn’t join “Home”.", "saved": ["Home"], "hasWifi": true, "wired": false])
+        #expect(rig.system.setupHotspot() == SetupHotspot(ssid: "CameraBridge-1A2B", address: "10.42.0.1"))
+        let report = await rig.system.wifi()
+        #expect(report.state == "hotspot" && report.saved == ["Home"] && report.lastError == "Couldn’t join “Home”." && report.ssid == nil && report.hasWifi)
+        rig.helper?.writeStatus("wifi", "online", "On the network.", extra: ["ssid": "Home", "hotspot": NSNull(), "saved": ["Home"], "hasWifi": true, "wired": false])
+        #expect(rig.system.setupHotspot() == nil)
+        #expect(await rig.system.wifi().ssid == "Home")
+    }
+
+    @Test func joiningAWifiNetworkChecksTheNameAndThePasswordAndRestarts() async throws {
+        let rig = try Rig(helper: FakeRootHelper.image(disks: []))
+        defer { rig.finish() }
+        for (ssid, password) in [("", "12345678"), (String(repeating: "x", count: 33), "12345678"), ("Home\n", "12345678"), ("Home", "short"),
+                                 ("Home", String(repeating: "p", count: 64)), ("Home", "1234567\u{7}")] {
+            await #expect(throws: SystemError.self, "\(ssid) \(password.count)") { try await rig.system.joinWifi(ssid: ssid, password: password, restart: true) }
+        }
+        #expect(rig.helper?.names().filter { $0 == "wifi-join" }.isEmpty == true)
+        try await rig.system.joinWifi(ssid: "Home", password: "correct horse", restart: true)
+        try await rig.system.joinWifi(ssid: "Cafe", password: "", restart: false)
+        #expect(rig.helper?.bodies("wifi-join") == [["ssid": "Home", "password": "correct horse", "reboot": true] as NSDictionary,
+                                                     ["ssid": "Cafe", "password": "", "reboot": false] as NSDictionary])
+        #expect(try await rig.system.scanWifi() == [WifiNetwork(ssid: "Home", signal: 80, security: "WPA2")])
+    }
+
     // MARK: How requests are written
 
     @Test func requestsAreWholeFilesOnlyWithAllowListedNamesAndPrivateModes() async throws {
@@ -578,5 +661,15 @@ struct Rig {
     @Test func theMessagesOfTheSystemAreMadeFitForAPage() {
         #expect(RequestFileSystemControl.sentence("a\nb\u{1b}[0mc\u{7f}") == "a b [0mc")
         #expect(RequestFileSystemControl.sentence(String(repeating: "x", count: 1_000)).count == 240)
+    }
+
+    @Test func aSystemOnAUSBStickIsToldFromOneOnTheMachinesOwnDisk() {
+        let info = "22 1 8:2 / / ro,relatime shared:1 - ext4 /dev/sda2 ro\n30 22 0:5 / /proc rw - proc proc rw\n"
+        let sata = "/sys/devices/pci0000:00/0000:00:17.0/ata2/host1/target1:0:0/1:0:0:0/block/sda/sda2"
+        let usb = "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host2/target2:0:0/2:0:0:0/block/sda/sda2"
+        #expect(RequestFileSystemControl.HostFacts.runningFromUSB(mountInfo: info) { $0 == "sda2" ? sata : nil } == false)
+        #expect(RequestFileSystemControl.HostFacts.runningFromUSB(mountInfo: info) { $0 == "sda2" ? usb : nil } == true)
+        #expect(RequestFileSystemControl.HostFacts.runningFromUSB(mountInfo: info) { _ in nil } == nil)
+        #expect(RequestFileSystemControl.HostFacts.runningFromUSB(mountInfo: "22 1 0:31 / / rw - overlay overlay rw\n") { _ in sata } == nil)
     }
 }

@@ -77,6 +77,9 @@ final class LiveFeed {
     }
     /// How large the picture is shown, in pixels: `.automatic` picks the sub stream for a tall main stream shown small.
     var displayWidth: Int?
+    /// Stopping the feed keeps its last picture on screen (`hasPicture` stays, the sound ends) instead of clearing it. The NVR sets it
+    /// before it hands the cell's renderer to recorded playback, whose first keyframe replaces the picture: no blank frame in between.
+    var keepsPictureOnStop = false
 
     let wantsAudio: Bool
     var isRunning: Bool { isWanted && !isSuspended }
@@ -90,6 +93,8 @@ final class LiveFeed {
     @ObservationIgnored private var silenceLimit: Duration { stallTime * 2 }
     @ObservationIgnored private let shared = Shared()
     @ObservationIgnored private var task: Task<Void, Never>?
+    /// The detached task of the connection read last (`read` cancels it but does not wait for it; `stopAndWait` does).
+    @ObservationIgnored private var reader: Task<Void, Never>?
 
     /// What the reader task and the main actor share.
     private nonisolated final class Shared: Sendable {
@@ -115,10 +120,21 @@ final class LiveFeed {
 
     deinit {
         task?.cancel()
+        reader?.cancel()
     }
 
     /// Stops the feed for good (`isWanted` false).
     func stop() { isWanted = false }
+
+    /// `stop()`, then waits until nothing of this feed can reach the sink any more: the run task and the reader task of its last connection
+    /// have ended, so no `show` or `play` of this feed happens after this returns. `read` cancels its reader without waiting, so
+    /// a picture can still be on its way to the sink just after `stop()`; a producer that takes the sink over (recorded playback) waits for this.
+    func stopAndWait() async {
+        let running = task, reading = reader
+        isWanted = false
+        await running?.value
+        await reading?.value
+    }
 
     private func reconcile() {
         if isRunning {
@@ -141,9 +157,13 @@ final class LiveFeed {
         task = nil
         guard phase != .stopped || hasPicture else { return }
         phase = .stopped
-        hasPicture = false
         activeStream = nil
-        sink.clear()
+        if keepsPictureOnStop {
+            sink.silence()   // the picture stays for whoever draws next
+        } else {
+            hasPicture = false
+            sink.clear()
+        }
     }
 
     // MARK: Running
@@ -201,6 +221,7 @@ final class LiveFeed {
             }
             shared.ended.withLock { $0 = true }
         }
+        self.reader = reader
         // Watchdog: first picture, stalls, and the end of the stream.
         var lastCount = 0
         var quiet = Duration.zero

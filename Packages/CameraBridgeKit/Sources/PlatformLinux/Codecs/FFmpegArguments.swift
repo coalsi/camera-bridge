@@ -90,8 +90,11 @@ enum FFmpegArguments {
     }
 
     /// compressed video in (FLV on stdin) → raw yuv420p pictures at `width × height` out (Y4M: `rawvideo` holds a picture back).
-    static func decoder(width: Int, height: Int) -> [String] {
-        common + lowLatencyInput + ["-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn",
+    /// With `hardwareDevice` (a VA-API render node) the GPU decodes and ffmpeg copies the pictures back for the filters; when the GPU
+    /// cannot take the stream, ffmpeg falls back to decoding on the CPU by itself.
+    static func decoder(width: Int, height: Int, hardwareDevice: String? = nil) -> [String] {
+        let hardware = hardwareDevice.map { ["-hwaccel", "vaapi", "-hwaccel_device", $0] } ?? []
+        return common + hardware + lowLatencyInput + ["-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn",
                                     "-vf", "scale=\(width):\(height),format=yuv420p", "-fps_mode", "passthrough",
                                     "-f", "yuv4mpegpipe", "-pix_fmt", "yuv420p", "pipe:1"]
     }

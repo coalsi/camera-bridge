@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The Settings window's tabs, in toolbar order. The last one used is remembered (`storageKey`, an `@AppStorage`).
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case general, homeKit, network, webhook, privacy, diagnostics, backup, about
+    case general, homeKit, recording, network, webhook, privacy, diagnostics, backup, about
 
     static let storageKey = "settingsTab"
 
@@ -12,6 +12,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: "General"
         case .homeKit: "HomeKit"
+        case .recording: "Recording"
         case .network: "Network"
         case .webhook: "Webhook"
         case .privacy: "Privacy"
@@ -25,6 +26,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: "gearshape"
         case .homeKit: "house"
+        case .recording: "recordingtape"
         case .network: "network"
         case .webhook: "link"
         case .privacy: "hand.raised"

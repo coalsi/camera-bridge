@@ -6,7 +6,7 @@ import Testing
 
 @Suite struct SettingsTabTests {
     @Test func everyTabHasAUniqueStableIdentity() {
-        #expect(SettingsTab.allCases.map(\.rawValue) == ["general", "homeKit", "network", "webhook", "privacy", "diagnostics", "backup", "about"])
+        #expect(SettingsTab.allCases.map(\.rawValue) == ["general", "homeKit", "recording", "network", "webhook", "privacy", "diagnostics", "backup", "about"])
         #expect(Set(SettingsTab.allCases.map(\.symbol)).count == SettingsTab.allCases.count)
         #expect(SettingsTab(rawValue: "removedTab") == nil, "an unknown stored tab falls back to the default")
         #expect(SettingsTab.storageKey == "settingsTab")

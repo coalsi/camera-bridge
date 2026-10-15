@@ -14,6 +14,8 @@ struct ReconnectPolicy: Sendable {
     /// attempt is a failed login, and cameras lock the client out after a few (Hikvision: ~30 min after 5–7 illegal
     /// logins, which would also block RTSP after the user fixes the password), so this is minutes, not seconds.
     var delayAfterUnauthorized: Duration = .seconds(600)
+    /// Waited on top of a login pause (`CameraAdapterError.lockedOut(until:)`) before the next attempt.
+    var marginAfterLoginPause: Duration = .seconds(1)
     /// Backoff for sessions that connected but ended before `healthyAfter` (a camera that accepts the subscription and then
     /// drops it: Tapo's PullPoint, which closes a request idle for 10 s). nil: the same backoff as failed attempts. Without
     /// a separate, slower one such a camera was retried every few seconds forever.
@@ -23,7 +25,13 @@ struct ReconnectPolicy: Sendable {
 
     /// The delay before the next attempt, after a session that `connected` (or not), lasted `lasted` and ended with
     /// `error` (nil: the camera closed the channel). Advances or resets the backoff.
-    mutating func delay(connected: Bool, lasted: Duration, error: (any Error)?) -> Duration {
+    mutating func delay(connected: Bool, lasted: Duration, error: (any Error)?, now: Date = Date()) -> Duration {
+        if case CameraAdapterError.lockedOut(let until)? = error {
+            // No login was tried: an earlier refusal paused them (CameraBridge's own 2 min, or the camera's lockout). Try again
+            // when the pause ends, not ten minutes later: a password fixed meanwhile would otherwise look wrong all that time.
+            _ = backoff.next()
+            return max(minimumDelayAfterFailure, .seconds(max(0, until.timeIntervalSince(now))) + marginAfterLoginPause)
+        }
         if let error = error as? CameraAdapterError, error.isLoginRefusal {
             return max(delayAfterUnauthorized, backoff.next())   // never resets the backoff
         }
@@ -69,6 +77,53 @@ protocol EventChannelLog: Sendable {
 
 extension Log: EventChannelLog {}
 
+/// Ends the long wait after a refused login early, once the credentials proved right elsewhere (`CameraEventSource.credentialsConfirmed`).
+/// A wake that comes while no wait runs (an attempt is under way) is kept for a minute and ends the next wait at once.
+final class ReconnectWaker: Sendable {
+    private struct State {
+        var sleeper: Task<Void, Never>?
+        var woken = false
+        var pendingSince: ContinuousClock.Instant?
+    }
+
+    static let pendingFor: Duration = .seconds(60)
+    private let state = Mutex(State())
+
+    /// Waits `delay`, or less when `wakeable` and `wake()` is called (or was, within `pendingFor`). True when woken.
+    func sleep(for delay: Duration, wakeable: Bool = true) async -> Bool {
+        let sleeper = Task<Void, Never> { try? await Task.sleep(for: delay) }
+        let pending = state.withLock { state -> Bool in
+            let pending = state.pendingSince.map { ContinuousClock.now - $0 < Self.pendingFor } ?? false
+            state.pendingSince = nil
+            state.woken = false
+            if wakeable && !pending { state.sleeper = sleeper }
+            return wakeable && pending
+        }
+        if pending {
+            sleeper.cancel()
+            return true
+        }
+        await withTaskCancellationHandler { await sleeper.value } onCancel: { sleeper.cancel() }
+        return state.withLock { state in
+            defer { state.sleeper = nil; state.woken = false }
+            return state.woken
+        }
+    }
+
+    func wake() {
+        let sleeper = state.withLock { state -> Task<Void, Never>? in
+            guard let sleeper = state.sleeper else {
+                state.pendingSince = .now
+                return nil
+            }
+            state.sleeper = nil
+            state.woken = true
+            return sleeper
+        }
+        sleeper?.cancel()
+    }
+}
+
 /// The reconnect loop behind `SupervisedEventSource` and `HikvisionAlertHub`: runs `attempt` (one connection's
 /// lifetime) again and again until the task is cancelled, then `afterAttempt` (always, also on cancellation), then
 /// waits as `policy` says. `onUnauthorized` runs after an attempt that ended with rejected credentials
@@ -110,11 +165,13 @@ enum ReconnectLoop {
 
     /// `onShortSessions`: called with the number of sessions in a row that connected but ended before `healthyAfter`,
     /// after each such session (0 once a healthy session ended).
-    static func run(label: String, policy: ReconnectPolicy, log: some EventChannelLog, reachability: CameraReachability? = nil, attempt: @Sendable (ConnectionState) async throws -> Void,
+    static func run(label: String, policy: ReconnectPolicy, log: some EventChannelLog, reachability: CameraReachability? = nil, waker: ReconnectWaker? = nil,
+                    attempt: @Sendable (ConnectionState) async throws -> Void,
                     afterAttempt: @Sendable (ConnectionState) async -> Void, onUnauthorized: @Sendable () -> Void = {},
                     onShortSessions: @Sendable (Int) -> Void = { _ in }) async {
         var policy = policy
         var failureLog = FailureLog()
+        var wakeUsed = false   // a wake already cut one wait short since logins started failing
         while !Task.isCancelled {
             if let reachability, reachability.isOffline {
                 await reachability.waitUntilReachable()
@@ -148,8 +205,22 @@ enum ReconnectLoop {
             }
             if connection.everConnected { onShortSessions(policy.consecutiveShortSessions) }
             if let failure = failure as? CameraAdapterError, failure.isLoginRefusal {
-                log.warning("\(label): the camera rejected the credentials; next attempt in \(Int(delay.timeInterval)) s")
+                if case .lockedOut = failure {
+                    log.warning("\(label): logins to the camera are paused after a refused login; next attempt in \(Int(delay.timeInterval)) s")
+                } else {
+                    log.warning("\(label): the camera rejected the credentials; next attempt in \(Int(delay.timeInterval)) s")
+                }
                 onUnauthorized()
+                if let reachability, reachability.isOffline { continue }
+                if let waker {
+                    // The long wait protects the camera from a lockout. Video that signs in with the same credentials ends it,
+                    // once per streak of refusals: a camera whose video flaps cannot turn that into a login every few seconds.
+                    if await waker.sleep(for: delay, wakeable: !wakeUsed) { wakeUsed = true }
+                    if Task.isCancelled { break }
+                    continue
+                }
+            } else {
+                wakeUsed = false
             }
             if let reachability, reachability.isOffline { continue }   // waits at the top, then connects at once
             if delay > .zero {
@@ -218,6 +289,7 @@ final class SupervisedEventSource: CameraEventSource, Sendable {
     private let broadcaster = AsyncBroadcaster<CameraEvent>(bufferingNewest: 256)
     private let holds: EventHoldState
     private let state: Mutex<State>
+    private let waker = ReconnectWaker()
 
     init(label: String, cameraID: UUID? = nil, policy: ReconnectPolicy = ReconnectPolicy(), ringDedupe: Duration = .seconds(3),
          unreliableAfterShortSessions: Int? = nil, onStop: (@Sendable () async -> Void)? = nil, reachability: CameraReachability? = nil,
@@ -251,12 +323,12 @@ final class SupervisedEventSource: CameraEventSource, Sendable {
 
     func events() -> AsyncStream<CameraEvent> {
         let stream = broadcaster.subscribe()
-        let (label, policy, session, log, broadcaster, holds, unreliableAfter, reachability) = (label, policy, session, log, broadcaster, holds,
-                                                                                               unreliableAfter, reachability)
+        let (label, policy, session, log, broadcaster, holds, unreliableAfter, reachability, waker) = (label, policy, session, log, broadcaster, holds,
+                                                                                                       unreliableAfter, reachability, waker)
         let start = state.withLock { state -> Bool in
             guard !state.stopped, state.task == nil else { return false }
             state.task = Task {
-                await ReconnectLoop.run(label: label, policy: policy, log: log, reachability: reachability) { connection in
+                await ReconnectLoop.run(label: label, policy: policy, log: log, reachability: reachability, waker: waker) { connection in
                     try await session(EventSessionContext(holds: holds, connection: connection) { broadcaster.yield($0) })
                 } afterAttempt: { connection in
                     await EventSessionContext(holds: holds, connection: connection) { broadcaster.yield($0) }.disconnected()
@@ -272,6 +344,10 @@ final class SupervisedEventSource: CameraEventSource, Sendable {
         }
         if start { log.debug("\(label): event channel starting") }
         return stream
+    }
+
+    func credentialsConfirmed() {
+        waker.wake()
     }
 
     func stop() async {

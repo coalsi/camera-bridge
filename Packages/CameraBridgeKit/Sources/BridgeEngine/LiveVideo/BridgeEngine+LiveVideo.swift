@@ -25,6 +25,33 @@ extension BridgeEngine {
         return subscription
     }
 
+    /// `liveVideo` for a browser: with `audio`, the camera's sound as AAC-LC (`LiveAudioConverter`: G.711 and the like converted, 16 kHz mono),
+    /// which a browser plays in MP4; without, video only. Cancelling it ends the converter and the camera's subscription.
+    public func browserLiveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
+        let source = try await liveVideo(cameraID: cameraID, stream: stream, audio: audio, displayWidth: displayWidth)
+        guard audio else { return source }
+        let codecs = environment.codecs
+        let (samples, continuation) = AsyncStream<MediaSample>.makeStream(bufferingPolicy: .unbounded)
+        let task = Task {
+            var converter = LiveAudioConverter(codecs: codecs)
+            for await sample in source.samples {
+                if Task.isCancelled { break }
+                switch sample {
+                case .video: continuation.yield(sample)
+                case .audio(let frame): for converted in converter.convert(frame) { continuation.yield(.audio(converted)) }
+                }
+            }
+            converter.finish()
+            continuation.finish()
+        }
+        let cancel: @Sendable () -> Void = {
+            task.cancel()
+            source.cancel()
+        }
+        continuation.onTermination = { _ in cancel() }
+        return LiveVideoSubscription(samples: samples, stream: source.stream, cancel: cancel)
+    }
+
     /// The preview engine's synthetic streams (moving test pattern, main or sub size of the sample camera), leased and
     /// counted like a real camera's.
     private func previewLiveVideo(cameraID: UUID, stream: LiveVideoStream, audio: Bool, displayWidth: Int?) async throws -> LiveVideoSubscription {

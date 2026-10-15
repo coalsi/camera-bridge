@@ -28,6 +28,22 @@ public protocol SystemControlling: Sendable {
     func setAutomaticUpdates(_ enabled: Bool) async throws
     /// Erases the bridge's settings and HomeKit pairings, then restarts.
     func factoryReset() async throws
+    /// Where recordings go now (the box's own disk or an attached drive) and the disks that could take them.
+    func recordingDrives() async throws -> RecordingDriveReport
+    /// Records to the disk `targetID` names from now on. Without `keepData` every file on it is erased and a new file system made (`phrase` is the
+    /// sentence the person typed, "ERASE ALL DATA ON <disk name>"); with it a disk that already is a Camera Bridge recording drive is used as it is.
+    func useRecordingDrive(targetID: String, phrase: String, keepData: Bool) async throws
+    /// Goes back to recording on the box's own disk. The drive and what is on it are left alone.
+    func forgetRecordingDrive() async throws
+    /// How the box is on the network (wired, a Wi-Fi network, the setup hotspot), the networks it knows and the last ones it saw.
+    func wifi() async -> WifiReport
+    /// Looks for Wi-Fi networks in range (the radio is busy for a few seconds). Strongest first.
+    func scanWifi() async throws -> [WifiNetwork]
+    /// Saves the network `ssid` (with `password`, empty for an open network) and, with `restart`, restarts the box to join it.
+    func joinWifi(ssid: String, password: String, restart: Bool) async throws
+    func forgetWifi(ssid: String) async throws
+    /// The setup hotspot while it is open (the box has no other network), nil otherwise. Cheap: it is asked for requests to unknown host names.
+    func setupHotspot() -> SetupHotspot?
 }
 
 extension SystemControlling {
@@ -45,6 +61,102 @@ extension SystemControlling {
 
     public func factoryReset() async throws {
         throw SystemError("This copy runs as a plain program, so there is nothing to reset.")
+    }
+
+    public func recordingDrives() async throws -> RecordingDriveReport {
+        throw SystemError("Choosing a recording drive is only possible on Camera Bridge OS.")
+    }
+
+    public func useRecordingDrive(targetID: String, phrase: String, keepData: Bool) async throws {
+        throw SystemError("Choosing a recording drive is only possible on Camera Bridge OS.")
+    }
+
+    public func forgetRecordingDrive() async throws {
+        throw SystemError("Choosing a recording drive is only possible on Camera Bridge OS.")
+    }
+
+    public func wifi() async -> WifiReport { WifiReport(state: "unavailable", message: "Wi-Fi is managed by Camera Bridge OS.") }
+
+    public func scanWifi() async throws -> [WifiNetwork] { throw SystemError("Wi-Fi is managed by Camera Bridge OS.") }
+
+    public func joinWifi(ssid: String, password: String, restart: Bool) async throws { throw SystemError("Wi-Fi is managed by Camera Bridge OS.") }
+
+    public func forgetWifi(ssid: String) async throws { throw SystemError("Wi-Fi is managed by Camera Bridge OS.") }
+
+    public func setupHotspot() -> SetupHotspot? { nil }
+}
+
+/// A Wi-Fi network in range.
+public struct WifiNetwork: Codable, Sendable, Equatable {
+    public var ssid: String
+    /// 0 to 100.
+    public var signal: Int
+    /// "" for an open network, else what the system says ("WPA2", "WPA1 WPA2", "WPA3", …).
+    public var security: String
+
+    public init(ssid: String, signal: Int, security: String) {
+        self.ssid = ssid
+        self.signal = signal
+        self.security = security
+    }
+}
+
+/// The setup hotspot the box opens when it has no network.
+public struct SetupHotspot: Codable, Sendable, Equatable {
+    public var ssid: String
+    /// The box's address on it (the setup page is there).
+    public var address: String
+
+    public init(ssid: String, address: String) {
+        self.ssid = ssid
+        self.address = address
+    }
+}
+
+/// How the box is on the network.
+public struct WifiReport: Codable, Sendable, Equatable {
+    /// "online", "hotspot", "searching", "no-wifi", "no-hotspot" or "unavailable" (no Camera Bridge OS underneath).
+    public var state: String
+    public var message: String
+    /// The Wi-Fi network the box is on, if any.
+    public var ssid: String?
+    public var hotspot: SetupHotspot?
+    /// The networks the box knows (it joins them by itself).
+    public var saved: [String]
+    /// Why the last network could not be joined, in a sentence.
+    public var lastError: String?
+    public var hasWifi: Bool
+    public var wired: Bool
+    /// The networks seen at the last look, strongest first.
+    public var networks: [WifiNetwork]
+
+    public init(state: String, message: String, ssid: String? = nil, hotspot: SetupHotspot? = nil, saved: [String] = [], lastError: String? = nil,
+                hasWifi: Bool = false, wired: Bool = false, networks: [WifiNetwork] = []) {
+        self.state = state
+        self.message = message
+        self.ssid = ssid
+        self.hotspot = hotspot
+        self.saved = saved
+        self.lastError = lastError
+        self.hasWifi = hasWifi
+        self.wired = wired
+        self.networks = networks
+    }
+}
+
+/// Where recordings go, as the system reports it.
+public struct RecordingDriveReport: Codable, Sendable, Equatable {
+    /// "internal" (the box's own disk), "mounted" (the chosen drive is in place), "missing" (chosen, not attached), "working" (being set up) or
+    /// "failed" (the last attempt did not work; `message` says why).
+    public var state: String
+    public var message: String
+    /// The disks that could take recordings (the system's own list, with the reasons for the ones that cannot).
+    public var drives: [InstallTarget]
+
+    public init(state: String, message: String, drives: [InstallTarget]) {
+        self.state = state
+        self.message = message
+        self.drives = drives
     }
 }
 
@@ -80,10 +192,12 @@ public struct SystemInfo: Codable, Sendable, Equatable {
     public var automaticUpdates: Bool?
     /// How the installation to a disk is going (nil: none was started since the system started).
     public var install: InstallProgress?
+    /// The system runs from a USB drive (the installer stick); nil when it can't be told. The page offers installing to a disk then.
+    public var runningFromUSB: Bool?
 
     public init(product: String, version: String, build: String, mode: String, osName: String? = nil, hostname: String? = nil,
                 hardware: String? = nil, architecture: String? = nil, canUpdate: Bool = false, canReboot: Bool = false,
-                canInstall: Bool = false, update: UpdateStatus? = nil, canManage: Bool = false, sshEnabled: Bool? = nil,
+                canInstall: Bool = false, update: UpdateStatus? = nil, canManage: Bool = false, runningFromUSB: Bool? = nil, sshEnabled: Bool? = nil,
                 automaticUpdates: Bool? = nil, install: InstallProgress? = nil) {
         self.product = product
         self.version = version
@@ -101,6 +215,7 @@ public struct SystemInfo: Codable, Sendable, Equatable {
         self.sshEnabled = sshEnabled
         self.automaticUpdates = automaticUpdates
         self.install = install
+        self.runningFromUSB = runningFromUSB
     }
 }
 
@@ -174,9 +289,15 @@ public struct InstallTarget: Codable, Sendable, Equatable {
     public var problems: [String]
     /// The sentence the person must type to erase this disk ("ERASE ALL DATA ON nvme0n1").
     public var phrase: String?
+    /// The disk already is a Camera Bridge recording drive: it can be used without erasing it (recording drives only).
+    public var isRecordingDrive: Bool?
+    /// The disk is the recording drive in use now (recording drives only).
+    public var inUse: Bool?
 
     public init(id: String, name: String, model: String? = nil, sizeBytes: Int64, note: String? = nil, eligible: Bool = true,
-                problems: [String] = [], phrase: String? = nil) {
+                problems: [String] = [], phrase: String? = nil, isRecordingDrive: Bool? = nil, inUse: Bool? = nil) {
+        self.isRecordingDrive = isRecordingDrive
+        self.inUse = inUse
         self.id = id
         self.name = name
         self.model = model

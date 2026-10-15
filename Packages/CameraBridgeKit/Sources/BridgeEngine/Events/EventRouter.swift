@@ -158,11 +158,20 @@ public actor EventRouter {
             return eventChannelConnected
         }
 
+        /// The camera reads as "rejected the username or password" (offline) when its video was refused, or when its event channel was refused and
+        /// there is no video to prove otherwise. Video that plays with the same credentials means they are right: a refused event login then is
+        /// the camera's own lockout, CameraBridge's login pause or a hiccup, so the camera stays online with its event channel down (a fault) while
+        /// the channel retries (at once, `CameraRuntime`).
+        var credentialsRejected: Bool {
+            rejectedBy.contains(.stream) || (rejectedBy.contains(.camera) && streamConnection != .online)
+        }
+
         func snapshot(id: UUID, at now: Duration) -> SensorState {
             SensorState(id: id, motion: motion.isActive(at: now), objects: Set(objects.filter { $0.value.isActive(at: now) }.keys),
                         tampered: tamper.isActive(at: now), audioAlarm: audioAlarm.isActive(at: now), isNight: isNight,
-                        digitalInputs: inputs, temperature: temperature, humidity: humidity, eventChannelConnected: publishedEventChannel(at: now),
-                        streamConnection: streamConnection, credentialsRejected: !rejectedBy.isEmpty, isEnabled: isEnabled,
+                        digitalInputs: inputs, temperature: temperature, humidity: humidity,
+                        eventChannelConnected: rejectedBy.contains(.camera) ? false : publishedEventChannel(at: now),
+                        streamConnection: streamConnection, credentialsRejected: credentialsRejected, isEnabled: isEnabled,
                         lastEvent: lastEvent, lastEventDate: lastEventDate, lastRingDate: lastRingDate, recentEvents: recentEvents)
         }
 

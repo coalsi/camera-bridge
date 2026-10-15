@@ -2,9 +2,12 @@
 # The network half of the updater. Runs as the unprivileged user "cbupdate" inside a sandbox (started by cb-update with
 # systemd-run); it can write only /srv/update/cache. It never writes a partition and never talks to the boot loader.
 #
-#   cb-update-fetch latest                       print the newest stable release as one JSON line
-#   cb-update-fetch download VERSION ARCH        download that release's update files into /srv/update/cache/VERSION,
+#   cb-update-fetch latest [--beta]              print the newest stable release as one JSON line (--beta: betas too)
+#   cb-update-fetch download VERSION ARCH [--beta]  download that release's update files into /srv/update/cache/VERSION,
 #                                                 then check the SHA-256 list's signature and every file's hash
+#
+# Betas are the 0.x releases, published as GitHub pre-releases. A box that runs a beta takes the next beta (cb-update passes --beta);
+# from 1.0 on a box takes only full releases.
 #
 # Releases come from GitHub: tags "os-v<version>" (not "v*": those are the Mac app) of the repository named in
 # /etc/camera-bridge/update.conf. Each release has SHA256SUMS and SHA256SUMS.sig (a minisign signature made with
@@ -49,10 +52,12 @@ releases_json() {
         "$CB_UPDATE_API/repos/$CB_UPDATE_REPO/releases?per_page=30"
 }
 
-# Newest published, non-draft, non-prerelease release whose tag is os-v<digits and dots>.
+BETA=false
+
+# Newest published, non-draft release whose tag is os-v<digits and dots>; pre-releases (betas) only with --beta.
 pick_latest() {
-    jq -c '
-      [ .[] | select((.draft | not) and (.prerelease | not) and (.tag_name | test("^os-v[0-9]+(\\.[0-9]+)*$"))) ]
+    jq -c --argjson beta "$BETA" '
+      [ .[] | select((.draft | not) and ($beta or (.prerelease | not)) and (.tag_name | test("^os-v[0-9]+(\\.[0-9]+)*$"))) ]
       | sort_by(.tag_name | ltrimstr("os-v") | split(".") | map(tonumber))
       | last // empty
       | { tag: .tag_name, version: (.tag_name | ltrimstr("os-v")), url: .html_url, notes: ((.body // "")[0:2000]),
@@ -109,8 +114,14 @@ cmd_download() {
     echo "downloaded and verified $version" >&2
 }
 
-case ${1:-} in
+command=${1:-}
+[ $# -gt 0 ] && shift
+args=()
+for arg in "$@"; do
+    if [ "$arg" = "--beta" ]; then BETA=true; else args+=("$arg"); fi
+done
+case $command in
     latest)   cmd_latest ;;
-    download) shift; cmd_download "$@" ;;
-    *) echo "usage: cb-update-fetch latest | download VERSION ARCH" >&2; exit 2 ;;
+    download) cmd_download "${args[@]}" ;;
+    *) echo "usage: cb-update-fetch latest [--beta] | download VERSION ARCH [--beta]" >&2; exit 2 ;;
 esac

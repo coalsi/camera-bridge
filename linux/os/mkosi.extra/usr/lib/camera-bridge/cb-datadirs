@@ -16,6 +16,7 @@ install -d -m 0750 -o camerabridge -g camerabridge /srv/camera-bridge
 install -d -m 2755 /srv/journal
 install -d -m 0755 /srv/system
 install -d -m 0700 /srv/system/ssh
+install -d -m 0700 /srv/system/network-connections
 install -d -m 0755 /srv/update
 install -d -m 0700 -o cbupdate -g cbupdate /srv/update/cache
 install -d -m 0700 /srv/update/stage

@@ -57,14 +57,29 @@ status() {
 
 current_version() { cb_os_version; }
 
+# A box on a beta (0.x) takes betas; from 1.0 on, only full releases. Sets CHANNEL to the fetcher's extra arguments.
+set_channel() {
+    CHANNEL=()
+    case "$(current_version)" in 0.*) CHANNEL=(--beta) ;; esac
+}
+
 # check: sets LATEST_JSON, LATEST, AVAILABLE
 do_check() {
     local current latest_json latest available=false extra
     current=$(current_version)
     status checking "looking for updates"
-    if ! latest_json=$(run_fetch latest) || [ -z "$latest_json" ]; then
+    set_channel
+    if ! latest_json=$(run_fetch latest "${CHANNEL[@]}"); then
         status failed "could not reach the update server (is the box online?)" "$(jq -n --arg c "$current" '{current: $c, updateAvailable: false}')"
         return 1
+    fi
+    if [ -z "$latest_json" ]; then
+        # The server answered, but no stable Camera Bridge OS version is published there yet (test versions are not offered).
+        status current "you are up to date ($current); no newer version has been published" \
+            "$(jq -n --arg c "$current" '{current: $c, updateAvailable: false, checkedAt: (now | todate)}')"
+        LATEST=""
+        AVAILABLE=false
+        return 0
     fi
     latest=$(jq -r .version <<<"$latest_json")
     if [ "$current" != "unknown" ] && dpkg --compare-versions "$latest" gt "$current"; then available=true; fi
@@ -117,6 +132,10 @@ do_apply() {
         cb_log "already up to date"
         return 0
     fi
+    if [ -z "$LATEST" ]; then
+        cb_log "no version has been published; nothing to install"
+        return 0
+    fi
     version=$LATEST
     [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]] || cb_die "odd version string"
 
@@ -128,7 +147,8 @@ do_apply() {
     fi
 
     status downloading "downloading version $version" "$(jq -n --arg v "$version" '{latest: $v}')"
-    if ! run_fetch download "$version" "$(arch)"; then
+    set_channel
+    if ! run_fetch download "$version" "$(arch)" "${CHANNEL[@]}"; then
         status failed "download or verification of version $version failed"
         return 1
     fi
@@ -153,12 +173,23 @@ do_apply() {
     cb_log "installed $version; reboot to activate"
 }
 
+# The bridge's time zone (Settings > Time zone, in the daemon's config.json), when it names one this system knows. The system
+# clock itself stays on UTC.
+bridge_time_zone() {
+    local zone
+    zone=$(jq -r '.settings.timeZone // empty' "$CB_DATA/config.json" 2>/dev/null) || return 0
+    case "$zone" in ''|*[!A-Za-z0-9_+/-]*|/*|*..*) return 0 ;; esac
+    [ -f "/usr/share/zoneinfo/$zone" ] && printf '%s' "$zone"
+}
+
 schedule_reboot() {
-    # After an automatic update, restart in the quiet hour (03:00, the box runs on UTC).
+    # After an automatic update, restart in the quiet hour: 03:00 in the bridge's time zone (UTC when it has none).
     if systemctl is-active --quiet camera-bridge-update-reboot.timer; then return 0; fi
-    systemd-run --quiet --unit=camera-bridge-update-reboot --on-calendar='*-*-* 03:00:00' \
+    local zone
+    zone=$(bridge_time_zone)
+    systemd-run --quiet --unit=camera-bridge-update-reboot --on-calendar="*-*-* 03:00:00 ${zone:-UTC}" \
         --timer-property=AccuracySec=1min systemctl reboot
-    cb_log "restart scheduled for 03:00"
+    cb_log "restart scheduled for 03:00 ${zone:-UTC}"
 }
 
 do_auto() {

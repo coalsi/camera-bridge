@@ -28,7 +28,9 @@ REPO=$(cd "$HERE/../.." && pwd)
 version="" arch=amd64 out="$HERE/out" daemon="" stub=0 broken=0 release=0 pubkey="" mirror="" clean=0
 # The engine and its tests use Swift 6.4. The -noble (Ubuntu 24.04) image on purpose: a binary built on a newer distribution
 # links libxml2.so.16 and newer glibc symbols that Debian 13 (the image) does not have.
-SWIFT_IMAGE=${CB_SWIFT_IMAGE:-swift:6.4-noble}
+# Pinned to 6.4.0: a daemon built with 6.4.1 used ~70% more CPU on the reference box (five cameras: 195% of a core against 113%,
+# half of it kernel time; measured 2026-10-14). Change it only after measuring a new release on real hardware.
+SWIFT_IMAGE=${CB_SWIFT_IMAGE:-swift:6.4.0-noble}
 SWIFT_BUILD_IMAGE=cb-os-swift-build
 BUILDER_IMAGE=cb-os-builder
 WORK_VOLUME=cb-os-work

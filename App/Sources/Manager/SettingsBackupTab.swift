@@ -6,10 +6,40 @@ import SwiftUI
 /// passwords stay in the Keychain (enter them again after an import), and so do the HomeKit pairings.
 struct BackupSettingsTab: View {
     let model: AppModel
+    @State private var confirmsHandOver = false
+    @State private var handedOver: Int?
 
     var body: some View {
         let backup = model.backup
         SettingsPage {
+            SectionCard(title: "Move to Camera Bridge OS", systemImage: "arrow.right.circle") {
+                SettingRow(title: "1. Export for the move",
+                           detail: "Saves your cameras as a file to take to the new bridge (a box running Camera Bridge OS).") {
+                    Button("Export for the Move…") { model.backup.export(from: model) }
+                        .buttonStyle(.brand(.primary))
+                }
+                SettingNote("2. On the new bridge open http://camera-bridge.local › Settings › Move from Camera Bridge for Mac, choose the file and type the cameras’ passwords (the file holds none).")
+                SettingRow(title: "3. Stop this Mac’s bridge",
+                           detail: "When the cameras run on the new bridge: every camera stops recording and is turned off here, so they are not served or recorded twice. Their settings stay; turn a camera back on to undo it.") {
+                    Button("Stop This Mac’s Bridge…") { confirmsHandOver = true }
+                        .buttonStyle(.brand(.secondary))
+                }
+                SettingNote("4. In the Home app: add the new bridge, then remove this Mac’s cameras (they show No Response once stopped).")
+                if let handedOver {
+                    Text(handedOver == 1 ? "1 camera stopped on this Mac." : "\(handedOver) cameras stopped on this Mac.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .confirmationDialog("Stop this Mac’s bridge?", isPresented: $confirmsHandOver, titleVisibility: .visible) {
+                Button("Stop Every Camera Here", role: .destructive) {
+                    Task { handedOver = await model.handOverToAnotherBridge() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Every camera stops recording and is turned off on this Mac. Recordings already made stay. Do this once the cameras run on the new bridge.")
+            }
+
             SectionCard(title: "Export", systemImage: "square.and.arrow.up") {
                 SettingRow(title: "Export Configuration",
                            detail: "Saves your cameras and the bridge settings as a file. It contains no passwords, no webhook token and no HomeKit pairings.") {

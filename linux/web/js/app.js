@@ -1,7 +1,9 @@
 // Camera Bridge: the page. Starts by asking who is there (first run, signed out, signed in), then shows the shell and routes screens.
-import { get, onAuthChange, setCSRFToken } from './api.js';
-import { h, replace, toast } from './dom.js';
+import { get, onAuthChange, patch, setCSRFToken } from './api.js';
+import { h, replace, spinner, toast } from './dom.js';
 import { icon } from './icons.js';
+import { askToPowerOff, powerOff } from './power.js';
+import { THEME_EVENT, THEME_INFO, applyTheme, currentTheme, nextTheme, setTheme } from './theme.js';
 import { store, startEvents, stopEvents, subscribe, loadCameras } from './store.js';
 import { renderSetup, renderLogin } from './screens/auth.js';
 import { renderCameras } from './screens/cameras.js';
@@ -10,6 +12,8 @@ import { renderCamera, renderCameraPairing, renderSensorsPairing } from './scree
 import { renderSettings } from './screens/settings.js';
 import { renderLogs } from './screens/logs.js';
 import { renderSystem } from './screens/system.js';
+import { renderAbout } from './screens/about.js';
+import { whatsNewNotice } from './whats-new.js';
 
 const root = document.getElementById('app');
 let screen = null;          // { el, destroy }
@@ -17,21 +21,53 @@ let shell = null;           // { main, nav, ... } while signed in
 let unsubscribe = null;
 
 const NAV = [
-  { href: '#/', label: 'Cameras', icon: 'camera', match: (p) => p === '' || p.startsWith('camera') || p === 'add' || p.startsWith('pair') },
+  { href: '#/', label: 'Monitor', icon: 'monitor', match: (p) => p === '' || p === 'monitor' || p === 'nvr' || p.startsWith('nvr/') },
+  { href: '#/cameras', label: 'Cameras', icon: 'camera', match: (p) => p === 'cameras' || p.startsWith('camera/') || p === 'add' || p.startsWith('pair') },
   { href: '#/logs', label: 'Log', icon: 'list', match: (p) => p === 'logs' },
   { href: '#/system', label: 'System', icon: 'server', match: (p) => p === 'system' },
-  { href: '#/settings', label: 'Settings', icon: 'sliders', match: (p) => p === 'settings' },
+  { href: '#/settings', label: 'Settings', icon: 'sliders', match: (p) => p === 'settings' || p.startsWith('settings/') },
+  { href: '#/about', label: 'About', icon: 'info', match: (p) => p === 'about' },
 ];
 
+/**
+ * A screen whose code is fetched when it is first opened: a spinner meanwhile, then the screen, or a plain card if its code could not be
+ * loaded. Nothing else on the page depends on it, so a broken file there cannot stop the sign-in page or the camera list.
+ */
+function lazy(importer, exportName) {
+  return (context) => {
+    const host = h('div', null, h('div', { class: 'checking' }, spinner()));
+    let inner = null;
+    let destroyed = false;
+    Promise.resolve().then(importer).then((loaded) => {
+      if (destroyed) return;
+      inner = loaded[exportName](context);
+      replace(host, inner.el);
+    }).catch((error) => {
+      console.error(error);
+      if (destroyed) return;
+      replace(host, h('div', { class: 'empty' }, h('h2', null, 'This page didn’t load'),
+        h('p', null, 'Part of Camera Bridge could not be loaded. Reload the page to try again.'),
+        h('button', { class: 'btn primary', type: 'button', onclick: () => location.reload() }, 'Reload')));
+    });
+    return { el: host, destroy() { destroyed = true; inner?.destroy?.(); } };
+  };
+}
+
 const ROUTES = [
-  { pattern: /^$/, title: 'Cameras', render: renderCameras },
+  { pattern: /^$/, title: 'Monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
+  { pattern: /^cameras$/, title: 'Cameras', render: renderCameras },
   { pattern: /^add$/, title: 'Add a camera', render: renderAdd },
   { pattern: /^camera\/([0-9A-Fa-f-]{36})$/, title: 'Camera', render: renderCamera },
   { pattern: /^camera\/([0-9A-Fa-f-]{36})\/pair$/, title: 'Add to Apple Home', render: renderCameraPairing },
+  { pattern: /^camera\/([0-9A-Fa-f-]{36})\/watch(?:\/(\d{12,13}))?$/, title: 'Recordings', render: lazy(() => import('./screens/watch.js'), 'renderWatch') },
+  // The Monitor writes #/nvr/<epoch ms> while you look back in the recordings; #/monitor is its old address.
+  { pattern: /^nvr(?:\/(\d{12,13}))?$/, title: 'NVR', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
+  { pattern: /^monitor$/, title: 'Monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^pair\/sensors$/, title: 'Sensors bridge', render: renderSensorsPairing },
   { pattern: /^logs$/, title: 'Log', render: renderLogs },
   { pattern: /^system$/, title: 'System', render: renderSystem },
-  { pattern: /^settings$/, title: 'Settings', render: renderSettings },
+  { pattern: /^settings(?:\/(recording))?$/, title: 'Settings', render: renderSettings },
+  { pattern: /^about$/, title: 'About', render: renderAbout },
 ];
 
 export function navigate(path) {
@@ -64,7 +100,7 @@ function route() {
     return;
   }
   replace(shell.content, h('div', { class: 'empty' }, h('h2', null, 'That page doesn’t exist'), h('p', null, 'It may have moved.'),
-    h('a', { class: 'btn primary', href: '#/' }, 'Back to your cameras')));
+    h('a', { class: 'btn primary', href: '#/cameras' }, 'Back to your cameras')));
   setTitle('Not found');
   markNav(path);
 }
@@ -80,16 +116,46 @@ function markNav(path) {
 function buildShell() {
   const name = h('span', null, store.session.bridgeName);
   const nav = h('nav', { class: 'nav', 'aria-label': 'Main' },
-    NAV.map((item) => h('a', { href: item.href }, icon(item.icon), h('span', null, item.label))));
+    NAV.map((item) => h('a', { href: item.href, title: item.label }, icon(item.icon), h('span', null, item.label))));
   const content = h('div');
   const main = h('main', { id: 'main', class: 'main', tabindex: '-1' }, content);
   const reconnect = h('div', { class: 'reconnect', role: 'status', hidden: true }, 'Lost contact with the bridge. Trying again…');
-  const version = h('div', { class: 'footer' });
-  replace(root, h('header', { class: 'topbar' }, h('div', { class: 'topbar-inner' },
-    h('a', { class: 'brand', href: '#/' }, h('img', { src: '/mark.svg', alt: '', width: 30, height: 30 }), name), nav)),
-  reconnect, main, version);
-  shell = { nav, content, main, name, reconnect, version };
-  get('status').then((s) => { version.textContent = `${s.product} ${s.version}`; }).catch(() => {});
+  // The system's version (Camera Bridge OS 0.2.0); a click opens About and its notes.
+  const notice = h('div', { class: 'notice-host' });
+  const version = h('a', { class: 'version', href: '#/about', title: 'About this version' });
+  // Auto → Light → Dark (js/theme.js); showTheme() fills it in.
+  const theme = h('button', { class: 'side-btn theme-btn', type: 'button', onclick: () => setTheme(nextTheme(currentTheme())) });
+  // Shown once the bridge says it can power the machine off (Camera Bridge OS), not for a bridge running as a program.
+  const power = h('button', { class: 'side-btn power-btn', type: 'button', title: 'Power off the bridge', hidden: true,
+    onclick: async () => {
+      if (!(await askToPowerOff())) return;
+      try { await powerOff(); } catch (error) { toast(error.message, 'error'); }
+    } }, icon('power'), h('span', { class: 'side-label' }, 'Power off'));
+  root.classList.add('signed-in');
+  replace(root,
+    h('aside', { class: 'sidebar' },
+      h('a', { class: 'brand', href: '#/', title: store.session.bridgeName }, h('img', { src: '/mark.svg', alt: '', width: 30, height: 30 }), name),
+      nav,
+      h('div', { class: 'sidebar-foot' }, theme, power, version)),
+    h('div', { class: 'app-main' }, reconnect, notice, main));
+  shell = { nav, content, main, name, reconnect, version, theme };
+  showTheme();
+  get('system').then((s) => {
+    power.hidden = !s.canManage;
+    version.textContent = `${s.product} ${s.version}`;
+    const news = whatsNewNotice(s.version);
+    if (news) notice.append(news);
+  }).catch(() => {});
+}
+
+/** The appearance button: the icon of the appearance in use, and what a click switches to. */
+function showTheme() {
+  if (!shell) return;
+  const now = THEME_INFO[currentTheme()];
+  const next = THEME_INFO[nextTheme(currentTheme())].label;
+  replace(shell.theme, icon(now.icon), h('span', { class: 'side-label' }, `Appearance: ${now.label}`));
+  shell.theme.title = `Appearance: ${now.label}. Click for ${next}.`;
+  shell.theme.setAttribute('aria-label', `Appearance: ${now.label}. Switch to ${next}`);
 }
 
 async function showApp() {
@@ -100,6 +166,13 @@ async function showApp() {
     if (kind === 'connection' && shell) shell.reconnect.hidden = store.connected;
   });
   try { await loadCameras(); } catch (error) { toast(error.message, 'error'); }
+  // A bridge without a time zone of its own (Camera Bridge OS runs in UTC) takes the zone of the browser that signs in: the timestamp it draws
+  // and the clocks it sets on cameras are then local time.
+  get('settings').then((settings) => {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!settings.timeZone && zone) return patch('settings', { timeZone: zone });
+    return null;
+  }).catch(() => {});
   startEvents();
   if (!location.hash) location.hash = '#/';
   route();
@@ -114,6 +187,7 @@ export async function showSignedIn(info) {
 function showSignedOut() {
   stopEvents();
   shell = null;
+  root.classList.remove('signed-in');
   screen?.destroy?.();
   screen = null;
   document.title = 'Sign in · Camera Bridge';
@@ -123,6 +197,7 @@ function showSignedOut() {
 function showSetup() {
   stopEvents();
   shell = null;
+  root.classList.remove('signed-in');
   document.title = 'Set up · Camera Bridge';
   replace(root, renderSetup({ session: store.session, onDone: showSignedIn }));
 }
@@ -147,5 +222,8 @@ onAuthChange(async (kind) => {
   if (kind === 'unauthorized' && shell) { store.session = { ...store.session, authenticated: false }; showSignedOut(); }
 });
 window.addEventListener('hashchange', route);
+document.addEventListener(THEME_EVENT, showTheme);
+// Another tab of this browser chose an appearance.
+window.addEventListener('storage', (event) => { if (event.key === null || event.key === 'cb-theme') applyTheme(currentTheme()); });
 boot();
 

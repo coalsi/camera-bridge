@@ -1,0 +1,62 @@
+/* Recording: the Record switch, the Record card, Settings > Recording and the "where to store" dialog.
+   The first block holds the colours and sizes the watch screen (nvr-watch.css) and the NVR grid (nvr-grid.css) share. */
+
+:root {
+  --nvr-rec: var(--recording);                      /* REC */
+  --nvr-wait: var(--warning);                       /* waiting, paused, bars above normal */
+  --nvr-stage-bg: #0c0c0e;                          /* behind video: dark in both themes, like .preview */
+  --nvr-stage-fg: #e8e8ea;
+  --nvr-overlay-bg: rgb(15 15 17 / 0.82);           /* captions and chips over video */
+  --nvr-overlay-border: rgb(255 255 255 / 0.14);
+  --nvr-track-bg: var(--bg-raised);                 /* behind a timeline or a bar */
+  --nvr-wave: var(--text-3);                        /* waveform bars */
+  --nvr-wave-hot: var(--amber);                     /* bars above 1.5 x normal */
+  --nvr-wave-normal: var(--border-strong);          /* the dashed "normal" line */
+  --nvr-gap-hatch: color-mix(in srgb, var(--text-3) 40%, transparent);
+  --nvr-playhead: var(--amber-strong);
+}
+
+/* The Record switch. It is a button with role="switch"; the words on it say what Record is doing. */
+.rec-switch { display: inline-flex; }
+.rec-switch.corner { position: absolute; top: 10px; right: 10px; z-index: 2; }   /* above the card's link (z-index 1) */
+.rec-toggle {
+  appearance: none; font: inherit; font-size: 0.8rem; font-weight: 650; cursor: pointer; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 4px 12px 4px 9px; border-radius: 99px;
+  border: 1px solid var(--nvr-overlay-border); background: var(--nvr-overlay-bg); color: var(--nvr-stage-fg);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+}
+.rec-toggle:hover { border-color: rgb(255 255 255 / 0.32); }
+.rec-toggle .rec-dot { width: 11px; height: 11px; flex: none; box-sizing: border-box; border-radius: 50%; border: 2px solid currentColor; }
+.rec-toggle[aria-checked="true"] .rec-dot { background: currentColor; }
+.rec-toggle.rec { color: #ff6a61; }
+.rec-toggle.wait, .rec-toggle.paused { color: #f0b254; }
+.rec-toggle.rec .rec-dot { animation: pulse 1.6s ease-in-out infinite; }
+.rec-toggle[aria-busy="true"] .rec-dot { animation: pulse 0.9s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .rec-toggle .rec-dot { animation: none !important; } }
+
+/* In a row of controls (the watch screen) it follows the page colours instead of the dark picture overlay. */
+.rec-switch.panel .rec-toggle { min-height: 38px; background: var(--surface-2); color: var(--text); border-color: var(--border-strong); -webkit-backdrop-filter: none; backdrop-filter: none; }
+.rec-switch.panel .rec-toggle:hover { background: color-mix(in srgb, var(--surface-2) 70%, var(--text) 12%); }
+.rec-switch.panel .rec-toggle.rec { color: var(--nvr-rec); }
+.rec-switch.panel .rec-toggle.wait, .rec-switch.panel .rec-toggle.paused { color: var(--nvr-wait); }
+
+/* The cards */
+.nvr-card .nvr-actions { margin-top: 14px; }
+.rec-note { color: var(--warning); margin: 0 0 10px; }
+.nvr-keyframe { margin: 12px 0 0; }
+.nvr-keyframe .small { display: block; margin-top: 4px; color: var(--text-2); }
+.nvr-card .kv { margin-top: 12px; }
+.nvr-card .inline-fields { margin-top: 14px; }
+.nvr-card .banner { margin: 12px 0 0; }
+#recording { scroll-margin-top: 84px; }   /* the sticky top bar */
+#recording h2:focus { outline: none; }    /* the heading takes focus when #/settings/recording scrolls here */
+.rec-usage { height: 8px; margin: 14px 0 10px; overflow: hidden; border-radius: 99px; border: 1px solid var(--border); background: var(--nvr-track-bg); }
+.rec-usage .fill { height: 100%; width: 0; border-radius: 99px; background: var(--amber); transition: width 0.25s; }
+
+/* "Where should recordings be stored?" */
+.nvr-choose .checking { flex-direction: row; justify-content: center; padding: 18px 0; }
+.nvr-choose .choice:has(input:disabled) { opacity: 0.6; cursor: not-allowed; }
+.nvr-choose .choice .mono { font-size: 0.82rem; color: var(--text-3); overflow-wrap: anywhere; }
+.rec-problem { color: var(--danger); }
+.nvr-warning { color: var(--warning); }
+.nvr-error { margin: 12px 0 0; color: var(--danger); font-weight: 550; }
