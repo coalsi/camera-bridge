@@ -8,8 +8,9 @@ import { icon } from '../icons.js';
 import { cameraList, subscribe } from '../store.js';
 import { stampText } from '../stamp.js';
 import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
+import { createZoom } from '../live/zoom.js';
 import { createWallEvents } from './wall-events.js';
-import { showLabel } from '../labels.js';
+import { labelStyle, showLabel } from '../labels.js';
 import { createFetcher } from '../nvr/fetcher.js';
 import { createCatalog } from '../nvr/catalog.js';
 import { PlaybackClock } from '../nvr/clock.js';
@@ -247,7 +248,7 @@ export function renderNVR({ params, navigate, setTitle }) {
       if (grid.children[index] !== parts.el) grid.insertBefore(parts.el, grid.children[index] ?? null);
       updateTile(parts, tile, view.transport.mode !== 'snapshots');
     });
-    if (soloId !== null && !wanted.has(soloId)) soloId = null;   // the camera left the page
+    if (soloId !== null && !wanted.has(soloId)) { soloId = null; zoom?.destroy(); zoom = null; }   // the camera left the page
     for (const [id, parts] of tileParts) parts.el.hidden = soloId !== null && id !== soloId;
     setData(grid, 'count', soloId !== null ? '1' : String(Math.max(1, Math.min(perPage, view.total))));
     setData(grid, 'solo', String(soloId !== null));
@@ -388,6 +389,22 @@ export function renderNVR({ params, navigate, setTitle }) {
     if (clip.choosing()) clip.cancel();     // the cameras on offer changed: start the clip again
     controller.showOnly(id);                // the timeline: that camera's recordings alone, or every camera's again
     render();
+    setZoom(id);
+  }
+
+  // Digital zoom on the camera that fills the wall (js/live/zoom.js): drag a box, wheel or pinch; double-click or Esc for the whole picture.
+  let zoom = null;
+  function setZoom(id) {
+    zoom?.destroy();
+    zoom = null;
+    const parts = id === null ? null : tileParts.get(id);
+    if (!parts) return;
+    zoom = createZoom({
+      host: parts.media,
+      // The picture on screen: a recording in its stage while one plays, else the live video.
+      getVideo: () => (parts.el.dataset.video === 'true' ? stageFor(id).querySelector('video') : parts.liveVideo),
+      onActive: (zoomed) => setData(parts.el, 'zoomed', String(zoomed)),
+    });
   }
 
   // MARK: Live stream (real video while live)
@@ -511,6 +528,8 @@ export function renderNVR({ params, navigate, setTitle }) {
   function drawLabel(parts) {
     const camera = cameraList().find((c) => c.id === parts.el.dataset.id);
     showLabel(parts.label, camera, camera ? labelTime(parts) : null);
+    // The label carries the name: the tile's own heading steps aside (it stays for screen readers and the keyboard).
+    setData(parts.el, 'labelname', String(!parts.label.hidden && !!camera && labelStyle(camera).showCameraName));
   }
 
   function tickClock() {
@@ -581,6 +600,7 @@ export function renderNVR({ params, navigate, setTitle }) {
     const typing = Boolean(target?.closest('input, select, textarea, [contenteditable=""], [contenteditable="true"]')) || Boolean(document.querySelector('dialog[open]'));
     const activatable = Boolean(target?.closest('button, a[href], summary, [role="button"], [role="switch"], [role="tab"], [role="menuitem"]'));
     if (!typing && clip.key(event)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+    if (!typing && event.key === 'Escape' && zoom?.zoomed()) { event.preventDefault(); zoom.reset(); return; }
     if (!typing && event.key === 'Escape' && soloId !== null && !document.fullscreenElement) { event.preventDefault(); setSolo(null); return; }
     const action = keyAction(event, { typing, activatable });
     if (!action || !controller.canAct()) return;
@@ -620,6 +640,7 @@ export function renderNVR({ params, navigate, setTitle }) {
       controller.destroy();
       clip.destroy();
       recordingSound?.destroy();
+      zoom?.destroy();
       snapshots.destroy();
       dispatcher.destroy();
       timeline.destroy();

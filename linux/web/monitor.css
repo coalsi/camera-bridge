@@ -117,3 +117,44 @@
 .nvr-sound svg { width: 18px; height: 18px; }
 .nvr-sound:hover { background: rgb(40 40 46 / 0.9); }
 .nvr-sound[data-on="true"] { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }
+
+/* The camera's name is in its label (with the date and time): the heading at the top left is then only for screen readers and the keyboard
+   (it shows again when focused, or when the label is hidden or leaves the name out). */
+.monitor .nvr-tile[data-labelname="true"] .nvr-tile-bar { background: none; }
+.monitor .nvr-tile[data-labelname="true"] .nvr-tile-bar h3:not(:focus-within) {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+/* Digital zoom (js/live/zoom.js), on the camera that fills the wall: the layer covers the picture; the zoomed area is drawn on its canvas over
+   the video; the controls and the overview sit at the top left (the name is in the label at the top right). */
+.zoom-layer { position: absolute; inset: 0; z-index: 2; }
+.nvr-grid[data-solo="false"] .zoom-layer { display: none; }
+.zoom-canvas { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
+.zoom-surface { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+.zoom-box {
+  position: absolute; left: var(--x); top: var(--y); width: var(--w); height: var(--h); pointer-events: none;
+  border: 2px solid #f0b254; background: rgb(240 178 84 / 0.12); box-shadow: 0 0 0 9999px rgb(0 0 0 / 0.35); border-radius: 4px;
+}
+.zoom-controls { position: absolute; top: 10px; left: 10px; z-index: 4; display: grid; gap: 8px; justify-items: start; }
+.zoom-row {
+  display: flex; align-items: center; gap: 4px; padding: 4px; border-radius: 12px; background: rgb(15 15 17 / 0.78);
+  border: 1px solid rgb(255 255 255 / 0.12); backdrop-filter: blur(8px);
+}
+.zoom-btn {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 32px; height: 32px; padding: 0 10px; justify-content: center;
+  border: 0; border-radius: 8px; background: transparent; color: #e8e8ea; font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+}
+.zoom-btn:hover { background: rgb(255 255 255 / 0.1); }
+.zoom-btn svg { width: 15px; height: 15px; }
+.zoom-enhance[aria-pressed="true"] { color: #f0b254; }
+.zoom-level { min-width: 4ch; text-align: center; font-variant-numeric: tabular-nums; font-weight: 650; color: #fff; font-size: 0.9rem; }
+.zoom-map { width: 160px; height: auto; border-radius: 8px; border: 1px solid rgb(255 255 255 / 0.18); background: #000; cursor: move; touch-action: none; }
+.zoom-hint {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 6px 12px; border-radius: 999px; pointer-events: none;
+  background: rgb(15 15 17 / 0.72); color: #e8e8ea; font-size: 0.8rem; opacity: 0; transition: opacity 0.2s;
+}
+.nvr-tile:hover .zoom-layer[data-zoomed="false"] .zoom-hint { opacity: 1; }
+@media (hover: none) { .zoom-hint { display: none; } }
+/* While zoomed, the speaker and badges stay above the drawn picture. */
+.nvr-tile[data-zoomed="true"] .nvr-sound, .nvr-tile[data-zoomed="true"] .nvr-badges { z-index: 5; }
+.nvr-tile[data-zoomed="true"] .video-label { z-index: 5; }

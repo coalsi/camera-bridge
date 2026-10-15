@@ -7,6 +7,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.103',
+    date: '2026-10-15',
+    title: 'Zoom into a camera',
+    items: [
+      'Zoom: with one camera on the wall, drag a box over the picture to zoom into it, or use the wheel or a pinch. Drag the rectangle on the overview to move; double-click or Esc shows the whole picture again.',
+      'Enhance sharpens the zoomed picture on your computer’s graphics, so edges and small text come back.',
+      'Each camera’s name is shown once, in its label with the date and time.',
+    ],
+  },
+  {
     version: '0.1.102',
     date: '2026-10-15',
     title: 'Live video and sound, one Monitor, and a clean label on every camera',
