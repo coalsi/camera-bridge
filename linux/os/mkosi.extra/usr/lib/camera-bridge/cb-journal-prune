@@ -1,5 +1,6 @@
 #!/bin/bash
-# The root file system is read-only, so systemd cannot save /etc/machine-id and invents a new one on every boot; the
+# The root file system is read-only, so systemd cannot save /etc/machine-id: it takes it from the firmware's product UUID
+# (systemd.machine_id=firmware, the same every boot), or invents a new one on every boot on a firmware without one. The
 # persistent journal keeps one folder per machine id. Keep the current one and the two most recent others, remove the
 # rest (journald's own size limit only applies inside the current folder).
 set -euo pipefail

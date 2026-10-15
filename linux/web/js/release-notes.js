@@ -7,6 +7,15 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.104',
+    date: '2026-10-15',
+    title: 'Apple Home records again',
+    items: [
+      'HomeKit Secure Video records on motion again: the box’s firewall blocked the connection the Home hub uses to collect recordings, so Apple Home showed live video but saved no clips.',
+      'The system log keeps earlier boots: the box now has the same machine id on every start.',
+    ],
+  },
+  {
     version: '0.1.103',
     date: '2026-10-15',
     title: 'Zoom into a camera',

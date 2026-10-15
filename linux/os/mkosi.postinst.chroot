@@ -12,7 +12,8 @@ chmod 0755 /usr/sbin/cb-install-to-disk /usr/sbin/cb-update /usr/sbin/cb-system 
 passwd -l root >/dev/null
 # SSH host keys are made on the box (when SSH is enabled), never shipped: they would be shared by every copy of the image.
 rm -f /etc/ssh/ssh_host_*
-# Empty machine-id on a read-only root: systemd uses a transient one each boot (see mkosi.extra/etc/fstab and the README).
+# Empty machine-id on a read-only root: systemd takes it from the firmware (systemd.machine_id=firmware in mkosi.conf), else a
+# transient one each boot (see mkosi.extra/etc/fstab and the README).
 : >/etc/machine-id
 rm -f /var/lib/dbus/machine-id
 
