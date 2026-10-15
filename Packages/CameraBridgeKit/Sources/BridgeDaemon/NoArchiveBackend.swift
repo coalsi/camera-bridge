@@ -39,6 +39,9 @@ struct NoArchiveBackend: BridgeBackend {
     func resetSensorsBridgePairing() async throws { try await base.resetSensorsBridgePairing() }
     func updateSettings(_ change: @Sendable @escaping (inout BridgeSettings) -> Void) async throws { try await base.updateSettings(change) }
     func snapshotJPEG(cameraID: UUID) async -> Data? { await base.snapshotJPEG(cameraID: cameraID) }
+    func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription {
+        try await base.liveVideo(cameraID: cameraID, stream: stream, displayWidth: displayWidth)
+    }
     func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
         try await base.liveVideo(cameraID: cameraID, stream: stream, displayWidth: displayWidth, audio: audio)
     }

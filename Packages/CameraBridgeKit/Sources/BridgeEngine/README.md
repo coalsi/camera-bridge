@@ -363,6 +363,10 @@ errno EHOSTUNREACH / EPERM persisted) and `.dualHomedSubnet` (two interfaces hol
 `controllerOnVPN` no longer fires for a routed subnet (a specific route through a LAN interface covers the address, `StreamAddress.routeTable`),
 this Mac's own LAN address, or an advertised address the HAP connection itself comes from.
 
+**Live sound for the browser (2026-10-15).** `BridgeEngine.browserLiveVideo(cameraID:stream:displayWidth:audio:)` is `liveVideo` with the camera's
+sound as AAC-LC (`LiveAudioConverter`: AAC-LC passed through, G.711 and the rest converted to 16 kHz mono by the platform's transcoder);
+`LiveMP4Remuxer(audio:)` and its `push(audio:)` add it to the page's live MP4 as a second track at the next keyframe.
+
 **In-app live viewer (2026-10-02).**
 
 `BridgeEngine.liveVideo(cameraID:stream:audio:displayWidth:)` (`LiveVideo/`) gives the app's own viewer the camera's encoded access units

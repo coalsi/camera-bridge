@@ -55,8 +55,11 @@ public protocol BridgeBackend: Sendable {
     func resetSensorsBridgePairing() async throws
     func updateSettings(_ change: @Sendable @escaping (inout BridgeSettings) -> Void) async throws
     func snapshotJPEG(cameraID: UUID) async -> Data?
-    /// `BridgeEngine.browserLiveVideo(cameraID:stream:displayWidth:audio:)`: the camera's encoded video from the newest keyframe on, for the
-    /// page's live video, with its sound as AAC-LC when `audio` is true. The default throws `EngineError.cameraNotRunning` (a backend without cameras of its own).
+    /// `BridgeEngine.liveVideo(cameraID:stream:audio:displayWidth:)` without audio: the camera's encoded video from the newest keyframe on, for the
+    /// page's live video. The default throws `EngineError.cameraNotRunning` (a backend without cameras of its own).
+    func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription
+    /// The same with the camera's sound as AAC-LC when `audio` is true (`BridgeEngine.browserLiveVideo`). The default serves video only and throws
+    /// `EngineError.cameraNotRunning` when sound is asked for, so a backend written before it still compiles.
     func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription
     /// `BridgeEngine.setCameraClockHidden(cameraID:hidden:)` with `hidden: !shown`: the camera's own date and time on its picture. Default throws.
     func setCameraClockShown(cameraID: UUID, shown: Bool) async throws -> CameraClockChange
@@ -144,6 +147,10 @@ public struct EngineBackend: BridgeBackend {
         await engine.snapshot(cameraID: cameraID)
     }
 
+    public func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription {
+        try await engine.liveVideo(cameraID: cameraID, stream: stream, audio: false, displayWidth: displayWidth)
+    }
+
     public func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
         try await engine.browserLiveVideo(cameraID: cameraID, stream: stream, displayWidth: displayWidth, audio: audio)
     }
@@ -197,8 +204,13 @@ public struct EngineBackend: BridgeBackend {
 }
 
 extension BridgeBackend {
-    public func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
+    public func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription {
         throw EngineError.cameraNotRunning
+    }
+
+    public func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
+        guard !audio else { throw EngineError.cameraNotRunning }
+        return try await liveVideo(cameraID: cameraID, stream: stream, displayWidth: displayWidth)
     }
 
     public func setCameraClockShown(cameraID: UUID, shown: Bool) async throws -> CameraClockChange {

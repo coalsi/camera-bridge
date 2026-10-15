@@ -21,6 +21,8 @@ in `docs/linux/ARCHITECTURE.md`; the interface itself is `linux/web/`.
 
 ## Additions beyond the contract
 
+Installer stick (2026-10-14, docs/CONTRACT_CHANGES.md): `SystemInfo.runningFromUSB` says whether the system runs from a USB drive; the System page offers installing to a disk only then.
+
 New module (additive; docs/CONTRACT_CHANGES.md 2026-10-08): `BridgeWeb` with `WebService`, `WebApp`, `WebConfiguration`, `HTTPServer`,
 `HTTPRequest`, `HTTPResponse`, `ResponseStream`, `AuthStore`, `BridgeBackend`, `EngineBackend`, `BridgeOverview`,
 `SystemControlling`, `UnavailableSystemControl`, `SystemInfo`, `UpdateStatus`, `InstallTarget`, `SystemError`, `LogFeed`,

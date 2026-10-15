@@ -9,6 +9,8 @@ libsystemd), a journald-friendly log sink (`StdoutLogSink`), the operating syste
 
 ## Additions beyond the contract
 
+Installer stick (2026-10-14): `RequestFileSystemControl.HostFacts.runningFromUSB` reads the device mounted at `/` from `/proc/self/mountinfo` and whether its path in /sys passes through USB; it fills `SystemInfo.runningFromUSB`.
+
 New module (additive; docs/CONTRACT_CHANGES.md 2026-10-08): `BridgeDaemon` with `Daemon`, `DaemonMain`, `DaemonOptions`,
 `DaemonInfo`, `SystemD`, `StdoutLogSink` and `RequestFileSystemControl`.
 
