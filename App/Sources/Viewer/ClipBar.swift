@@ -35,7 +35,7 @@ struct ClipBar: View {
         let preview = panel.clipPreview
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
-                Image(systemName: "scissors").foregroundStyle(Brand.amber)
+                Image(systemName: "scissors").foregroundStyle(Brand.accent)
                 if let selection {
                     Text(range(selection, preview: preview))
                         .font(.system(size: 13, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(.white)
@@ -56,9 +56,9 @@ struct ClipBar: View {
                     .help("Stop choosing a clip (Esc)")
                 Button { Task { await panel.exportClip() } } label: {
                     Text("Export Clip")
-                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.onAmber)
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.onRed)
                         .padding(.horizontal, 14).frame(height: 28)
-                        .background(Brand.amber.opacity(canExport ? 1 : 0.4), in: Capsule())
+                        .background(Brand.red.opacity(canExport ? 1 : 0.4), in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canExport)
@@ -73,8 +73,8 @@ struct ClipBar: View {
             }
         }
         .padding(10)
-        .background(Brand.amber.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Brand.amber.opacity(0.45), lineWidth: 1) }
+        .background(Brand.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Brand.accent.opacity(0.45), lineWidth: 1) }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Clip"))
     }
@@ -103,9 +103,9 @@ struct ClipBar: View {
             Text("\(chosen) of \(total) cameras").font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
             Button(chosen == total ? "All cameras" : "Select all") { panel.setAllClipCameras() }
                 .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .semibold)).foregroundStyle(chosen == total ? Brand.onAmber : .white)
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(chosen == total ? Brand.onRed : .white)
                 .padding(.horizontal, 10).frame(height: 28)
-                .background(chosen == total ? Brand.amber : Color.white.opacity(0.12), in: Capsule())
+                .background(chosen == total ? Brand.red : Color.white.opacity(0.12), in: Capsule())
                 .help("Include every camera. Click a picture to include or leave it out.")
         }
     }
@@ -129,15 +129,15 @@ struct ClipBar: View {
     private func finished(urls: [URL], notes: [String], export: ClipExportModel) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Brand.amber)
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Brand.accent)
                 Text(urls.count == 1 ? String(localized: "Saved the clip") : String(localized: "Saved \(urls.count) clips"))
                     .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
                 Spacer(minLength: 8)
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
                     .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.onAmber)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.onRed)
                     .padding(.horizontal, 12).frame(height: 28)
-                    .background(Brand.amber, in: Capsule())
+                    .background(Brand.red, in: Capsule())
                 Button("Done") { export.dismissResult() }
                     .buttonStyle(.plain)
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
@@ -153,7 +153,7 @@ struct ClipBar: View {
 
     private func failed(_ sentence: String, export: ClipExportModel) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Brand.amber)
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Brand.accent)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Couldn’t Save the Clip").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
                 Text(sentence).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -195,11 +195,11 @@ struct ClipBand: View {
                 let to = panel.playheadX()
                 let (left, right) = (min(max(min(from, to), 0), width), min(max(max(from, to), 0), width))
                 ZStack(alignment: .topLeading) {
-                    Rectangle().fill(Brand.amber.opacity(0.22)).frame(width: max(0, right - left), height: TimelineScrubber.trackHeight)
+                    Rectangle().fill(Brand.accent.opacity(0.22)).frame(width: max(0, right - left), height: TimelineScrubber.trackHeight)
                         .offset(x: left)
                     if from >= 0, from <= width {
-                        Rectangle().fill(Brand.amber).frame(width: 2, height: TimelineScrubber.trackHeight).offset(x: from - 1)
-                        Image(systemName: "flag.fill").font(.system(size: 10)).foregroundStyle(Brand.amber).offset(x: from + 2, y: 2)
+                        Rectangle().fill(Brand.accent).frame(width: 2, height: TimelineScrubber.trackHeight).offset(x: from - 1)
+                        Image(systemName: "flag.fill").font(.system(size: 10)).foregroundStyle(Brand.accent).offset(x: from + 2, y: 2)
                     }
                 }
                 .frame(width: width, height: TimelineScrubber.trackHeight, alignment: .topLeading)

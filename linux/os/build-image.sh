@@ -6,6 +6,7 @@
 #
 #   --stub-broken        like --stub-daemon, but the daemon dies at once (tests the automatic rollback)
 #   --web DIR            web UI files to install (default: none; the daemon falls back to its built-in page)
+#   --helpers DIR        helper programs from fetch-go2rtc.sh (DIR/go2rtc, go2rtc.LICENSE, go2rtc.version); required with --release
 #   --pubkey FILE        update verification public key (default: the one in mkosi.extra, a placeholder)
 #   --mirror URL         Debian mirror
 #   --release            refuse placeholder key, stub daemon, unsigned output
@@ -17,7 +18,7 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-arch=amd64 version="" out="" daemon="" stub=0 broken=0 web="" pubkey="" mirror="" release=0 work="" root_size=2560M
+arch=amd64 version="" out="" daemon="" stub=0 broken=0 web="" helpers="" pubkey="" mirror="" release=0 work="" root_size=2560M
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -28,6 +29,7 @@ while [ $# -gt 0 ]; do
         --stub-daemon) stub=1 ;;
         --stub-broken) stub=1; broken=1 ;;
         --web) web=$2; shift ;;
+        --helpers) helpers=$2; shift ;;
         --pubkey) pubkey=$2; shift ;;
         --mirror) mirror=$2; shift ;;
         --release) release=1 ;;
@@ -48,7 +50,7 @@ case $arch in amd64) mkosi_arch=x86-64 ;; arm64) mkosi_arch=arm64 ;; *) die "unk
 [ -z "$daemon" ] || [ -f "$daemon" ] || die "no such daemon binary: $daemon"
 work=${work:-/work/build-$arch}
 
-# paths.env: where the daemon and the web UI live in the image (one place).
+# paths.env: where the daemon, the web UI and the helpers live in the image (one place).
 # shellcheck source=paths.env
 . "$HERE/paths.env"
 
@@ -60,6 +62,7 @@ if [ "$release" -eq 1 ]; then
     [ "$placeholder" -eq 0 ] || die "--release needs a real update public key (replace linux/os/mkosi.extra/usr/share/camera-bridge/update-key.pub)"
     [ "$stub" -eq 0 ] || die "--release cannot use the stub daemon"
     [ -n "${MINISIGN_SECRET_KEY:-}" ] || die "--release needs MINISIGN_SECRET_KEY in the environment"
+    [ -n "$helpers" ] || die "--release needs --helpers (the go2rtc helper)"
 fi
 
 mkdir -p "$out"
@@ -81,6 +84,19 @@ mkdir -p "$stage$CB_WEB_ROOT"
 if [ -n "$web" ]; then
     [ -d "$web" ] || die "no such web directory: $web"
     cp -a "$web"/. "$stage$CB_WEB_ROOT"/
+fi
+if [ -n "$helpers" ]; then
+    # go2rtc (MIT), where PlatformLinux's ProcessHelperLauncher finds it. Its licence goes where Debian keeps every package's.
+    for f in go2rtc go2rtc.LICENSE go2rtc.version; do [ -s "$helpers/$f" ] || die "no $f in $helpers (run fetch-go2rtc.sh)"; done
+    install -D -m 0755 -o root -g root "$helpers/go2rtc" "$stage$CB_HELPERS_DIR/go2rtc"
+    {
+        echo "go2rtc, https://github.com/AlexxIT/go2rtc"
+        cat "$helpers/go2rtc.version"
+        echo "Installed unmodified at $CB_HELPERS_DIR/go2rtc. License: MIT."
+        echo
+        cat "$helpers/go2rtc.LICENSE"
+    } >"$work/go2rtc.copyright"
+    install -D -m 0644 "$work/go2rtc.copyright" "$stage/usr/share/doc/go2rtc/copyright"
 fi
 install -d "$stage/usr/lib/systemd/system"
 sed -e "s|@CB_DAEMON@|$CB_DAEMON|g" -e "s|@CB_WEB_ROOT@|$CB_WEB_ROOT|g" \
@@ -164,6 +180,11 @@ cp "$docdir/SOURCE-OFFER.txt" "$out/SOURCE-OFFER.txt"
 for f in LICENSE NOTICE OS-LICENSES.md; do
     debugfs -R "stat /usr/share/doc/camera-bridge/$f" "$work/root.raw" >/dev/null 2>&1 || die "$f is missing from the image"
 done
+if [ -n "$helpers" ]; then
+    for f in "$CB_HELPERS_DIR/go2rtc" /usr/share/doc/go2rtc/copyright; do
+        debugfs -R "stat $f" "$work/root.raw" >/dev/null 2>&1 || die "$f is missing from the image"
+    done
+fi
 zstd -q -T0 -19 --long=27 -f "$work/root.raw" -o "$out/$root_name"
 rm -f "$work/root.raw"
 xz -T0 -6 -c "$work/$img_name" >"$out/$img_name.xz"

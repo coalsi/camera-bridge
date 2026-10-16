@@ -4,7 +4,7 @@
 #
 #   linux/os/test-static.sh            (from the repository root or anywhere)
 #
-# Checks: shellcheck + bash -n on every script, the nftables ruleset (nft -c), every systemd unit (systemd-analyze verify),
+# Checks: shellcheck + bash -n on every script, the go2rtc pins (fetch-go2rtc.sh), the nftables ruleset (nft -c), every systemd unit (systemd-analyze verify),
 # sysusers/tmpfiles/repart definitions, the mkosi configuration (mkosi summary), the stub daemon's syntax.
 # What this does NOT prove: that the image boots (see test-vm.sh) or works on real hardware (docs/linux/BUILDING.md).
 # shellcheck disable=SC2016,SC2001
@@ -28,7 +28,7 @@ check() { # check DESCRIPTION COMMAND...
 }
 
 cd "$OS"
-scripts=(build.sh build-image.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken
+scripts=(build.sh build-image.sh fetch-go2rtc.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken
          mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk
          mkosi.extra/usr/lib/camera-bridge/lib.sh)
 while IFS= read -r f; do scripts+=("$f"); done < <(find mkosi.extra/usr/lib/camera-bridge -name 'cb-*' -type f | sort)
@@ -36,7 +36,17 @@ while IFS= read -r f; do scripts+=("$f"); done < <(find mkosi.extra/usr/lib/came
 for f in "${scripts[@]}"; do [ -f "$f" ] || continue; check "bash -n $f" bash -n "$f"; done
 check "shellcheck (all scripts)" shellcheck -x "${scripts[@]}"
 check "stub daemon parses" python3 -c "import ast; ast.parse(open('stub/camerabridged-stub').read())"
-check "scripts are executable" bash -c 'for f in build.sh build-image.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
+check "scripts are executable" bash -c 'for f in build.sh build-image.sh fetch-go2rtc.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
+
+# --- the go2rtc helper: a pinned commit, toolchain digest and checksums; installed where the engine looks ---------------------
+check "fetch-go2rtc.sh pins a full commit hash" grep -Eq '^GO2RTC_COMMIT="[0-9a-f]{40}"' fetch-go2rtc.sh
+check "fetch-go2rtc.sh pins a version" grep -Eq '^GO2RTC_VERSION="[0-9]+\.[0-9]+\.[0-9]+[^"]*"' fetch-go2rtc.sh
+check "fetch-go2rtc.sh pins the Go image by digest" grep -Eq '^GO_IMAGE="golang:[0-9.]+[^@"]*@sha256:[0-9a-f]{64}"' fetch-go2rtc.sh
+check "fetch-go2rtc.sh pins SHA-256 checksums (amd64, arm64, LICENSE)" bash -c 'for v in SHA256_AMD64 SHA256_ARM64 SHA256_LICENSE; do grep -Eq "^$v=\"[0-9a-f]{64}\"" fetch-go2rtc.sh || { echo "no 64-hex $v"; exit 1; }; done'
+check "fetch-go2rtc.sh --help" ./fetch-go2rtc.sh --help
+check "fetch-go2rtc.sh refuses an unknown architecture" bash -c '! ./fetch-go2rtc.sh --arch riscv64 --verify 2>/dev/null'
+check "build-image.sh installs go2rtc under CB_HELPERS_DIR" grep -q 'CB_HELPERS_DIR/go2rtc' build-image.sh
+check "CB_HELPERS_DIR is a folder ProcessHelperLauncher searches" bash -c '. ./paths.env; [ -n "$CB_HELPERS_DIR" ] && grep -q "\"$CB_HELPERS_DIR\"" /src/Packages/CameraBridgeKit/Sources/PlatformLinux/System/ProcessHelperLauncher.swift'
 
 check "systemd-sysupdate binary exists where cb-update expects it" test -x /usr/lib/systemd/systemd-sysupdate
 check "sysupdate definitions are in place" test -f mkosi.extra/usr/lib/sysupdate.d/10-root.transfer -a -f mkosi.extra/usr/lib/sysupdate.d/20-uki.transfer

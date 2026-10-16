@@ -8,7 +8,7 @@ import SwiftUI
 /// access, ports, this Mac's addresses), Webhook, Privacy (setup reports, camera profiles), Diagnostics (log level,
 /// export, data folder), Backup and About. Per-camera options stay on the camera's page; the HomeKit tab links there.
 ///
-/// The window follows the brand: a solid dark canvas, cards, amber accents. The toolbar tabs are the system's, and the
+/// The window follows the brand: a solid dark canvas, cards, red accents. The toolbar tabs are the system's, and the
 /// last tab used is restored.
 struct SettingsView: View {
     let model: AppModel
@@ -48,7 +48,7 @@ struct SettingsView: View {
         .background { BrandCanvas() }
         // The brand look is dark, as in the manager window.
         .preferredColorScheme(.dark)
-        .tint(Brand.amber)
+        .tint(Brand.accent)
         .overlay(alignment: .bottom) { SettingsNotice(text: model.notice) }
         .onAppear {
             model.refreshLoginItemStatus()   // changed in System Settings › General › Login Items meanwhile

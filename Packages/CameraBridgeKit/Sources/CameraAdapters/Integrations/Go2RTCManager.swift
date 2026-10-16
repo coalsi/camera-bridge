@@ -318,6 +318,10 @@ public actor Go2RTCManager: Go2RTCStreamProviding {
         var configured: [Go2RTCConfig.Stream] = []
         for (index, name) in snapshot.keys.sorted().enumerated() {
             guard let source = snapshot[name] else { continue }
+            if source.isPublished {
+                configured.append(Go2RTCConfig.Stream(name: name, variable: nil))
+                continue
+            }
             let variable = "CB_SRC_\(index)"
             environment[variable] = Go2RTCConfig.environmentValue(forSource: source.url)
             configured.append(Go2RTCConfig.Stream(name: name, variable: variable))

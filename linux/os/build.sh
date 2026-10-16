@@ -1,6 +1,7 @@
 #!/bin/bash
-# Builds Camera Bridge OS: the camerabridged daemon (static Swift build), the Debian image (mkosi), the compressed
-# release files, SHA-256 sums and signatures. Works on a Mac (Docker / OrbStack) and on Linux (Docker). Needs only Docker.
+# Builds Camera Bridge OS: the camerabridged daemon (static Swift build), the go2rtc helper (pinned commit, fetch-go2rtc.sh),
+# the Debian image (mkosi), the compressed release files, SHA-256 sums and signatures. Works on a Mac (Docker / OrbStack)
+# and on Linux (Docker). Needs only Docker.
 #
 #   linux/os/build.sh --version 0.1 [--arch amd64|arm64] [--out DIR]
 #                     [--daemon FILE | --stub-daemon | (default: build the daemon with Swift in a container)]
@@ -49,7 +50,7 @@ while [ $# -gt 0 ]; do
         --pubkey) pubkey=$2; shift ;;
         --mirror) mirror=$2; shift ;;
         --clean) clean=1 ;;
-        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
     shift
@@ -102,6 +103,10 @@ EOF
     daemon_in_container=/work/daemon-$arch/camerabridged
 fi
 
+# --- 1b. the go2rtc helper (built from a pinned commit with Go in a container, checked against a pinned SHA-256) -------------
+helpers_dir="$REPO/build/os-helpers/$arch"
+"$HERE/fetch-go2rtc.sh" --arch "$arch" --output "$helpers_dir"
+
 # --- 2. the image, inside the builder container ---------------------------------------------------------------------
 echo "==> preparing the builder image ($BUILDER_IMAGE:$arch)"
 docker build -q --platform "linux/$arch" -f "$HERE/Dockerfile.builder" -t "$BUILDER_IMAGE:$arch" "$HERE" >/dev/null
@@ -118,10 +123,11 @@ else
     args+=(--daemon "$daemon_in_container")
 fi
 [ -d "$REPO/linux/web" ] && args+=(--web /src/linux/web)
+args+=(--helpers /helpers)
 [ "$release" -eq 0 ] || args+=(--release)
 [ -z "$mirror" ] || args+=(--mirror "$mirror")
 
-mounts=(-v "$REPO":/src:ro -v "$WORK_VOLUME":/work -v "$out":/out)
+mounts=(-v "$REPO":/src:ro -v "$WORK_VOLUME":/work -v "$out":/out -v "$helpers_dir":/helpers:ro)
 [ -z "$daemon_dir" ] || mounts+=(-v "$daemon_dir":/daemon:ro)
 if [ -n "$pubkey" ]; then
     [ -f "$pubkey" ] || die "no such file: $pubkey"

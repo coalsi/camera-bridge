@@ -15,9 +15,9 @@ struct OverviewSidebarCard: View {
             HStack(spacing: 12) {
                 Image(systemName: "square.grid.2x2.fill")
                     .font(.system(size: 20))
-                    .foregroundStyle(Brand.onAmber)
+                    .foregroundStyle(Brand.onRed)
                     .frame(width: 44, height: 44)
-                    .background(Brand.amber, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(Brand.red, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Overview")

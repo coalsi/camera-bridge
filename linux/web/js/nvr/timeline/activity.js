@@ -5,7 +5,7 @@ export const BIN_LADDER_SEC = [2, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600
 export const MIN_COLUMN_PX = 2;
 export const MAX_REQUEST_BINS = 2000;                       // GET nvr/activity: bins 1...2000
 export const MAX_REQUEST_SPAN_MS = 31 * 86_400_000;         // and bins x binMs at most 31 days
-export const ELEVATED_FACTOR = 1.5;                         // bars above 1.5 x typical are amber
+export const ELEVATED_FACTOR = 1.5;                         // bars above 1.5 x typical are highlighted
 export const REFERENCE_FACTOR = 4;                          // the bar scale tops out at 4 x typical
 export const LEVEL_FLOOR = 1000;                            // bytes per second: the smallest scale when no typical level exists yet
 const MAX_PLAN_WIDTH_PX = 2600;                             // with a quarter-window margin on each side, 2600 px stays under 2000 bins
@@ -105,7 +105,7 @@ export function barHeight(level, reference) {
   return Math.sqrt(Math.min(level / reference, 1));
 }
 
-/** Amber bars: above 1.5 x typical (always taller than the dashed normal line, so colour is never the only signal). */
+/** Highlighted (brand red) bars: above 1.5 x typical (always taller than the dashed normal line, so colour is never the only signal). */
 export function isElevated(level, typical) {
   return Number.isFinite(typical) && typical > 0 && level > ELEVATED_FACTOR * typical;
 }

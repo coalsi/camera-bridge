@@ -105,6 +105,7 @@ public struct CameraTypeSpec: Sendable, Encodable, Equatable {
         case "ring": .ring
         case "googleNest": .nest
         case "wyzeCloud": .wyze
+        case "eufy": .eufy
         case "tuya": .tuya
         case "otherCloud": .other
         case "unifiProtect": .unifiProtect
@@ -228,15 +229,25 @@ public enum CameraTypeCatalog {
             live: .yes, recording: .yes, events: .partly("Built-in motion detection only; doorbell presses are not detected"), eventsDetail: "",
             fields: ["nest"], advancedFields: [], defaultHTTPPort: 80, defaultRTSPPort: 554, defaultUseHTTPS: false),
         CameraTypeSpec(
-            id: "wyzeCloud", title: "Wyze (Other Models)", summary: "Wyze cameras without RTSP, over Wyze’s local P2P connection.", group: .cloud,
-            vendor: "go2rtc", usesDiscovery: false, needsStreamingHelper: true,
-            setupSteps: ["This is for Wyze models without their own RTSP (Cam v4, v3 Pro, Pan v2, Outdoor, Doorbell). Models with Gwell hardware (OG, Pan v4) are not supported.",
-                         "On a computer, run go2rtc (go2rtc.org), open its page, sign in with your Wyze account and an API key from Wyze’s developer console, and copy the Wyze source it shows.",
-                         "Paste the source here. Streaming is local; the internet is only used while loading your camera list."],
-            notes: ["Unofficial: Wyze’s terms don’t allow apps other than Wyze’s to use its cameras without permission, and the connection can change with firmware. Use at your own risk.",
-                    "Needs DTLS firmware. Cam v3 and Pan v3 can use Wyze’s official RTSP instead, which is the better choice."],
+            id: "wyzeCloud", title: "Wyze Account", summary: "Any Wyze camera on your account, through the Wyze plugin.", group: .cloud,
+            vendor: "go2rtc", usesDiscovery: false, needsStreamingHelper: false,
+            setupSteps: ["Sign in to your Wyze account (Plugins, Wyze) with an API key from Wyze’s developer console.",
+                         "Choose the camera. Camera Bridge uses the camera’s own RTSP when it has it (Cam v4, v3 and Pan v3 on current firmware, with RTSP switched on in the Wyze app), else the local Wyze connection.",
+                         "For RTSP, enter the RTSP password you set in the Wyze app."],
+            notes: ["RTSP is Wyze’s own feature and the best way in: local, full quality. The local Wyze connection is unofficial: Wyze’s terms don’t allow apps other than Wyze’s to use its cameras without permission, and it can change with firmware.",
+                    "Models with Gwell hardware (OG, Pan v4) and cloud-only doorbells are not supported yet."],
             live: .yes, recording: .yes, events: .partly("Built-in motion detection only"), eventsDetail: "",
-            fields: ["source"], advancedFields: [], defaultHTTPPort: 80, defaultRTSPPort: 554, defaultUseHTTPS: false),
+            fields: ["wyze"], advancedFields: [], defaultHTTPPort: 80, defaultRTSPPort: 554, defaultUseHTTPS: false),
+        CameraTypeSpec(
+            id: "eufy", title: "eufy Account", summary: "eufy cameras and doorbells on your account, battery ones included, through the eufy plugin.",
+            group: .cloud, vendor: "go2rtc", usesDiscovery: false, needsStreamingHelper: true,
+            setupSteps: ["Set the camera up in the eufy app first. Best: make a second eufy account, share the camera with it from your main account, and sign in with that one, so the eufy app stays signed in.",
+                         "Sign in to the eufy account (Plugins, eufy). eufy may ask for the characters in a picture and a code it emails you.",
+                         "Choose the camera."],
+            notes: ["A battery camera sleeps between uses: it wakes for a live view, an Apple Home recording or motion, and Camera Bridge lets it sleep again. Recordings start when it wakes, a few seconds after the motion.",
+                    "Unofficial: eufy has no API for other apps. This uses the eufy SDK (open source) and can stop working when eufy changes its servers."],
+            live: .yes, recording: .yes, events: .partly("Motion and people from eufy’s notifications"), eventsDetail: "",
+            fields: ["eufy"], advancedFields: [], defaultHTTPPort: 80, defaultRTSPPort: 554, defaultUseHTTPS: false),
         CameraTypeSpec(
             id: "tuya", title: "Tuya / Smart Life", summary: "Tuya cameras from the Tuya Smart app.", group: .cloud, vendor: "go2rtc", usesDiscovery: false,
             needsStreamingHelper: true,

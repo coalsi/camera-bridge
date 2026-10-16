@@ -67,6 +67,16 @@ public protocol BridgeBackend: Sendable {
     func setCameraTimeZone(cameraID: UUID) async throws -> String
     /// `BridgeEngine.setCleanPicture(cameraID:clean:)`: every label the camera draws itself off, or back. Default throws.
     func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange
+    /// Moves a pan/tilt camera (`BridgeEngine.panTilt`).
+    func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws
+    /// `BridgeEngine.localIPv4Addresses()`. The default has none.
+    func localIPv4Addresses() async -> [String]
+    /// `BridgeEngine.portAnswer(host:port:timeout:)`. The default never reaches anything (`.silent`).
+    func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer
+    /// `BridgeEngine.pluginSecret(id:)`: a plugin's stored secret. The default has none.
+    func pluginSecret(id: String) async throws -> Data?
+    /// `BridgeEngine.setPluginSecret(id:_:)`. The default throws `EngineError.cameraNotRunning` (a backend that keeps no secrets).
+    func setPluginSecret(id: String, _ data: Data?) async throws
     func triggerTestMotion(cameraID: UUID) async
     func pause() async
     func resume() async
@@ -167,6 +177,26 @@ public struct EngineBackend: BridgeBackend {
         try await engine.setCleanPicture(cameraID: cameraID, clean: clean)
     }
 
+    public func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws {
+        try await engine.panTilt(cameraID: cameraID, pan: pan, tilt: tilt)
+    }
+
+    public func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer {
+        await engine.portAnswer(host: host, port: port, timeout: timeout)
+    }
+
+    public func localIPv4Addresses() async -> [String] {
+        engine.localIPv4Addresses()
+    }
+
+    public func pluginSecret(id: String) async throws -> Data? {
+        try await engine.pluginSecret(id: id)
+    }
+
+    public func setPluginSecret(id: String, _ data: Data?) async throws {
+        try await engine.setPluginSecret(id: id, data)
+    }
+
     public func triggerTestMotion(cameraID: UUID) async {
         await engine.triggerTestMotion(cameraID: cameraID)
     }
@@ -204,6 +234,16 @@ public struct EngineBackend: BridgeBackend {
 }
 
 extension BridgeBackend {
+    public func pluginSecret(id: String) async throws -> Data? { nil }
+
+    public func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer { .silent }
+
+    public func localIPv4Addresses() async -> [String] { [] }
+
+    public func setPluginSecret(id: String, _ data: Data?) async throws {
+        throw EngineError.cameraNotRunning
+    }
+
     public func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription {
         throw EngineError.cameraNotRunning
     }
@@ -222,6 +262,10 @@ extension BridgeBackend {
     }
 
     public func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange {
+        throw EngineError.cameraNotRunning
+    }
+
+    public func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws {
         throw EngineError.cameraNotRunning
     }
 }

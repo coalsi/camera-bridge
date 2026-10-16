@@ -54,6 +54,8 @@ struct RuntimeStatus: Sendable, Equatable {
     var liveViewers = 0
     /// Viewers in CameraBridge's own window (`BridgeEngine.liveVideo`), apart from the HomeKit viewers.
     var appViewers = 0
+    /// `CameraStatus.panTilt`.
+    var panTilt = false
     /// Why the sub stream is offline while it should run (`CameraStatus.subStreamProblem`).
     var subStreamProblem: String?
     /// `CameraStatus.eventsNote`.
@@ -127,6 +129,18 @@ actor CameraRuntime {
     private var appViewers = 0
     private var appSubscriptions: [UUID: @Sendable () -> Void] = [:]
     private var subPermanent = false
+    /// The camera streams only on demand (`CameraDriver.streamsOnDemand`): the main stream runs while `mainUsers` > 0 (live views, the
+    /// app's viewers, recordings, a motion event) and `onDemandIdleStop` after, and soft motion never runs (it would keep it awake).
+    private let onDemand: Bool
+    private var mainUsers = 0
+    /// Bumped by every `acquireMain`: an idle stop scheduled before a later user arrived does not apply.
+    private var mainGeneration = 0
+    private var mainIdleStop: Task<Void, Never>?
+    /// An on-demand camera's motion holds its stream (so Home records it and the NVR keeps it) while the event lasts.
+    private var motionHoldsMain = false
+    /// The camera's pan and tilt (nil: it has none), and the stop that follows a move nobody renewed.
+    private let panTiltControl: (any PanTiltControl)?
+    private var panTiltStop: Task<Void, Never>?
     /// Bumped by every `acquireSub`: an idle stop scheduled before a later user arrived does not apply.
     private var subGeneration = 0
     private var subIdleStop: Task<Void, Never>?
@@ -214,8 +228,11 @@ actor CameraRuntime {
             driver = CameraDrivers.make(vendor: configuration.vendor, endpoint: configuration.endpoint, credentials: credentials,
                                         mainStreamURL: configuration.mainStreamURL, subStreamURL: configuration.subStreamURL,
                                         transport: environment.platform.transport, cameraID: configuration.id, reachability: reachability,
-                                        integration: configuration.integration, go2rtc: dependencies.go2rtc)
+                                        integration: configuration.integration, go2rtc: dependencies.go2rtc,
+                                        helpers: environment.platform.helpers)
         }
+        onDemand = driver.streamsOnDemand
+        panTiltControl = driver.makePanTilt()
     }
 
     /// `start` / `publish` could not bring the accessory up, but the camera itself (ingest, events, snapshots, the app's
@@ -242,6 +259,11 @@ actor CameraRuntime {
     /// Tests: whether the sub stream's supervisor runs.
     var isSubStreamRunning: Bool {
         get async { await subIngest?.isRunning ?? false }
+    }
+
+    /// Tests: whether the main stream's supervisor runs (an on-demand camera's sleeps between uses).
+    var isMainStreamRunning: Bool {
+        get async { await mainIngest?.isRunning ?? false }
     }
 
     /// Tests: connection attempts of the main and sub stream supervisors (nil before they exist).
@@ -541,6 +563,10 @@ actor CameraRuntime {
         stack = nil
         subIdleStop?.cancel()
         subIdleStop = nil
+        mainIdleStop?.cancel()
+        mainIdleStop = nil
+        mainUsers = 0
+        motionHoldsMain = false
         await mainIngest?.stop()
         await subIngest?.stop()
         if let holder = driver as? any StreamHoldingDriver { await holder.releaseStreams() }   // the go2rtc helper ends with its last stream
@@ -644,6 +670,7 @@ actor CameraRuntime {
         status.videoSummary = StreamSources.summary(await mainHub.videoFormat, frameRate: await mainHub.measuredFrameRate)
         status.isPaired = paired
         status.appViewers = appViewers
+        status.panTilt = panTiltControl != nil
         status.subStreamProblem = running ? subStreamProblem : nil
         status.eventsNote = running && eventsUnreliable ? Self.eventsUnreliableNote : nil
         status.homeKitNote = running ? await healthMonitor?.controllerSilenceNote : nil
@@ -981,10 +1008,17 @@ actor CameraRuntime {
                 onChange()
             }
         }
-        await mainIngest.start()
+        if onDemand {
+            // Woken once at the start, for its picture size and a fresh picture, until it delivers (or `onDemandWakeWait` ran out); it
+            // sleeps again `onDemandIdleStop` later unless used.
+            await acquireMain()
+            Task { [weak self] in await self?.endStartupWake(epoch) }
+        } else {
+            await mainIngest.start()
+        }
         if let subIngest, subPermanent || subUsers > 0 { await subIngest.start() }
-        if configuration.motionSource == .softMotion { await startSoftMotion(epoch) }
-        await startMotionShadow(epoch)
+        if configuration.motionSource == .softMotion, !onDemand { await startSoftMotion(epoch) }
+        if !onDemand { await startMotionShadow(epoch) }
         guard isCurrent(epoch) else {
             // stop() ran meanwhile; it may have reached these before they started.
             await mainIngest.stop()
@@ -1026,6 +1060,7 @@ actor CameraRuntime {
     /// since, and is then given a try in the background so it is used again once it delivers), and as soon as it goes
     /// offline while the live view waits for its first picture.
     func lease(preferSub: Bool) async -> HubLease {
+        if onDemand { return await leaseOnDemand() }
         let main = HubLease(hub: mainHub, isSubStream: false, release: {}, traits: mainTraits)
         guard preferSub, let subIngest else { return main }
         if case .offline = subState, await subIngest.isRunning {
@@ -1114,6 +1149,101 @@ actor CameraRuntime {
         if subIngest === self.subIngest, running, subUsers > 0 || subPermanent { await subIngest.start() }
     }
 
+    // MARK: - Pan and tilt
+
+    /// A move lasts this long unless the page asks again: a page that closes (or a dropped connection) never leaves the camera turning.
+    static let panTiltHold: Duration = .milliseconds(1500)
+
+    /// Moves the camera (`pan`, `tilt` in -1…1), or stops it when both are 0. Throws `EngineError.cameraNotRunning` for a camera without
+    /// pan and tilt or not running, and what the camera's control throws.
+    func panTilt(pan: Double, tilt: Double) async throws {
+        guard running, let control = panTiltControl else { throw EngineError.cameraNotRunning }
+        panTiltStop?.cancel()
+        panTiltStop = nil
+        let pan = min(max(pan, -1), 1), tilt = min(max(tilt, -1), 1)
+        if pan == 0, tilt == 0 {
+            try await control.stop()
+            return
+        }
+        try await control.move(pan: pan, tilt: tilt)
+        let hold = Self.panTiltHold
+        panTiltStop = Task { [log] in
+            try? await Task.sleep(for: hold)
+            guard !Task.isCancelled else { return }
+            do { try await control.stop() } catch { log.info("Could not stop the camera turning: \(error)") }
+        }
+    }
+
+    // MARK: - On demand
+
+    /// The main stream of an on-demand camera, held until the lease is released: waits up to `onDemandWakeWait` for the camera to wake
+    /// and deliver (the live view or recording then starts with a fresh picture, not one left from its last wake).
+    private func leaseOnDemand() async -> HubLease {
+        await acquireMain()
+        let release: @Sendable () async -> Void = { [weak self] in await self?.releaseMain() }
+        await waitForOnDemandPicture()
+        return HubLease(hub: mainHub, isSubStream: false, release: release, traits: mainTraits)
+    }
+
+    /// Returns once the woken main stream delivers, or after `onDemandWakeWait`.
+    private func waitForOnDemandPicture() async {
+        let deadline = ContinuousClock.now + dependencies.tuning.onDemandWakeWait
+        while ContinuousClock.now < deadline, !Task.isCancelled, running {
+            if await mainIngest?.isDelivering(within: .seconds(2)) == true { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        if !Task.isCancelled, running { log.info("\(configuration.name) did not wake within \(MediaFit.seconds(dependencies.tuning.onDemandWakeWait)) s") }
+    }
+
+    private func endStartupWake(_ epoch: Int) async {
+        await waitForOnDemandPicture()
+        guard isCurrent(epoch) else { return }
+        releaseMain()
+    }
+
+    private func acquireMain() async {
+        mainUsers += 1
+        mainGeneration &+= 1
+        mainIdleStop?.cancel()
+        mainIdleStop = nil
+        if let mainIngest, await !mainIngest.isRunning { log.info("Waking \(configuration.name)") }
+        await mainIngest?.start()
+    }
+
+    private func releaseMain() {
+        mainUsers = max(0, mainUsers - 1)
+        guard onDemand, mainUsers == 0, mainIngest != nil else { return }
+        let delay = dependencies.tuning.onDemandIdleStop
+        let generation = mainGeneration
+        mainIdleStop?.cancel()
+        mainIdleStop = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await self?.stopIdleMain(generation)
+        }
+    }
+
+    private func stopIdleMain(_ generation: Int) async {
+        guard generation == mainGeneration, mainUsers == 0, let mainIngest else { return }
+        log.info("\(configuration.name) is unused; letting it sleep")
+        await mainIngest.stop()
+        if mainIngest === self.mainIngest, running, mainUsers > 0 { await mainIngest.start() }
+    }
+
+    /// An on-demand camera's motion: wakes it and holds the stream while the event lasts, and passes the start on only once the picture
+    /// flows (or the wait ran out), so the recording Home asks for starts with video rather than an empty buffer.
+    private func onDemandMotion(_ active: Bool) async {
+        if active {
+            guard !motionHoldsMain else { return }
+            motionHoldsMain = true
+            await acquireMain()
+            await waitForOnDemandPicture()
+        } else if motionHoldsMain {
+            motionHoldsMain = false
+            releaseMain()
+        }
+    }
+
     // MARK: - Events
 
     private func startEvents() {
@@ -1130,6 +1260,7 @@ actor CameraRuntime {
                     if case .eventChannelUnreliable = event { await self?.eventChannelBecameUnreliable(epoch) }
                     if case .motion(let active) = event {
                         if !usesCameraMotion { continue }
+                        await self?.motionOnDemand(active)
                         await self?.shadowCameraMotion(active)   // the camera's own period, for the shadow test
                     }
                     await router.handle(event, for: cameraID, origin: .camera)
@@ -1145,13 +1276,18 @@ actor CameraRuntime {
         guard isCurrent(epoch), !eventsUnreliable else { return }
         eventsUnreliable = true
         log.warning("\(configuration.name): camera events are unreliable; using built-in motion detection instead")
-        if configuration.motionSource == .cameraEvents, softMotion == nil, mainIngest != nil {
+        if configuration.motionSource == .cameraEvents, softMotion == nil, mainIngest != nil, !onDemand {
             // Built-in motion detection is live now (it is the camera's motion): a second detector would only repeat it.
             await stopMotionShadow()
             motionShadowPause = "Built-in motion detection is already in use for this camera"
             await startSoftMotion(epoch)
         }
         dependencies.onChange()
+    }
+
+    private func motionOnDemand(_ active: Bool) async {
+        guard onDemand, running else { return }
+        await onDemandMotion(active)
     }
 
     private func stopEvents() async {
@@ -1256,7 +1392,7 @@ actor CameraRuntime {
     }
 
     private func startMotionShadow(_ epoch: Int) async {
-        guard motionShadowWanted, isCurrent(epoch), motionShadow == nil, configuration.motionSource == .cameraEvents else { return }
+        guard motionShadowWanted, isCurrent(epoch), motionShadow == nil, configuration.motionSource == .cameraEvents, !onDemand else { return }
         guard softMotion == nil else {
             motionShadowPause = "Built-in motion detection is already in use for this camera"
             return

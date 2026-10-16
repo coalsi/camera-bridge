@@ -15,9 +15,9 @@ struct SensorsBridgeView: View {
                     HStack(spacing: 14) {
                         Image(systemName: "sensor.fill")
                             .font(.title)
-                            .foregroundStyle(Brand.onAmber)
+                            .foregroundStyle(Brand.onRed)
                             .frame(width: 52, height: 52)
-                            .background(Brand.amber, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .background(Brand.red, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Camera Bridge Sensors")

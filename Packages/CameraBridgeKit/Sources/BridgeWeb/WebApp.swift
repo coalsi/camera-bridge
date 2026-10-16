@@ -33,6 +33,10 @@ public struct WebConfiguration: Sendable {
     public var liveLifetime: Duration
     /// List the demo camera (a test pattern) among the camera types.
     public var offersDemoCamera: Bool
+    /// How the Wyze plugin reaches Wyze's servers (tests give a fake); nil: the real servers.
+    public var wyzeTransport: (any WyzeTransport)? = nil
+    /// How the eufy plugin reaches its helper (tests give a fake); nil: the real `eufy-bridge` (`EufyBridge.shared`).
+    public var eufyBridge: (any EufyBridgeCalling)? = nil
     public var diagnosticsContext: @Sendable (_ launched: Date) -> DiagnosticsContext
     public var limits: HTTPServer.Limits
     /// Where recordings may be stored (the box: its one built-in location); empty offers none, and no folder can then be chosen from the page.
@@ -163,6 +167,10 @@ public final class WebApp: Sendable {
     let log = Log(category: "web")
     private let streams = Mutex(StreamCounts())
     let nestSignIns = Mutex<[String: NestSignIn]>([:])
+    /// The Wyze plugin (`Plugins/WyzePlugin.swift`).
+    let wyze: WyzePlugin
+    /// The eufy plugin (`Plugins/EufyPlugin.swift`).
+    let eufy: EufyPlugin
     /// What the NVR routes remember between requests (`WebApp+NVR.swift`): admission counters, per-file playback information, folder checks.
     let archiveState = ArchiveWebState()
 
@@ -180,10 +188,15 @@ public final class WebApp: Sendable {
         hub = EventHub(backend: backend, interval: configuration.eventInterval)
         files = StaticFiles(directory: configuration.staticDirectory)
         launched = Date()
+        wyze = WyzePlugin(backend: backend, cloud: configuration.wyzeTransport.map { WyzeCloud(transport: $0) } ?? WyzeCloud())
+        eufy = EufyPlugin(backend: backend, bridge: configuration.eufyBridge ?? EufyBridge.shared)
     }
 
     func startEvents() {
         hub.start()
+        let wyze = wyze, eufy = eufy
+        Task { await wyze.start() }
+        Task { await eufy.start() }
     }
 
     func stopEvents() {

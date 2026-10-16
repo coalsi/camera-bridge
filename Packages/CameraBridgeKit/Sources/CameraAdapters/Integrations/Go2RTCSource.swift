@@ -40,6 +40,20 @@ public struct Go2RTCSource: Sendable, Equatable, CustomStringConvertible {
         }
     }
 
+    /// A stream with no source that a helper program publishes into over RTSP (`rtsp://127.0.0.1:<port>/<name>`, RTSP RECORD): the
+    /// Wyze cloud and Gwell helpers. Never parsed from text (a person cannot paste it), and go2rtc gets no source for it.
+    public static let published = Go2RTCSource(url: "publish:", scheme: "publish", host: "", parameterNames: [])
+
+    /// A camera served by the `eufy-bridge` helper (`EufyBridge`): `http://127.0.0.1:<port>/stream/<token>/<serial>`, read by go2rtc only
+    /// while a viewer or a recording wants the picture (the camera wakes for it). Never parsed from text; the token makes it secret.
+    public static func eufyBridge(port: UInt16, token: String, serial: String) -> Go2RTCSource {
+        let safe = serial.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        return Go2RTCSource(url: "http://127.0.0.1:\(port)/stream/\(token)/\(safe)", scheme: "http", host: "127.0.0.1:\(port)", parameterNames: [])
+    }
+
+    /// Whether this is `published`.
+    public var isPublished: Bool { scheme == "publish" }
+
     /// `ring:`, `wyze://192.168.1.20`: no parameter, key or password.
     public var description: String { host.isEmpty ? "\(scheme):" : "\(scheme)://\(host)" }
 

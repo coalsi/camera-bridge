@@ -1,9 +1,10 @@
 # Camera Bridge web interface
 
 The page `camerabridged` serves at `http://camera-bridge.local`. Plain HTML, CSS and ES modules: no build step, no framework, no CDN,
-no external fonts. Dark by default and light with the system (`prefers-color-scheme`), amber `#E8A33D` on dark neutral, phone
-and desktop (a tab bar at the bottom on a phone), keyboard and screen reader friendly (landmarks, labels, visible focus, live
-regions, native dialogs, reduced motion).
+no external fonts. Dark by default and light with the system (`prefers-color-scheme`), bridge red `#9E2B20` with cream text on
+fills and light red `#E06A5A` for text on dark, on dark neutral; the logo is the Golden Gate seen through a lens
+(`docs/brand/BRAND.md`). Phone and desktop (a tab bar at the bottom on a phone), keyboard and screen reader friendly (landmarks,
+labels, visible focus, live regions, native dialogs, reduced motion).
 
 ```
 index.html            the shell; one module script
@@ -15,7 +16,7 @@ js/dom.js             h(), modal dialogs, toasts (everything is built with the D
 js/screens/           auth, cameras (the Cameras list, #/cameras), nvr (the Monitor: the home page's wall with the recordings), wall-events (its notices), add (the wizard), camera, pairing, settings, logs, system, banners
 js/nvr/               recording and playback (see "Recording and playback" below)
 nvr-record.css, nvr-watch.css, nvr-grid.css    styles of the recording screens (style.css is not edited for them)
-mark.svg, site.webmanifest
+mark.svg, mark-small.svg, site.webmanifest    the logo (mark-small.svg at 32 px and below: favicon, sidebar), the manifest
 ```
 
 The Content-Security-Policy the server sends allows only these files and media played from a `blob:` URL (`media-src 'self' blob:`): no

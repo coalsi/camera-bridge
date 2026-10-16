@@ -216,3 +216,28 @@ published), and Scrypted's Hikvision, ONVIF and Reolink plugins (read for behavi
   folder), `AmcrestTests`, `DoorBirdTests`, `UnifiProtectTests` (recorded payloads in `Fixtures/`), `RawHTTPStreamTests`, `NestDeviceAccessTests`.
 
 Also: `IntegrationService` (ring, nest, tuya, wyze, unifiProtect, other), `Go2RTCStreamProviding` (what a driver needs from the helper; `Go2RTCManager` conforms), `Go2RTCError` and `IntegrationError` (readable failures), `UnifiProtectCamera` (the wizard's console camera list), `AmcrestRTSP` and `DoorBirdRTSP` (the RTSP paths the engine uses as defaults), `CameraDrivers.unifiProtectCameras(endpoint:apiKey:)`.
+
+- **Wyze cloud** (`Integrations/Wyze/`, 2026-10-15, spec `docs/superpowers/specs/2026-10-15-plugins-wyze-design.md`): `WyzeCloud` (an actor over an
+  injected `WyzeTransport`; `URLSessionWyzeTransport` is `AuthenticatingHTTPClient`, 30 s, URL-free errors): `signIn` (`auth-prod.api.wyze.com/api/user/login`
+  with the person's `Keyid`/`Apikey`, the password MD5-hashed three times by the portable `WyzeMD5`) → `WyzeSignIn.signedIn(WyzeSession)` or
+  `.needsVerification(WyzeVerification)`; `sendCode` (`/user/login/sendSmsCode`, `/user/login/sendEmailCode`; nothing for an authenticator app) and
+  `verify` (`/user/login` with `mfa_type`, `verification_id`, `verification_code`, as wyze-sdk and wyzeapy); `refresh` (`api.wyzecam.com/app/user/refresh_token`);
+  `devices` (`app/v2/home_page/get_object_list`, cameras only, Gwell models kept and marked unsupported). `WyzeError` maps Wyze's codes (1000 + message,
+  2001, 3044, HTTP 401/403/429) to sentences without any secret (tokens, keys, hash and session IDs are masked even when Wyze echoes them).
+  The e-mailed code's endpoint follows the texted one's shape; no open-source client documents it, so it is unverified until tried on an account.
+  `WyzeDevice` (`modelName` from `WyzeModels`, `connection`: `WyzeConnection` from `WyzeFirmware.hasRTSP` (v4 ≥ 4.52.17.0, v3 ≥ 4.36.16.5654, Pan v3 ≥
+  4.50.16.5654, compared numerically) and DTLS/UID/`enr`), `Go2RTCSource.wyze(_:host:hd:)` (`wyze://HOST?dtls=true&enr=…&mac=…&model=…&subtype=hd|sd&uid=…`),
+  `NeighborTable` (a MAC's IPv4 address from Linux `/proc/net/arp`). Tests: `WyzeCloudTests` (recorded answers through a fake transport).
+
+Wyze helper programs (2026-10-15): `WyzeHelpers` (kinds `cloud` → `wyze-lake`, `gwell` → `wyze-gwell`; `Request`; `setProvider`, the plugin's fresh
+credentials for every start; `kind(of:)`) and `WyzeHelperDriver`, which publishes into a go2rtc stream with no source (`Go2RTCSource.published`,
+`isPublished`; written `'name': []`) and supervises the helper with restarts by exit code. `WyzeGwellAccess` and `WyzeCloud.gwellAccess(_:mac:)`:
+Wyze's Mars registration for a Gwell camera (HMAC-MD5 signed). `CameraDrivers.make(…helpers:)` passes the helper launcher.
+
+eufy (2026-10-15): `EufyBridge` (the `eufy-bridge` helper for the account: one process while the plugin is on, a loopback HTTP API with a
+per-start token, camera events from its stderr lines; `EufyBridge.shared`, configured by the engine), `EufyBridgeCalling` (what the plugin needs;
+tests fake it), `EufyModels` (model codes to names: T8134 is the SoloCam S220), `EufyDriver` (on demand: `CameraDriver.streamsOnDemand`; probe and
+snapshots never wake the camera; motion and people from eufy's push notifications, held 30 s after the last), `Go2RTCSource.eufyBridge(port:token:serial:)`
+(the helper's stream URL for go2rtc; its description never shows the token), `IntegrationService.eufy`, `IntegrationSettings.Key.eufySerial` /
+`eufyModel`. `CameraDriver.streamsOnDemand` defaults to false.
+The Wyze plugin's cameras carry `IntegrationSettings.Key.wyzeMAC`, `wyzeModel` and `wyzeWay` (`rtsp`, `local`, `cloud`, `gwell`).

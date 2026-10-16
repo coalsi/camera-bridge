@@ -34,6 +34,11 @@ licenses that give you the right to the source code. This note tells you how to 
    file). They run ffmpeg as a separate program and do not contain GPL code. Notices for the third-party code they do
    contain are in NOTICE and THIRD_PARTY_LICENSES.md.
 
+   The streaming helper /usr/lib/camera-bridge/helpers/go2rtc is go2rtc (MIT License, https://github.com/AlexxIT/go2rtc),
+   built unmodified from commit c245815e75e2a5fd60b4290f12bfc04e55a984d3 (it reports version 1.9.14+dev.c245815). It is
+   not a Debian package and is not in the package list; its source is that commit, and its license text is in
+   /usr/share/doc/go2rtc/copyright.
+
 4. Licenses
 
    Every Debian package keeps its license text in /usr/share/doc/<package>/copyright. A plain-language overview is in

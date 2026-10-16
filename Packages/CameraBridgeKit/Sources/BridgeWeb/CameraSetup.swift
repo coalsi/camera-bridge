@@ -33,6 +33,11 @@ struct SetupRequest: Decodable {
     var unifiCameraName: String?
     var nestSession: String?
     var nestDeviceID: String?
+    /// A camera from the Wyze plugin: its MAC address, and `rtsp` or `local`.
+    var wyzeMAC: String?
+    var wyzeWay: String?
+    /// A camera from the eufy plugin: its serial number.
+    var eufySerial: String?
     // Choices of the later pages (add only).
     var name: String?
     var kind: CameraKind?
@@ -75,7 +80,8 @@ enum CameraSetup {
     // MARK: Validation
 
     /// Checks `request` as the wizard's Connect page does and resolves the type, address, streams and secrets.
-    static func prepare(_ request: SetupRequest, helperInstalled: Bool, nest: NestSignIn?) throws -> PreparedCamera {
+    static func prepare(_ request: SetupRequest, helperInstalled: Bool, nest: NestSignIn?, wyze: WyzePick? = nil,
+                        eufy: EufyPlugin.Device? = nil) throws -> PreparedCamera {
         guard let spec = CameraTypeCatalog.spec(id: request.type) else { throw SetupProblem(message: "Choose a camera type.", field: "type") }
         var username = (request.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         var password = request.password ?? ""
@@ -160,7 +166,65 @@ enum CameraSetup {
                                   subStreamURL: nil, integration: IntegrationSettings(service: .nest, details: [IntegrationSettings.Key.deviceName: camera.name]),
                                   secret: source.url, source: source)
 
-        case "ring", "wyzeCloud", "tuya", "otherCloud":
+        case "wyzeCloud":
+            // A camera from the Wyze plugin: its own RTSP (preferred), or the local Wyze connection through go2rtc.
+            guard let wyze else { throw SetupProblem(message: "Sign in to Wyze (Plugins, Wyze) and choose a camera.", field: "wyze") }
+            let device = wyze.device
+            var details = [IntegrationSettings.Key.deviceName: String(device.nickname.prefix(100)), IntegrationSettings.Key.wyzeMAC: device.mac,
+                           IntegrationSettings.Key.wyzeModel: device.productModel]
+            switch request.wyzeWay ?? "rtsp" {
+            case "rtsp":
+                let address = try wyze.requireAddress()
+                if username.isEmpty { username = "admin" }
+                if password.isEmpty { throw SetupProblem(message: "Enter the RTSP password you set in the Wyze app.", field: "password") }
+                guard let main = WyzePlugin.rtspURL(host: address, path: "/stream0"), let sub = WyzePlugin.rtspURL(host: address, path: "/stream1") else {
+                    throw SetupProblem(message: "The camera’s address can’t be used.", field: "wyze")
+                }
+                details[IntegrationSettings.Key.wyzeWay] = "rtsp"
+                return PreparedCamera(spec: spec, vendor: .rtsp, endpoint: CameraEndpoint(host: address, rtspPort: 554), username: username,
+                                      password: password, mainStreamURL: main, subStreamURL: sub,
+                                      integration: IntegrationSettings(service: .wyze, details: details), secret: password, source: nil)
+            case "local":
+                if !helperInstalled { throw SetupProblem(message: helperMissing, field: nil) }
+                let address = try wyze.requireAddress()
+                let source: Go2RTCSource
+                do {
+                    source = try Go2RTCSource.wyze(device, host: address, hd: true)
+                } catch {
+                    throw SetupProblem(message: "This camera can’t use the local Wyze connection.", field: "wyze")
+                }
+                details[IntegrationSettings.Key.wyzeWay] = "local"
+                return PreparedCamera(spec: spec, vendor: .go2rtc, endpoint: CameraEndpoint(host: "127.0.0.1"), username: "", password: "", mainStreamURL: nil,
+                                      subStreamURL: nil, integration: IntegrationSettings(service: .wyze, details: details), secret: source.url, source: source)
+            case "cloud", "gwell":
+                // The Pan v4's cloud video or a Gwell model: a helper program brings it in (`WyzeHelpers`); nothing secret is saved with
+                // the camera (the plugin hands the helper fresh credentials each time).
+                if !helperInstalled { throw SetupProblem(message: helperMissing, field: nil) }
+                let way = request.wyzeWay ?? "cloud"
+                guard let kind = WyzeHelpers.Kind(rawValue: way), WyzeHelpers.isInstalled(kind) else {
+                    throw SetupProblem(message: "This Wyze model doesn’t work with Camera Bridge yet.", field: "wyzeWay")
+                }
+                guard (way == "cloud" && device.connection == .cloud) || (way == "gwell" && device.connection == .gwell) else {
+                    throw SetupProblem(message: "This camera can’t use that connection.", field: "wyzeWay")
+                }
+                details[IntegrationSettings.Key.wyzeWay] = way
+                return PreparedCamera(spec: spec, vendor: .go2rtc, endpoint: CameraEndpoint(host: "127.0.0.1"), username: "", password: "", mainStreamURL: nil,
+                                      subStreamURL: nil, integration: IntegrationSettings(service: .wyze, details: details), secret: "wyze-helper", source: nil)
+            default:
+                throw SetupProblem(message: "Choose how to connect the camera.", field: "wyzeWay")
+            }
+
+        case "eufy":
+            // A camera from the eufy plugin: the eufy-bridge helper streams it on demand; nothing secret is saved with the camera.
+            if !helperInstalled { throw SetupProblem(message: helperMissing, field: nil) }
+            guard let eufy else { throw SetupProblem(message: "Sign in to eufy (Plugins, eufy) and choose a camera.", field: "eufy") }
+            if eufy.livestream == false { throw SetupProblem(message: "This eufy device has no live video.", field: "eufy") }
+            let details = [IntegrationSettings.Key.deviceName: String(eufy.name.prefix(100)), IntegrationSettings.Key.eufySerial: eufy.serial,
+                           IntegrationSettings.Key.eufyModel: eufy.model]
+            return PreparedCamera(spec: spec, vendor: .go2rtc, endpoint: CameraEndpoint(host: "127.0.0.1"), username: "", password: "", mainStreamURL: nil,
+                                  subStreamURL: nil, integration: IntegrationSettings(service: .eufy, details: details), secret: "eufy-helper", source: nil)
+
+        case "ring", "tuya", "otherCloud":
             if !helperInstalled { throw SetupProblem(message: helperMissing, field: nil) }
             let source: Go2RTCSource
             do {
@@ -215,7 +279,10 @@ enum CameraSetup {
     /// The check the page's Check the Camera step makes: the engine's probe for the prepared camera.
     static func probe(_ camera: PreparedCamera, backend: any BridgeBackend) async throws -> CameraProbeResult {
         switch camera.spec.id {
-        case "unifiProtect", "googleNest", "ring", "wyzeCloud", "tuya", "otherCloud":
+        case "wyzeCloud" where camera.vendor == .rtsp:
+            return try await backend.probeCamera(vendor: .rtsp, endpoint: camera.endpoint, username: camera.username, password: camera.password,
+                                                 mainStreamURL: camera.mainStreamURL, subStreamURL: camera.subStreamURL)
+        case "unifiProtect", "googleNest", "ring", "wyzeCloud", "eufy", "tuya", "otherCloud":
             guard let vendor = camera.vendor, let integration = camera.integration, let secret = camera.secret else {
                 throw SetupProblem(message: "The camera’s details are incomplete.", field: nil)
             }
@@ -266,6 +333,8 @@ enum CameraSetup {
         let sources = availableMotionSources(result.capabilities)
         let wanted = request.motionSource ?? defaults.motionSource
         config.motionSource = sources.contains(wanted) ? wanted : .softMotion
+        // A eufy camera streams on demand: built-in detection would need its picture all the time, so its motion is eufy's own.
+        if prepared.integration?.service == .eufy { config.motionSource = .cameraEvents }
         config.motionSensitivity = min(max(request.motionSensitivity ?? 0.5, 0), 1)
         config.motionHoldSeconds = min(max(request.motionHoldSeconds ?? 20, 1), 3_600)
         config.sensors = SensorCatalog.filtered(request.sensors ?? SensorOptions(), by: result.capabilities, motionSource: config.motionSource)

@@ -44,7 +44,7 @@ struct OnboardingView: View {
         .frame(width: 640, height: 700)
         .background { BrandCanvas() }
         .preferredColorScheme(.dark)   // the brand look is dark
-        .tint(Brand.amber)
+        .tint(Brand.accent)
     }
 
     private var content: some View {
@@ -125,7 +125,7 @@ struct LocalNetworkAccessSheet: View {
         .fixedSize(horizontal: false, vertical: true)
         .background { BrandCanvas() }
         .preferredColorScheme(.dark)
-        .tint(Brand.amber)
+        .tint(Brand.accent)
     }
 }
 
@@ -138,7 +138,7 @@ private struct PrerequisiteRow: View {
         HStack(alignment: .top, spacing: 14) {
             Image(systemName: symbol)
                 .font(.title2)
-                .foregroundStyle(Brand.amber)
+                .foregroundStyle(Brand.accent)
                 .frame(width: 32)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {

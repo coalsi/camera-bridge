@@ -105,6 +105,12 @@ actor RecordingHandler: CameraRecordingDelegate {
                 await lease.release()
             }
         }
+        if !usesSubStream, let hubs {
+            // The main stream, held while the recording runs: a camera that streams on demand (a battery camera) stays awake for it.
+            // For any other camera the main stream runs anyway and the lease costs nothing.
+            let lease = await hubs(false)
+            if lease.hub === hub { currentLease = lease } else { await lease.release() }
+        }
         let producer = RecordingProducer(streamID: streamID, configuration: configuration, audioActive: audioActive,
                                          cameraAudioEnabled: cameraAudioEnabled, hub: recordingHub, traits: recordingTraits, codecs: codecs,
                                          timing: timing, log: log, qualityMode: qualityMode, usesSubStream: usesSubStream, overlay: overlay)

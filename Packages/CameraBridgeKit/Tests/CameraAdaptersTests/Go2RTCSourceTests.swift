@@ -98,7 +98,7 @@ import Testing
             }
         }
         #expect(Go2RTCConfig.servingModules.contains("rtsp") && !Go2RTCConfig.setupModules.contains("rtsp"))
-        #expect(Go2RTCConfig(apiPort: 1, rtspPort: 2).yaml.contains("modules: [api, rtsp, ring, nest, tuya, wyze, tapo, doorbird, dvrip, xiaomi]"))
+        #expect(Go2RTCConfig(apiPort: 1, rtspPort: 2).yaml.contains("modules: [api, rtsp, http, ring, nest, tuya, wyze, tapo, doorbird, dvrip, xiaomi]"))
     }
 
     @Test func setupConfigurationHasNoRTSPServerAndNoPassword() {

@@ -37,7 +37,7 @@ struct LiveIconButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .glass(in: Circle(), interactive: true, tint: isProminent ? Brand.amber.opacity(0.55) : nil)
+        .glass(in: Circle(), interactive: true, tint: isProminent ? Brand.red.opacity(0.55) : nil)
         .help(Text(label))
         .accessibilityLabel(Text(label))
     }

@@ -39,7 +39,7 @@ struct OverviewTile: View {
         .brandSurface(radius: radius)
         .overlay {
             if isDropTarget {
-                RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Brand.amber, lineWidth: 3)
+                RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Brand.accent, lineWidth: 3)
             }
         }
         .onScrollVisibilityChange(threshold: 0.3) { overview.setVisible(status.id, $0) }

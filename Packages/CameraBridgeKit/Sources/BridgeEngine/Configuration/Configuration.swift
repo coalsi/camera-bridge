@@ -247,6 +247,9 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
     /// The bridge's time zone (an IANA identifier, "America/Phoenix"): the time the timestamp overlay draws and cameras are set to. nil: the system's
     /// (on Camera Bridge OS that is UTC, so the web page sets it from the browser that signs in first).
     public var timeZone: String?
+    /// The plugins' own settings by plugin id ("wyze"): switched on, the account shown, the last sync. Secrets are not here: they are in the
+    /// platform `SecretStore` (`BridgeEngine.pluginSecret(id:)`).
+    public var plugins: [String: PluginState]
 
     public static let nvrKeepDaysRange = 1...365
     public static let nvrMaxSizeGBRange = 10...100_000
@@ -274,11 +277,12 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         nvrKeepDays = 7
         nvrMaxSizeGB = 500
         timeZone = nil
+        plugins = [:]
     }
 
     private enum CodingKeys: String, CodingKey {
         case webhookEnabled, webhookPort, webhookToken, keepMacAwake, sensorsBridgePort, logLevel, basePort, motionShadowTest
-        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone
+        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone, plugins
     }
 
     public init(from decoder: any Decoder) throws {
@@ -312,8 +316,36 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         if let zone: String = value(.timeZone, default: nil) {
             if TimeZone(identifier: zone) != nil { timeZone = zone } else { unreadable.append(CodingKeys.timeZone.stringValue) }
         }
+        plugins = value(.plugins, default: plugins)
         if !unreadable.isEmpty {
             Log(category: "Engine").warning("Unreadable settings \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }
+    }
+}
+
+/// One plugin's settings (`BridgeSettings.plugins`): nothing secret.
+public struct PluginState: Sendable, Codable, Equatable {
+    public var enabled: Bool
+    /// What the plugin is connected to, for the page ("someone@example.com").
+    public var account: String?
+    public var lastSync: Date?
+    /// The last problem, in words for the page (nil when the last sync worked).
+    public var lastError: String?
+
+    public init(enabled: Bool = false, account: String? = nil, lastSync: Date? = nil, lastError: String? = nil) {
+        self.enabled = enabled
+        self.account = account
+        self.lastSync = lastSync
+        self.lastError = lastError
+    }
+
+    private enum CodingKeys: String, CodingKey { case enabled, account, lastSync, lastError }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = (try? container.decodeIfPresent(Bool.self, forKey: .enabled)) ?? false
+        account = try? container.decodeIfPresent(String.self, forKey: .account)
+        lastSync = try? container.decodeIfPresent(Date.self, forKey: .lastSync)
+        lastError = try? container.decodeIfPresent(String.self, forKey: .lastError)
     }
 }

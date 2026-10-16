@@ -32,6 +32,7 @@ extension WebApp {
         Route("POST", "cameras/:id/camera-clock", takesBody: true) { app, ctx in try await app.cameraClock(ctx) },
         Route("POST", "cameras/:id/camera-time-zone", takesBody: true) { app, ctx in try await app.cameraTimeZone(ctx) },
         Route("POST", "cameras/:id/clean-picture", takesBody: true) { app, ctx in try await app.cleanPicture(ctx) },
+        Route("POST", "cameras/:id/pan-tilt", takesBody: true) { app, ctx in try await app.panTilt(ctx) },
         Route("GET", "cameras/:id/pairing") { app, ctx in try await app.pairing(ctx) },
         Route("POST", "cameras/:id/reset-pairing") { app, ctx in try await app.resetPairing(ctx) },
         Route("POST", "cameras/:id/test-motion") { app, ctx in try await app.testMotion(ctx) },
@@ -41,6 +42,19 @@ extension WebApp {
         Route("POST", "integrations/nest/authorize", takesBody: true) { app, ctx in try await app.nestAuthorize(ctx) },
         Route("POST", "integrations/nest/connect", takesBody: true) { app, ctx in try await app.nestConnect(ctx) },
         Route("GET", "sensors-bridge") { app, _ in await app.sensorsBridge() },
+        // Plugins
+        Route("GET", "plugins") { app, _ in try await app.plugins() },
+        Route("PATCH", "plugins/:id", takesBody: true) { app, ctx in try await app.patchPlugin(ctx) },
+        Route("GET", "plugins/wyze") { app, ctx in try await app.wyzeState(ctx) },
+        Route("POST", "plugins/wyze/sign-in", takesBody: true) { app, ctx in try await app.wyzeSignIn(ctx) },
+        Route("POST", "plugins/wyze/send-code", takesBody: true) { app, ctx in try await app.wyzeSendCode(ctx) },
+        Route("POST", "plugins/wyze/verify", takesBody: true) { app, ctx in try await app.wyzeVerify(ctx) },
+        Route("POST", "plugins/wyze/sign-out") { app, _ in try await app.wyzeSignOut() },
+        Route("GET", "plugins/eufy") { app, _ in try await app.eufyState() },
+        Route("POST", "plugins/eufy/sign-in", takesBody: true) { app, ctx in try await app.eufySignIn(ctx) },
+        Route("POST", "plugins/eufy/captcha", takesBody: true) { app, ctx in try await app.eufyCaptcha(ctx) },
+        Route("POST", "plugins/eufy/verify", takesBody: true) { app, ctx in try await app.eufyVerify(ctx) },
+        Route("POST", "plugins/eufy/sign-out") { app, _ in try await app.eufySignOut() },
         Route("POST", "sensors-bridge/reset-pairing") { app, _ in try await app.resetSensorsBridgePairing() },
         // Bridge
         Route("GET", "settings") { app, _ in await app.getSettings() },
@@ -313,7 +327,8 @@ extension WebApp {
     func addCamera(_ ctx: RequestContext) async throws -> HTTPResponse {
         let body = try decode(SetupRequest.self, from: ctx)
         let overview = await backend.overview()
-        let prepared = try CameraSetup.prepare(body, helperInstalled: overview.streamingHelperInstalled, nest: nestSignIn(named: body.nestSession))
+        let prepared = try CameraSetup.prepare(body, helperInstalled: overview.streamingHelperInstalled, nest: nestSignIn(named: body.nestSession),
+                                               wyze: try await wyzePick(mac: body.wyzeMAC), eufy: try await eufyPick(serial: body.eufySerial))
         let result: CameraProbeResult
         do {
             result = try await CameraSetup.probe(prepared, backend: backend)
@@ -665,7 +680,8 @@ extension WebApp {
     func probe(_ ctx: RequestContext) async throws -> HTTPResponse {
         let body = try decode(SetupRequest.self, from: ctx)
         let overview = await backend.overview()
-        let prepared = try CameraSetup.prepare(body, helperInstalled: overview.streamingHelperInstalled, nest: nestSignIn(named: body.nestSession))
+        let prepared = try CameraSetup.prepare(body, helperInstalled: overview.streamingHelperInstalled, nest: nestSignIn(named: body.nestSession),
+                                               wyze: try await wyzePick(mac: body.wyzeMAC), eufy: try await eufyPick(serial: body.eufySerial))
         let result: CameraProbeResult
         do {
             result = try await CameraSetup.probe(prepared, backend: backend)
@@ -678,7 +694,9 @@ extension WebApp {
             return .json(ProbeFailure(error: ErrorText.describe(error)))
         }
         let defaults = CameraSetup.Defaults(result: result, discoveredName: nil)
-        let sources = CameraSetup.availableMotionSources(result.capabilities)
+        // A eufy camera sleeps between uses: built-in detection and a webhook would need its picture all the time, so only its own events.
+        let onDemand = prepared.integration?.service == .eufy
+        let sources = onDemand ? [.cameraEvents] : CameraSetup.availableMotionSources(result.capabilities)
         var candidate = CameraConfiguration(name: defaults.name, kind: defaults.kind, vendor: result.vendor, endpoint: prepared.endpoint, username: prepared.username)
         candidate.mainStreamURL = (result.mainStream?.url ?? prepared.mainStreamURL)?.removingUserInfo
         candidate.serialNumber = result.serialNumber
@@ -687,7 +705,7 @@ extension WebApp {
             vendor: result.vendor.rawValue, vendorName: StatusText.vendor(result.vendor), manufacturer: result.manufacturer, model: result.model,
             serialNumber: result.serialNumber, firmware: result.firmware, mainStream: result.mainStream.map(StreamResource.init),
             subStream: result.subStream.map(StreamResource.init), capabilities: result.capabilities, onvifPort: result.onvifPort,
-            suggestedName: defaults.name, suggestedKind: defaults.kind, suggestedMotionSource: defaults.motionSource,
+            suggestedName: defaults.name, suggestedKind: defaults.kind, suggestedMotionSource: onDemand ? .cameraEvents : defaults.motionSource,
             motionSources: sources.map { MotionChoice(id: $0.rawValue, title: StatusText.motionSource($0), detail: StatusText.motionSourceDetail($0)) },
             sensorsByMotionSource: Dictionary(uniqueKeysWithValues: MotionSource.allCases.map {
                 ($0.rawValue, SensorCatalog.available(in: result.capabilities, motionSource: $0))
@@ -913,5 +931,35 @@ extension WebApp {
             throw APIError(status: 422, code: "clean_picture_failed", message: "The camera did not change its labels: \(change.summary).")
         }
         return .json(CleanPictureAnswer(clean: body.clean, summary: change.summary))
+    }
+}
+
+// MARK: Pan and tilt
+
+extension WebApp {
+    private struct PanTiltBody: Decodable {
+        var pan: Double
+        var tilt: Double
+    }
+
+    /// `POST cameras/:id/pan-tilt {pan, tilt}` (-1…1 each; both 0 stops): moves a pan/tilt camera for 1.5 s; the page repeats it while a
+    /// button is held.
+    func panTilt(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let id = try ctx.uuid("id")
+        let body = try decode(PanTiltBody.self, from: ctx)
+        guard body.pan.isFinite, body.tilt.isFinite, abs(body.pan) <= 1, abs(body.tilt) <= 1 else {
+            throw APIError.badRequest("Pan and tilt are numbers from -1 to 1.", field: "pan")
+        }
+        guard await backend.overview().configurations.contains(where: { $0.id == id }) else {
+            throw APIError.notFound("There is no camera with this identifier.")
+        }
+        do {
+            try await backend.panTilt(cameraID: id, pan: body.pan, tilt: body.tilt)
+        } catch EngineError.cameraNotRunning {
+            throw APIError(status: 409, code: "no_pan_tilt", message: "This camera can’t pan and tilt right now.")
+        } catch {
+            throw APIError(status: 422, code: "pan_tilt_failed", message: ErrorText.describe(error))
+        }
+        return .empty()
     }
 }

@@ -87,10 +87,10 @@ private struct PresetPicker: View {
                 } label: {
                     Text(preset.title)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(panel.preset == preset ? Brand.onAmber : .white)
+                        .foregroundStyle(panel.preset == preset ? Brand.onRed : .white)
                         .padding(.horizontal, 9)
                         .frame(height: 26)
-                        .background(panel.preset == preset ? Brand.amber : Color.white.opacity(0.10), in: Capsule())
+                        .background(panel.preset == preset ? Brand.red : Color.white.opacity(0.10), in: Capsule())
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
@@ -125,10 +125,10 @@ private struct SaveClipButton: View {
         } label: {
             Label("Save Clip", systemImage: "scissors")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(panel.isChoosingClip ? Brand.onAmber : .white)
+                .foregroundStyle(panel.isChoosingClip ? Brand.onRed : .white)
                 .padding(.horizontal, 12)
                 .frame(height: 30)
-                .background(panel.isChoosingClip ? Brand.amber : Color.clear, in: Capsule())
+                .background(panel.isChoosingClip ? Brand.red : Color.clear, in: Capsule())
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)

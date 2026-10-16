@@ -1,18 +1,23 @@
 import SwiftUI
 
-/// CameraBridge's brand tokens: a solid dark-gray canvas with the yellow-to-orange palette used only for accents
-/// (selection outline, icons, status, focus, links and the primary button). No gradients in controls. The manager
-/// window forces a dark appearance, so these are tuned for dark only; the menu and Settings keep following the system
-/// and use the `AccentColor` asset instead.
+/// Camera Bridge's brand tokens: a solid dark-gray canvas with the covered-bridge red palette used only for accents
+/// (selection outline, icons, focus, links and the primary button). No gradients in controls. The manager window
+/// forces a dark appearance, so these are tuned for dark only; the menu and Settings keep following the system and use
+/// the `AccentColor` asset instead (bridge red on light, light red on dark). See docs/brand/BRAND.md.
 enum Brand {
-    static let yellow = Color(hex: 0xFFDE1A)
-    static let gold = Color(hex: 0xFFCE00)
-    static let amber = Color(hex: 0xFFA700)
-    static let tangerine = Color(hex: 0xFF8D00)
-    static let orange = Color(hex: 0xFF7400)
-
-    /// Text and glyphs on an amber fill are always black.
-    static let onAmber = Color.black
+    /// Bridge red: fills (primary button, selected thumb, chips) with cream text on them.
+    static let red = Color(hex: 0x9E2B20)
+    /// Hover of a bridge-red fill (a touch lighter, so it still reads on the near-black canvas).
+    static let redHover = Color(hex: 0xB23428)
+    /// Deep red: pressed fills.
+    static let deepRed = Color(hex: 0x6E1A14)
+    /// Light red: accent text, icons, outlines and links on dark backgrounds (bridge red is too dark there).
+    static let accent = Color(hex: 0xE06A5A)
+    /// Hover of light-red links on dark.
+    static let accentHover = Color(hex: 0xEC8577)
+    /// Cream: text and glyphs on a bridge-red fill.
+    static let cream = Color(hex: 0xEFE6D8)
+    static let onRed = cream
 
     /// Window, sidebar, cards, raised cards (selected sidebar card) and hairlines.
     static let canvas = Color(hex: 0x1C1C1E)
@@ -47,7 +52,7 @@ struct BrandCanvas: View {
 }
 
 /// Rounded solid card surface with a hairline border (lighter under Increase Contrast). `highlighted` is the selected
-/// state: a slightly lighter fill and a solid amber outline. `radius` is 16-20 pt for cards, smaller for pills.
+/// state: a slightly lighter fill and a solid light-red outline. `radius` is 16-20 pt for cards, smaller for pills.
 struct BrandSurface: ViewModifier {
     var radius: CGFloat = 18
     var highlighted = false
@@ -59,7 +64,7 @@ struct BrandSurface: ViewModifier {
             .background { shape.fill(highlighted ? Brand.cardSelected : Brand.card) }
             .overlay {
                 if highlighted {
-                    shape.strokeBorder(Brand.amber, lineWidth: 2)
+                    shape.strokeBorder(Brand.accent, lineWidth: 2)
                 } else {
                     shape.strokeBorder(contrast == .increased ? Color.white.opacity(0.5) : Brand.border, lineWidth: contrast == .increased ? 1.5 : 1)
                 }
@@ -91,7 +96,7 @@ struct SectionCard<Content: View>: View {
             HStack(spacing: 8) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .foregroundStyle(Brand.amber)
+                        .foregroundStyle(Brand.accent)
                         .accessibilityHidden(true)
                 }
                 Text(title)

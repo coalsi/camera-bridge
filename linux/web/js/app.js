@@ -13,6 +13,7 @@ import { renderSettings } from './screens/settings.js';
 import { renderLogs } from './screens/logs.js';
 import { renderSystem } from './screens/system.js';
 import { renderAbout } from './screens/about.js';
+import { renderEufyPlugin, renderPlugins, renderWyzePlugin } from './screens/plugins.js';
 import { whatsNewNotice } from './whats-new.js';
 
 const root = document.getElementById('app');
@@ -23,6 +24,7 @@ let unsubscribe = null;
 const NAV = [
   { href: '#/', label: 'Monitor', icon: 'monitor', match: (p) => p === '' || p === 'monitor' || p === 'nvr' || p.startsWith('nvr/') },
   { href: '#/cameras', label: 'Cameras', icon: 'camera', match: (p) => p === 'cameras' || p.startsWith('camera/') || p === 'add' || p.startsWith('pair') },
+  { href: '#/plugins', label: 'Plugins', icon: 'plugin', match: (p) => p === 'plugins' || p.startsWith('plugins/') },
   { href: '#/logs', label: 'Log', icon: 'list', match: (p) => p === 'logs' },
   { href: '#/system', label: 'System', icon: 'server', match: (p) => p === 'system' },
   { href: '#/settings', label: 'Settings', icon: 'sliders', match: (p) => p === 'settings' || p.startsWith('settings/') },
@@ -68,6 +70,9 @@ const ROUTES = [
   { pattern: /^system$/, title: 'System', render: renderSystem },
   { pattern: /^settings(?:\/(recording))?$/, title: 'Settings', render: renderSettings },
   { pattern: /^about$/, title: 'About', render: renderAbout },
+  { pattern: /^plugins$/, title: 'Plugins', render: renderPlugins },
+  { pattern: /^plugins\/wyze$/, title: 'Wyze', render: renderWyzePlugin },
+  { pattern: /^plugins\/eufy$/, title: 'eufy', render: renderEufyPlugin },
 ];
 
 export function navigate(path) {
@@ -134,7 +139,7 @@ function buildShell() {
   root.classList.add('signed-in');
   replace(root,
     h('aside', { class: 'sidebar' },
-      h('a', { class: 'brand', href: '#/', title: store.session.bridgeName }, h('img', { src: '/mark.svg', alt: '', width: 30, height: 30 }), name),
+      h('a', { class: 'brand', href: '#/', title: store.session.bridgeName }, h('img', { src: '/mark-small.svg', alt: '', width: 30, height: 30 }), name),
       nav,
       h('div', { class: 'sidebar-foot' }, theme, power, version)),
     h('div', { class: 'app-main' }, reconnect, notice, main));

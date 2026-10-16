@@ -349,7 +349,12 @@ public final class BridgeEngine {
         await operations.withLock {
             switch state {
             case .running, .starting: return
-            case .stopped, .failed, .paused: await startServices()
+            case .stopped, .failed, .paused:
+                // The eufy helper (started by the eufy plugin) runs with the engine's helpers and keeps its session in the data directory.
+                WyzeHelpers.configure(launcher: environment.platform.helpers)
+                await EufyBridge.shared.configure(launcher: environment.platform.helpers,
+                                                  stateDirectory: environment.dataDirectory.appendingPathComponent("plugins/eufy", isDirectory: true))
+                await startServices()
             }
         }
     }
@@ -639,6 +644,48 @@ public final class BridgeEngine {
     }
 
     /// `resetPairing(cameraID:)` for the sensors bridge (a running bridge restarts with its new identity).
+    // MARK: Plugin helpers
+
+    /// Whether `host` answers on TCP `port` within `timeout`: `.answers` (it accepted), `.refused` (the host is there but nothing listens),
+    /// `.silent` (no answer). A plugin uses it to see whether a camera's RTSP is on and, sweeping a subnet, to make the system learn each
+    /// host's MAC address (its neighbour table).
+    public func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer {
+        do {
+            let connection = try await environment.platform.transport.connect(host: host, port: port, timeout: timeout)
+            connection.close()
+            return .answers
+        } catch TransportError.connectionRefused {
+            return .refused
+        } catch {
+            return .silent
+        }
+    }
+
+    /// This machine's IPv4 addresses on interfaces that are up (not loopback), for a plugin that sweeps its local network.
+    public nonisolated func localIPv4Addresses() -> [String] {
+        StreamAddress.interfaceAddresses().map(\.address).filter { !$0.contains(":") && !$0.hasPrefix("127.") }
+    }
+
+    // MARK: Plugin secrets
+
+    /// A plugin's secret (its account tokens and keys), kept in the platform `SecretStore` as `plugin.<id>`: never in `config.json`, logs or
+    /// the page. nil when none is stored. `id` is the plugin's id: lowercase letters, digits and dashes.
+    public func pluginSecret(id: String) throws -> Data? {
+        try environment.platform.secrets.read(account: try Self.pluginAccount(id))
+    }
+
+    /// Stores (or with nil deletes) a plugin's secret.
+    public func setPluginSecret(id: String, _ data: Data?) throws {
+        try environment.platform.secrets.write(data, account: try Self.pluginAccount(id))
+    }
+
+    static func pluginAccount(_ id: String) throws -> String {
+        guard !id.isEmpty, id.count <= 32, id.unicodeScalars.allSatisfy({ ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "-" }) else {
+            throw EngineError.invalidSettings("not a plugin id")
+        }
+        return "plugin.\(id)"
+    }
+
     public func resetSensorsBridgePairing() async throws {
         guard !isPreview else { return }
         try await operations.withLock {
@@ -909,6 +956,13 @@ public final class BridgeEngine {
     /// "Clean picture": every label the camera draws itself (clock, name, text lines, logo) off (`clean`), so the bridge's own timestamp and name
     /// are the only ones, the same on every camera; or back as they were. The backup is kept in `CameraConfiguration.cleanPictureBackup`, which
     /// only the engine writes. Throws `EngineError.unknownCamera`, `CameraOfflineError` for an unreachable camera, and `CancellationError`.
+    /// Moves a pan/tilt camera (`pan`, `tilt` in -1…1; both 0 stops it). A move ends by itself 1.5 s after the last ask, so the page
+    /// repeats it while a button is held. Throws `EngineError.cameraNotRunning` for a camera that isn't running or can't pan and tilt.
+    public func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws {
+        guard !isPreview, let runtime = runtimes[cameraID] else { throw EngineError.cameraNotRunning }
+        try await runtime.panTilt(pan: pan, tilt: tilt)
+    }
+
     public func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange {
         guard !isPreview else { throw EngineError.cameraNotRunning }
         if runtimes[cameraID]?.isUnreachable == true { throw CameraOfflineError() }
@@ -1275,7 +1329,8 @@ public final class BridgeEngine {
         camera.integration = integration
         let driver = tuning.driverFactory?(camera, credentials, environment.platform.transport)
             ?? CameraDrivers.make(vendor: chosen, endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL,
-                                  transport: environment.platform.transport, cameraID: nil, integration: integration, go2rtc: go2rtc)
+                                  transport: environment.platform.transport, cameraID: nil, integration: integration, go2rtc: go2rtc,
+                                  helpers: environment.platform.helpers)
         let onvifPort = chosen == .onvif ? endpoint.onvifPort.flatMap { $0 == endpoint.httpPort ? nil : $0 } : nil
         log.info("Probing \(endpoint.host) as \(chosen.rawValue)\(onvifPort.map { " (ONVIF port \($0))" } ?? "")")
         // The check's camera session ends with it (Reolink: a login holds one of the camera's few API sessions for an
@@ -2072,6 +2127,7 @@ public final class BridgeEngine {
                 status.recordingNow = runtimeStatus.recordingNow
                 status.liveViewers = runtimeStatus.liveViewers
                 status.appViewers = runtimeStatus.appViewers
+                status.panTilt = runtimeStatus.panTilt
                 status.subStreamProblem = runtimeStatus.subStreamProblem
                 status.liveSessions = runtimeStatus.liveSessions
                 status.recordingSession = runtimeStatus.recordingSession
@@ -2383,4 +2439,9 @@ public final class BridgeEngine {
         if paired { comparable.name = old.name }
         return comparable != old
     }
+}
+
+/// `BridgeEngine.portAnswer(host:port:timeout:)`.
+public enum PortAnswer: String, Sendable {
+    case answers, refused, silent
 }

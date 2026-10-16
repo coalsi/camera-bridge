@@ -30,11 +30,13 @@ HomeKit Secure Video needs H.264 video passed through untouched wherever possibl
 
 ```
 camerabridged        Swift daemon: BridgeEngine + web API (one process, user camerabridge)
-  ├─ go2rtc          helper for Ring / Nest / Wyze / Tuya (started on demand)
+  ├─ go2rtc          helper for Wyze / Ring / Nest / Tuya (started on demand): /usr/lib/camera-bridge/helpers/go2rtc
   └─ ffmpeg          codecs (started per stream)
 avahi-daemon         mDNS (HomeKit advertising)
 camerabridge-web     not a process: camerabridged serves the web UI itself on :80, plain HTTP (nothing listens on :443; HTTPS is a later option)
 ```
+
+go2rtc (MIT) is part of the image: built from a pinned commit of its master (`1.9.14+dev.c245815`, for the fixes to its native Wyze source after v1.9.14) by `linux/os/fetch-go2rtc.sh`, checked against a pinned SHA-256, installed `0755 root:root` at `/usr/lib/camera-bridge/helpers/go2rtc` (the folder `ProcessHelperLauncher` searches after `CAMERABRIDGE_HELPERS_DIR` and the daemon's own folder), licence at `/usr/share/doc/go2rtc/copyright`. It runs as a child of `camerabridged`, so as user `camerabridge` inside the daemon's sandbox. See BUILDING.md, "The go2rtc helper".
 
 State lives in `/var/lib/camera-bridge` (a separate data partition, so updates never touch it): `config.json`, `hap/`, `secrets/` (the encrypted items and `master.key`), `Diagnostics/`, and `recordings/` (the NVR's files, once Record is on). This is the same layout the Mac app uses in `~/Library/Application Support/CameraBridge`.
 

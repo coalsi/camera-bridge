@@ -115,11 +115,11 @@ struct ViewerPill: View {
             .font(.system(size: compact ? 11 : 11.5, weight: .semibold).monospacedDigit())
             .lineLimit(1)
             .fixedSize()
-            .foregroundStyle(Brand.amber)
+            .foregroundStyle(Brand.accent)
             .padding(.horizontal, compact ? 7 : 9)
             .padding(.vertical, 4)
-            .background { Capsule().fill(Brand.amber.opacity(0.16)) }
-            .overlay { Capsule().strokeBorder(Brand.amber.opacity(0.35), lineWidth: 1) }
+            .background { Capsule().fill(Brand.accent.opacity(0.16)) }
+            .overlay { Capsule().strokeBorder(Brand.accent.opacity(0.35), lineWidth: 1) }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(count == 1 ? String(localized: "1 viewer") : String(localized: "\(count) viewers")))
     }

@@ -110,7 +110,7 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
 
   const canvas = h('canvas', { class: 'zoom-canvas', hidden: true, 'aria-hidden': 'true' });
   const box = h('div', { class: 'zoom-box', hidden: true });
-  const surface = h('div', { class: 'zoom-surface', title: 'Drag over an area to zoom into it' });
+  const surface = h('div', { class: 'zoom-surface' });
   const level = h('span', { class: 'zoom-level', 'aria-live': 'polite' });
   const minimap = h('canvas', { class: 'zoom-map', width: 160, height: 90, title: 'Drag the rectangle to move' });
   const enhanceButton = h('button', { class: 'zoom-btn zoom-enhance', type: 'button', onclick: (e) => { e.stopPropagation(); setEnhance(!enhance); } });
@@ -124,6 +124,14 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
     minimap);
   const hint = h('div', { class: 'zoom-hint' }, 'Drag over an area to zoom');
   const el = h('div', { class: 'zoom-layer' }, canvas, surface, box, controls, hint);
+  // The hint shows each time the pointer comes onto the picture, for 3 s.
+  let hintTimer = null;
+  surface.addEventListener('pointerenter', (event) => {
+    if (event.pointerType !== 'mouse') return;
+    hint.dataset.show = 'true';
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => { hint.dataset.show = 'false'; }, 3000);
+  });
   host.append(el);
 
   let gl = createGLDrawer(canvas);
@@ -254,7 +262,7 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
     c.fillRect(0, r.y + r.h, minimap.width, minimap.height - r.y - r.h);
     c.fillRect(0, r.y, r.x, r.h);
     c.fillRect(r.x + r.w, r.y, minimap.width - r.x - r.w, r.h);
-    c.strokeStyle = '#f0b254';
+    c.strokeStyle = '#e06a5a';   // light brand red, as the zoom box (monitor.css)
     c.lineWidth = 2;
     c.strokeRect(r.x + 1, r.y + 1, Math.max(2, r.w - 2), Math.max(2, r.h - 2));
   }
@@ -370,6 +378,7 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
     reset,
     zoomed: isZoomed,
     destroy() {
+      clearTimeout(hintTimer);
       destroyed = true;
       resize.disconnect();
       if (frame !== null) cancelAnimationFrame(frame);

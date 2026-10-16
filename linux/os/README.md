@@ -66,7 +66,7 @@ Status files (world-readable JSON written atomically by the root side; each has 
 ```
 mkosi.conf, mkosi.conf.d/        image definition
 repart/image/                    partition layout at build time
-paths.env                        daemon and web UI paths (one place)
+paths.env                        daemon, web UI and helper paths (one place)
 units/camerabridged.service.in   daemon unit template
 mkosi.extra/                     copied into the image (see BUILDING.md)
   etc/                           fstab, nftables.conf, sysctl, journald, networkd, avahi, chrony, sshd
@@ -76,6 +76,7 @@ mkosi.extra/                     copied into the image (see BUILDING.md)
   usr/lib/sysupdate.d/           A/B update definitions (root slot + UKI)
   usr/lib/repart.d/              grows the data partition on first boot
 build.sh, build-image.sh         build
+fetch-go2rtc.sh                  builds the go2rtc helper (pinned commit and checksums)
 test-static.sh, test-vm.sh       tests
 stub/                            test-only stand-in daemons
 ```

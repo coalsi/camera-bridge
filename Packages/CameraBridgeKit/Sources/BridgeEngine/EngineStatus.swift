@@ -80,6 +80,8 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     /// Viewers in CameraBridge's own window ("1 viewer in CameraBridge"), counted apart from the HomeKit viewers in
     /// `liveViewers`.
     public var appViewers: Int
+    /// The camera pans and tilts, and the bridge can move it (`BridgeEngine.panTilt`).
+    public var panTilt = false
     public var lastEvent: String?
     public var lastEventDate: Date?
     public var lastError: String?

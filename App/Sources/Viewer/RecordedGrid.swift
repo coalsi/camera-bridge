@@ -79,7 +79,7 @@ private struct NVRTile: View {
             if cell?.owner == .live, cell?.feed?.phase == .live { LiveChip().padding(6).allowsHitTesting(false) }
         }
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(isHovering ? Brand.amber : Brand.border, lineWidth: isHovering ? 2 : 1) }
+        .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(isHovering ? Brand.accent : Brand.border, lineWidth: isHovering ? 2 : 1) }
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onHover { hovering in
             isHovering = hovering
@@ -105,14 +105,14 @@ private struct NVRTile: View {
     }
 }
 
-/// An always-visible check on a tile while a clip is being chosen: an amber check when the camera is in it, an empty circle when it is left out.
+/// An always-visible check on a tile while a clip is being chosen: a red check when the camera is in it, an empty circle when it is left out.
 struct ClipCheck: View {
     let included: Bool
 
     var body: some View {
         Image(systemName: included ? "checkmark.circle.fill" : "circle")
             .font(.system(size: 22, weight: .semibold))
-            .foregroundStyle(included ? Brand.amber : Color.white.opacity(0.85))
+            .foregroundStyle(included ? Brand.accent : Color.white.opacity(0.85))
             .shadow(color: .black.opacity(0.5), radius: 2)
     }
 }

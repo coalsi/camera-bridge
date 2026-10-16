@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum BrandButtonKind {
-    /// Solid amber fill with black text: the one main action of a screen.
+    /// Solid bridge-red fill with cream text: the one main action of a screen.
     case primary
     /// Solid gray surface with light text.
     case secondary
@@ -57,7 +57,7 @@ private struct BrandButtonBody: View {
     private var foreground: Color {
         guard isEnabled else { return Color(hex: 0x9C9CA2) }
         switch kind {
-        case .primary: return Brand.onAmber
+        case .primary: return Brand.onRed
         case .secondary: return Color(hex: 0xF2F2F5)
         case .destructive: return Color(hex: 0xFF8A80)
         }
@@ -72,13 +72,13 @@ private struct BrandButtonBody: View {
         }
     }
 
-    /// Solid fills only. Primary is amber, orange-ish on hover and deeper when pressed; a disabled button of any kind is
+    /// Solid fills only. Primary is bridge red, a touch lighter on hover and deep red when pressed; a disabled button of any kind is
     /// a flat dark-gray tile with gray text (clearly inactive, still readable) instead of a faded version of itself.
     private var fill: Color {
         guard isEnabled else { return Color(hex: 0x2F2F32) }
         let pressed = configuration.isPressed
         switch kind {
-        case .primary: return pressed ? Brand.orange : (isHovering ? Brand.tangerine : Brand.amber)
+        case .primary: return pressed ? Brand.deepRed : (isHovering ? Brand.redHover : Brand.red)
         case .secondary: return pressed ? Color(hex: 0x56565A) : (isHovering ? Brand.controlHover : Brand.control)
         case .destructive: return pressed ? Color(hex: 0x4A2A28) : (isHovering ? Color(hex: 0x40272A) : Color(hex: 0x35262A))
         }

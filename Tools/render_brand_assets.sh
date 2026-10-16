@@ -1,13 +1,15 @@
 #!/bin/sh
-# Renders every CameraBridge brand asset from the primary logo, App/Resources/Brand/CameraBridgeOutline.svg (amber house
-# outline, white camera, 100 x 100 viewBox). The older filled artwork, CameraBridgeMark.svg, stays in the repo but is no
-# longer used for any icon.
+# Renders every Camera Bridge brand asset from the primary logo, App/Resources/Brand/CameraBridgeLogo.svg (the Golden Gate seen
+# through a camera lens; covered-bridge red #9E2B20; 200 x 200 viewBox). Brand guide: docs/brand/BRAND.md. The older artwork
+# (CameraBridgeOutline.svg, CameraBridgeMark.svg) stays in the repo but is no longer used for any icon.
 #
-#   1. App icon (AppIcon.appiconset, 16...1024 @1x/@2x): a macOS-style tile (824 pt squircle in a 1024 canvas, dark
-#      #2A2A2D to #1C1C1E, inner highlight and soft shadow) with the outline mark at about 62% of the tile. Each size is
-#      rendered at its own pixel size by headless Chrome, with a heavier stroke at 64 px and below.
-#   2. Menu bar template mark (MenuBarIcon.imageset, 18 pt @1x/@2x/@3x): black house outline + filled camera, alpha only.
-#   3. In-app vector mark (BrandMark.imageset/BrandMark.pdf): the logo as authored, for the sidebar, onboarding, About.
+#   1. App icon (AppIcon.appiconset, 16...1024 @1x/@2x): a macOS-style tile (824 pt squircle in a 1024 canvas, bridge red with
+#      a soft top highlight and shadow) with the logo's lens filling it: the logo's red ring is the tile itself. 128 px and up
+#      use the full logo, 64 px and below CameraBridgeLogoSmall.svg (thicker cable and deck, no crossbeams or glint). Each size
+#      is rendered at its own pixel size by headless Chrome. (CB_ICON=dark builds the logo on a dark tile instead.)
+#   2. Menu bar template mark (MenuBarIcon.imageset, 18 pt @1x/@2x/@3x): CameraBridgeMenuBarMark.svg, a lens ring and a simple
+#      suspension bridge, black, alpha only.
+#   3. In-app vector mark (BrandMark.imageset/BrandMark.pdf): the full logo as authored, for the sidebar, onboarding, About.
 #
 # The HTML compositions come from Tools/compose_brand_assets.py. Needs Google Chrome, python3 and sips. Run from anywhere.
 # The website's copies (../CameraBridge-web) are not touched here.

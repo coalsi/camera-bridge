@@ -117,10 +117,10 @@ test('bar height is the square root, so normal activity sits at half the height'
   assert.equal(barHeight(reference * 10, reference), 1);
   assert.equal(barHeight(0, reference), 0);
   assert.equal(barHeight(100, 0), 0);
-  assert.ok(barHeight(1.5 * typical + 1, reference) > 0.5);                // amber bars are also taller than the normal line
+  assert.ok(barHeight(1.5 * typical + 1, reference) > 0.5);                // highlighted bars are also taller than the normal line
 });
 
-test('amber means above 1.5 x typical, and only when a typical level exists', () => {
+test('highlighted means above 1.5 x typical, and only when a typical level exists', () => {
   assert.equal(isElevated(1501, 1000), true);
   assert.equal(isElevated(1500, 1000), false);
   assert.equal(isElevated(1e9, null), false);

@@ -16,7 +16,7 @@ import TestSupport
         #expect(answer.status == 200)
         let types = try #require(answer.json["types"] as? [[String: Any]])
         #expect(types.compactMap { $0["id"] as? String } == ["automatic", "hikvision", "reolink", "tapo", "amcrest", "doorbird", "wyzeRTSP", "rtspURL",
-                                                             "unifiProtect", "ring", "googleNest", "wyzeCloud", "tuya", "otherCloud", "demo"])
+                                                             "unifiProtect", "ring", "googleNest", "wyzeCloud", "eufy", "tuya", "otherCloud", "demo"])
         let automatic = try #require(types.first)
         #expect(automatic["title"] as? String == "ONVIF / RTSP Camera (Detect Automatically)")
         #expect(automatic["usesDiscovery"] as? Bool == true)
@@ -29,7 +29,8 @@ import TestSupport
             #expect(!(type["summary"] as? String ?? "").isEmpty)
             #expect((type["setupSteps"] as? [String])?.isEmpty == false)
         }
-        let cloud = types.filter { $0["group"] as? String == "cloud" }
+        // The cloud types go through go2rtc, except a Wyze account camera that uses its own RTSP (the Wyze plugin decides per camera).
+        let cloud = types.filter { $0["group"] as? String == "cloud" && $0["id"] as? String != "wyzeCloud" }
         #expect(cloud.allSatisfy { $0["needsStreamingHelper"] as? Bool == true })
     }
 

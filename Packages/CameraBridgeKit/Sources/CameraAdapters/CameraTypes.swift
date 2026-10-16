@@ -128,6 +128,13 @@ public protocol TalkbackSink: Sendable {
     func close() async
 }
 
+/// Moves a pan/tilt camera: continuously, at a speed, until `stop` (or the next `move`). `pan` and `tilt` are -1…1 (right and up are
+/// positive, 1 the fastest); the bridge stops a camera itself when the page stops asking (`CameraRuntime.panTilt`).
+public protocol PanTiltControl: Sendable {
+    func move(pan: Double, tilt: Double) async throws
+    func stop() async throws
+}
+
 public protocol CameraDriver: Sendable {
     var vendor: CameraVendor { get }
     func probe() async throws -> CameraProbeResult
@@ -148,10 +155,22 @@ public protocol CameraDriver: Sendable {
     /// throws `CameraAdapterError.unsupported` for cameras without the call (the default), `.unauthorized` / `.lockedOut` when the
     /// camera refuses the login.
     func requestKeyframe(subStream: Bool) async throws
+
+    /// The camera streams only while something wants its picture (a battery camera that sleeps between views): the engine connects
+    /// its stream for a viewer, a recording or a motion event and lets go of it after a short idle, instead of holding it. The default
+    /// is false.
+    var streamsOnDemand: Bool { get }
+
+    /// The camera's pan and tilt, nil when it has none (the default).
+    func makePanTilt() -> (any PanTiltControl)?
 }
 
 extension CameraDriver {
     public func close() async {}
+
+    public var streamsOnDemand: Bool { false }
+
+    public func makePanTilt() -> (any PanTiltControl)? { nil }
 
     public func requestKeyframe(subStream: Bool) async throws {
         throw CameraAdapterError.unsupported("this camera has no keyframe request")

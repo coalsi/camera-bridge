@@ -27,7 +27,7 @@ struct ManagerWindow: View {
         .background { WindowVisibilityObserver().frame(width: 0, height: 0) }
         // The brand look is dark; the menu and Settings follow the system.
         .preferredColorScheme(.dark)
-        .tint(Brand.amber)
+        .tint(Brand.accent)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .navigationTitle("Camera Bridge")
         .navigationSubtitle(subtitle)
@@ -203,9 +203,9 @@ struct EmptyCamerasHero: View {
         VStack(spacing: 22) {
             Image(systemName: "video.badge.plus")
                 .font(.system(size: 54))
-                .foregroundStyle(Brand.onAmber)
+                .foregroundStyle(Brand.onRed)
                 .frame(width: 112, height: 112)
-                .background(Brand.amber, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+                .background(Brand.red, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
                 .accessibilityHidden(true)
             VStack(spacing: 8) {
                 Text("No Cameras Yet")

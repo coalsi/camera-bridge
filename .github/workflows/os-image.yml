@@ -10,7 +10,8 @@ name: Camera Bridge OS image
 # Without them a tag build fails on purpose: an image that cannot verify its own updates must not be released.
 #
 # Action versions are pinned by commit SHA. The SHAs were read from the GitHub API for the tags named in the comments.
-# Everything else (docker, mkosi, Swift, QEMU) runs inside containers/apt packages from Debian and the swift.org image.
+# Everything else (docker, mkosi, Swift, Go, QEMU) runs inside containers/apt packages from Debian, the swift.org image and the
+# official golang image (pinned by digest in linux/os/fetch-go2rtc.sh, which builds the go2rtc helper inside build.sh).
 
 on:
   push:
@@ -73,7 +74,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h / | tail -1
-      - name: Build (camerabridged with Swift, image with mkosi)
+      - name: Build (camerabridged with Swift, go2rtc with Go, image with mkosi)
         env:
           VERSION: ${{ steps.v.outputs.version }}
           REF_TYPE: ${{ github.ref_type }}

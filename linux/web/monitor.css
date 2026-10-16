@@ -5,7 +5,7 @@
 .monitor {
   --mon-bg: #000; --mon-panel: #0b0b0d; --mon-line: #1f1f25; --mon-text: #e8e8ea; --mon-dim: #8a8a93;
   --bg: #000; --bg-raised: #0b0b0d; --surface: #0b0b0d; --surface-2: #1a1a1f; --border: #1f1f25; --border-strong: #3a3a42;
-  --text: #e8e8ea; --text-2: #b4b4bc; --text-3: #8a8a93; --link: #f0b254; --focus: #f0b254;
+  --text: #e8e8ea; --text-2: #b4b4bc; --text-3: #8a8a93; --link: #e06a5a; --focus: #efe6d8; --brand-accent: #e06a5a;
   color-scheme: dark;
   display: flex; flex-direction: column; gap: 10px; padding: 12px; height: calc(100vh - 56px); min-height: 600px;
   background: var(--mon-bg); color: var(--mon-text); border-radius: var(--radius); position: relative;
@@ -17,9 +17,9 @@
 .mon-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .monitor .btn { background: #15151a; border-color: #2c2c34; color: var(--mon-text); }
 .monitor .btn:hover { background: #1d1d24; }
-.monitor .btn.primary { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }
+.monitor .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 .monitor .btn[aria-pressed="true"] { background: #2a2a33; border-color: #4a4a52; }
-.monitor .btn.primary[aria-pressed="true"] { background: #2a2a33; border-color: var(--amber); color: var(--mon-text); }
+.monitor .btn.primary[aria-pressed="true"] { background: #2a2a33; border-color: var(--brand-accent); color: var(--mon-text); }
 .monitor select { width: auto; min-height: 32px; padding: 2px 30px 2px 10px; background-color: #15151a; color: var(--mon-text); border-color: #2c2c34; font-size: 0.85rem; }
 .mon-none { flex: 1; display: grid; place-items: center; gap: 12px; align-content: center; color: var(--mon-dim); }
 
@@ -53,7 +53,7 @@
 .nvr-tile[data-video="true"] .nvr-live { visibility: hidden; }
 
 /* Something happened at the camera: its border and a flag, for 12 s. */
-.mon-flag { padding: 2px 8px; border-radius: 999px; background: #ffd36b; color: #1a1407; font-weight: 700; font-size: 0.8rem; white-space: nowrap; }
+.mon-flag { padding: 2px 8px; border-radius: 999px; background: #ffd36b; color: #151517; font-weight: 700; font-size: 0.8rem; white-space: nowrap; }
 .nvr-tile[data-alert="motion"], .nvr-tile[data-alert="detection"] { border-color: #ffd36b; }
 .nvr-tile[data-alert="detection"] .mon-flag { background: #7fb2ff; }
 .nvr-tile[data-alert="doorbell"] { border-color: #ff6a61; }
@@ -66,7 +66,7 @@
 .mon-banners { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); z-index: 5; display: grid; gap: 6px; width: min(560px, 92%); pointer-events: none; }
 .mon-banner {
   pointer-events: auto; display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; border-radius: 10px; text-decoration: none;
-  background: #1a1407ee; color: #fff; border: 1px solid #ffd36b; box-shadow: 0 6px 24px #000a;
+  background: #151517ee; color: #fff; border: 1px solid #ffd36b; box-shadow: 0 6px 24px #000a;
 }
 .mon-banner[data-level="doorbell"] { background: #1a0605ee; border-color: #ff6a61; }
 .mon-banner[data-level="detection"] { background: #07121aee; border-color: #7fb2ff; }
@@ -116,7 +116,7 @@
 }
 .nvr-sound svg { width: 18px; height: 18px; }
 .nvr-sound:hover { background: rgb(40 40 46 / 0.9); }
-.nvr-sound[data-on="true"] { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }
+.nvr-sound[data-on="true"] { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 
 /* The camera's name is in its label (with the date and time): the heading at the top left is then only for screen readers and the keyboard
    (it shows again when focused, or when the label is hidden or leaves the name out). */
@@ -133,7 +133,7 @@
 .zoom-surface { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
 .zoom-box {
   position: absolute; left: var(--x); top: var(--y); width: var(--w); height: var(--h); pointer-events: none;
-  border: 2px solid #f0b254; background: rgb(240 178 84 / 0.12); box-shadow: 0 0 0 9999px rgb(0 0 0 / 0.35); border-radius: 4px;
+  border: 2px solid #e06a5a; background: rgb(224 106 90 / 0.12); box-shadow: 0 0 0 9999px rgb(0 0 0 / 0.35); border-radius: 4px;
 }
 .zoom-controls { position: absolute; top: 10px; left: 10px; z-index: 4; display: grid; gap: 8px; justify-items: start; }
 .zoom-row {
@@ -146,15 +146,38 @@
 }
 .zoom-btn:hover { background: rgb(255 255 255 / 0.1); }
 .zoom-btn svg { width: 15px; height: 15px; }
-.zoom-enhance[aria-pressed="true"] { color: #f0b254; }
+.zoom-enhance[aria-pressed="true"] { color: #e06a5a; }
 .zoom-level { min-width: 4ch; text-align: center; font-variant-numeric: tabular-nums; font-weight: 650; color: #fff; font-size: 0.9rem; }
 .zoom-map { width: 160px; height: auto; border-radius: 8px; border: 1px solid rgb(255 255 255 / 0.18); background: #000; cursor: move; touch-action: none; }
 .zoom-hint {
-  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 6px 12px; border-radius: 999px; pointer-events: none;
-  background: rgb(15 15 17 / 0.72); color: #e8e8ea; font-size: 0.8rem; opacity: 0; transition: opacity 0.2s;
+  position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 18px 36px; border-radius: 999px; pointer-events: none;
+  background: rgb(15 15 17 / 0.72); color: #e8e8ea; font-size: 2.4rem; font-weight: 600; white-space: nowrap; opacity: 0; transition: opacity 0.4s;
 }
-.nvr-tile:hover .zoom-layer[data-zoomed="false"] .zoom-hint { opacity: 1; }
+.zoom-layer[data-zoomed="false"] .zoom-hint[data-show="true"] { opacity: 1; }
 @media (hover: none) { .zoom-hint { display: none; } }
 /* While zoomed, the speaker and badges stay above the drawn picture. */
 .nvr-tile[data-zoomed="true"] .nvr-sound, .nvr-tile[data-zoomed="true"] .nvr-badges { z-index: 5; }
 .nvr-tile[data-zoomed="true"] .video-label { z-index: 5; }
+
+/* A battery camera on the wall: its latest picture, live only when opened on its own (it sleeps between uses). */
+.nvr-tile[data-sleeps="true"] .nvr-media::after {
+  content: "Asleep · open to watch live";
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  padding: 3px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; pointer-events: none;
+  background: rgba(0, 0, 0, .6); color: #fff;
+}
+
+/* Pan and tilt: a column between the timeline and the events, only for one pan/tilt camera opened on its own. */
+.mon-bottom[data-ptz="true"] { grid-template-columns: minmax(0, 1fr) auto 340px; }
+.mon-ptz { min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--mon-panel); border: 1px solid var(--mon-line); border-radius: 8px; padding: 8px 12px; }
+.mon-ptz[hidden] { display: none; }
+.mon-ptz .mon-timeline-head { align-self: stretch; }
+.mon-ptz-pad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); gap: 6px; grid-template-areas: ". up ." "left stop right" ". down ."; border-radius: 10px; outline-offset: 4px; }
+.mon-ptz-btn { display: grid; place-items: center; border-radius: 10px; border: 1px solid var(--mon-line); background: rgba(255, 255, 255, .06); color: inherit; font-size: 15px; cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none; }
+.mon-ptz-btn:hover { background: rgba(255, 255, 255, .12); }
+.mon-ptz-btn[aria-pressed="true"] { background: var(--brand); color: var(--on-brand); border-color: transparent; }
+.mon-ptz-btn.up { grid-area: up; } .mon-ptz-btn.down { grid-area: down; } .mon-ptz-btn.left { grid-area: left; } .mon-ptz-btn.right { grid-area: right; }
+.mon-ptz-btn.stop { grid-area: stop; font-size: 12px; opacity: .8; }
+.mon-ptz-status { margin: 0; max-width: 160px; font-size: 0.78rem; color: var(--mon-dim); text-align: center; }
+.mon-ptz-status:empty { display: none; }
+@media (max-width: 900px) { .mon-bottom[data-ptz="true"] { grid-template-columns: minmax(0, 1fr); } }

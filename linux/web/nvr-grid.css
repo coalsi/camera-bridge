@@ -43,7 +43,7 @@
 }
 .nvr-tile + .nvr-tile { margin-top: 0; }
 .nvr-tile:hover { border-color: var(--border-strong); }
-.nvr-tile[data-focus="true"] { border-color: var(--amber); }
+.nvr-tile[data-focus="true"] { border-color: var(--brand-accent); }
 .nvr-tile:has(.nvr-open:focus-visible) { outline: 3px solid var(--focus); outline-offset: 2px; }
 
 .nvr-media { position: relative; aspect-ratio: 16 / 9; background: #0c0c0e; overflow: hidden; }
@@ -112,7 +112,7 @@
 @keyframes nvr-live-dot { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .nvr-readout[data-live="true"]::before { animation: none; } }
 .nvr-grid-presets { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
-.nvr-grid-presets .btn[aria-pressed="true"] { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }
+.nvr-grid-presets .btn[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 @media (max-width: 640px) {
   .nvr-grid-presets { margin-left: 0; width: 100%; }
   .nvr-grid-presets .btn { flex: 1 1 auto; }

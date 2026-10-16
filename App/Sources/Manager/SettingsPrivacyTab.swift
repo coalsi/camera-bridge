@@ -25,7 +25,7 @@ struct PrivacySettingsTab: View {
                 SettingNote("A report contains the camera’s brand, model and firmware version, which ways of changing its settings worked or failed, the HomeKit readiness results, and the Camera Bridge and macOS versions. It never contains IP addresses, camera or home names, passwords, serial numbers, images or video, and it isn’t linked to you or used for tracking.")
                 Link("Privacy Policy", destination: CameraBridgeService.privacyPolicy)
                     .font(.system(size: 13))
-                    .foregroundStyle(Brand.amber)
+                    .foregroundStyle(Brand.accent)
             }
 
             SectionCard(title: "Camera Profiles", systemImage: "arrow.triangle.2.circlepath") {

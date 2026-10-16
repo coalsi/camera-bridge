@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/brand/camera-bridge-logo.svg" width="128" height="128" alt="Camera Bridge logo: the Golden Gate Bridge seen through a camera lens"></p>
+
 # Camera Bridge
 
 Camera Bridge brings the network cameras you already own into the Apple Home app, with HomeKit Secure Video recording,

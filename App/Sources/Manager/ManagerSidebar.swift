@@ -222,7 +222,7 @@ struct CameraThumbnail: View {
     }
 }
 
-/// Fallback for a missing picture: a solid dark tile with the camera glyph in amber.
+/// Fallback for a missing picture: a solid dark tile with the camera glyph in light red.
 struct SnapshotPlaceholder: View {
     let kind: CameraKind
     var glyphSize: CGFloat = 40
@@ -232,7 +232,7 @@ struct SnapshotPlaceholder: View {
             Color(hex: 0x232326)
             Image(systemName: kind == .doorbell ? "video.doorbell.fill" : "video.fill")
                 .font(.system(size: glyphSize))
-                .foregroundStyle(Brand.amber)
+                .foregroundStyle(Brand.accent)
                 .opacity(0.9)
         }
     }

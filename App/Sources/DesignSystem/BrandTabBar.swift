@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Segmented tab strip: a capsule track with a solid amber thumb behind the selected item (black text on it). Each item is
+/// Segmented tab strip: a capsule track with a solid bridge-red thumb behind the selected item (cream text on it). Each item is
 /// a real button: keyboard focusable, with the selected trait for VoiceOver.
 struct BrandTabBar<Tab: Hashable & Identifiable>: View {
     let tabs: [Tab]
@@ -20,12 +20,12 @@ struct BrandTabBar<Tab: Hashable & Identifiable>: View {
                     } label: {
                         Label(title(tab), systemImage: symbol(tab))
                             .font(.system(size: 13.5, weight: .semibold))
-                            .foregroundStyle(selected ? Brand.onAmber : Color(hex: 0xE4E4E8))
+                            .foregroundStyle(selected ? Brand.onRed : Color(hex: 0xE4E4E8))
                             .padding(.horizontal, 14)
                             .frame(minHeight: 36)
                             .background {
                                 if selected {
-                                    Capsule().fill(Brand.amber).matchedGeometryEffect(id: "thumb", in: thumb)
+                                    Capsule().fill(Brand.red).matchedGeometryEffect(id: "thumb", in: thumb)
                                 }
                             }
                             .contentShape(Capsule())

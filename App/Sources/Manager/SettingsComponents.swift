@@ -76,7 +76,7 @@ struct SettingToggleRow: View {
             Toggle(isOn: $isOn) { Text(title) }
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .tint(Brand.amber)
+                .tint(Brand.accent)
         }
     }
 }

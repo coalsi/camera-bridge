@@ -342,7 +342,7 @@ private struct CameraStatTiles: View {
                 StatTile(title: "Apple Home",
                          value: status.isPaired ? String(localized: "Added") : String(localized: "Not added"),
                          detail: status.isPaired ? String(localized: "Paired with Apple Home") : String(localized: "Show the QR code to add it"),
-                         systemImage: "house.fill", tint: status.isPaired ? Brand.live : Brand.amber,
+                         systemImage: "house.fill", tint: status.isPaired ? Brand.live : Brand.accent,
                          accessibilityHint: "Shows the Apple Home pairing") { navigate(.pairing) }
 
                 if configuration.hasCameraInterface {
@@ -355,18 +355,18 @@ private struct CameraStatTiles: View {
                      accessibilityHint: "Shows the stream settings") { navigate(.streams) }
 
             StatTile(title: "Recording", value: recordingValue, detail: recordingDetail, systemImage: "record.circle",
-                     tint: status.recordingNow ? Brand.recording : Brand.amber,
+                     tint: status.recordingNow ? Brand.recording : Brand.accent,
                      accessibilityHint: "Shows the recording settings") { navigate(.recording) }
 
             StatTile(title: "Live View", value: StatusText.viewersValue(status), detail: StatusText.viewersDetail(status),
-                     systemImage: "eye.fill", tint: status.liveViewers + status.appViewers > 0 ? Brand.live : Brand.amber,
+                     systemImage: "eye.fill", tint: status.liveViewers + status.appViewers > 0 ? Brand.live : Brand.accent,
                      accessibilityHint: "Shows the live view settings") { navigate(.liveView) }
 
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 StatTile(title: "Motion",
                          value: status.lastEventDate.map { StatusText.timeAgo($0, now: context.date) } ?? String(localized: "No events yet"),
                          detail: status.lastEvent ?? String(localized: "Waiting for the first one"),
-                         systemImage: "figure.walk.motion", tint: status.motionActive ? Brand.warning : Brand.amber,
+                         systemImage: "figure.walk.motion", tint: status.motionActive ? Brand.warning : Brand.accent,
                          accessibilityHint: "Shows motion settings and recent events") { navigate(.motion) }
             }
         }
@@ -418,7 +418,7 @@ private struct AppleHomeSummary: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
-                Image(systemName: "house.fill").foregroundStyle(Brand.amber).accessibilityHidden(true)
+                Image(systemName: "house.fill").foregroundStyle(Brand.accent).accessibilityHidden(true)
                 Text("Apple Home").font(.headline).accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 0)
                 pairingChip

@@ -13,19 +13,21 @@ import Foundation
 ///   that name when it reads the file (its documented `${VAR}` support); the manager puts the values in the helper's
 ///   environment. The file is 0600 in a private folder, and it is removed once the helper answers and at exit.
 public struct Go2RTCConfig: Sendable, Equatable {
-    /// One stream: `name` is the RTSP path; the source reaches go2rtc through the environment variable `variable`.
+    /// One stream: `name` is the RTSP path; the source reaches go2rtc through the environment variable `variable`. nil: a stream with no
+    /// source, which a helper publishes into (`Go2RTCSource.published`).
     public struct Stream: Sendable, Equatable {
         public var name: String
-        public var variable: String
+        public var variable: String?
 
-        public init(name: String, variable: String) {
+        public init(name: String, variable: String?) {
             self.name = name
             self.variable = variable
         }
     }
 
     /// Modules of the serving helper: the API, the RTSP server and the camera sources.
-    public static let servingModules = ["api", "rtsp", "ring", "nest", "tuya", "wyze", "tapo", "doorbird", "dvrip", "xiaomi"]
+    /// `http`: the eufy helper's streams (`Go2RTCSource.eufyBridge`, MPEG-TS from 127.0.0.1); nobody else's source is an HTTP one.
+    public static let servingModules = ["api", "rtsp", "http", "ring", "nest", "tuya", "wyze", "tapo", "doorbird", "dvrip", "xiaomi"]
     /// Modules of the sign-in page: the API with the pages' account lookups, no RTSP server.
     public static let setupModules = ["api", "ring", "nest", "tuya", "wyze"]
     /// API paths of the serving helper: its info (the health check) and the stream list.
@@ -84,7 +86,11 @@ public struct Go2RTCConfig: Sendable, Equatable {
         } else {
             lines.append("streams:")
             for stream in streams {
-                lines.append("  \(Self.quoted(stream.name)): '${\(stream.variable)}'")
+                if let variable = stream.variable {
+                    lines.append("  \(Self.quoted(stream.name)): '${\(variable)}'")
+                } else {
+                    lines.append("  \(Self.quoted(stream.name)): []")
+                }
             }
         }
         return lines.joined(separator: "\n") + "\n"

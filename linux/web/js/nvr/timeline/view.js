@@ -105,7 +105,7 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
     const v = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
     colors = {
       track: v('--bg-raised', '#1c1c1f'), span: v('--surface-2', '#2c2c30'), tick: v('--border-strong', '#4a4a52'), label: v('--text-3', '#8a8a93'),
-      bar: v('--text-2', '#b4b4bc'), hot: v('--amber', '#e8a33d'), normal: v('--text-3', '#8a8a93'), gap: v('--border-strong', '#4a4a52'),
+      bar: v('--text-2', '#b4b4bc'), hot: v('--brand-accent', '#e06a5a'), normal: v('--text-3', '#8a8a93'), gap: v('--border-strong', '#4a4a52'),
     };
   }
 

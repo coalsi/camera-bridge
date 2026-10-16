@@ -11,6 +11,7 @@ legal advice. The authoritative texts are in the image itself (`/usr/share/doc/`
 | Third-party code inside Camera Bridge | Apache-2.0, MIT | See [`NOTICE`](../../NOTICE) and [`THIRD_PARTY_LICENSES.md`](../../THIRD_PARTY_LICENSES.md). Also installed at `/usr/share/doc/camera-bridge/`. |
 | Linux kernel | GPL-2.0 | Debian's kernel, unmodified. |
 | ffmpeg | LGPL-2.1+ / GPL-2+ (Debian's build) | Camera Bridge runs it as a separate program; it does not link it. |
+| [go2rtc](https://github.com/AlexxIT/go2rtc) 1.9.14+dev.c245815 | MIT (its Go modules: their own permissive licenses, listed in its `go.mod`) | The streaming helper at `/usr/lib/camera-bridge/helpers/go2rtc`, built unmodified from commit `c245815e75e2a5fd60b4290f12bfc04e55a984d3` (`linux/os/fetch-go2rtc.sh`). Camera Bridge runs it as a separate program. Licence text: `/usr/share/doc/go2rtc/copyright`; see [docs/third-party/go2rtc.md](../third-party/go2rtc.md). Not a Debian package, so it is not in `packages.txt`. |
 | systemd, Avahi, glibc and the other libraries | LGPL-2.1+ and similar | Camera Bridge links Avahi's `dns_sd` compatibility library and glibc dynamically. |
 | Everything else from Debian 13 | Each package has its own license | Listed in `/usr/share/doc/<package>/copyright`. |
 | Intel graphics and Realtek network firmware | Redistributable firmware licenses | From Debian's `non-free-firmware` section (`firmware-intel-graphics`, `firmware-realtek`). Their license texts are in `/usr/share/doc/`. |

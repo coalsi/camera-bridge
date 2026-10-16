@@ -95,4 +95,6 @@ go2rtc (MIT License)
 --------------------------------------------------------------------------------
 Copyright (c) 2022 Alexey Khit. https://github.com/AlexxIT/go2rtc
 The macOS app bundles the unmodified go2rtc 1.9.14 program as a helper (Contents/Helpers/go2rtc); it runs as a separate
-program. License text and checksums: docs/third-party/go2rtc.md.
+program. Camera Bridge OS contains go2rtc 1.9.14+dev.c245815, built unmodified from commit
+c245815e75e2a5fd60b4290f12bfc04e55a984d3, at /usr/lib/camera-bridge/helpers/go2rtc (its license text is in
+/usr/share/doc/go2rtc/copyright). License text and checksums: docs/third-party/go2rtc.md.

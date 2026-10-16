@@ -1,6 +1,6 @@
 # Building and testing Camera Bridge OS
 
-Everything for the operating system image lives in `linux/os/` (and `.github/workflows/os-image.yml`). The image is built from Debian 13 "trixie" with [mkosi](https://github.com/systemd/mkosi); the engine daemon `camerabridged` is built as a static Swift binary and copied in.
+Everything for the operating system image lives in `linux/os/` (and `.github/workflows/os-image.yml`). The image is built from Debian 13 "trixie" with [mkosi](https://github.com/systemd/mkosi); the engine daemon `camerabridged` is built as a static Swift binary and copied in, and so is the go2rtc streaming helper, built with Go from a pinned commit.
 
 ## Quick start
 
@@ -33,8 +33,9 @@ When you are done, `linux/os/build.sh --clean` removes the Docker volumes (`cb-o
 |---|---|
 | `linux/os/Dockerfile.builder` | the build container (Debian 13 with the same mkosi / systemd the image uses) |
 | `linux/os/build.sh` | host side: builds the daemon (`swift build -c release --static-swift-stdlib --build-system native` in the `swift:6.4.0-noble` image (pinned: 6.4.1 made the daemon use ~70% more CPU) plus the Avahi, curl and libxml2 development packages), starts the builder container |
+| `linux/os/fetch-go2rtc.sh` | host side, run by `build.sh`: builds the go2rtc helper (below) into `build/os-helpers/<arch>/` |
 | `linux/os/build-image.sh` | inside the container: stages files, runs mkosi, cuts the update artifacts, compresses, hashes, signs |
-| `linux/os/paths.env` | **where the daemon and the web UI live in the image** (`CB_DAEMON`, `CB_WEB_ROOT`); `units/camerabridged.service.in` is rendered with these |
+| `linux/os/paths.env` | **where the daemon, the web UI and the helpers live in the image** (`CB_DAEMON`, `CB_WEB_ROOT`, `CB_HELPERS_DIR`); `units/camerabridged.service.in` is rendered with these |
 | `linux/os/mkosi.conf`, `mkosi.conf.d/` | the image definition (packages, boot loader, kernel command line) |
 | `linux/os/repart/image/` | partition layout used when building (`@VERSION@` becomes the root slot's label) |
 | `linux/os/mkosi.extra/` | files copied into the image: units, scripts, firewall, sysctl, network, `usr/lib/repart.d` (first-boot growth), `usr/lib/sysupdate.d` (A/B update definitions) |
@@ -44,6 +45,20 @@ When you are done, `linux/os/build.sh --clean` removes the Docker volumes (`cb-o
 | `linux/os/README.md` | the contract between the OS and the daemon (environment variables, request files) |
 
 The daemon is installed to `/usr/bin/camerabridged` and the web UI (`linux/web/`, if present) to `/usr/share/camera-bridge/web`; change both in `paths.env` only.
+
+### The go2rtc helper
+
+The engine starts [go2rtc](https://github.com/AlexxIT/go2rtc) (MIT) for the cameras it cannot reach itself (Wyze's own protocol, Ring, Nest, Tuya). The image has it at `/usr/lib/camera-bridge/helpers/go2rtc` (`CB_HELPERS_DIR`, one of the folders `PlatformLinux`'s `ProcessHelperLauncher` searches), `0755 root:root`, with its licence at `/usr/share/doc/go2rtc/copyright`.
+
+`linux/os/fetch-go2rtc.sh --arch amd64|arm64` builds it; `build.sh` runs it before the image and mounts the result into the builder container (`build-image.sh --helpers`; `--release` refuses to build without it). It is built from a pinned commit of go2rtc's master (`GO2RTC_COMMIT`, at present `c245815e75e2`, which reports `1.9.14+dev.c245815`), not the v1.9.14 release binary, because the native Wyze source (`pkg/tutk`, `pkg/wyze`) was fixed after that release. The script:
+
+* fetches exactly that commit with git (and checks `git rev-parse HEAD`), downloads the Go modules and checks them against `go.sum` (`go mod verify`);
+* builds in the official Go image pinned by digest (`golang:1.25.14-bookworm@sha256:3b4a…`), running on the machine's own architecture and cross-compiling with `GOARCH`, so there is no emulation on an Apple Silicon Mac: `CGO_ENABLED=0 go build -trimpath -buildvcs=true -ldflags "-s -w -buildid="`;
+* accepts the binary only if its SHA-256 equals the one pinned for that architecture (and the same for the `LICENSE` file). The build is reproducible: the same bytes on an Apple Silicon Mac and on x86-64 (checked 2026-10-15). A mismatch installs nothing.
+
+The result is kept in `build/os-helpers/<arch>/` (`go2rtc`, `go2rtc.LICENSE`, `go2rtc.version`); a later build that finds a file with the pinned checksum reuses it. The Go caches are in the Docker volume `cb-os-go` (removed by `build.sh --clean`). The first build takes about a minute; the binary is about 19 MB for amd64 (18 MB for arm64), stripped, not UPX-packed. `--verify` checks the kept file without building, and `--test` also runs go2rtc's own tests and `go vet` of `pkg/tutk`, `pkg/wyze` and `internal/wyze` (only `pkg/tutk` has tests; they pass at the pinned commit).
+
+To move to another go2rtc commit: change `GO2RTC_COMMIT` and `GO2RTC_VERSION` in the script, run it (it prints the new checksum on the mismatch), build on a second machine of the other architecture and compare, set the checksums, run with `--test`, and update `docs/third-party/go2rtc.md`, `NOTICE`, `THIRD_PARTY_LICENSES.md`, `docs/linux/LICENSES.md` and `linux/os/SOURCE-OFFER.txt.in`. The macOS app's go2rtc is separate (`Tools/fetch-go2rtc.sh`, the v1.9.14 release).
 
 ## Release signing
 
@@ -79,7 +94,7 @@ A build for testing that publishes nothing: run the workflow by hand (Actions > 
 linux/os/test-static.sh
 ```
 
-Runs in a throw-away Debian 13 container: `bash -n` and `shellcheck` on every script, `nft -c -f` on the firewall, `systemd-analyze verify` on every unit, `systemd-sysusers`/`systemd-tmpfiles`/`systemd-repart --dry-run` on the definitions, `mkosi summary` for amd64 and arm64, and the installer's argument checks.
+Runs in a throw-away Debian 13 container: `bash -n` and `shellcheck` on every script, the go2rtc pins (a full commit hash, a version, the Go image by digest, 64-hex checksums for amd64, arm64 and the licence; `CB_HELPERS_DIR` is a folder the engine searches), `nft -c -f` on the firewall, `systemd-analyze verify` on every unit, `systemd-sysusers`/`systemd-tmpfiles`/`systemd-repart --dry-run` on the definitions, `mkosi summary` for amd64 and arm64, and the installer's argument checks.
 
 ### Boot test in QEMU
 
@@ -152,4 +167,4 @@ Not verified here:
 
 ## Disk space and cleanup
 
-A build uses several GB in Docker volumes (`cb-os-work`: the mkosi cache and image, `cb-os-swift-<arch>`: Swift build cache). `linux/os/build.sh --clean` removes them. The VM test uses a few GB in its scratch folder, deleted at the end unless `--keep`.
+A build uses several GB in Docker volumes (`cb-os-work`: the mkosi cache and image, `cb-os-swift-<arch>`: Swift build cache, `cb-os-go`: Go module and build cache for go2rtc). `linux/os/build.sh --clean` removes them. The VM test uses a few GB in its scratch folder, deleted at the end unless `--keep`.

@@ -616,3 +616,15 @@ it through ONVIF `SetSystemDateAndTime` (a POSIX string from `PosixTimeZone`), s
 
 `BridgeEngine.setCleanPicture(cameraID:clean:)` (2026-10-14) turns every label the camera draws itself off or back, keeping the saved copy in
 `CameraConfiguration.cleanPictureBackup` (engine-owned, like `hiddenCameraClock`).
+
+Plugins (2026-10-15): `BridgeSettings.plugins` (`[String: PluginState]`, decoded leniently) keeps each plugin's switch, account line, last sync and
+last problem; `BridgeBackend.pluginSecret(id:)` / `setPluginSecret(id:_:)` keep a plugin's session in the platform `SecretStore` (account
+`plugin.<id>`); `BridgeBackend.portAnswer(host:port:timeout:)` → `PortAnswer` (answers, refused, silent) and `BridgeBackend.localIPv4Addresses()`
+serve the Wyze plugin's search of the local network. All have extension defaults, so existing conformers compile.
+
+On-demand cameras (2026-10-15): a camera whose driver says `CameraDriver.streamsOnDemand` (a eufy battery camera) has its main stream connected
+only while something wants it: a HomeKit or in-app live view (`lease`), an HKSV recording (the recording handler holds the main stream for its
+length), or a motion event (held while the event lasts; the start reaches the router once the picture flows, or after `onDemandWakeWait`, so the
+recording Home asks for starts with video). It is woken once at the start for its picture size, and sleeps `onDemandIdleStop` after its last user.
+Soft motion and the motion shadow test never run for it, and asleep is not offline (the last stream state stays). The engine hands
+`EufyBridge.shared` its helper launcher and the `plugins/eufy` folder of the data directory at every start.

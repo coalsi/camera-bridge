@@ -66,7 +66,7 @@ struct SensorsSidebarSection: View {
                 HStack(spacing: 8) {
                     Image(systemName: "sensor.fill")
                         .font(.system(size: 12))
-                        .foregroundStyle(Brand.amber)
+                        .foregroundStyle(Brand.accent)
                         .accessibilityHidden(true)
                     Text("Sensors Settings")
                         .font(.system(size: 12.5, weight: .medium))

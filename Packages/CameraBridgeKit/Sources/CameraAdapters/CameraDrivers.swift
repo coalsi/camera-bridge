@@ -37,7 +37,7 @@ public enum CameraDrivers {
     public static func make(vendor: CameraVendor, endpoint: CameraEndpoint, credentials: HTTPCredentials?,
                             mainStreamURL: URL?, subStreamURL: URL?, transport: any NetworkTransport, cameraID: UUID?,
                             reachability: CameraReachability? = nil, integration: IntegrationSettings? = nil,
-                            go2rtc: (any Go2RTCStreamProviding)? = nil) -> any CameraDriver {
+                            go2rtc: (any Go2RTCStreamProviding)? = nil, helpers: (any HelperLaunching)? = nil) -> any CameraDriver {
         switch vendor {
         case .hikvision:
             HikvisionDriver(endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, transport: transport,
@@ -60,8 +60,17 @@ public enum CameraDrivers {
             UnifiProtectDriver(endpoint: endpoint, credentials: credentials, settings: integration, provider: go2rtc,
                                rtspFactory: RTSPProbing.factory(transport: transport), cameraID: cameraID)
         case .go2rtc:
-            Go2RTCDriver(cameraID: cameraID, settings: integration, credentials: credentials, provider: go2rtc,
-                         rtspFactory: RTSPProbing.factory(transport: transport))
+            if integration?.service == .eufy {
+                // A eufy camera the eufy-bridge helper brings in, on demand (battery cameras sleep between views).
+                EufyDriver(cameraID: cameraID, settings: integration, provider: go2rtc)
+            } else if let kind = WyzeHelpers.kind(of: integration) {
+                // A Wyze camera a helper program brings in (the Pan v4's cloud video, Gwell models).
+                WyzeHelperDriver(cameraID: cameraID, settings: integration, kind: kind, provider: go2rtc, launcher: helpers,
+                                 rtspFactory: RTSPProbing.factory(transport: transport))
+            } else {
+                Go2RTCDriver(cameraID: cameraID, settings: integration, credentials: credentials, provider: go2rtc,
+                             rtspFactory: RTSPProbing.factory(transport: transport))
+            }
         case .demo:
             DemoCameraDriver()
         }

@@ -7,7 +7,7 @@ struct StatTile<Accessory: View>: View {
     let value: String
     var detail: String?
     var systemImage: String
-    var tint: Color = Brand.amber
+    var tint: Color = Brand.accent
     var action: (() -> Void)?
     var accessibilityHint: LocalizedStringKey?
     var hasAccessory = false
@@ -58,7 +58,7 @@ struct StatTile<Accessory: View>: View {
 }
 
 extension StatTile where Accessory == EmptyView {
-    init(title: LocalizedStringKey, value: String, detail: String? = nil, systemImage: String, tint: Color = Brand.amber,
+    init(title: LocalizedStringKey, value: String, detail: String? = nil, systemImage: String, tint: Color = Brand.accent,
          accessibilityHint: LocalizedStringKey? = nil, action: (() -> Void)? = nil) {
         self.init(title: title, value: value, detail: detail, systemImage: systemImage, tint: tint, action: action,
                   accessibilityHint: accessibilityHint, hasAccessory: false) { EmptyView() }

@@ -108,7 +108,7 @@ struct TimestampOverlaySection: View {
     }
 }
 
-/// Which corner the timestamp sits in: a small screen with a pill in each corner, the chosen one amber.
+/// Which corner the timestamp sits in: a small screen with a pill in each corner, the chosen one red.
 struct OverlayPositionPicker: View {
     @Binding var selection: OverlayPosition
 
@@ -142,7 +142,7 @@ struct OverlayPositionPicker: View {
             selection = position
         } label: {
             Capsule()
-                .fill(isSelected ? Brand.amber : Brand.control)
+                .fill(isSelected ? Brand.accent : Brand.control)
                 .frame(width: 42, height: 16)
                 .contentShape(Rectangle().inset(by: -4))
         }

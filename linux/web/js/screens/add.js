@@ -7,6 +7,8 @@ import { backLink, field, inlineError, switchRow } from './common.js';
 import { pairingPanel } from './pairing.js';
 
 const SENSITIVITY_LABELS = ['Low', 'Medium', 'High'];
+// How a Wyze camera connects (the Wyze plugin's ways), as the add page names them.
+const WAY_WORDS = { rtsp: 'RTSP', local: 'local Wyze connection', cloud: 'Wyze cloud (experimental)', gwell: 'Gwell connection (unofficial)' };
 
 export function renderAdd({ navigate }) {
   const w = {
@@ -15,6 +17,10 @@ export function renderAdd({ navigate }) {
     username: '', password: '', apiKey: '', mainStreamURL: '', subStreamURL: '', source: '',
     unifiCameras: [], unifiCameraID: null, unifiCameraName: '', unifiBusy: false, unifiError: null,
     nest: { projectID: '', clientID: '', clientSecret: '', code: '', session: null, cameras: [], deviceID: null, busy: false, error: null, linkURL: null },
+    // A camera from the Wyze plugin (screens/plugins.js): its MAC address and how it connects, `rtsp` or `local`.
+    wyze: { loaded: false, signedIn: false, cameras: [], mac: null, way: 'rtsp', busy: false, error: null },
+    // A camera from the eufy plugin: its serial number.
+    eufy: { loaded: false, signedIn: false, cameras: [], serial: null, busy: false, error: null },
     discovered: null, discovering: false, discoverRun: 0,
     probe: null, probeError: null, probeRun: 0,
     name: '', nameTouched: false, kind: 'camera', motionSource: 'softMotion', motionSensitivity: 0.5, motionHoldSeconds: 20,
@@ -89,6 +95,8 @@ export function renderAdd({ navigate }) {
     }
     if (t.id === 'unifiProtect') { body.unifiCameraID = w.unifiCameraID; body.unifiCameraName = w.unifiCameraName; }
     if (t.id === 'googleNest') { body.nestSession = w.nest.session; body.nestDeviceID = w.nest.deviceID; }
+    if (t.id === 'wyzeCloud') { body.wyzeMAC = w.wyze.mac; body.wyzeWay = w.wyze.way; }
+    if (t.id === 'eufy') body.eufySerial = w.eufy.serial;
     if (forAdd) {
       Object.assign(body, { name: w.name, kind: w.kind, motionSource: w.motionSource, motionSensitivity: w.motionSensitivity, motionHoldSeconds: w.motionHoldSeconds,
         sensors: w.sensors, audioEnabled: w.audioEnabled, twoWayAudio: w.twoWayAudio });
@@ -223,6 +231,8 @@ export function renderAdd({ navigate }) {
       controls.push(field('Source address', area, { error: e.source, hint: 'Camera Bridge keeps it encrypted on this bridge. It is never shown again.' }));
     }
     if (t.fields.includes('nest')) controls.push(nestPanel());
+    if (t.fields.includes('wyze')) controls.push(wyzePanel());
+    if (t.fields.includes('eufy')) controls.push(eufyPanel());
     if (t.advancedFields.length) {
       const more = [];
       if (t.advancedFields.includes('httpPort')) {
@@ -246,7 +256,8 @@ export function renderAdd({ navigate }) {
       }
       controls.push(h('details', { class: 'card', open: Object.keys(e).some((k) => k.endsWith('Port')) || null }, h('summary', null, 'More options'), h('div', { class: 'stack' }, more)));
     }
-    const ready = t.id === 'unifiProtect' ? !!w.unifiCameraID : t.id === 'googleNest' ? !!w.nest.deviceID : true;
+    const ready = t.id === 'unifiProtect' ? !!w.unifiCameraID : t.id === 'googleNest' ? !!w.nest.deviceID
+      : t.id === 'wyzeCloud' ? !!w.wyze.mac && (w.wyze.way !== 'rtsp' || !!w.password) : t.id === 'eufy' ? !!w.eufy.serial : true;
     return form([
       h('h1', null, `Connect to ${t.id === 'rtspURL' ? 'the camera' : t.title}`),
       h('p', { class: 'lede' }, t.usesDiscovery ? 'Enter the user you created for Camera Bridge on the camera.' : 'Enter the details Camera Bridge needs to reach it.'),
@@ -311,6 +322,99 @@ export function renderAdd({ navigate }) {
       n.cameras.length ? h('div', { class: 'found', role: 'radiogroup', 'aria-label': 'Cameras in your Google home' }, n.cameras.map((camera) => h('label', { class: 'choice' },
         h('input', { type: 'radio', name: 'nest', checked: n.deviceID === camera.id, onchange: () => { n.deviceID = camera.id; if (!w.nameTouched) w.name = camera.name; show('connect'); } }),
         h('span', { class: 'text' }, h('span', { class: 'title' }, camera.name), h('span', { class: 'desc' }, `${camera.doorbell ? 'Doorbell' : 'Camera'} · ${camera.transport}`)))) ) : null);
+  }
+
+  /** The Wyze account's cameras (the Wyze plugin): choose one and how it connects; RTSP asks for the password set in the Wyze app. */
+  function wyzePanel() {
+    const z = w.wyze;
+    if (!z.loaded && !z.busy) loadWyze(false);
+    if (z.busy && !z.cameras.length) return h('div', { class: 'checking' }, spinner(), ' Asking your Wyze account…');
+    if (z.loaded && !z.signedIn) {
+      return h('div', { class: 'card' }, h('p', null, 'Sign in to your Wyze account first. Camera Bridge then lists your Wyze cameras here.'),
+        h('a', { class: 'btn primary', href: '#/plugins/wyze' }, 'Open the Wyze plugin'));
+    }
+    const camera = z.cameras.find((c) => c.mac === z.mac);
+    const usable = z.cameras.filter((c) => !c.cameraID);
+    const list = usable.length
+      ? h('div', { class: 'found', role: 'radiogroup', 'aria-label': 'Cameras on your Wyze account' }, usable.map((c) => h('label', { class: 'choice' },
+        h('input', { type: 'radio', name: 'wyze', checked: z.mac === c.mac, disabled: !c.ways.length, onchange: () => {
+          z.mac = c.mac; z.way = c.ways.includes('rtsp') ? 'rtsp' : c.ways[0]; if (!w.nameTouched) w.name = c.name; show('connect');
+        } }),
+        h('span', { class: 'text' }, h('span', { class: 'title' }, c.name),
+          h('span', { class: 'desc' }, [c.modelName, WAY_WORDS[c.ways[0]]].filter(Boolean).join(' · ')),
+          c.note ? h('span', { class: 'desc' }, c.note) : null))))
+      : h('p', { class: 'muted' }, z.cameras.length ? 'Every camera on your Wyze account is already in Camera Bridge.' : 'Your Wyze account has no cameras.');
+    const ways = camera && camera.ways.length > 1 ? h('div', { class: 'stack', role: 'radiogroup', 'aria-label': 'How to connect' },
+      h('label', { class: 'choice' }, h('input', { type: 'radio', name: 'wyze-way', checked: z.way === 'rtsp', onchange: () => { z.way = 'rtsp'; show('connect'); } }),
+        h('span', { class: 'text' }, h('span', { class: 'title' }, 'RTSP (recommended)'), h('span', { class: 'desc' }, 'Wyze’s own feature: local and full quality.'))),
+      h('label', { class: 'choice' }, h('input', { type: 'radio', name: 'wyze-way', checked: z.way === 'local', onchange: () => { z.way = 'local'; show('connect'); } }),
+        h('span', { class: 'text' }, h('span', { class: 'title' }, 'Local Wyze connection'), h('span', { class: 'desc' }, 'Unofficial; no RTSP settings needed.')))) : null;
+    const rtsp = camera && z.way === 'rtsp' ? [
+      field('RTSP user name', h('input', { type: 'text', value: w.username || 'admin', autocomplete: 'off', spellcheck: 'false', oninput: (e) => { w.username = e.target.value; } }),
+        { hint: 'The user name you set for RTSP in the Wyze app (usually admin).' }),
+      field('RTSP password', h('input', { type: 'password', value: w.password, autocomplete: 'new-password', oninput: (e) => { w.password = e.target.value; delete w.errors.password; } }),
+        { error: w.errors.password, hint: 'The password you set for RTSP in the Wyze app. Camera Bridge keeps it encrypted on this bridge.' }),
+    ] : null;
+    return h('div', { class: 'stack' },
+      h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', disabled: z.busy, onclick: () => loadWyze(true) }, z.busy ? spinner() : icon('refresh'), 'Refresh')),
+      z.error ? h('span', { class: 'error', role: 'alert' }, z.error) : null,
+      list, ways, rtsp);
+  }
+
+  async function loadWyze(refresh) {
+    const z = w.wyze;
+    z.busy = true; z.error = null;
+    try {
+      const state = await get(`plugins/wyze${refresh ? '?refresh=1' : ''}`);
+      z.signedIn = state.signedIn; z.cameras = state.cameras || []; z.error = state.lastError || null;
+      const chosen = z.cameras.find((c) => c.mac === z.mac);
+      if (!chosen || !chosen.ways.length) z.mac = null;
+      else {
+        if (!chosen.ways.includes(z.way)) z.way = chosen.ways[0];
+        if (!w.nameTouched && !w.name) w.name = chosen.name;
+      }
+    } catch (error) { z.error = error.message; }
+    z.loaded = true; z.busy = false;
+    if (w.step === 'connect' && !gone) show('connect');
+  }
+
+  /** The eufy account's cameras (the eufy plugin): choose one. */
+  function eufyPanel() {
+    const z = w.eufy;
+    if (!z.loaded && !z.busy) loadEufy();
+    if (z.busy && !z.cameras.length) return h('div', { class: 'checking' }, spinner(), ' Asking your eufy account…');
+    if (z.loaded && !z.signedIn) {
+      return h('div', { class: 'card' }, h('p', null, 'Sign in to your eufy account first. Camera Bridge then lists your eufy cameras here.'),
+        h('a', { class: 'btn primary', href: '#/plugins/eufy' }, 'Open the eufy plugin'));
+    }
+    const usable = z.cameras.filter((c) => !c.cameraID);
+    const list = usable.length
+      ? h('div', { class: 'found', role: 'radiogroup', 'aria-label': 'Cameras on your eufy account' }, usable.map((c) => h('label', { class: 'choice' },
+        h('input', { type: 'radio', name: 'eufy', checked: z.serial === c.serial, disabled: !c.canAdd, onchange: () => {
+          z.serial = c.serial; if (!w.nameTouched) w.name = c.name; show('connect');
+        } }),
+        h('span', { class: 'text' }, h('span', { class: 'title' }, c.name),
+          h('span', { class: 'desc' }, [c.modelName, c.battery != null ? `battery ${c.battery}%` : null].filter(Boolean).join(' · ')),
+          c.note ? h('span', { class: 'desc' }, c.note) : null))))
+      : h('p', { class: 'muted' }, z.cameras.length ? 'Every camera on your eufy account is already in Camera Bridge.' : 'Your eufy account has no cameras.');
+    return h('div', { class: 'stack' },
+      h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', disabled: z.busy, onclick: () => loadEufy() }, z.busy ? spinner() : icon('refresh'), 'Refresh')),
+      z.error ? h('span', { class: 'error', role: 'alert' }, z.error) : null,
+      list);
+  }
+
+  async function loadEufy() {
+    const z = w.eufy;
+    z.busy = true; z.error = null;
+    try {
+      const state = await get('plugins/eufy');
+      z.signedIn = state.status?.state === 'signedIn'; z.cameras = state.cameras || []; z.error = state.lastError || null;
+      const chosen = z.cameras.find((c) => c.serial === z.serial);
+      if (!chosen || !chosen.canAdd) z.serial = null;
+      else if (!w.nameTouched && !w.name) w.name = chosen.name;
+    } catch (error) { z.error = error.message; }
+    z.loaded = true; z.busy = false;
+    if (w.step === 'connect' && !gone) show('connect');
   }
 
   // MARK: Step 4, check the camera
@@ -506,7 +610,28 @@ export function renderAdd({ navigate }) {
 
   replace(root, backLink('#/cameras', 'Cameras'), progress, body);
   replace(body, h('div', { class: 'checking' }, spinner()));
-  get('camera-types').then((catalog) => { w.catalog = catalog; show('type'); }).catch((error) => replace(body, inlineError(error.message)));
+  get('camera-types').then((catalog) => {
+    w.catalog = catalog;
+    // Coming from the Wyze plugin's Add button: straight to that camera.
+    let mac = null;
+    try { mac = sessionStorage.getItem('cb.add.wyze'); sessionStorage.removeItem('cb.add.wyze'); } catch { /* none */ }
+    if (mac && catalog.types.some((t) => t.id === 'wyzeCloud')) {
+      w.typeId = 'wyzeCloud';
+      w.wyze.mac = mac;
+      show('connect');
+      return;
+    }
+    // Coming from the eufy plugin's Add button.
+    let serial = null;
+    try { serial = sessionStorage.getItem('cb.add.eufy'); sessionStorage.removeItem('cb.add.eufy'); } catch { /* none */ }
+    if (serial && catalog.types.some((t) => t.id === 'eufy')) {
+      w.typeId = 'eufy';
+      w.eufy.serial = serial;
+      show('connect');
+      return;
+    }
+    show('type');
+  }).catch((error) => replace(body, inlineError(error.message)));
 
   return { el: root, destroy() { gone = true; pairing?.destroy(); } };
 }

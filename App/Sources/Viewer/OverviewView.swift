@@ -294,7 +294,7 @@ private struct CustomLayoutPopover: View {
     }
 }
 
-/// The big Play All / Pause All button: a toggle, amber while it is off (the main action), gray while everything plays.
+/// The big Play All / Pause All button: a toggle, red while it is off (the main action), gray while everything plays.
 struct PlayAllButton: View {
     @Binding var isOn: Bool
 
@@ -388,7 +388,7 @@ private struct PageBar: View {
                         ForEach(0..<overview.pageCount, id: \.self) { index in
                             Button { overview.goToPage(index) } label: {
                                 Circle()
-                                    .fill(index == overview.page ? Brand.amber : Color.white.opacity(0.28))
+                                    .fill(index == overview.page ? Brand.accent : Color.white.opacity(0.28))
                                     .frame(width: 7, height: 7)
                                     .frame(width: 12, height: 12)
                                     .contentShape(Circle())

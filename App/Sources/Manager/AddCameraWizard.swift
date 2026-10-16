@@ -56,7 +56,7 @@ struct AddCameraWizard: View {
         .frame(width: 640, height: 600)
         .background { BrandCanvas() }
         .preferredColorScheme(.dark)   // the brand look is dark
-        .tint(Brand.amber)
+        .tint(Brand.accent)
         .interactiveDismissDisabled(wizard.addState == .adding)
         .onDisappear { wizard.cancel() }   // however the sheet goes away, stop probing the camera
     }
@@ -89,9 +89,9 @@ private struct WizardHeader: View {
             HStack(spacing: 14) {
                 Image(systemName: symbol)
                     .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(Brand.onAmber)
+                    .foregroundStyle(Brand.onRed)
                     .frame(width: 48, height: 48)
-                    .background(Brand.amber, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .background(Brand.red, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
@@ -123,7 +123,7 @@ private struct WizardProgressBar: View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.white.opacity(0.12))
-                Capsule().fill(Brand.amber).frame(width: max(8, geometry.size.width * fraction))
+                Capsule().fill(Brand.accent).frame(width: max(8, geometry.size.width * fraction))
             }
         }
         .frame(height: 6)

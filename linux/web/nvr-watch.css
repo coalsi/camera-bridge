@@ -38,7 +38,7 @@
 .nvr-timeline { margin-top: 8px; }
 .nvr-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin-bottom: 8px; }
 .nvr-presets, .nvr-zoom { display: flex; flex-wrap: wrap; gap: 6px; }
-.nvr-preset[aria-pressed="true"] { background: var(--amber); border-color: var(--amber); color: var(--on-amber); }
+.nvr-preset[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 .nvr-track {
   position: relative; height: 116px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-raised);
   touch-action: none; user-select: none; -webkit-user-select: none; cursor: ew-resize;

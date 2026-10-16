@@ -34,7 +34,7 @@ const combined = {
 const reference = waveformReference(typical, []);
 const geometry = { viewport, widthPx: 1000, plan, combined, reference, typical, oldestMs: NOW - 20 * MIN, newestMs: NOW };
 
-test('bars: normal activity is half height, elevated ones are amber and taller, gaps are runs', () => {
+test('bars: normal activity is half height, elevated ones are highlighted and taller, gaps are runs', () => {
   const layout = layoutBars(geometry);
   assert.equal(layout.bars.length, 8);
   assert.equal(layout.bars[0].half, 0.5);
@@ -66,7 +66,7 @@ test('bins outside the window are not laid out', () => {
   assert.ok(layout.bars.every((b) => b.x >= -0.001));
 });
 
-test('a camera with no typical level has no dashed line and no amber bars', () => {
+test('a camera with no typical level has no dashed line and no highlighted bars', () => {
   const layout = layoutBars({ ...geometry, typical: null, reference: 6000 });
   assert.equal(layout.normal, null);
   assert.ok(layout.bars.every((b) => !b.hot));
@@ -77,7 +77,7 @@ test('no data, no bars', () => {
   assert.deepEqual(layoutBars({ ...geometry, reference: 0 }), { bars: [], gaps: [], normal: null });
 });
 
-test('painting: the dashed normal line sits at half height above and below the centre, amber is used once', () => {
+test('painting: the dashed normal line sits at half height above and below the centre, the highlight is used once', () => {
   const ctx = fakeContext();
   const colors = { track: '#t', span: '#s', tick: '#k', label: '#l', bar: '#bar', hot: '#hot', normal: '#n', gap: '#g' };
   const height = 122;

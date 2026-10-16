@@ -28,6 +28,10 @@ struct EngineTuning: Sendable {
     var liveStreamTiming = LiveStreamTiming.standard
     /// An unused sub stream disconnects after this long.
     var subStreamIdleStop: Duration = .seconds(10)
+    /// A camera that streams on demand (`CameraDriver.streamsOnDemand`, a battery camera) disconnects after this long unused.
+    var onDemandIdleStop: Duration = .seconds(15)
+    /// How long a live view, recording or motion event waits for an on-demand camera to wake and send its first picture.
+    var onDemandWakeWait: Duration = .seconds(25)
     /// A live view waits this long for the sub stream's first picture before using the main stream.
     var subStreamStartWait: Duration = .seconds(3)
     /// Status is aggregated at most this often (contract: ≤ 4 Hz).

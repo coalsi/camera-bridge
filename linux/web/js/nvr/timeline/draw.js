@@ -96,7 +96,7 @@ export function paintTimeline(ctx, frame) {
     ctx.restore();
   }
 
-  // Waveform, mirrored about the centre line; amber bars are the ones above 1.5 x typical
+  // Waveform, mirrored about the centre line; highlighted (brand red) bars are the ones above 1.5 x typical
   for (const bar of layout.bars) {
     if (bar.half <= 0) continue;
     const h = bar.half * half;

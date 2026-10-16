@@ -18,7 +18,7 @@ The PolyForm license applies to Camera Bridge's own code only. It does not chang
 | [Sparkle](https://github.com/sparkle-project/Sparkle) | 2.10.0 | MIT, plus bundled components under BSD-2-Clause-style, MIT and zlib-style licenses (bsdiff, sais-lite, orlp/ed25519, SUSignatureVerifier) | Software updates (`App/Sources/Updates`). Embedded as `Sparkle.framework`. | Acknowledgements.md, "Sparkle" |
 | [go2rtc](https://github.com/AlexxIT/go2rtc) | 1.9.14 | MIT (built from Go modules under their own permissive licenses, listed in its `go.mod`) | Helper program for cloud cameras and consoles (Ring, Nest, Wyze, Tuya, UniFi RTSPS). Bundled unmodified as `Contents/Helpers/go2rtc` and run as a separate process; fetched and checksum-verified by `Tools/fetch-go2rtc.sh`. | Acknowledgements.md, "go2rtc"; [docs/third-party/go2rtc.md](docs/third-party/go2rtc.md) |
 
-Versions are those pinned in `Packages/CameraBridgeKit/Package.resolved`, `project.yml` and `Tools/fetch-go2rtc.sh`.
+Versions are those pinned in `Packages/CameraBridgeKit/Package.resolved`, `project.yml` and `Tools/fetch-go2rtc.sh` (Camera Bridge OS: `linux/os/fetch-go2rtc.sh`).
 
 Apple's system frameworks (CryptoKit, Network, VideoToolbox, AVFoundation, SwiftUI and others) and the `dns_sd`
 (Bonjour) API are used through their public interfaces under Apple's SDK terms; none of their code is copied.
@@ -68,6 +68,7 @@ service and characteristic definitions; the generator is not shipped.
 | Component | License | Notes |
 |---|---|---|
 | BoringSSL, inside swift-crypto (`CCryptoBoringSSL`) | OpenSSL / ISC-style (see swift-crypto's `LICENSE.txt` and `NOTICE.txt`) | swift-crypto compiles it in only on non-Apple platforms; the macOS app does not contain it. |
+| [go2rtc](https://github.com/AlexxIT/go2rtc) 1.9.14+dev.c245815 (commit `c245815e75e2a5fd60b4290f12bfc04e55a984d3`) | MIT (built from Go modules under their own permissive licenses, listed in its `go.mod`) | Camera Bridge OS only: the helper program at `/usr/lib/camera-bridge/helpers/go2rtc`, built unmodified from that commit and checksum-verified by `linux/os/fetch-go2rtc.sh`; run as a separate process. Licence in the image at `/usr/share/doc/go2rtc/copyright`; details in [docs/third-party/go2rtc.md](docs/third-party/go2rtc.md). |
 
 ## Development and test tooling (not shipped)
 

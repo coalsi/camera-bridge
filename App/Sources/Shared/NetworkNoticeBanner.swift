@@ -14,7 +14,7 @@ struct NetworkNoticeBanner: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: isWarning ? "exclamationmark.triangle.fill" : "info.circle.fill")
-                .foregroundStyle(isWarning ? Color.orange : Brand.amber)
+                .foregroundStyle(isWarning ? Color.orange : Brand.accent)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(message.title)
@@ -40,7 +40,7 @@ struct NetworkNoticeBanner: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background((isWarning ? Color.orange : Brand.amber).opacity(0.12))
+        .background((isWarning ? Color.orange : Brand.accent).opacity(0.12))
         .glass(in: Rectangle())
         .overlay(alignment: .bottom) { Divider() }
         .accessibilityElement(children: .contain)
@@ -60,7 +60,7 @@ struct NetworkHelpSheet: View {
                     HStack(spacing: 10) {
                         Image(systemName: page.systemImage)
                             .font(.title)
-                            .foregroundStyle(Brand.amber)
+                            .foregroundStyle(Brand.accent)
                             .accessibilityHidden(true)
                         Text(page.title)
                             .font(.title2.weight(.semibold))
@@ -102,7 +102,7 @@ struct NetworkHelpSheet: View {
         .frame(width: 520, height: 560)
         .background { BrandCanvas() }
         .preferredColorScheme(.dark)
-        .tint(Brand.amber)
+        .tint(Brand.accent)
     }
 }
 

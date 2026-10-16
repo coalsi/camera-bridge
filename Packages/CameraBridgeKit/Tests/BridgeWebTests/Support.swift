@@ -17,6 +17,9 @@ final class FakeBackend: BridgeBackend {
         var state: EngineState = .running
         var configurations: [CameraConfiguration] = []
         var settings = BridgeSettings()
+        var pluginSecrets: [String: Data] = [:]
+        /// What `portAnswer` says for "host:port" (default `.silent`).
+        var ports: [String: PortAnswer] = [:]
         var webhookProblem: String?
         var notices: [NetworkNotice] = []
         var helperInstalled = true
@@ -123,6 +126,10 @@ final class FakeBackend: BridgeBackend {
     }
 
     func snapshotJPEG(cameraID: UUID) async -> Data? { read { $0.snapshot } }
+    func pluginSecret(id: String) async throws -> Data? { read { $0.pluginSecrets[id] } }
+    func setPluginSecret(id: String, _ data: Data?) async throws { write { $0.pluginSecrets[id] = data } }
+    func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer { read { $0.ports["\(host):\(port)"] ?? .silent } }
+    func localIPv4Addresses() async -> [String] { ["192.0.2.10"] }
     func triggerTestMotion(cameraID: UUID) async { write { $0.calls.append("motion") } }
     func pause() async { write { $0.state = .paused } }
     func resume() async { write { $0.state = .running } }

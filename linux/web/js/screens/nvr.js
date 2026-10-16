@@ -9,6 +9,7 @@ import { cameraList, subscribe } from '../store.js';
 import { stampText } from '../stamp.js';
 import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
 import { createZoom } from '../live/zoom.js';
+import { createPanTiltPad } from '../live/pan-tilt.js';
 import { createWallEvents } from './wall-events.js';
 import { labelStyle, showLabel } from '../labels.js';
 import { createFetcher } from '../nvr/fetcher.js';
@@ -247,6 +248,7 @@ export function renderNVR({ params, navigate, setTitle }) {
       if (!parts) { parts = buildTile(tile); tileParts.set(tile.id, parts); }
       if (grid.children[index] !== parts.el) grid.insertBefore(parts.el, grid.children[index] ?? null);
       updateTile(parts, tile, view.transport.mode !== 'snapshots');
+      setData(parts.el, 'sleeps', String(sleeps(tile.id) && soloId !== tile.id));
     });
     if (soloId !== null && !wanted.has(soloId)) { soloId = null; zoom?.destroy(); zoom = null; }   // the camera left the page
     for (const [id, parts] of tileParts) parts.el.hidden = soloId !== null && id !== soloId;
@@ -255,6 +257,9 @@ export function renderNVR({ params, navigate, setTitle }) {
     allButton.hidden = soloId === null;
     cameraLink.hidden = soloId === null;
     if (soloId !== null) cameraLink.setAttribute('href', `#/camera/${soloId}`);
+    const turns = soloId !== null && cameraList().find((camera) => camera.id === soloId)?.status?.panTilt === true;
+    panTilt.setCamera(turns ? soloId : null);
+    setData(bottom, 'ptz', String(turns));
     grid.hidden = view.noCameras;
     emptyHost.hidden = !view.noCameras;
   }
@@ -458,9 +463,13 @@ export function renderNVR({ params, navigate, setTitle }) {
     live = { request, ids: ids.join(','), stream, audio: audio.join(',') };
   }
 
+  /** A camera that sleeps between uses (a eufy battery camera): the wall shows its latest picture, and only the one camera opened on its own
+   *  wakes it (a wall left open would otherwise keep it awake and drain it). */
+  const sleeps = (id) => cameraList().find((camera) => camera.id === id)?.integration?.service === 'eufy';
+
   function syncLive(view) {
     const liveMode = view.transport.mode === 'live' || view.transport.mode === 'snapshots';
-    const ids = soloId !== null ? [soloId] : view.tiles.map((tile) => tile.id);
+    const ids = soloId !== null ? [soloId] : view.tiles.map((tile) => tile.id).filter((id) => !sleeps(id));
     const stream = soloId !== null ? 'main' : liveQuality;   // one camera on the whole wall: its full picture
     const want = liveOn && liveMode && ids.length > 0;
     if (!want) { if (live) stopLive(); }
@@ -545,18 +554,22 @@ export function renderNVR({ params, navigate, setTitle }) {
   const emptyHost = h('div', { class: 'mon-none', hidden: true },
     h('p', null, 'No cameras yet.'), h('a', { class: 'btn primary', href: '#/add' }, icon('plus'), 'Add a camera'));
   const bannerHost = banners();
+  // Pan and tilt: only for one pan/tilt camera opened on its own, beside the events.
+  const panTilt = createPanTiltPad();
+  const bottom = h('div', { class: 'mon-bottom' });
   const el = h('section', { class: 'monitor nvr-page', 'aria-label': 'Monitor' },
     h('div', { class: 'mon-head' },
       h('h1', null, 'Monitor'), allButton, cameraLink, bigClock,
       h('div', { class: 'mon-actions' }, liveOn ? qualitySelect : null, sizeSelect, events.soundButton, fullButton)),
     events.banners, bannerHost, notice, grid, emptyHost,
-    h('div', { class: 'mon-bottom' },
+    replace(bottom,
       h('div', { class: 'mon-timeline nvr-controls' },
         h('div', { class: 'nvr-transport' }, playButton, liveButton, readout, clip.button,
           h('div', { class: 'nvr-grid-presets', role: 'group', 'aria-label': 'Timeline range' }, presetButtons),
           h('nav', { class: 'nvr-pager', 'aria-label': 'Camera pages' }, prevButton, pageLabel, nextButton)),
         clip.el,
         timelineHost),
+      panTilt.el,
       h('div', { class: 'mon-activity' }, h('div', { class: 'mon-timeline-head' }, h('strong', null, 'Events')), events.list)),
     announcer);
 
@@ -634,6 +647,7 @@ export function renderNVR({ params, navigate, setTitle }) {
       clearInterval(clockTimer);
       stopLive();
       events.destroy();
+      panTilt.destroy();
       for (const parts of tileParts.values()) clearTimeout(parts.alertTimer);
       stopRendering();
       if (typeof stopModel === 'function') stopModel();

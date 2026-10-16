@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="512" height="512" role="img" aria-labelledby="t">
+  <title id="t">Camera Bridge</title>
+  <defs>
+    <clipPath id="lens"><circle cx="100" cy="100" r="72"/></clipPath>
+  </defs>
+  <circle cx="100" cy="100" r="94" fill="#9E2B20"/>
+  <circle cx="100" cy="100" r="74" fill="#151517"/>
+  <g clip-path="url(#lens)" fill="none" stroke="#EFE6D8" stroke-linecap="round">
+    <path d="M69,50 Q100,158 131,50" stroke-width="3.6"/>
+    <path d="M69,50 Q50,96 22,124" stroke-width="3.6"/>
+    <path d="M131,50 Q150,96 178,124" stroke-width="3.6"/>
+    <g stroke-width="1.5">
+      <line x1="78" y1="77" x2="78" y2="124"/><line x1="84" y1="90" x2="84" y2="124"/><line x1="90" y1="98" x2="90" y2="124"/>
+      <line x1="96" y1="103" x2="96" y2="124"/><line x1="104" y1="103" x2="104" y2="124"/><line x1="110" y1="98" x2="110" y2="124"/>
+      <line x1="116" y1="90" x2="116" y2="124"/><line x1="122" y1="77" x2="122" y2="124"/>
+      <line x1="59" y1="72" x2="59" y2="124"/><line x1="49" y1="91" x2="49" y2="124"/><line x1="39" y1="106" x2="39" y2="124"/>
+      <line x1="141" y1="72" x2="141" y2="124"/><line x1="151" y1="91" x2="151" y2="124"/><line x1="161" y1="106" x2="161" y2="124"/>
+    </g>
+  </g>
+  <g clip-path="url(#lens)" fill="#EFE6D8">
+    <rect x="20" y="123" width="160" height="7"/>
+    <rect x="20" y="132" width="160" height="2" opacity="0.55"/>
+    <rect x="63" y="44" width="4.5" height="110"/><rect x="70.5" y="44" width="4.5" height="110"/>
+    <rect x="62" y="40" width="6.5" height="5" rx="1"/><rect x="69.5" y="40" width="6.5" height="5" rx="1"/>
+    <rect x="63" y="54" width="12" height="3"/><rect x="63" y="72" width="12" height="3"/><rect x="63" y="92" width="12" height="3.5"/><rect x="63" y="112" width="12" height="4"/>
+    <rect x="125" y="44" width="4.5" height="110"/><rect x="132.5" y="44" width="4.5" height="110"/>
+    <rect x="124" y="40" width="6.5" height="5" rx="1"/><rect x="131.5" y="40" width="6.5" height="5" rx="1"/>
+    <rect x="125" y="54" width="12" height="3"/><rect x="125" y="72" width="12" height="3"/><rect x="125" y="92" width="12" height="3.5"/><rect x="125" y="112" width="12" height="4"/>
+  </g>
+  <circle cx="100" cy="100" r="74" fill="none" stroke="#6E1A14" stroke-width="5"/>
+  <path d="M38,90 A64,64 0 0 1 52,60" fill="none" stroke="#EFE6D8" stroke-width="3.5" stroke-linecap="round" opacity="0.55"/>
+</svg>

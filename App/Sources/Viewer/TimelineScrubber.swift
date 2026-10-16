@@ -153,7 +153,7 @@ private struct TimelineTrack: View, Equatable {
                     let high = normalIsKnown && level > WaveformScale.highActivity
                     let bar = CGRect(x: x, y: middle - height, width: max(1, barWidth - 0.5), height: height * 2)
                     context.fill(Path(roundedRect: bar.intersection(trackRect), cornerRadius: min(1.5, barWidth / 2)),
-                                 with: .color((high ? Brand.amber : Color.white.opacity(0.55)).opacity(0.35 + 0.65 * coverage)))
+                                 with: .color((high ? Brand.accent : Color.white.opacity(0.55)).opacity(0.35 + 0.65 * coverage)))
                 }
             }
             // Normal: a dashed line at the height a typical level reaches (half, under the square root).
@@ -208,10 +208,10 @@ private struct Playhead: View {
             let isLive = panel.session.clock.isLive
             ZStack(alignment: .top) {
                 Rectangle()
-                    .fill(isLive ? Brand.recording : Brand.amber)
+                    .fill(isLive ? Brand.recording : Brand.accent)
                     .frame(width: 2, height: TimelineScrubber.trackHeight)
                 Circle()
-                    .fill(isLive ? Brand.recording : Brand.amber)
+                    .fill(isLive ? Brand.recording : Brand.accent)
                     .frame(width: 10, height: 10)
                     .offset(y: -5)
             }

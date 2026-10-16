@@ -36,10 +36,16 @@ final class ScriptedEventDriver: CameraDriver {
     }
 
     let vendor: CameraVendor = .demo
+    /// Pretends to be a camera that streams on demand (a battery camera).
+    let streamsOnDemand: Bool
     let sourcesMade = Box(0)
     let sourcesStopped = Box(0)
     let credentialsConfirmed = Box(0)
     private let current = Mutex<Source?>(nil)
+
+    init(streamsOnDemand: Bool = false) {
+        self.streamsOnDemand = streamsOnDemand
+    }
 
     func emit(_ event: CameraEvent) {
         current.withLock { $0 }?.continuation.yield(event)

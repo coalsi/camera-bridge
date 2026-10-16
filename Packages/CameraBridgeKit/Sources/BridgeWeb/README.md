@@ -47,6 +47,9 @@ NVR limits and locations (2026-10-10, docs/CONTRACT_CHANGES.md): `ArchiveLocatio
 the id, never the path), `WebConfiguration.archiveLocations`, `WebConfiguration.maximumArchiveReads` (8), `WebConfiguration.maximumArchiveReadsPerAddress` (6) and
 `WebConfiguration.maximumSegmentBytes` (16 MiB). The Content-Security-Policy gains `media-src 'self' blob:`.
 
+- Plugins (2026-10-15): the Wyze and eufy plugins (`Plugins/`). `WebConfiguration.wyzeTransport` and `WebConfiguration.eufyBridge` let tests replace
+  Wyze's servers and the `eufy-bridge` helper. Neither plugin keeps a password: Wyze's session is in the secret store, eufy's in its helper's folder.
+
 ## Security notes
 
 - Only IP addresses, `localhost`, `*.local`, `*.home.arpa`, names without a dot and `allowedHosts` are served (DNS rebinding).

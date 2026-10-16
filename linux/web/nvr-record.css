@@ -3,17 +3,17 @@
 
 :root {
   --nvr-rec: var(--recording);                      /* REC */
-  --nvr-wait: var(--warning);                       /* waiting, paused, bars above normal */
+  --nvr-wait: var(--warning);                       /* waiting, paused */
   --nvr-stage-bg: #0c0c0e;                          /* behind video: dark in both themes, like .preview */
   --nvr-stage-fg: #e8e8ea;
   --nvr-overlay-bg: rgb(15 15 17 / 0.82);           /* captions and chips over video */
   --nvr-overlay-border: rgb(255 255 255 / 0.14);
   --nvr-track-bg: var(--bg-raised);                 /* behind a timeline or a bar */
   --nvr-wave: var(--text-3);                        /* waveform bars */
-  --nvr-wave-hot: var(--amber);                     /* bars above 1.5 x normal */
+  --nvr-wave-hot: var(--brand-accent);              /* bars above 1.5 x normal */
   --nvr-wave-normal: var(--border-strong);          /* the dashed "normal" line */
   --nvr-gap-hatch: color-mix(in srgb, var(--text-3) 40%, transparent);
-  --nvr-playhead: var(--amber-strong);
+  --nvr-playhead: var(--brand-accent);
 }
 
 /* The Record switch. It is a button with role="switch"; the words on it say what Record is doing. */
@@ -51,7 +51,7 @@
 #recording { scroll-margin-top: 84px; }   /* the sticky top bar */
 #recording h2:focus { outline: none; }    /* the heading takes focus when #/settings/recording scrolls here */
 .rec-usage { height: 8px; margin: 14px 0 10px; overflow: hidden; border-radius: 99px; border: 1px solid var(--border); background: var(--nvr-track-bg); }
-.rec-usage .fill { height: 100%; width: 0; border-radius: 99px; background: var(--amber); transition: width 0.25s; }
+.rec-usage .fill { height: 100%; width: 0; border-radius: 99px; background: var(--brand-accent); transition: width 0.25s; }
 
 /* "Where should recordings be stored?" */
 .nvr-choose .checking { flex-direction: row; justify-content: center; padding: 18px 0; }
