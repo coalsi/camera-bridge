@@ -166,6 +166,10 @@ import Testing
         #expect(value(after: "-hwaccel", in: arguments) == "vaapi")
         #expect(value(after: "-hwaccel_device", in: arguments) == "/dev/dri/renderD128")
         #expect(arguments.firstIndex(of: "-hwaccel")! < arguments.firstIndex(of: "-i")!, "an input option: before -i")
+        #expect(value(after: "-hwaccel_output_format", in: arguments) == "vaapi")
+        #expect(value(after: "-vf", in: arguments)?.hasPrefix("scale_vaapi=w=1920:h=1080") == true, "scaled on the GPU, then copied back")
+        #expect(FFmpegVideoDecoder.outputSize(width: 3840, height: 2160, maxWidth: 640) == (640, 360))
+        #expect(FFmpegVideoDecoder.outputSize(width: 640, height: 480, maxWidth: 640) == (640, 480))
         #expect(!FFmpegArguments.decoder(width: 1920, height: 1080).contains("-hwaccel"))
     }
 

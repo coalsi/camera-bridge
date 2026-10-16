@@ -98,3 +98,21 @@ The macOS app bundles the unmodified go2rtc 1.9.14 program as a helper (Contents
 program. Camera Bridge OS contains go2rtc 1.9.14+dev.c245815, built unmodified from commit
 c245815e75e2a5fd60b4290f12bfc04e55a984d3, at /usr/lib/camera-bridge/helpers/go2rtc (its license text is in
 /usr/share/doc/go2rtc/copyright). License text and checksums: docs/third-party/go2rtc.md.
+
+--------------------------------------------------------------------------------
+Camera Bridge OS helpers: wyze-lake (MIT License) and eufy-bridge (Node.js, eufy SDK)
+--------------------------------------------------------------------------------
+wyze-lake (/usr/lib/camera-bridge/helpers/wyze-lake; source linux/helpers/wyze-lake) is Camera Bridge's own helper for
+Wyze cameras that stream through Wyze's cloud. Copyright (c) 2026 Corey Silvia, MIT License (linux/helpers/wyze-lake/LICENSE).
+It links Go modules under their own licences: the Go standard library, golang.org/x/crypto, x/net, x/sys and x/time,
+github.com/google/uuid and github.com/wlynxg/anet (BSD-3-Clause), github.com/gorilla/websocket (BSD-2-Clause) and the
+github.com/pion WebRTC modules (MIT). Texts: linux/helpers/wyze-lake/LICENSES, in the image /usr/share/doc/wyze-lake/.
+
+eufy-bridge (/usr/lib/camera-bridge/helpers/eufy-bridge and helpers/eufy/; source linux/helpers/eufy-bridge) runs on
+Node.js 24.21.0 (Copyright Node.js contributors, MIT License, with the bundled components named in its LICENSE file), the
+unmodified official linux-x64 binary. Bundled into eufy-bridge.js: @mega-yfue/eufy-sdk 0.4.0, Copyright 2026 mega-yfue,
+licensed under the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0); it ships no NOTICE file. One
+change is made to it at bundle time: its lazy protobufjs loader (createRequire(import.meta.url)("protobufjs")) is replaced
+by a plain require("protobufjs"). Also bundled, unmodified: long (Apache-2.0), protobufjs and jpeg-js (BSD-3-Clause),
+inherits and lru-cache (ISC), and MIT-licensed npm packages. Every licence text is in the image at
+/usr/lib/camera-bridge/helpers/eufy/LICENSES; the list is in docs/third-party/eufy-bridge.md.

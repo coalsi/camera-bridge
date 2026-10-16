@@ -150,8 +150,8 @@
 .zoom-level { min-width: 4ch; text-align: center; font-variant-numeric: tabular-nums; font-weight: 650; color: #fff; font-size: 0.9rem; }
 .zoom-map { width: 160px; height: auto; border-radius: 8px; border: 1px solid rgb(255 255 255 / 0.18); background: #000; cursor: move; touch-action: none; }
 .zoom-hint {
-  position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 18px 36px; border-radius: 999px; pointer-events: none;
-  background: rgb(15 15 17 / 0.72); color: #e8e8ea; font-size: 2.4rem; font-weight: 600; white-space: nowrap; opacity: 0; transition: opacity 0.4s;
+  position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 9px 18px; border-radius: 999px; pointer-events: none;
+  background: rgb(15 15 17 / 0.72); color: #e8e8ea; font-size: 1.2rem; font-weight: 600; white-space: nowrap; opacity: 0; transition: opacity 0.4s;
 }
 .zoom-layer[data-zoomed="false"] .zoom-hint[data-show="true"] { opacity: 1; }
 @media (hover: none) { .zoom-hint { display: none; } }

@@ -39,6 +39,11 @@ licenses that give you the right to the source code. This note tells you how to 
    not a Debian package and is not in the package list; its source is that commit, and its license text is in
    /usr/share/doc/go2rtc/copyright.
 
+   The helpers /usr/lib/camera-bridge/helpers/wyze-lake (MIT License) and /usr/lib/camera-bridge/helpers/eufy-bridge
+   (with the folder helpers/eufy: Node.js, MIT License, and our bundle with the eufy SDK, Apache License 2.0) are our own
+   programs; their source is in the same repository under linux/helpers. Their license texts are in
+   /usr/share/doc/wyze-lake/ and /usr/lib/camera-bridge/helpers/eufy/LICENSES.
+
 4. Licenses
 
    Every Debian package keeps its license text in /usr/share/doc/<package>/copyright. A plain-language overview is in

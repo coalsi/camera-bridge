@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds Camera Bridge OS: the camerabridged daemon (static Swift build), the go2rtc helper (pinned commit, fetch-go2rtc.sh),
-# the Debian image (mkosi), the compressed release files, SHA-256 sums and signatures. Works on a Mac (Docker / OrbStack)
-# and on Linux (Docker). Needs only Docker.
+# our own helpers wyze-lake and eufy-bridge (linux/helpers, build-helpers.sh), the Debian image (mkosi), the compressed release
+# files, SHA-256 sums and signatures. Works on a Mac (Docker / OrbStack) and on Linux (Docker). Needs only Docker.
 #
 #   linux/os/build.sh --version 0.1 [--arch amd64|arm64] [--out DIR]
 #                     [--daemon FILE | --stub-daemon | (default: build the daemon with Swift in a container)]
@@ -106,6 +106,9 @@ fi
 # --- 1b. the go2rtc helper (built from a pinned commit with Go in a container, checked against a pinned SHA-256) -------------
 helpers_dir="$REPO/build/os-helpers/$arch"
 "$HERE/fetch-go2rtc.sh" --arch "$arch" --output "$helpers_dir"
+
+# --- 1c. our own helpers: wyze-lake (Go) and eufy-bridge (Node.js + the eufy SDK; amd64 only), from linux/helpers ---------------
+"$HERE/build-helpers.sh" --arch "$arch" --output "$helpers_dir"
 
 # --- 2. the image, inside the builder container ---------------------------------------------------------------------
 echo "==> preparing the builder image ($BUILDER_IMAGE:$arch)"

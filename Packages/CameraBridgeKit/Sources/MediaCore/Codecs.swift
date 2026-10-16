@@ -9,6 +9,10 @@ public protocol MediaCodecs: Sendable {
     /// A decoder for the live view's self-check (it decodes a few of the pictures the stream sends, to see them as the
     /// controller does): low priority, session creation logged at debug level. The default is `makeVideoDecoder`.
     func makeProbeDecoder(format: VideoFormat) throws -> any VideoDecoding
+    /// A decoder for built-in motion detection, which looks at a small grey thumbnail a few times a second: it may hand back smaller
+    /// pictures than the stream's and decode on the GPU where that pays (a 4K or HEVC camera decoded all the time). The default is
+    /// `makeVideoDecoder`.
+    func makeMotionDecoder(format: VideoFormat) throws -> any VideoDecoding
     func makeVideoEncoder(settings: VideoEncoderSettings) throws -> any VideoEncoding
     func makeVideoTranscoder(output: VideoEncoderSettings) throws -> any VideoTranscoding
     /// A transcoder that also draws `overlay` (asked for at every picture; nil: none) on the pictures it encodes. The
@@ -27,6 +31,8 @@ extension MediaCodecs {
     public func makeSnapshotDecoder(format: VideoFormat) throws -> any VideoDecoding { try makeVideoDecoder(format: format) }
 
     public func makeProbeDecoder(format: VideoFormat) throws -> any VideoDecoding { try makeVideoDecoder(format: format) }
+
+    public func makeMotionDecoder(format: VideoFormat) throws -> any VideoDecoding { try makeVideoDecoder(format: format) }
 
     public func makeVideoTranscoder(output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?) throws -> any VideoTranscoding {
         try makeVideoTranscoder(output: output)

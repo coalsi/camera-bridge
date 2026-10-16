@@ -50,6 +50,8 @@ the id, never the path), `WebConfiguration.archiveLocations`, `WebConfiguration.
 - Plugins (2026-10-15): the Wyze and eufy plugins (`Plugins/`). `WebConfiguration.wyzeTransport` and `WebConfiguration.eufyBridge` let tests replace
   Wyze's servers and the `eufy-bridge` helper. Neither plugin keeps a password: Wyze's session is in the secret store, eufy's in its helper's folder.
 
+- Pan and tilt (2026-10-16): `BridgeBackend.panTilt(cameraID:pan:tilt:)` (extension default throws) and route `POST cameras/:id/pan-tilt`.
+
 ## Security notes
 
 - Only IP addresses, `localhost`, `*.local`, `*.home.arpa`, names without a dot and `allowedHosts` are served (DNS rebinding).

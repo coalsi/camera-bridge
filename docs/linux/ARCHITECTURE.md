@@ -31,12 +31,14 @@ HomeKit Secure Video needs H.264 video passed through untouched wherever possibl
 ```
 camerabridged        Swift daemon: BridgeEngine + web API (one process, user camerabridge)
   ├─ go2rtc          helper for Wyze / Ring / Nest / Tuya (started on demand): /usr/lib/camera-bridge/helpers/go2rtc
+  ├─ wyze-lake       helper for Wyze's cloud-only cameras (on demand): /usr/lib/camera-bridge/helpers/wyze-lake
+  ├─ eufy-bridge     helper for the Eufy account (while the eufy plugin is on): helpers/eufy-bridge -> helpers/eufy/node
   └─ ffmpeg          codecs (started per stream)
 avahi-daemon         mDNS (HomeKit advertising)
 camerabridge-web     not a process: camerabridged serves the web UI itself on :80, plain HTTP (nothing listens on :443; HTTPS is a later option)
 ```
 
-go2rtc (MIT) is part of the image: built from a pinned commit of its master (`1.9.14+dev.c245815`, for the fixes to its native Wyze source after v1.9.14) by `linux/os/fetch-go2rtc.sh`, checked against a pinned SHA-256, installed `0755 root:root` at `/usr/lib/camera-bridge/helpers/go2rtc` (the folder `ProcessHelperLauncher` searches after `CAMERABRIDGE_HELPERS_DIR` and the daemon's own folder), licence at `/usr/share/doc/go2rtc/copyright`. It runs as a child of `camerabridged`, so as user `camerabridge` inside the daemon's sandbox. See BUILDING.md, "The go2rtc helper".
+go2rtc (MIT) is part of the image: built from a pinned commit of its master (`1.9.14+dev.c245815`, for the fixes to its native Wyze source after v1.9.14) by `linux/os/fetch-go2rtc.sh`, checked against a pinned SHA-256, installed `0755 root:root` at `/usr/lib/camera-bridge/helpers/go2rtc` (the folder `ProcessHelperLauncher` searches after `CAMERABRIDGE_HELPERS_DIR` and the daemon's own folder), licence at `/usr/share/doc/go2rtc/copyright`. It runs as a child of `camerabridged`, so as user `camerabridge` inside the daemon's sandbox. See BUILDING.md, "The go2rtc helper". Our own helpers `wyze-lake` (Go, MIT) and `eufy-bridge` (Node.js 24 with the eufy SDK, Apache-2.0; amd64 images) are built from `linux/helpers/` by `linux/os/build-helpers.sh` and installed in the same folder the same way; they run as children of the daemon too (BUILDING.md, "Our own helpers").
 
 State lives in `/var/lib/camera-bridge` (a separate data partition, so updates never touch it): `config.json`, `hap/`, `secrets/` (the encrypted items and `master.key`), `Diagnostics/`, and `recordings/` (the NVR's files, once Record is on). This is the same layout the Mac app uses in `~/Library/Application Support/CameraBridge`.
 

@@ -77,6 +77,7 @@ mkosi.extra/                     copied into the image (see BUILDING.md)
   usr/lib/repart.d/              grows the data partition on first boot
 build.sh, build-image.sh         build
 fetch-go2rtc.sh                  builds the go2rtc helper (pinned commit and checksums)
+build-helpers.sh                 builds our own helpers wyze-lake and eufy-bridge from ../helpers
 test-static.sh, test-vm.sh       tests
 stub/                            test-only stand-in daemons
 ```

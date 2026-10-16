@@ -28,3 +28,8 @@ Tools/captures/
 *private-key*
 *sparkle*.key
 ExportOptions.plist
+
+# Camera Bridge OS helpers (linux/helpers): build output and npm installs; the image build keeps its copy in build/os-helpers
+linux/helpers/*/out/
+linux/helpers/*/node_modules/
+linux/helpers/*/dl-*

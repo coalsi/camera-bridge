@@ -34,6 +34,8 @@ When you are done, `linux/os/build.sh --clean` removes the Docker volumes (`cb-o
 | `linux/os/Dockerfile.builder` | the build container (Debian 13 with the same mkosi / systemd the image uses) |
 | `linux/os/build.sh` | host side: builds the daemon (`swift build -c release --static-swift-stdlib --build-system native` in the `swift:6.4.0-noble` image (pinned: 6.4.1 made the daemon use ~70% more CPU) plus the Avahi, curl and libxml2 development packages), starts the builder container |
 | `linux/os/fetch-go2rtc.sh` | host side, run by `build.sh`: builds the go2rtc helper (below) into `build/os-helpers/<arch>/` |
+| `linux/os/build-helpers.sh` | host side, run by `build.sh`: builds our own helpers `wyze-lake` and `eufy-bridge` from `linux/helpers/` (below) into the same folder |
+| `linux/helpers/wyze-lake/`, `linux/helpers/eufy-bridge/` | the helpers' sources, each with its own `build.sh`, `pins.env` and tests |
 | `linux/os/build-image.sh` | inside the container: stages files, runs mkosi, cuts the update artifacts, compresses, hashes, signs |
 | `linux/os/paths.env` | **where the daemon, the web UI and the helpers live in the image** (`CB_DAEMON`, `CB_WEB_ROOT`, `CB_HELPERS_DIR`); `units/camerabridged.service.in` is rendered with these |
 | `linux/os/mkosi.conf`, `mkosi.conf.d/` | the image definition (packages, boot loader, kernel command line) |
@@ -57,6 +59,22 @@ The engine starts [go2rtc](https://github.com/AlexxIT/go2rtc) (MIT) for the came
 * accepts the binary only if its SHA-256 equals the one pinned for that architecture (and the same for the `LICENSE` file). The build is reproducible: the same bytes on an Apple Silicon Mac and on x86-64 (checked 2026-10-15). A mismatch installs nothing.
 
 The result is kept in `build/os-helpers/<arch>/` (`go2rtc`, `go2rtc.LICENSE`, `go2rtc.version`); a later build that finds a file with the pinned checksum reuses it. The Go caches are in the Docker volume `cb-os-go` (removed by `build.sh --clean`). The first build takes about a minute; the binary is about 19 MB for amd64 (18 MB for arm64), stripped, not UPX-packed. `--verify` checks the kept file without building, and `--test` also runs go2rtc's own tests and `go vet` of `pkg/tutk`, `pkg/wyze` and `internal/wyze` (only `pkg/tutk` has tests; they pass at the pinned commit).
+
+### Our own helpers: wyze-lake and eufy-bridge
+
+Two more helper programs are Camera Bridge's own and live in this repository; the daemon finds them by name in the same folder:
+
+| Helper | Source | In the image | What |
+|---|---|---|---|
+| `wyze-lake` | `linux/helpers/wyze-lake/` (Go, MIT) | `/usr/lib/camera-bridge/helpers/wyze-lake` (static, about 10 MB) | Wyze cameras that stream only through Wyze's cloud (Cam Pan v4) |
+| `eufy-bridge` | `linux/helpers/eufy-bridge/` (Node.js, the eufy SDK) | the folder `/usr/lib/camera-bridge/helpers/eufy/` (`node`, `eufy-bridge.js`, `package.json`, `LICENSES/`, `VERSION`; about 124 MiB, nearly all of it the Node.js binary) and the launcher `/usr/lib/camera-bridge/helpers/eufy-bridge` | the Eufy account and its cameras; amd64 images only |
+
+`linux/os/build-helpers.sh --arch amd64|arm64` builds both; `build.sh` runs it right after `fetch-go2rtc.sh` and both write to `build/os-helpers/<arch>/`, which `build-image.sh --helpers` installs (`root:root`, programs `0755`, the rest `0644`; `--release` refuses an image without them). Each helper is built by its own `build.sh` in Docker:
+
+* `wyze-lake/build.sh`: the official Go image pinned by digest (`pins.env`), `go mod verify`, `go vet`, `go test`, then `CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=…"`, cross-compiled like go2rtc (the same bytes on a Mac and on x86-64). `FULL_TESTS=1` installs ffmpeg in the container first so the tests that need it run too.
+* `eufy-bridge/build.sh`: the Node image pinned by digest, `npm ci` from the lockfile, the SDK version checked against `pins.env`, the tests, an esbuild bundle, and the official Node.js linux-x64 binary, accepted only with the pinned SHA-256 of its tarball (and the release's `SHASUMS256.txt`) and of the binary itself. It is not stripped, so it stays byte-identical to nodejs.org's (stripping would save about 17 MB). `test/integration/run.sh build/os-helpers/amd64` runs the helper from that folder exactly as the image lays it out, as an unprivileged user on a read-only root file system.
+
+`build-helpers.sh` writes a stamp next to each result (`wyze-lake.version`, `eufy-bridge.version`: version, a SHA-256 over the helper's source files, the toolchain, the result's SHA-256) and rebuilds only when the sources or pins changed or the files no longer match the stamp; `--verify` only checks. `build-image.sh` checks the binaries against the stamps again, and after the image is made, that they are in it, root-owned and `0755`, and that the image's `node` is the verified one; it also prints how full the root slot is. The eufy helper writes nothing outside its state folder under the daemon's data directory (`CB_EUFY_STATE_DIR`; the daemon sets `HOME` to it too), so the read-only `/usr` is fine. To update Node.js or the SDK, change `pins.env` (and `package-lock.json`), rebuild, and update `docs/third-party/eufy-bridge.md`, `NOTICE`, `THIRD_PARTY_LICENSES.md` and `docs/linux/LICENSES.md`; for wyze-lake's Go modules, `docs/third-party/wyze-lake.md` and its `NOTICE` and `LICENSES/`.
 
 To move to another go2rtc commit: change `GO2RTC_COMMIT` and `GO2RTC_VERSION` in the script, run it (it prints the new checksum on the mismatch), build on a second machine of the other architecture and compare, set the checksums, run with `--test`, and update `docs/third-party/go2rtc.md`, `NOTICE`, `THIRD_PARTY_LICENSES.md`, `docs/linux/LICENSES.md` and `linux/os/SOURCE-OFFER.txt.in`. The macOS app's go2rtc is separate (`Tools/fetch-go2rtc.sh`, the v1.9.14 release).
 
@@ -94,7 +112,7 @@ A build for testing that publishes nothing: run the workflow by hand (Actions > 
 linux/os/test-static.sh
 ```
 
-Runs in a throw-away Debian 13 container: `bash -n` and `shellcheck` on every script, the go2rtc pins (a full commit hash, a version, the Go image by digest, 64-hex checksums for amd64, arm64 and the licence; `CB_HELPERS_DIR` is a folder the engine searches), `nft -c -f` on the firewall, `systemd-analyze verify` on every unit, `systemd-sysusers`/`systemd-tmpfiles`/`systemd-repart --dry-run` on the definitions, `mkosi summary` for amd64 and arm64, and the installer's argument checks.
+Runs in a throw-away Debian 13 container: `bash -n` and `shellcheck` on every script, the go2rtc pins (a full commit hash, a version, the Go image by digest, 64-hex checksums for amd64, arm64 and the licence; `CB_HELPERS_DIR` is a folder the engine searches), the pins of `wyze-lake` and `eufy-bridge` (toolchain images by digest, Node.js version and SHA-256s, the SDK commit and the lockfile's SDK version) and that they carry the names the daemon looks for, `nft -c -f` on the firewall, `systemd-analyze verify` on every unit, `systemd-sysusers`/`systemd-tmpfiles`/`systemd-repart --dry-run` on the definitions, `mkosi summary` for amd64 and arm64, and the installer's argument checks.
 
 ### Boot test in QEMU
 
@@ -167,4 +185,4 @@ Not verified here:
 
 ## Disk space and cleanup
 
-A build uses several GB in Docker volumes (`cb-os-work`: the mkosi cache and image, `cb-os-swift-<arch>`: Swift build cache, `cb-os-go`: Go module and build cache for go2rtc). `linux/os/build.sh --clean` removes them. The VM test uses a few GB in its scratch folder, deleted at the end unless `--keep`.
+A build uses several GB in Docker volumes (`cb-os-work`: the mkosi cache and image, `cb-os-swift-<arch>`: Swift build cache, `cb-os-go`: Go module and build cache for go2rtc and wyze-lake). `linux/os/build.sh --clean` removes them. The VM test uses a few GB in its scratch folder, deleted at the end unless `--keep`.

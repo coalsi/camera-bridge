@@ -6,7 +6,9 @@
 #
 #   --stub-broken        like --stub-daemon, but the daemon dies at once (tests the automatic rollback)
 #   --web DIR            web UI files to install (default: none; the daemon falls back to its built-in page)
-#   --helpers DIR        helper programs from fetch-go2rtc.sh (DIR/go2rtc, go2rtc.LICENSE, go2rtc.version); required with --release
+#   --helpers DIR        helper programs from fetch-go2rtc.sh (DIR/go2rtc, go2rtc.LICENSE, go2rtc.version) and build-helpers.sh
+#                        (DIR/wyze-lake, wyze-lake.version, wyze-lake.doc/; DIR/eufy/, eufy-bridge, eufy-bridge.version);
+#                        required with --release
 #   --pubkey FILE        update verification public key (default: the one in mkosi.extra, a placeholder)
 #   --mirror URL         Debian mirror
 #   --release            refuse placeholder key, stub daemon, unsigned output
@@ -62,7 +64,7 @@ if [ "$release" -eq 1 ]; then
     [ "$placeholder" -eq 0 ] || die "--release needs a real update public key (replace linux/os/mkosi.extra/usr/share/camera-bridge/update-key.pub)"
     [ "$stub" -eq 0 ] || die "--release cannot use the stub daemon"
     [ -n "${MINISIGN_SECRET_KEY:-}" ] || die "--release needs MINISIGN_SECRET_KEY in the environment"
-    [ -n "$helpers" ] || die "--release needs --helpers (the go2rtc helper)"
+    [ -n "$helpers" ] || die "--release needs --helpers (go2rtc, wyze-lake and, on amd64, eufy-bridge)"
 fi
 
 mkdir -p "$out"
@@ -97,6 +99,66 @@ if [ -n "$helpers" ]; then
         cat "$helpers/go2rtc.LICENSE"
     } >"$work/go2rtc.copyright"
     install -D -m 0644 "$work/go2rtc.copyright" "$stage/usr/share/doc/go2rtc/copyright"
+
+    # Our own helpers from build-helpers.sh, found by the daemon by name in the same folder: wyze-lake (Go, MIT) and eufy-bridge
+    # (a launcher that starts the eufy/ folder's Node.js with the bundle). All root-owned and read-only to the daemon's user; the
+    # eufy helper writes only to its state folder under the daemon's data directory (CB_EUFY_STATE_DIR, and HOME points there).
+    if [ -e "$helpers/wyze-lake" ]; then
+        for f in wyze-lake wyze-lake.version wyze-lake.doc/LICENSE wyze-lake.doc/NOTICE; do
+            [ -s "$helpers/$f" ] || die "no $f in $helpers (run build-helpers.sh)"
+        done
+        [ "$(sha256sum "$helpers/wyze-lake" | awk '{print $1}')" = "$(awk '$1 == "sha256" { print $2 }' "$helpers/wyze-lake.version")" ] \
+            || die "$helpers/wyze-lake does not match its stamp (run build-helpers.sh)"
+        install -D -m 0755 -o root -g root "$helpers/wyze-lake" "$stage$CB_HELPERS_DIR/wyze-lake"
+        {
+            echo "wyze-lake, Camera Bridge's helper for Wyze cameras that stream through Wyze's cloud (source: linux/helpers/wyze-lake)"
+            cat "$helpers/wyze-lake.version"
+            echo "Installed at $CB_HELPERS_DIR/wyze-lake. License: MIT (below). Its Go modules' licence texts: LICENSES/ in this folder."
+            echo
+            cat "$helpers/wyze-lake.doc/LICENSE"
+            echo
+            cat "$helpers/wyze-lake.doc/NOTICE"
+        } >"$work/wyze-lake.copyright"
+        install -D -m 0644 "$work/wyze-lake.copyright" "$stage/usr/share/doc/wyze-lake/copyright"
+        install -d -m 0755 "$stage/usr/share/doc/wyze-lake/LICENSES"
+        install -m 0644 -o root -g root "$helpers/wyze-lake.doc/LICENSES"/* "$stage/usr/share/doc/wyze-lake/LICENSES/"
+    elif [ "$release" -eq 1 ]; then
+        die "--release needs the wyze-lake helper in $helpers (run build-helpers.sh)"
+    fi
+    if [ -d "$helpers/eufy" ]; then
+        for f in eufy/node eufy/eufy-bridge.js eufy/package.json eufy/VERSION eufy/LICENSES/README.txt eufy-bridge eufy-bridge.version; do
+            [ -s "$helpers/$f" ] || die "no $f in $helpers (run build-helpers.sh)"
+        done
+        [ "$(sha256sum "$helpers/eufy/node" | awk '{print $1}')" = "$(awk '$1 == "node-sha256" { print $2 }' "$helpers/eufy-bridge.version")" ] \
+            || die "$helpers/eufy/node is not the pinned Node.js binary (run build-helpers.sh)"
+        eufy=$stage$CB_HELPERS_DIR/eufy
+        install -d -m 0755 -o root -g root "$eufy"
+        install -m 0755 -o root -g root "$helpers/eufy/node" "$eufy/node"
+        for f in eufy-bridge.js package.json VERSION; do install -m 0644 -o root -g root "$helpers/eufy/$f" "$eufy/$f"; done
+        cp -R "$helpers/eufy/LICENSES" "$eufy/LICENSES"
+        chown -R root:root "$eufy/LICENSES"
+        find "$eufy/LICENSES" -type d -exec chmod 0755 {} +
+        find "$eufy/LICENSES" -type f -exec chmod 0644 {} +
+        # The launcher (written by build-helpers.sh): it must start this folder's node with the bundle.
+        grep -qxF "exec $CB_HELPERS_DIR/eufy/node $CB_HELPERS_DIR/eufy/eufy-bridge.js \"\$@\"" "$helpers/eufy-bridge" \
+            || die "$helpers/eufy-bridge is not the launcher for $CB_HELPERS_DIR/eufy (run build-helpers.sh)"
+        install -m 0755 -o root -g root "$helpers/eufy-bridge" "$stage$CB_HELPERS_DIR/eufy-bridge"
+        {
+            echo "eufy-bridge, Camera Bridge's helper for Eufy cameras (source: linux/helpers/eufy-bridge)"
+            cat "$helpers/eufy-bridge.version"
+            echo
+            cat "$helpers/eufy/VERSION"
+            echo
+            echo "Installed at $CB_HELPERS_DIR/eufy (started by $CB_HELPERS_DIR/eufy-bridge). It contains Node.js (MIT and others)"
+            echo "and, bundled into eufy-bridge.js, @mega-yfue/eufy-sdk (Apache-2.0; its protobufjs loader is rewritten at bundle time"
+            echo "to a plain require, the only change) and the npm packages below. Every licence text is in $CB_HELPERS_DIR/eufy/LICENSES."
+            echo
+            cat "$helpers/eufy/LICENSES/README.txt"
+        } >"$work/eufy-bridge.copyright"
+        install -D -m 0644 "$work/eufy-bridge.copyright" "$stage/usr/share/doc/eufy-bridge/copyright"
+    elif [ "$release" -eq 1 ] && [ "$arch" = amd64 ]; then
+        die "--release needs the eufy-bridge helper in $helpers (run build-helpers.sh)"
+    fi
 fi
 install -d "$stage/usr/lib/systemd/system"
 sed -e "s|@CB_DAEMON@|$CB_DAEMON|g" -e "s|@CB_WEB_ROOT@|$CB_WEB_ROOT|g" \
@@ -181,9 +243,39 @@ for f in LICENSE NOTICE OS-LICENSES.md; do
     debugfs -R "stat /usr/share/doc/camera-bridge/$f" "$work/root.raw" >/dev/null 2>&1 || die "$f is missing from the image"
 done
 if [ -n "$helpers" ]; then
-    for f in "$CB_HELPERS_DIR/go2rtc" /usr/share/doc/go2rtc/copyright; do
+    image_files=("$CB_HELPERS_DIR/go2rtc" /usr/share/doc/go2rtc/copyright)
+    image_programs=("$CB_HELPERS_DIR/go2rtc")
+    if [ -e "$helpers/wyze-lake" ]; then
+        image_files+=("$CB_HELPERS_DIR/wyze-lake" /usr/share/doc/wyze-lake/copyright)
+        image_programs+=("$CB_HELPERS_DIR/wyze-lake")
+    fi
+    if [ -d "$helpers/eufy" ]; then
+        image_files+=("$CB_HELPERS_DIR/eufy-bridge" "$CB_HELPERS_DIR/eufy/node" "$CB_HELPERS_DIR/eufy/eufy-bridge.js"
+                      "$CB_HELPERS_DIR/eufy/package.json" "$CB_HELPERS_DIR/eufy/VERSION" "$CB_HELPERS_DIR/eufy/LICENSES/README.txt"
+                      /usr/share/doc/eufy-bridge/copyright)
+        image_programs+=("$CB_HELPERS_DIR/eufy-bridge" "$CB_HELPERS_DIR/eufy/node")
+    fi
+    for f in "${image_files[@]}"; do
         debugfs -R "stat $f" "$work/root.raw" >/dev/null 2>&1 || die "$f is missing from the image"
     done
+    # The programs: root-owned, 0755 (the daemon's user can run them, not change them).
+    for f in "${image_programs[@]}"; do
+        st=$(debugfs -R "stat $f" "$work/root.raw" 2>/dev/null)
+        if ! grep -Eq 'User: +0 +Group: +0' <<<"$st" || ! grep -Eq 'Mode: +0?0755' <<<"$st"; then die "$f in the image is not root-owned 0755"; fi
+    done
+    if [ -d "$helpers/eufy" ]; then
+        debugfs -R "dump $CB_HELPERS_DIR/eufy/node $work/node.check" "$work/root.raw" >/dev/null 2>&1
+        [ "$(sha256sum "$work/node.check" | awk '{print $1}')" = "$(sha256sum "$helpers/eufy/node" | awk '{print $1}')" ] \
+            || die "the image's $CB_HELPERS_DIR/eufy/node is not the verified Node.js binary"
+        rm -f "$work/node.check"
+    fi
+fi
+# How full the root slot is (the helpers live there; the slot size is fixed by --root-size, the same for both slots).
+root_blocks=$(dumpe2fs -h "$work/root.raw" 2>/dev/null | awk -F: '/^Block count/ { gsub(/ /, "", $2); print $2 }')
+root_free=$(dumpe2fs -h "$work/root.raw" 2>/dev/null | awk -F: '/^Free blocks/ { gsub(/ /, "", $2); print $2 }')
+root_bsize=$(dumpe2fs -h "$work/root.raw" 2>/dev/null | awk -F: '/^Block size/ { gsub(/ /, "", $2); print $2 }')
+if [ -n "$root_blocks" ] && [ -n "$root_free" ] && [ -n "$root_bsize" ]; then
+    echo "    root slot: $(( (root_blocks - root_free) * root_bsize / 1048576 )) MiB used, $(( root_free * root_bsize / 1048576 )) MiB free of $(( root_blocks * root_bsize / 1048576 )) MiB"
 fi
 zstd -q -T0 -19 --long=27 -f "$work/root.raw" -o "$out/$root_name"
 rm -f "$work/root.raw"

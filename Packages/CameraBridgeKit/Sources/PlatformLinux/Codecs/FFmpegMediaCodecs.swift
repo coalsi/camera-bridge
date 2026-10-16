@@ -62,6 +62,13 @@ public final class FFmpegMediaCodecs: MediaCodecs {
         try FFmpegVideoDecoder(runtime: runtime, format: format, sessionLogLevel: .debug, lowPriority: true)
     }
 
+    /// Motion detection's decoder: pictures at most `FFmpegVideoDecoder.motionPictureWidth` wide, decoded on the GPU for HEVC and anything
+    /// larger than 1080p (on the reference box a 4K HEVC camera cost a whole core decoded on the CPU, 2026-10-16).
+    public func makeMotionDecoder(format: VideoFormat) throws -> any VideoDecoding {
+        try FFmpegVideoDecoder(runtime: runtime, format: format, sessionLogLevel: .debug, maxOutputWidth: FFmpegVideoDecoder.motionPictureWidth,
+                               hardwareWhenHeavy: true)
+    }
+
     public func makeVideoEncoder(settings: VideoEncoderSettings) throws -> any VideoEncoding {
         try FFmpegVideoEncoder(runtime: runtime, settings: settings)
     }

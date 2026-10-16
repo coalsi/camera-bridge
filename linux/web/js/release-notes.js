@@ -7,6 +7,20 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.105',
+    date: '2026-10-16',
+    title: 'Plugins: Wyze and eufy, battery cameras, pan and tilt, and a new look',
+    items: [
+      'Plugins: a new section for cameras that need their maker’s account. Sign in once, see your cameras, add them with one click.',
+      'Wyze: sign in with two-step verification. Wyze Cam v4, v3 and Pan v3 come in over their own RTSP; the Wyze Cam Pan v4 comes in through Wyze’s cloud, with sound, and its pan and tilt.',
+      'eufy: sign in (eufy may ask for a captcha and an emailed code) and add your eufy cameras, battery ones included, with motion and people from eufy’s notifications.',
+      'Battery cameras sleep: they wake for a live view, an Apple Home recording or motion, and sleep again when nobody needs the picture. On the Monitor wall they show their latest picture until you open them.',
+      'Pan and tilt: open a pan/tilt camera on its own on the Monitor, and a pad beside the events turns it. Hold an arrow to keep turning.',
+      'Motion detection on 4K and HEVC cameras runs on the box’s graphics, using a fraction of the processor it did.',
+      'A new logo, the Golden Gate seen through a lens, and the red of New England’s covered bridges.',
+    ],
+  },
+  {
     version: '0.1.104',
     date: '2026-10-15',
     title: 'Apple Home records again',

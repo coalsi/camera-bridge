@@ -121,7 +121,7 @@ actor SoftMotionMonitor {
             if decoderFormat != frame.format {
                 guard frame.isKeyframe else { continue }
                 decoder?.invalidate()
-                decoder = try? codecs.makeVideoDecoder(format: frame.format)
+                decoder = try? codecs.makeMotionDecoder(format: frame.format)
                 decoderFormat = frame.format
             }
             guard let decoder else { continue }

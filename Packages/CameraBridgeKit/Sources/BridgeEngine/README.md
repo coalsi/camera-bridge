@@ -628,3 +628,7 @@ length), or a motion event (held while the event lasts; the start reaches the ro
 recording Home asks for starts with video). It is woken once at the start for its picture size, and sleeps `onDemandIdleStop` after its last user.
 Soft motion and the motion shadow test never run for it, and asleep is not offline (the last stream state stays). The engine hands
 `EufyBridge.shared` its helper launcher and the `plugins/eufy` folder of the data directory at every start.
+
+Pan and tilt (2026-10-16): `BridgeEngine.panTilt(cameraID:pan:tilt:)` moves a camera whose driver has `CameraDriver.makePanTilt()`; a move stops
+by itself 1.5 s after the last ask. `CameraStatus.panTilt` says whether a camera pans and tilts. Motion detection asks for
+`MediaCodecs.makeMotionDecoder(format:)` (default `makeVideoDecoder`), which may hand back smaller pictures decoded on the GPU.

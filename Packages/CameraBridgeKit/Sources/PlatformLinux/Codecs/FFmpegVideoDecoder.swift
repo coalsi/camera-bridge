@@ -123,8 +123,16 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
     private let gate = AsyncGate()
     private let log = Log(category: "VideoDecoder")
     private let initialFormat: VideoFormat
+    /// Pictures come out at most this wide (the aspect kept); nil: the stream's size.
+    private let maxOutputWidth: Int?
+    /// Decode on the GPU (VA-API, when usable) for a stream that is heavy on the CPU: HEVC, or larger than 1080p.
+    private let hardwareWhenHeavy: Bool
 
-    init(runtime: FFmpegRuntime, format: VideoFormat, sessionLogLevel: LogLevel = .info, lowPriority: Bool = false) throws {
+    /// Motion detection's picture width (it analyses a 320-pixel thumbnail of it).
+    static let motionPictureWidth = 640
+
+    init(runtime: FFmpegRuntime, format: VideoFormat, sessionLogLevel: LogLevel = .info, lowPriority: Bool = false, maxOutputWidth: Int? = nil,
+         hardwareWhenHeavy: Bool = false) throws {
         _ = try runtime.requireExecutable()
         guard format.width > 0, format.height > 0, FLVWriter.videoSequenceHeader(format) != nil else {
             throw MediaCodecError.unsupported("video format \(format.codec.rawValue) \(format.width)×\(format.height) with \(format.parameterSets.count) parameter sets")
@@ -132,6 +140,8 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
         self.runtime = runtime
         self.sessionLogLevel = sessionLogLevel
         self.lowPriority = lowPriority
+        self.maxOutputWidth = maxOutputWidth
+        self.hardwareWhenHeavy = hardwareWhenHeavy
         initialFormat = format
         state = Mutex(State())
     }
@@ -205,11 +215,12 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
         guard let header = stream.header else {
             throw MediaCodecError.unsupported("the stream's parameter sets cannot be described to ffmpeg")
         }
+        // CPU decoding by default: on the reference box (N150, five H.264 cameras) decoding on the GPU saved nothing measurable and copying
+        // the pictures back cost a little (2026-10-14). A heavy stream (HEVC, above 1080p) decoded all the time is where it pays.
+        let hardware = hardwareWhenHeavy && Self.isHeavy(format) ? runtime.hardwareDecodeDevice() : nil
+        let output = Self.outputSize(width: format.width, height: format.height, maxWidth: maxOutputWidth)
         let spec = FFmpegProcessSpec(executable: executable,
-                                     // CPU decoding: on the reference box (N150, five H.264 cameras) decoding on the GPU saved nothing measurable
-                                     // and copying the pictures back cost a little (2026-10-14). `runtime.hardwareDecodeDevice()` is there for
-                                     // cameras where it pays (HEVC, several 4K streams decoded all the time); measure before turning it on.
-                                     arguments: FFmpegArguments.decoder(width: format.width, height: format.height, hardwareDevice: nil),
+                                     arguments: FFmpegArguments.decoder(width: output.width, height: output.height, hardwareDevice: hardware),
                                      label: "video decoder")
         let session = try FFmpegSession(launcher: runtime.launcher, spec: spec)
         do {
@@ -218,11 +229,12 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
             session.terminate()
             throw error
         }
-        let pipeline = Pipeline(session: session, stream: stream, reader: Y4MPictureReader(width: format.width, height: format.height),
+        let pipeline = Pipeline(session: session, stream: stream, reader: Y4MPictureReader(width: output.width, height: output.height),
                                 format: format)
         state.pipeline = pipeline
         live.withLock { $0 = session }
         let message = "ffmpeg video decoder started: \(format.codec.rawValue) \(format.width)×\(format.height)"
+            + (output.width != format.width ? " → \(output.width)×\(output.height)" : "") + (hardware != nil ? " on the GPU" : "")
         if sessionLogLevel <= .debug { log.debug(message) } else { log.info(message) }
         return pipeline
     }
@@ -231,6 +243,18 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
         pipeline.session.terminate()
         live.withLock { $0 = nil }
         if state.pipeline === pipeline { state.pipeline = nil }
+    }
+
+    /// HEVC, or more pixels than 1080p.
+    static func isHeavy(_ format: VideoFormat) -> Bool {
+        format.codec == .hevc || format.width * format.height > 1920 * 1088
+    }
+
+    /// The picture size for `maxWidth` (even numbers, the aspect kept); the stream's own size when it is not wider.
+    static func outputSize(width: Int, height: Int, maxWidth: Int?) -> (width: Int, height: Int) {
+        guard let maxWidth, width > maxWidth, width > 0 else { return (width, height) }
+        let scaled = Int((Double(height) * Double(maxWidth) / Double(width)).rounded())
+        return (maxWidth & ~1, max(2, scaled & ~1))
     }
 
     private static func sameStream(_ a: VideoFormat, _ b: VideoFormat) -> Bool {

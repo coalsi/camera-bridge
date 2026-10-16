@@ -11,7 +11,9 @@ name: Camera Bridge OS image
 #
 # Action versions are pinned by commit SHA. The SHAs were read from the GitHub API for the tags named in the comments.
 # Everything else (docker, mkosi, Swift, Go, QEMU) runs inside containers/apt packages from Debian, the swift.org image and the
-# official golang image (pinned by digest in linux/os/fetch-go2rtc.sh, which builds the go2rtc helper inside build.sh).
+# official golang image (pinned by digest in linux/os/fetch-go2rtc.sh, which builds the go2rtc helper inside build.sh), and our
+# own helpers built by linux/os/build-helpers.sh inside build.sh: wyze-lake (golang image pinned by digest) and eufy-bridge (node
+# image pinned by digest; Node.js and the npm packages are checked against pinned SHA-256s and package-lock.json).
 
 on:
   push:
@@ -74,7 +76,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h / | tail -1
-      - name: Build (camerabridged with Swift, go2rtc with Go, image with mkosi)
+      - name: Build (camerabridged with Swift, go2rtc and wyze-lake with Go, eufy-bridge with Node, image with mkosi)
         env:
           VERSION: ${{ steps.v.outputs.version }}
           REF_TYPE: ${{ github.ref_type }}

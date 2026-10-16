@@ -241,3 +241,6 @@ snapshots never wake the camera; motion and people from eufy's push notification
 (the helper's stream URL for go2rtc; its description never shows the token), `IntegrationService.eufy`, `IntegrationSettings.Key.eufySerial` /
 `eufyModel`. `CameraDriver.streamsOnDemand` defaults to false.
 The Wyze plugin's cameras carry `IntegrationSettings.Key.wyzeMAC`, `wyzeModel` and `wyzeWay` (`rtsp`, `local`, `cloud`, `gwell`).
+
+Pan and tilt (2026-10-16): `PanTiltControl` (continuous `move(pan:tilt:)` in -1…1, `stop()`) and `CameraDriver.makePanTilt()` (default nil). The Wyze
+Cam Pan v4 (`WyzeModels.pansAndTilts(_:)`) turns through `wyze-lake`'s loopback control server, one nudge per move.

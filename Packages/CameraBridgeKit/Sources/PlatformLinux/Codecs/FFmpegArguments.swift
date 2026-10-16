@@ -90,12 +90,16 @@ enum FFmpegArguments {
     }
 
     /// compressed video in (FLV on stdin) → raw yuv420p pictures at `width × height` out (Y4M: `rawvideo` holds a picture back).
-    /// With `hardwareDevice` (a VA-API render node) the GPU decodes and ffmpeg copies the pictures back for the filters; when the GPU
-    /// cannot take the stream, ffmpeg falls back to decoding on the CPU by itself.
+    /// With `hardwareDevice` (a VA-API render node) the GPU decodes and scales and ffmpeg copies the scaled pictures back. Only for
+    /// streams the GPU takes (HEVC, H.264): the pictures must stay on the GPU for `scale_vaapi`, so there is no CPU fallback.
     static func decoder(width: Int, height: Int, hardwareDevice: String? = nil) -> [String] {
-        let hardware = hardwareDevice.map { ["-hwaccel", "vaapi", "-hwaccel_device", $0] } ?? []
+        // On the GPU the pictures stay there for the scaling (`scale_vaapi`), and only the scaled picture is copied back: copying a 4K
+        // picture back and scaling it on the CPU cost as much as the decoding saved (2026-10-16).
+        let hardware = hardwareDevice.map { ["-hwaccel", "vaapi", "-hwaccel_device", $0, "-hwaccel_output_format", "vaapi"] } ?? []
+        let filters = hardwareDevice == nil ? "scale=\(width):\(height),format=yuv420p"
+            : "scale_vaapi=w=\(width):h=\(height):format=nv12,hwdownload,format=nv12,format=yuv420p"
         return common + hardware + lowLatencyInput + ["-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn",
-                                    "-vf", "scale=\(width):\(height),format=yuv420p", "-fps_mode", "passthrough",
+                                    "-vf", filters, "-fps_mode", "passthrough",
                                     "-f", "yuv4mpegpipe", "-pix_fmt", "yuv420p", "pipe:1"]
     }
 
