@@ -38,3 +38,13 @@ import Testing
         #expect(profiles.map(\.ptzConfigured) == [true, false])
     }
 }
+
+/// The main-stream bit rate cap Optimize and Camera setup use: 6 Mbit/s, 8 Mbit/s for 4K and 8 MP cameras.
+@Suite struct MainBitrateCapTests {
+    @Test func fourKCamerasMayKeepEightMegabits() {
+        #expect(HomeKitReadinessAdvisor.maximumMainBitrateKbps(width: 3840, height: 2160) == 8000)
+        #expect(HomeKitReadinessAdvisor.maximumMainBitrateKbps(width: 4256, height: 1888) == 8000, "the 8 MP panoramic Hikvisions")
+        #expect(HomeKitReadinessAdvisor.maximumMainBitrateKbps(width: 2688, height: 1520) == 6000)
+        #expect(HomeKitReadinessAdvisor.maximumMainBitrateKbps(width: nil, height: nil) == 6000)
+    }
+}

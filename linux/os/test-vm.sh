@@ -196,7 +196,7 @@ stop_vm() {
     # Ask politely over SSH when possible, otherwise just cut the power (the data partition is journaled).
     if [ -n "$qemu_pid" ] && kill -0 "$qemu_pid" 2>/dev/null; then
         ssh_run 'systemctl poweroff' >/dev/null 2>&1 || true
-        rm -f "$ctl_path"
+        drop_ssh_master
         local n
         for ((n = 0; n < 30; n++)); do kill -0 "$qemu_pid" 2>/dev/null || break; sleep 1; done
         kill "$qemu_pid" 2>/dev/null || true
@@ -207,10 +207,20 @@ stop_vm() {
 }
 
 ssh_opts() {
-    # One multiplexed connection: the firewall rate-limits new SSH connections (and a test makes hundreds of calls).
-    printf '%s\n' -o ControlMaster=auto -o "ControlPath=$ctl_path" -o ControlPersist=120 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=5 \
+    # One multiplexed connection: the firewall rate-limits new SSH connections (and a test makes hundreds of calls). ServerAlive: a master
+    # whose VM went away (a reboot does not close its TCP connection through QEMU's user network) gives up within 15 s instead of
+    # holding every later call (CI, 2026-10-16: "ssh did not come back after the reset").
+    printf '%s\n' -o ControlMaster=auto -o "ControlPath=$ctl_path" -o ControlPersist=120 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=5 \
         -o LogLevel=ERROR -o BatchMode=yes -i "$work/id_ed25519" -p "$ssh_port"
 }
+# drop_ssh_master: ends the multiplexed connection after the VM reboots or loses power (removing only its socket would leave the old
+# master running, and a later call could still reach it).
+drop_ssh_master() {
+    ssh -O exit -o "ControlPath=$ctl_path" root@127.0.0.1 >/dev/null 2>&1 || true
+    rm -f "$ctl_path"
+}
+
 ssh_run() {
     local opts=()
     while IFS= read -r o; do opts+=("$o"); done < <(ssh_opts)
@@ -437,7 +447,7 @@ PY
 
 reboot_vm() {
     ssh_run 'systemctl reboot' >/dev/null 2>&1 || true
-    rm -f "$ctl_path"
+    drop_ssh_master
     sleep 12
 }
 
@@ -589,6 +599,7 @@ if selected persist; then
     key_before=$(ssh_run 'sha256sum /var/lib/camera-bridge/secrets/master.key | cut -d" " -f1')
     ssh_run 'echo persistent > /var/lib/camera-bridge/testfile; sync'
     ssh_run 'systemctl reboot' >/dev/null 2>&1 || true
+    drop_ssh_master
     sleep 15
     wait_http "$boot_timeout" || { no "web UI did not come back after reboot"; dump_serial; exit 1; }
     wait_ssh || { no "ssh did not come back after reboot"; exit 1; }
@@ -714,6 +725,12 @@ if selected nvr; then
             CB_PASSWORD="$admin_pw" node "$conformance" "http://127.0.0.1:$http_port" "${conformance_args[@]}" >"$nvr_dir/conformance.txt" 2>&1 || conformance_status=$?
             echo "        $(tail -n 1 "$nvr_dir/conformance.txt" | cut -c1-200)"
             grep -A1 '^skip  admission' "$nvr_dir/conformance.txt" | cut -c1-200 | sed 's/^/        /' || true
+            # A crash of the daemon is a finding of its own, never "a flaky test": it is said first, with the stack trace the journal kept.
+            crash=$(ssh_run 'journalctl -b --no-pager -u camerabridged | grep -E "Main process exited, code=(killed|dumped)"' 2>/dev/null || true)
+            if [ -n "$crash" ]; then
+                no "the daemon crashed while conformance.mjs ran: $(echo "$crash" | tail -1 | sed 's/.*Main process exited, //')"
+                ssh_run 'journalctl -b --no-pager -t systemd-coredump | tail -60' 2>/dev/null | cut -c1-240 | sed 's/^/          | /' || true
+            fi
             if [ "$conformance_status" -eq 0 ]; then
                 ok "conformance.mjs (T07) finds the box within the contract"
             else
@@ -787,7 +804,7 @@ if selected nvr-archive; then
         nvr_phase record-on --seconds 6
         ssh_run "cd $rec/$CAM_DIR && find . -name '*.cbidx' -printf '%p %s\n' | sort" >"$nvr_dir/before.txt"
         ssh_run 'systemctl reboot' >/dev/null 2>&1 || true
-        rm -f "$ctl_path"
+        drop_ssh_master
         sleep 15
         wait_http "$boot_timeout" || { no "web UI did not come back after the reboot"; dump_serial; exit 1; }
         wait_ssh || { no "ssh did not come back after the reboot"; exit 1; }
@@ -827,7 +844,7 @@ if selected nvr-faults; then
         wait "$qemu_pid" 2>/dev/null || true
         kill_qemu_pidfile
         qemu_pid=""
-        rm -f "$ctl_path"
+        drop_ssh_master
         start_vm yes "$work/disk.raw"
         wait_http "$boot_timeout" || { no "web UI did not come back after the power cut"; dump_serial; exit 1; }
         wait_ssh || { no "ssh did not come back after the power cut"; exit 1; }
@@ -884,6 +901,7 @@ if selected factory-reset; then
         else no "the nvr tests left no recordings to erase"; fi
     fi
     ssh_run "echo keepme > /var/lib/camera-bridge/testfile; touch $esp/camera-bridge-factory-reset; sync; systemctl reboot" >/dev/null 2>&1 || true
+    drop_ssh_master
     sleep 15
     wait_http "$boot_timeout" || { no "web UI did not come back after the reset"; dump_serial; exit 1; }
     wait_ssh || { no "ssh did not come back after the reset"; exit 1; }
@@ -956,6 +974,7 @@ if selected recording-drive; then
     ssh_has 'findmnt -no OPTIONS /var/lib/camera-bridge/recordings' 'noexec' && ok "the drive is mounted noexec" || no "the drive is not noexec"
     ssh_has 'systemctl is-active camerabridged' 'active' && ok "the engine runs with the drive" || no "the engine is not running after the drive was chosen"
     ssh_run 'systemctl reboot' >/dev/null 2>&1 || true
+    drop_ssh_master
     sleep 15
     wait_http "$boot_timeout" && wait_ssh || { no "the box did not come back after a reboot with a recording drive"; dump_serial; exit 1; }
     [ "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/recordings')" = /dev/vdb1 ] && ok "the drive is mounted again after a reboot" || no "the drive was not mounted after a reboot"

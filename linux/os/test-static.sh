@@ -72,6 +72,9 @@ check "systemd-sysupdate binary exists where cb-update expects it" test -x /usr/
 check "sysupdate definitions are in place" test -f mkosi.extra/usr/lib/sysupdate.d/10-root.transfer -a -f mkosi.extra/usr/lib/sysupdate.d/20-uki.transfer
 check "nftables ruleset parses (nft -c)" nft -c -f mkosi.extra/etc/nftables.conf
 check "ruleset is default-deny inbound" grep -q 'policy drop' mkosi.extra/etc/nftables.conf
+# The box is the cameras' time server: NTP (UDP 123) only from local/private addresses, in the firewall and in chrony.
+check "firewall lets NTP in from local addresses only" bash -c 'f=mkosi.extra/etc/nftables.conf; grep -q "ip saddr @lan4 udp dport 123 accept" "$f" && grep -q "ip6 saddr @lan6 udp dport 123 accept" "$f" && ! grep -E "dport[^#]*\b123\b" "$f" | grep -vq "saddr @lan[46]"'
+check "chrony serves only local and private networks, also without the internet" bash -c 'f=mkosi.extra/etc/chrony/chrony.conf; grep -Eq "^allow " "$f" && ! grep -Eq "^(allow|allow all|allow 0\.0\.0\.0/0|allow ::/0)\s*$" "$f" && ! grep -Ev "^allow (10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16|169\.254\.0\.0/16|fc00::/7|fe80::/10)$" "$f" | grep -q "^allow" && grep -Eq "^local stratum [0-9]+" "$f" && ! grep -Eq "^port 0" "$f"'
 
 # --- units: install the tree into this disposable container, render the daemon unit, ask systemd to verify -------------------
 cp -a mkosi.extra/. /

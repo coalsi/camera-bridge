@@ -26,6 +26,9 @@ public struct BridgeEnvironment: Sendable {
     /// keys every this many seconds instead of every 2, so the smart-codec path (the keyframe note above 10 s, the coarse caption above 4 s,
     /// `typicalGOP`) runs through the real engine. nil, or a value outside 1...120, keeps 2 s.
     public var demoKeyframeSeconds: Double?
+    /// This machine serves time (NTP) to the local network: Camera Bridge OS's chrony does. "Set up for Camera Bridge" then points cameras'
+    /// clocks at the bridge's address; elsewhere (the Mac app) that step is not offered. Off by default.
+    public var servesTime: Bool = false
 
     public init(dataDirectory: URL, platform: PlatformServices, codecs: any MediaCodecs, loopbackOnly: Bool = false, advertise: Bool = true,
                 archivePolicy: ArchivePlatformPolicy? = nil, demoKeyframeSeconds: Double? = nil) {

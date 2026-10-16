@@ -103,6 +103,57 @@ export function createDevServer(options) {
     return json(state.cameraResource(camera));
   }
 
+  // "Set up for Camera Bridge" (GET/POST cameras/:id/setup, POST …/setup/restore): a scripted camera that needs every step but the time from
+  // the bridge (a dev server does not serve time). Applying marks the steps done and keeps a pretend backup; restoring clears both.
+  const SETUP_STEPS = [
+    ['timeZone', 'Time zone', [['Time zone', 'UTC−8 with daylight saving', 'America/Phoenix (UTC−7)']]],
+    ['timeSource', 'Time from the bridge', null],
+    ['cleanPicture', 'Clean picture', [['The camera’s own labels', 'date and time and camera name', 'off (the bridge draws its own)']]],
+    ['streams', 'Streams for recording, Apple Home and live view', [['Smart codec (H.264+ or H.265+)', 'on', 'off'],
+      ['Main stream', 'H.265, 3840×2160, 20 fps, 4.1 Mbit/s, keyframe every 2.5 s', 'H.264, 3840×2160, 20 fps, 4.1 Mbit/s, keyframe every 2 s'],
+      ['Sub stream', 'H.264, 640×480, 20 fps, keyframe every 2.5 s', 'H.264, 640×480, 20 fps, keyframe every 2 s']]],
+    ['upnp', 'UPnP off', [['UPnP', 'on', 'off']]],
+    ['cloud', 'Cloud off (Hik-Connect)', [['Hik-Connect (the maker’s cloud)', 'on', 'off']]],
+  ];
+
+  function setupReport(camera, phase) {
+    const applied = Boolean(camera.configuration.setupBackup);
+    const steps = SETUP_STEPS.map(([id, title, changes]) => {
+      if (!changes) return { id, title, status: 'notOffered', changes: [], detail: 'Camera Bridge OS serves time to cameras; this bridge does not.', needsRestart: false };
+      const list = changes.map(([label, now, after]) => ({ label, now, after }));
+      const status = phase === 'apply' ? 'done' : phase === 'restore' ? 'restored' : applied ? 'alreadyRight' : 'willChange';
+      return { id, title, status, changes: status === 'alreadyRight' ? [] : list, detail: phase === 'apply' ? 'via ISAPI' : null, needsRestart: false };
+    });
+    return { steps, state: camera.configuration.setupState ?? null, canRestore: Boolean(camera.configuration.setupBackup), streamRestarted: phase === 'apply',
+      mayNeedRecordingReEnabled: phase === 'apply' };
+  }
+
+  function setupPreview(ctx) { return json(setupReport(findCamera(ctx), 'preview')); }
+
+  function setupApply(ctx) {
+    if (ctx.body?.confirm !== true) throw new ApiError(400, 'invalid', 'Confirm that the camera’s settings may be changed.', { field: 'confirm' });
+    const camera = findCamera(ctx);
+    const already = Boolean(camera.configuration.setupBackup);
+    const now = new Date().toISOString();
+    camera.configuration.setupBackup = { version: 1, created: now };
+    camera.configuration.setupState = { version: 1, started: now, applied: now,
+      steps: SETUP_STEPS.map(([id, , changes]) => ({ id, status: !changes ? 'notOffered' : already ? 'alreadyRight' : 'done', needsRestart: false })) };
+    return json(setupReport(camera, already ? 'preview' : 'apply'));
+  }
+
+  function setupRestore(ctx) {
+    if (ctx.body?.confirm !== true) throw new ApiError(400, 'invalid', 'Confirm that the camera’s original settings may be written back.', { field: 'confirm' });
+    const camera = findCamera(ctx);
+    if (!camera.configuration.setupBackup) throw new ApiError(422, 'camera_setup_failed', 'Invalid settings: this camera has no saved settings to put back.');
+    const report = setupReport(camera, 'restore');
+    delete camera.configuration.setupBackup;
+    delete camera.configuration.setupState;
+    report.steps = report.steps.filter((step) => step.status === 'restored').reverse();
+    report.canRestore = false;
+    report.state = null;
+    return json(report);
+  }
+
   const settingsBody = { basePort: 21100, sensorsBridgePort: 21099, webhookEnabled: false, webhookPort: 21090, webhookToken: '00000000000000000000000000000000', webhookProblem: null, logLevel: 'info', motionShadowTest: false };
 
   const systemInfo = () => json({ product: 'Camera Bridge OS', version: '0.0-dev', build: 'development', mode: 'development', osName: 'Dev server', canUpdate: false, canReboot: false, canInstall: false, canManage: false });
@@ -131,6 +182,9 @@ export function createDevServer(options) {
     ['PATCH', 'cameras/:id', 'session', true, patchCameraSettings],
     ['GET', 'cameras/:id/snapshot', 'session', false, snapshot],
     ['GET', 'cameras/:id/live', 'session', false, live],
+    ['GET', 'cameras/:id/setup', 'session', false, setupPreview],
+    ['POST', 'cameras/:id/setup', 'session', true, setupApply],
+    ['POST', 'cameras/:id/setup/restore', 'session', true, setupRestore],
     ['GET', 'settings', 'session', false, () => json({ bridgeName: config.bridgeName, ...settingsBody })],
     ['PATCH', 'settings', 'session', true, (ctx) => {
       if (typeof ctx.body.bridgeName === 'string') config.bridgeName = ctx.body.bridgeName.slice(0, 60);

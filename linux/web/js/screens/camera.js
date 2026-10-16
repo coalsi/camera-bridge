@@ -8,6 +8,7 @@ import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
 import { loadNVR, nvrSupported } from '../nvr/lite.js';
 import { putCamera, store, subscribe } from '../store.js';
 import { banners } from './banners.js';
+import { cameraSetupCard, setupSupported } from './camera-setup.js';
 import { backLink, field, homeState, inlineError, selectField, statePill, switchRow } from './common.js';
 import { pairingPanel } from './pairing.js';
 
@@ -262,6 +263,17 @@ export function renderCamera({ params, navigate, setTitle }) {
         h('p', { class: 'small muted' }, 'Sensors appear on the Camera Bridge Sensors bridge in the Home app. They never start recordings.')) : null);
   }
 
+  // After the camera setup changed the camera: its configuration (the setup's record, its backup) as the bridge has it now.
+  async function refreshCamera() {
+    try {
+      const updated = await get(`cameras/${id}`);
+      if (destroyed) return;
+      putCamera(updated);
+      camera = updated;
+      renderAll();
+    } catch { /* the event stream brings it */ }
+  }
+
   async function triggerMotion() {
     try {
       await post(`cameras/${id}/test-motion`);
@@ -293,7 +305,7 @@ export function renderCamera({ params, navigate, setTitle }) {
   function overlayCard() {
     const o = camera.timestampOverlay;
     const set = (partial) => { Object.assign(camera.timestampOverlay, partial); save({ timestampOverlay: partial }); };
-    const clean = Boolean(camera.cleanPictureBackup);
+    const clean = Boolean(camera.cleanPictureBackup || camera.setupBackup?.cleanPicture);   // the setup keeps its backup in its own
     const position = [['topRight', 'Top right'], ['topLeft', 'Top left'], ['bottomRight', 'Bottom right'], ['bottomLeft', 'Bottom left']];
     return h('div', { class: 'card' }, h('h2', null, 'Labels on video'),
       h('p', { class: 'desc' }, 'The bridge draws the camera’s name and the date and time the same way everywhere: on the Monitor, on recordings as you play them, burned into saved clips and, if you choose, into Apple Home’s video.'),
@@ -423,7 +435,7 @@ export function renderCamera({ params, navigate, setTitle }) {
     recordHandle = nvr ? nvr.recordCard(camera) : null;
     const home = homeCard();
     if (camera.status?.paired) { replace(homeHost); replace(homeBottomHost, home); } else { replace(homeBottomHost); replace(homeHost, home); }
-    replace(right, recordHandle?.el, motionCard(), audioCard(), qualityCard(), overlayCard(), hook, connectionCard(),
+    replace(right, recordHandle?.el, setupSupported(camera) ? cameraSetupCard(camera, { onDone: refreshCamera }) : null, motionCard(), audioCard(), qualityCard(), overlayCard(), hook, connectionCard(),
       h('div', { class: 'card' }, h('h2', null, 'Remove'), h('p', { class: 'desc' }, 'Removes the camera from Camera Bridge. Remove it from the Home app as well.'),
         h('button', { class: 'btn danger', type: 'button', onclick: removeCamera }, icon('trash'), 'Remove camera…')));
   }

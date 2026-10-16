@@ -28,6 +28,8 @@ New module (additive; docs/CONTRACT_CHANGES.md 2026-10-08): `BridgeWeb` with `We
 `SystemControlling`, `UnavailableSystemControl`, `SystemInfo`, `UpdateStatus`, `InstallTarget`, `SystemError`, `LogFeed`,
 `CameraTypeCatalog`, `CameraTypeSpec` and `QRCode`.
 
+Set up for Camera Bridge (2026-10-16, docs/CONTRACT_CHANGES.md): `BridgeBackend.cameraSetupPreview(cameraID:)`, `BridgeBackend.applyCameraSetup(cameraID:)` and `BridgeBackend.restoreCameraSetup(cameraID:)` (extension defaults throw, so existing conformers compile); routes `GET cameras/:id/setup`, `POST cameras/:id/setup {confirm: true}` and `POST cameras/:id/setup/restore {confirm: true}` (`WebApp+CameraSetup.swift`; one change at a time per camera, shared with Optimize).
+
 Labels (2026-10-14, docs/CONTRACT_CHANGES.md): `BridgeBackend.setCleanPicture(cameraID:clean:)` (extension default throws), route `POST cameras/:id/clean-picture`, and `labels=1` on the clip route (`WebApp+NVRClipLabels.swift`: the clip re-encoded with the camera's label by ffmpeg, streamed as fragmented MP4).
 
 Camera clocks (2026-10-14, docs/CONTRACT_CHANGES.md): `BridgeBackend.setCameraClockShown(cameraID:shown:)` and `BridgeBackend.setCameraTimeZone(cameraID:)` (extension defaults throw), routes `POST cameras/:id/camera-clock` and `POST cameras/:id/camera-time-zone`, and `timeZone` in the settings resource.

@@ -79,6 +79,11 @@ POST   /api/v1/cameras/{id}/reset-pairing
 POST   /api/v1/cameras/{id}/optimize        {confirm: true}: the HomeKit optimizer for this camera (one at a time, 20 to 40 s; it can lower the bit rate,
                                       change H.265 to H.264 and restarts the camera) -> {applied, failed, canUndo, mayNeedRecordingReEnabled, scoreBefore, scoreAfter}
 POST   /api/v1/cameras/{id}/optimize/undo   -> 204
+GET    /api/v1/cameras/{id}/setup     "Set up for Camera Bridge", read only: {steps: [{id, title, status, changes: [{label, now, after}], detail?, needsRestart}],
+                                      state?, canRestore, streamRestarted, mayNeedRecordingReEnabled}; status willChange, alreadyRight, notSupported or notOffered
+POST   /api/v1/cameras/{id}/setup     {confirm: true}: applies it (time zone, time from the bridge, clean picture, streams, UPnP off, cloud off; each read back;
+                                      one backup in the camera's setupBackup) -> the same shape, steps done, refused or notRun, stoppedAt?; 409 camera_setup_busy
+POST   /api/v1/cameras/{id}/setup/restore   {confirm: true}: writes every saved value back -> steps restored or refused; canRestore false once all are back
 POST   /api/v1/cameras/{id}/test-motion
 POST   /api/v1/discover               ONVIF WS-Discovery -> {cameras: [{host, name, hardware, onvifPort, alreadyAdded}]}
 POST   /api/v1/probe                  the same body as POST /cameras (no choices needed) -> {ok: true, vendor, model, streams, capabilities, suggestions,

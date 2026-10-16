@@ -69,9 +69,11 @@ struct EngineFixture {
     /// `transport`: replaces the loopback transport (a `ScriptedTransport` over it).
     /// `secrets`: replaces the in-memory secret store (Keychain).
     init(tuning: EngineTuning = .testing, directory: TemporaryDirectory? = nil, advertiser: (any ServiceAdvertiser)? = nil,
-         transport: (any NetworkTransport)? = nil, secrets: (any SecretStore)? = nil, configure: (inout BridgeSettings) -> Void = { _ in }) async throws {
+         transport: (any NetworkTransport)? = nil, secrets: (any SecretStore)? = nil, servesTime: Bool = false,
+         configure: (inout BridgeSettings) -> Void = { _ in }) async throws {
         let directory = try directory ?? TemporaryDirectory()
         var environment = BridgeEnvironment.testing(directory: directory.url)
+        environment.servesTime = servesTime
         let power = RecordingPowerManager()
         let networkChanges = ManualNetworkChanges()
         environment.platform.power = power

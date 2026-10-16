@@ -54,6 +54,9 @@ struct NoArchiveBackend: BridgeBackend {
     func localIPv4Addresses() async -> [String] { await base.localIPv4Addresses() }
     func setPluginSecret(id: String, _ data: Data?) async throws { try await base.setPluginSecret(id: id, data) }
     func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange { try await base.setCleanPicture(cameraID: cameraID, clean: clean) }
+    func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport { try await base.cameraSetupPreview(cameraID: cameraID) }
+    func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.applyCameraSetup(cameraID: cameraID) }
+    func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.restoreCameraSetup(cameraID: cameraID) }
     func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws { try await base.panTilt(cameraID: cameraID, pan: pan, tilt: tilt, zoom: zoom) }
     func triggerTestMotion(cameraID: UUID) async { await base.triggerTestMotion(cameraID: cameraID) }
     func pause() async { await base.pause() }

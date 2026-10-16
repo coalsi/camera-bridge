@@ -65,7 +65,7 @@ extension CameraSettingsService {
             switch backup.method {
             case .hikvisionISAPI:
                 guard let document = backup.document, let body = document.data(using: .utf8) else { throw CameraAdapterError.invalidResponse("no saved overlays") }
-                let api = HikvisionISAPI(endpoint: endpoint, credentials: credentials)
+                let api = isapi()
                 let input = HikvisionISAPI.inputChannel(streamingChannelID: hikvisionChannel(isSub: false))
                 _ = try await api.put(HikvisionISAPI.overlaysPath(inputChannel: input), body: body)
             case .reolinkAPI:
@@ -98,7 +98,7 @@ extension CameraSettingsService {
         switch method {
         case .hikvisionISAPI:
             guard vendor == .hikvision else { return nil }
-            let api = HikvisionISAPI(endpoint: endpoint, credentials: credentials)
+            let api = isapi()
             let path = HikvisionISAPI.overlaysPath(inputChannel: HikvisionISAPI.inputChannel(streamingChannelID: hikvisionChannel(isSub: false)))
             guard let document = String(data: try await api.get(path), encoding: .utf8) else { throw CameraAdapterError.invalidResponse("overlays: not UTF-8") }
             let clean = Self.allOverlaysOff(document)

@@ -58,11 +58,11 @@ public final class BridgeEngine {
 
     @ObservationIgnored let isPreview: Bool
     @ObservationIgnored private let store: ConfigurationStore
-    @ObservationIgnored private let credentials: CredentialStore
+    @ObservationIgnored let credentials: CredentialStore
     @ObservationIgnored private let power: PowerController
     @ObservationIgnored private let changes = ChangeSignal()
     @ObservationIgnored private let logs: LogCollector
-    @ObservationIgnored private let operations = AsyncSerialLock()
+    @ObservationIgnored let operations = AsyncSerialLock()
     @ObservationIgnored private let registry = ControllerRegistry()
     @ObservationIgnored let router = EventRouter()
     /// The go2rtc helper that turns cloud and console cameras into local RTSP (`Go2RTCManager`); it starts with the first camera
@@ -71,14 +71,14 @@ public final class BridgeEngine {
     @ObservationIgnored var go2rtc: any Go2RTCStreamProviding { tuning.go2rtc ?? go2rtcManager }
     /// The synthetic streams the preview engine's `liveVideo` serves.
     @ObservationIgnored let previewLive = PreviewLiveSources()
-    @ObservationIgnored private let log = Log(category: "Engine")
+    @ObservationIgnored let log = Log(category: "Engine")
     @ObservationIgnored private var loaded = false
     @ObservationIgnored private(set) var runtimes: [UUID: CameraRuntime] = [:]
     /// The pre-optimization encoder/smart-codec values `optimizeForHomeKit` can still undo, per camera.
-    @ObservationIgnored private var homeKitOptimizationSnapshots: [UUID: HomeKitOptimizationSnapshot] = [:]
+    @ObservationIgnored var homeKitOptimizationSnapshots: [UUID: HomeKitOptimizationSnapshot] = [:]
     /// The camera profiles feed (`setCameraProfiles`): seeds the method tried first for a camera with no remembered one
     /// and replaces built-in manual steps. Never persisted into a camera's configuration.
-    @ObservationIgnored private var cameraProfiles = CameraProfileFeed.empty
+    @ObservationIgnored var cameraProfiles = CameraProfileFeed.empty
     @ObservationIgnored private(set) var bridge: SensorsBridge?
     @ObservationIgnored private var bridgeFollow: Task<Void, Never>?
     @ObservationIgnored private(set) var webhook: WebhookServer?
@@ -240,7 +240,7 @@ public final class BridgeEngine {
     }
 
     /// Running or starting (paused and stopped engines bridge nothing).
-    private var isActive: Bool { state == .running || state == .starting }
+    var isActive: Bool { state == .running || state == .starting }
 
     /// Whether `cameraID`'s accessory may be published (`homeKitAllowlist`).
     func mayPublish(_ cameraID: UUID) -> Bool { homeKitAllowlist?.contains(cameraID) ?? true }
@@ -514,6 +514,8 @@ public final class BridgeEngine {
             if camera.hapPort == 0 { camera.hapPort = old.hapPort }
             camera.hiddenCameraClock = old.hiddenCameraClock   // the engine owns it (`setCameraClockHidden`); a form never carries it back
             camera.cleanPictureBackup = old.cleanPictureBackup   // and this one (`setCleanPicture`)
+            camera.setupBackup = old.setupBackup               // and "Set up for Camera Bridge" owns these two
+            camera.setupState = old.setupState
             camera.nvrEnabled = old.nvrEnabled                 // and `setNVR` owns these two: an edit made from a stale copy never undoes Record
             camera.nvrRecordSound = old.nvrRecordSound
             updated[index] = camera
@@ -860,7 +862,8 @@ public final class BridgeEngine {
     static func encoderService(_ camera: CameraConfiguration, _ secrets: HTTPCredentials?, profiles: CameraProfileFeed = .empty) -> CameraSettingsService {
         CameraSettingsService(endpoint: camera.endpoint, credentials: secrets, cameraID: camera.id, vendor: camera.vendor,
                               mainStreamURL: camera.mainStreamURL,
-                              preferredMethod: camera.preferredConfigMethod ?? profileMatch(profiles, camera: camera).preferredConfigMethod)
+                              preferredMethod: camera.preferredConfigMethod ?? profileMatch(profiles, camera: camera).preferredConfigMethod,
+                              subStreamURL: camera.subStreamURL)
     }
 
     /// What the profiles feed says about this camera (brand, model and firmware as the configuration remembers them).
@@ -874,13 +877,13 @@ public final class BridgeEngine {
         cameraProfiles = feed
     }
 
-    private func manualStepOverrides(for camera: CameraConfiguration, deviceInfo: CameraDeviceInfo?) -> [String: [String]] {
+    func manualStepOverrides(for camera: CameraConfiguration, deviceInfo: CameraDeviceInfo?) -> [String: [String]] {
         cameraProfiles.match(vendor: camera.vendor, manufacturer: deviceInfo?.manufacturer ?? camera.manufacturer,
                              model: deviceInfo?.model ?? camera.model, firmware: deviceInfo?.firmwareVersion ?? camera.firmware).manualSteps
     }
 
     /// Stores (or clears) the camera's remembered encoder method after a settings service call, when it changed.
-    private func rememberConfigMethod(cameraID: UUID, _ update: CameraConfigMemoryUpdate?) async {
+    func rememberConfigMethod(cameraID: UUID, _ update: CameraConfigMemoryUpdate?) async {
         guard let update, let index = configurations.firstIndex(where: { $0.id == cameraID }) else { return }
         let method: CameraConfigMethod?
         switch update {
@@ -968,15 +971,22 @@ public final class BridgeEngine {
         if runtimes[cameraID]?.isUnreachable == true { throw CameraOfflineError() }
         return try await operations.withLock {
             guard let camera = configurations.first(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
-            if clean, camera.cleanPictureBackup != nil { return CleanPictureChange(succeeded: true, summary: "already clean") }
-            if !clean, camera.cleanPictureBackup == nil { return CleanPictureChange(succeeded: true, summary: "already as the camera had it") }
+            // "Set up for Camera Bridge" keeps its clean-picture backup in its own (one backup, one way back); this switch turns it back too.
+            let saved = camera.cleanPictureBackup ?? camera.setupBackup?.cleanPicture
+            if clean, saved != nil { return CleanPictureChange(succeeded: true, summary: "already clean") }
+            if !clean, saved == nil { return CleanPictureChange(succeeded: true, summary: "already as the camera had it") }
             let credentials = credentials
             let secrets = try await Self.offMain { try credentials.credentials(for: camera) }
             let service = CameraSettingsService(endpoint: camera.endpoint, credentials: secrets, cameraID: cameraID, vendor: camera.vendor,
                                                 mainStreamURL: camera.mainStreamURL, preferredMethod: camera.preferredConfigMethod)
-            let change = if clean { try await service.cleanPicture() } else { try await service.restorePicture(camera.cleanPictureBackup!) }
+            let change = if clean { try await service.cleanPicture() } else { try await service.restorePicture(saved!) }
             guard change.succeeded, let index = configurations.firstIndex(where: { $0.id == cameraID }) else { return change }
             configurations[index].cleanPictureBackup = clean ? change.backup : nil
+            if !clean, let setup = configurations[index].setupBackup, setup.cleanPicture != nil {
+                let rest = setup.clearing(.cleanPicture)
+                configurations[index].setupBackup = rest.isEmpty ? nil : rest
+                if rest.isEmpty { configurations[index].setupState = nil }
+            }
             log.info("\(camera.name): the camera's own labels are \(clean ? "off" : "back") (\(change.summary))")
             await persist()
             return change
@@ -1118,56 +1128,8 @@ public final class BridgeEngine {
                 if sub == nil { sub = try? await service.hikvisionEncoderSettings(isSub: true) }
             }
 
-            var planned: [PlannedEncoderFix] = []
-            if let main {
-                let options = before.mainProfile?.options ?? []
-                let current = options.first { $0.encoding.caseInsensitiveCompare(main.encoding) == .orderedSame }
-                let fps = main.frameRate ?? 15
-                let targetFPS = min(25, max(15, fps))
-                let targetGOP = max(1, Int((targetFPS * 2).rounded()))
-                let targetBitrate = main.bitrate.map { min(6000, max(2000, $0)) } ?? 4096
-                let h264Offered = options.isEmpty || options.contains { Self.isH264($0.encoding) }
-                let needsCodec = !Self.isH264(main.encoding) && h264Offered
-                let needsGOP = main.iFrameInterval != targetGOP
-                let baseline = current?.h264ProfilesSupported.first { $0.lowercased().hasPrefix("base") }
-                let needsBFrames = beforeFacts?.main?.hasBFrames == true && Self.isH264(main.encoding) && baseline != nil
-                    && main.h264Profile?.lowercased().hasPrefix("base") != true
-                let needsFPS = !(15...25).contains(fps)
-                let needsBitrate = main.bitrate.map { !(2000...6000).contains($0) } ?? false
-                if needsCodec || needsGOP || needsBFrames || needsFPS || needsBitrate {
-                    var fixed = main
-                    var fixes: [String] = []
-                    if needsCodec { fixed.encoding = "H264"; fixes.append("codec") }
-                    if needsGOP { fixed.iFrameInterval = targetGOP; fixes.append("keyframeInterval") }
-                    if needsBFrames { fixed.h264Profile = baseline; fixes.append("bFrames") }
-                    if needsFPS { fixed.frameRate = targetFPS; fixes.append("frameRate") }
-                    if needsBitrate { fixed.bitrate = targetBitrate; fixes.append("bitrate") }
-                    planned.append(PlannedEncoderFix(isSub: false, before: main, options: options, fixes: fixes,
-                                                     edit: CameraEncoderEdit(isSub: false, desired: fixed, options: options)))
-                }
-            }
-            if let sub {
-                let options = before.subProfile?.options ?? []
-                let fps = sub.frameRate ?? 15
-                let targetFPS = min(25, max(15, fps))
-                let targetGOP = max(1, Int((targetFPS * 2).rounded()))
-                let height = sub.resolution?.height ?? 0
-                let sizeOK = (360...720).contains(height)
-                let h264Offered = options.isEmpty || options.contains { Self.isH264($0.encoding) }
-                let needsCodec = !Self.isH264(sub.encoding) && h264Offered
-                let needsGOP = sub.iFrameInterval != targetGOP
-                let better = before.subProfile?.currentEncodingOptions?.resolutions.min { abs($0.height - 480) < abs($1.height - 480) }
-                let needsSize = !sizeOK && better != nil
-                if needsCodec || needsGOP || needsSize {
-                    var fixed = sub
-                    if needsCodec { fixed.encoding = "H264" }
-                    fixed.iFrameInterval = targetGOP
-                    fixed.frameRate = targetFPS
-                    if needsSize, let better { fixed.resolution = better }
-                    planned.append(PlannedEncoderFix(isSub: true, before: sub, options: options, fixes: ["subStream"],
-                                                     edit: CameraEncoderEdit(isSub: true, desired: fixed, options: options)))
-                }
-            }
+            let planned = Self.plannedEncoderFixes(main: main, mainProfile: before.mainProfile, sub: sub, subProfile: before.subProfile,
+                                                   mainHasBFrames: beforeFacts?.main?.hasBFrames == true)
 
             // Each stream is changed through the first method that works (the camera's remembered one first) and read back.
             if !planned.isEmpty {
@@ -1224,6 +1186,70 @@ public final class BridgeEngine {
             return HomeKitOptimizationResult(before: beforeReport, after: afterReport, appliedFixes: appliedFixes, failedFixes: failedFixes,
                                              fixMethods: fixMethods, canUndo: !undo.isEmpty, mayNeedRecordingReEnabled: resolutionOrCodecChanged)
         }
+    }
+
+    /// The HomeKit optimizer's encoder changes for a camera's two streams (`optimizeForHomeKit`, and the streams step of "Set up for Camera
+    /// Bridge"): the main stream H.264 at 15 to 25 fps, a keyframe every 2 seconds, 2 to 6 Mbit/s (8 for 4K: `HomeKitReadinessAdvisor.maximumMainBitrateKbps`), no B-frames; the sub stream H.264 at the
+    /// same rate and keyframe interval, 360 to 720 lines high. Empty when both are right already. Only H.264/H.265 streams are planned.
+    static func plannedEncoderFixes(main: CameraVideoEncoderSettings?, mainProfile: CameraVideoProfile?, sub: CameraVideoEncoderSettings?,
+                                    subProfile: CameraVideoProfile?, mainHasBFrames: Bool) -> [PlannedEncoderFix] {
+        var planned: [PlannedEncoderFix] = []
+        // Only streams: a JPEG/MJPEG encoder (a camera's snapshot profile) is never planned or written as one.
+        let main = main.flatMap { CameraSettingsService.isStreamCodec($0.encoding) ? $0 : nil }
+        let sub = sub.flatMap { CameraSettingsService.isStreamCodec($0.encoding) ? $0 : nil }
+        if let main {
+            let options = mainProfile?.options ?? []
+            let current = options.first { $0.encoding.caseInsensitiveCompare(main.encoding) == .orderedSame }
+            let fps = main.frameRate ?? 15
+            let targetFPS = min(25, max(15, fps))
+            let targetGOP = max(1, Int((targetFPS * 2).rounded()))
+            let maxBitrate = HomeKitReadinessAdvisor.maximumMainBitrateKbps(width: main.resolution?.width, height: main.resolution?.height)
+            let targetBitrate = main.bitrate.map { min(maxBitrate, max(2000, $0)) } ?? 4096
+            let h264Offered = options.isEmpty || options.contains { Self.isH264($0.encoding) }
+            let needsCodec = !Self.isH264(main.encoding) && h264Offered
+            let needsGOP = main.iFrameInterval != targetGOP
+            let baseline = current?.h264ProfilesSupported.first { $0.lowercased().hasPrefix("base") }
+            let needsBFrames = mainHasBFrames && Self.isH264(main.encoding) && baseline != nil
+                && main.h264Profile?.lowercased().hasPrefix("base") != true
+            let needsFPS = !(15...25).contains(fps)
+            // 5 % above the cap is left alone: cameras take only some values (a 4K PTZ at 8.2 Mbit/s refused 8.0), and that little more
+            // costs nothing.
+            let needsBitrate = main.bitrate.map { !(2000...(maxBitrate + maxBitrate / 20)).contains($0) } ?? false
+            if needsCodec || needsGOP || needsBFrames || needsFPS || needsBitrate {
+                var fixed = main
+                var fixes: [String] = []
+                if needsCodec { fixed.encoding = "H264"; fixes.append("codec") }
+                if needsGOP { fixed.iFrameInterval = targetGOP; fixes.append("keyframeInterval") }
+                if needsBFrames { fixed.h264Profile = baseline; fixes.append("bFrames") }
+                if needsFPS { fixed.frameRate = targetFPS; fixes.append("frameRate") }
+                if needsBitrate { fixed.bitrate = targetBitrate; fixes.append("bitrate") }
+                planned.append(PlannedEncoderFix(isSub: false, before: main, options: options, fixes: fixes,
+                                                 edit: CameraEncoderEdit(isSub: false, desired: fixed, options: options)))
+            }
+        }
+        if let sub {
+            let options = subProfile?.options ?? []
+            let fps = sub.frameRate ?? 15
+            let targetFPS = min(25, max(15, fps))
+            let targetGOP = max(1, Int((targetFPS * 2).rounded()))
+            let height = sub.resolution?.height ?? 0
+            let sizeOK = (360...720).contains(height)
+            let h264Offered = options.isEmpty || options.contains { Self.isH264($0.encoding) }
+            let needsCodec = !Self.isH264(sub.encoding) && h264Offered
+            let needsGOP = sub.iFrameInterval != targetGOP
+            let better = subProfile?.currentEncodingOptions?.resolutions.min { abs($0.height - 480) < abs($1.height - 480) }
+            let needsSize = !sizeOK && better != nil
+            if needsCodec || needsGOP || needsSize {
+                var fixed = sub
+                if needsCodec { fixed.encoding = "H264" }
+                fixed.iFrameInterval = targetGOP
+                fixed.frameRate = targetFPS
+                if needsSize, let better { fixed.resolution = better }
+                planned.append(PlannedEncoderFix(isSub: true, before: sub, options: options, fixes: ["subStream"],
+                                                 edit: CameraEncoderEdit(isSub: true, desired: fixed, options: options)))
+            }
+        }
+        return planned
     }
 
     /// Restores the encoder/smart-codec values `optimizeForHomeKit(cameraID:)` last changed for this camera, then
@@ -1535,7 +1561,7 @@ public final class BridgeEngine {
     /// Starts the runtimes of `cameras` concurrently; a camera whose accessory moved to another port keeps that port. A
     /// camera whose accessory could not start is offline with the reason and tried again with backoff (and at once on
     /// a wake or network change).
-    private func startRuntimes(_ cameras: [CameraConfiguration]) async {
+    func startRuntimes(_ cameras: [CameraConfiguration]) async {
         var started: [(CameraConfiguration, CameraRuntime, Set<UInt16>)] = []
         let wanted = cameras.filter { runtimes[$0.id] == nil }
         for camera in wanted { accessoryRetries.removeValue(forKey: camera.id)?.cancel() }   // starting now
@@ -1656,7 +1682,7 @@ public final class BridgeEngine {
     }
 
     /// `limit`: wait at most this long for the runtime to stop (a runtime that does not answer may never).
-    private func stopRuntime(_ cameraID: UUID, within limit: Duration? = nil) async {
+    func stopRuntime(_ cameraID: UUID, within limit: Duration? = nil) async {
         cancelAccessoryRetries(cameraID)
         await nvr.detach(cameraID)   // before the runtime stops: the recorder flushes its group and closes the file
         guard let runtime = runtimes.removeValue(forKey: cameraID) else { return }
@@ -2321,12 +2347,20 @@ public final class BridgeEngine {
         try await Self.offMain { try store.save(configuration) }
     }
 
-    private func persist() async {
+    func persist() async {
         do {
             try await save(BridgeConfiguration(settings: storedSettings, cameras: configurations))
         } catch {
             log.error("Could not save the configuration: \(error)")
         }
+    }
+
+    /// Changes one camera's engine-owned fields in place (`setupBackup`, `setupState`, `cleanPictureBackup`) and saves. Nothing when the camera
+    /// is gone. `configurations` keeps its private setter: this is the one way other files of the engine write a camera.
+    func changeConfiguration(_ cameraID: UUID, _ change: (inout CameraConfiguration) -> Void) async {
+        guard let index = configurations.firstIndex(where: { $0.id == cameraID }) else { return }
+        change(&configurations[index])
+        await persist()
     }
 
     /// Ports the HAP servers already listen on (kept by `resolvePorts`).
@@ -2435,6 +2469,8 @@ public final class BridgeEngine {
         if comparable.timestampOverlay.enabled == old.timestampOverlay.enabled { comparable.timestampOverlay = old.timestampOverlay }
         comparable.hiddenCameraClock = old.hiddenCameraClock
         comparable.cleanPictureBackup = old.cleanPictureBackup
+        comparable.setupBackup = old.setupBackup
+        comparable.setupState = old.setupState
         comparable.nvrEnabled = old.nvrEnabled               // Record and Record sound are applied in place (`setNVR`): never a restart
         comparable.nvrRecordSound = old.nvrRecordSound
         if paired { comparable.name = old.name }

@@ -7,6 +7,18 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.108',
+    date: '2026-10-16',
+    title: 'Set up for Camera Bridge',
+    items: [
+      'Set up for Camera Bridge: one button on a camera’s page (and offered right after adding one) that makes the camera right for the bridge. It shows every change first, saves a backup, applies, reads each setting back, and Restore original settings puts it all back.',
+      'It tunes the streams for recording, Apple Home and live view, turns off the camera’s own labels, sets the bridge’s time zone and takes the time from the bridge, and turns off the camera maker’s cloud (Hik-Connect) and UPnP where the camera has them.',
+      'Camera Bridge OS keeps time for your cameras, so they keep the right time with no internet.',
+      '4K cameras may keep up to 8 Mbit/s on their main stream (6 for smaller ones), so recordings keep their detail.',
+      'Fixed: a Tapo’s snapshot (JPEG) stream could be taken for its sub stream when changing stream settings.',
+    ],
+  },
+  {
     version: '0.1.107',
     date: '2026-10-16',
     title: 'Pan, tilt and zoom for ONVIF cameras',

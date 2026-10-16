@@ -236,6 +236,8 @@ public actor CameraSettingsService {
     let vendor: CameraVendor?
     /// The camera's configured main stream URL (names a Hikvision NVR channel).
     let mainStreamURL: URL?
+    /// The camera's configured sub stream URL: with `mainStreamURL`, picks the ONVIF profiles the bridge really streams (`streamProfiles`).
+    let subStreamURL: URL?
     /// Reolink channel (0-based) for `GetEnc` / `SetEnc`.
     let reolinkChannel: Int
     /// The method that worked last time for this camera: tried first.
@@ -247,7 +249,8 @@ public actor CameraSettingsService {
 
     /// `vendor`, `mainStreamURL`, `preferredMethod` and `reolinkChannel` steer encoder changes (`applyEncoder`).
     public init(endpoint: CameraEndpoint, credentials: HTTPCredentials?, cameraID: UUID? = nil, vendor: CameraVendor? = nil,
-                mainStreamURL: URL? = nil, preferredMethod: CameraConfigMethod? = nil, reolinkChannel: Int = 0) {
+                mainStreamURL: URL? = nil, preferredMethod: CameraConfigMethod? = nil, reolinkChannel: Int = 0, subStreamURL: URL? = nil) {
+        self.subStreamURL = subStreamURL
         self.endpoint = endpoint
         self.credentials = credentials
         self.cameraID = cameraID
@@ -261,6 +264,17 @@ public actor CameraSettingsService {
     /// `http(s)://host:httpPort` — the camera's own web configuration page. Never includes credentials.
     public var webPageURL: URL? {
         endpoint.httpURL(path: "/", port: endpoint.httpPort)
+    }
+
+    /// The ISAPI client of a Hikvision camera, made once and kept for the service's life: a client (a URL session) made and
+    /// released per request can crash FoundationNetworking on Linux when requests overlap.
+    private var isapiClient: HikvisionISAPI?
+
+    func isapi() -> HikvisionISAPI {
+        if let isapiClient { return isapiClient }
+        let made = HikvisionISAPI(endpoint: endpoint, credentials: credentials)
+        isapiClient = made
+        return made
     }
 
     func client() async -> ONVIFClient? {
@@ -307,7 +321,7 @@ public actor CameraSettingsService {
         }
 
         let profiles = (try? await client.mediaProfiles()) ?? []
-        let (mainProfile, subProfile) = Self.selectProfiles(profiles)
+        let (mainProfile, subProfile) = await Self.streamProfiles(profiles, client: client, main: mainStreamURL, sub: subStreamURL)
         var mainOut: CameraVideoProfile?
         var subOut: CameraVideoProfile?
         if let mainProfile { mainOut = try? await Self.buildProfile(mainProfile, client: client) }
@@ -365,27 +379,57 @@ public actor CameraSettingsService {
     /// Hikvision camera, an older model, or a channel ISAPI doesn't expose this on). The caller (`BridgeEngine`'s
     /// optimizer) only calls this for cameras configured as Hikvision; it's harmless (just throws) on anything else.
     public func hikvisionSmartCodecEnabled(channelID: String) async throws -> Bool? {
-        try await HikvisionISAPI(endpoint: endpoint, credentials: credentials).smartCodecEnabled(channelID: channelID)
+        try await isapi().smartCodecEnabled(channelID: channelID)
     }
 
     /// Hikvision-only: read-modify-write `Video/SmartCodec/enabled` on `/ISAPI/Streaming/channels/<channelID>`
     /// (PUT replaces the whole document, so the read keeps every other field the camera already had). Does nothing
     /// if that channel has no `SmartCodec` element.
     public func setHikvisionSmartCodec(enabled: Bool, channelID: String) async throws {
-        try await HikvisionISAPI(endpoint: endpoint, credentials: credentials).setSmartCodecEnabled(enabled, channelID: channelID)
+        try await isapi().setSmartCodecEnabled(enabled, channelID: channelID)
     }
 
     /// Hikvision only: a channel's codec, frame rate and keyframe interval (frames) over ISAPI.
     public func hikvisionEncoder(channelID: String) async throws -> (codec: String?, fps: Double?, govLength: Int?) {
-        try await HikvisionISAPI(endpoint: endpoint, credentials: credentials).encoderSettings(channelID: channelID)
+        try await isapi().encoderSettings(channelID: channelID)
     }
 
     /// Hikvision only: sets a channel's keyframe interval (frames) over ISAPI, leaving everything else unchanged.
     public func setHikvisionGovLength(_ frames: Int, channelID: String) async throws {
-        try await HikvisionISAPI(endpoint: endpoint, credentials: credentials).setGovLength(frames, channelID: channelID)
+        try await isapi().setGovLength(frames, channelID: channelID)
     }
 
     // MARK: - Conversions
+
+    /// Whether an encoding is one the bridge streams (H.264 or H.265). A JPEG or MPEG-4 encoder configuration (a camera's snapshot
+    /// profile) is never treated as a stream: its settings are never planned or written as one.
+    public static func isStreamCodec(_ encoding: String?) -> Bool {
+        guard let encoding else { return false }
+        return ["H264", "H265"].contains(EncoderValues.normalizedCodec(encoding))
+    }
+
+    /// The main and sub profiles the bridge streams: only H.264/H.265 ones; the profile whose stream address (`GetStreamUri`) has the
+    /// configured URL's path, when the URLs are known; else the largest for main and the smallest other one for sub. nil for a stream the
+    /// camera has no H.264/H.265 profile for (a Tapo's third profile is JPEG at the sub stream's size: it is never the sub stream).
+    static func streamProfiles(_ profiles: [ONVIFMediaProfile], client: ONVIFClient, main mainURL: URL?, sub subURL: URL?) async
+        -> (main: ONVIFMediaProfile?, sub: ONVIFMediaProfile?) {
+        let streams = profiles.filter { isStreamCodec($0.videoEncoderConfiguration?.encoding) }
+        var (main, sub) = selectProfiles(streams)
+        if mainURL != nil || subURL != nil {
+            for profile in streams {
+                guard let uri = try? await client.streamURI(profileToken: profile.token) else { continue }
+                if let mainURL, sameStream(uri, mainURL) { main = profile } else if let subURL, sameStream(uri, subURL) { sub = profile }
+            }
+        }
+        if sub?.token == main?.token { sub = nil }
+        return (main, sub)
+    }
+
+    /// Two stream addresses name the same stream: the same path, letters' case ignored (host, port, credentials and query may differ).
+    static func sameStream(_ lhs: URL, _ rhs: URL) -> Bool {
+        let a = lhs.path.lowercased(), b = rhs.path.lowercased()
+        return !a.isEmpty && a != "/" && a == b
+    }
 
     static func selectProfiles(_ profiles: [ONVIFMediaProfile]) -> (main: ONVIFMediaProfile?, sub: ONVIFMediaProfile?) {
         func pixelCount(_ profile: ONVIFMediaProfile) -> Int {

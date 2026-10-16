@@ -59,6 +59,22 @@ final class MockONVIFCamera: Sendable {
     }
     let osdMode = Box(OSDMode.accept)
 
+    /// The device's clock (`GetSystemDateAndTime` / `SetSystemDateAndTime`) and time servers (`GetNTP` / `SetNTP`), as a camera keeps them.
+    struct Clock: Sendable, Equatable {
+        var type = "NTP"
+        var daylightSavings = true
+        var timeZone: String? = "CST6CDT,M3.2.0,M11.1.0"
+        var ntpFromDHCP = false
+        var ntpServers = ["pool.ntp.org"]
+    }
+    let clock = Box(Clock())
+    /// `SetSystemDateAndTime` and `SetNTP` answer a fault while set (a camera whose ONVIF user may not change the clock).
+    let refuseClockChanges = Box(false)
+    /// The device has no `GetNTP` (answers `ActionNotSupported`).
+    let noNTP = Box(false)
+    /// Clock calls in order: "SetSystemDateAndTime", "SetNTP".
+    let clockCalls = Box<[String]>([])
+
     /// An `OSD` element's children: a text element of `textType` (Plain, Date, Time, DateAndTime).
     static func osdChildren(textType: String, text: String?) -> String {
         let plain = text.map { "<tt:PlainText>\($0)</tt:PlainText>" } ?? ""
@@ -168,8 +184,11 @@ final class MockONVIFCamera: Sendable {
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = TimeZone(identifier: "UTC")!
             let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+            let state = self.clock.value
+            let zone = state.timeZone.map { "<tt:TimeZone><tt:TZ>\($0)</tt:TZ></tt:TimeZone>" } ?? ""
             return self.envelope("""
-            <tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:DateTimeType>NTP</tt:DateTimeType><tt:UTCDateTime>\
+            <tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:DateTimeType>\(state.type)</tt:DateTimeType>\
+            <tt:DaylightSavings>\(state.daylightSavings)</tt:DaylightSavings>\(zone)<tt:UTCDateTime>\
             <tt:Time><tt:Hour>\(c.hour!)</tt:Hour><tt:Minute>\(c.minute!)</tt:Minute><tt:Second>\(c.second!)</tt:Second></tt:Time>\
             <tt:Date><tt:Year>\(c.year!)</tt:Year><tt:Month>\(c.month!)</tt:Month><tt:Day>\(c.day!)</tt:Day></tt:Date></tt:UTCDateTime>\
             </tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse>
@@ -245,6 +264,38 @@ final class MockONVIFCamera: Sendable {
             let children = node?.children.map { $0.serialized() }.joined() ?? ""
             if osdMode.value != .ignoreChanges { osds.update { list in if let index = list.firstIndex(where: { $0.token == token }) { list[index].children = children } } }
             return self.envelope("<trt:SetOSDResponse xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\"/>")
+        case "SetSystemDateAndTime":
+            clockCalls.update { $0.append("SetSystemDateAndTime") }
+            if refuseClockChanges.value { return fault("InvalidArgVal", "the time settings can not be changed") }
+            let type = envelope.firstDescendant("DateTimeType")?.text ?? "NTP"
+            let dst = envelope.firstDescendant("DaylightSavings")?.text == "true"
+            let zone = envelope.firstDescendant("TimeZone")?.child("TZ")?.text
+            clock.update { state in
+                state.type = type
+                state.daylightSavings = dst
+                if let zone { state.timeZone = zone }
+            }
+            return self.envelope("<tds:SetSystemDateAndTimeResponse/>")
+        case "GetNTP":
+            if noNTP.value { return fault("ActionNotSupported", "GetNTP is not supported") }
+            let state = clock.value
+            let manual = state.ntpServers.map { server in
+                ONVIFClient.isIPv4(server) ? "<tt:NTPManual><tt:Type>IPv4</tt:Type><tt:IPv4Address>\(server)</tt:IPv4Address></tt:NTPManual>"
+                    : "<tt:NTPManual><tt:Type>DNS</tt:Type><tt:DNSname>\(server)</tt:DNSname></tt:NTPManual>"
+            }.joined()
+            return self.envelope("<tds:GetNTPResponse><tds:NTPInformation><tt:FromDHCP>\(state.ntpFromDHCP)</tt:FromDHCP>\(manual)</tds:NTPInformation></tds:GetNTPResponse>")
+        case "SetNTP":
+            clockCalls.update { $0.append("SetNTP") }
+            if refuseClockChanges.value { return fault("InvalidArgVal", "the time servers can not be changed") }
+            let fromDHCP = envelope.firstDescendant("FromDHCP")?.text == "true"
+            let servers = (envelope.firstDescendant("SetNTP")?.children("NTPManual") ?? []).compactMap { entry in
+                entry.string("IPv4Address") ?? entry.string("IPv6Address") ?? entry.string("DNSname")
+            }
+            clock.update { state in
+                state.ntpFromDHCP = fromDHCP
+                state.ntpServers = servers
+            }
+            return self.envelope("<tds:SetNTPResponse/>")
         case "GetImagingSettings": return .soap(template("GetImagingSettingsResponse.xml"))
         case "GetOptions": return .soap(template("GetImagingOptionsResponse.xml"))
         case "SetImagingSettings":

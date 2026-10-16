@@ -83,7 +83,7 @@ extension WebApp {
         Route("POST", "system/ssh", takesBody: true) { app, ctx in try await app.systemSSH(ctx) },
         Route("POST", "system/auto-update", takesBody: true) { app, ctx in try await app.systemAutomaticUpdates(ctx) },
         Route("POST", "system/factory-reset", takesBody: true) { app, ctx in try await app.systemFactoryReset(ctx) },
-    ] + archiveRoutes
+    ] + archiveRoutes + cameraSetupRoutes
 
     // MARK: Status and session
 

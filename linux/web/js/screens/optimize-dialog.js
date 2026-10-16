@@ -7,7 +7,7 @@ import { icon } from '../icons.js';
 export const OPTIMIZE_TIMEOUT_MS = 120_000;
 
 export const WHAT_IT_CAN_CHANGE = [
-  'Lowers the main stream to 6 Mbit/s if it is higher.',
+  'Lowers the main stream to 6 Mbit/s if it is higher (8 Mbit/s for 4K and 8 MP cameras).',
   'Changes H.265 to H.264 if the camera uses H.265.',
   'Keeps the frame rate between 15 and 25 frames a second.',
   'Changes the video profile if the camera uses B-frames.',

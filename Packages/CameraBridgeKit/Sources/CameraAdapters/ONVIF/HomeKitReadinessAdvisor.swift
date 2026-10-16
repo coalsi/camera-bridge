@@ -117,7 +117,9 @@ public enum HomeKitReadinessAdvisor {
         checks.append(smartCodecCheck(vendor: vendor))
         checks.append(bFramesCheck(vendor: vendor, hasBFrames: effectiveBFrames))
         checks.append(frameRateCheck(vendor: vendor, fps: effectiveFPS))
-        checks.append(bitrateCheck(vendor: vendor, bitrateKbps: mainStreamFacts?.bitrateKbps ?? main?.bitrate))
+        checks.append(bitrateCheck(vendor: vendor, bitrateKbps: mainStreamFacts?.bitrateKbps ?? main?.bitrate,
+                                   maximumKbps: Self.maximumMainBitrateKbps(width: mainStreamFacts?.width ?? main?.resolution?.width,
+                                                                           height: mainStreamFacts?.height ?? main?.resolution?.height)))
         checks.append(resolutionCheck(vendor: vendor, width: mainStreamFacts?.width ?? main?.resolution?.width,
                                       height: mainStreamFacts?.height ?? main?.resolution?.height))
         checks.append(subStreamCheck(vendor: vendor, snapshot: snapshot, facts: subStreamFacts))
@@ -228,22 +230,30 @@ public enum HomeKitReadinessAdvisor {
             recommendedValue: "15–25 fps", fixMethod: .automatic)
     }
 
-    private static func bitrateCheck(vendor: CameraVendor, bitrateKbps: Int?) -> HomeKitReadinessCheck {
+    /// The highest main-stream bit rate that is right for the bridge (kbit/s): 6 Mbit/s, or 8 Mbit/s from about 7 megapixels up (4K and the
+    /// 8 MP panoramic cameras), so a 4K recording keeps its detail (owner, 2026-10-16). Optimize and Camera setup lower a higher one to it.
+    public static func maximumMainBitrateKbps(width: Int?, height: Int?) -> Int {
+        guard let width, let height, width * height >= 7_000_000 else { return 6000 }
+        return 8000
+    }
+
+    private static func bitrateCheck(vendor: CameraVendor, bitrateKbps: Int?, maximumKbps: Int = 6000) -> HomeKitReadinessCheck {
         guard let bitrateKbps else {
             return HomeKitReadinessCheck(id: "bitrate", title: "Main stream bitrate", status: .warning,
                                          explanation: "The main stream's bitrate could not be read yet.", fixMethod: .none)
         }
-        if (2000...6000).contains(bitrateKbps) {
+        let top = maximumKbps / 1000
+        if (2000...(maximumKbps + maximumKbps / 20)).contains(bitrateKbps) {   // as Optimize: 5 % over the cap is fine
             return HomeKitReadinessCheck(id: "bitrate", title: "Main stream bitrate", status: .ok,
-                                         explanation: "2–6 Mbps (CBR, or VBR with that cap) balances recording quality "
-                                            + "against storage and network use.", recommendedValue: "2–6 Mbps", fixMethod: .none)
+                                         explanation: "2–\(top) Mbps (CBR, or VBR with that cap) balances recording quality "
+                                            + "against storage and network use.", recommendedValue: "2–\(top) Mbps", fixMethod: .none)
         }
         return HomeKitReadinessCheck(
             id: "bitrate", title: "Main stream bitrate", status: .warning,
             explanation: bitrateKbps < 2000
                 ? "Under 2 Mbps can look soft in HomeKit Secure Video recordings, especially at night."
-                : "Over 6 Mbps uses more iCloud storage and network bandwidth than HomeKit recordings typically need.",
-            recommendedValue: "2–6 Mbps (CBR or capped VBR)", fixMethod: .automatic)
+                : "Over \(top) Mbps uses more iCloud storage and network bandwidth than HomeKit recordings typically need.",
+            recommendedValue: "2–\(top) Mbps (CBR or capped VBR)", fixMethod: .automatic)
     }
 
     private static func resolutionCheck(vendor: CameraVendor, width: Int?, height: Int?) -> HomeKitReadinessCheck {

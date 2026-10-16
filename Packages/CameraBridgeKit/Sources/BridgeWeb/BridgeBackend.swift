@@ -67,6 +67,12 @@ public protocol BridgeBackend: Sendable {
     func setCameraTimeZone(cameraID: UUID) async throws -> String
     /// `BridgeEngine.setCleanPicture(cameraID:clean:)`: every label the camera draws itself off, or back. Default throws.
     func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange
+    /// `BridgeEngine.cameraSetupPreview(cameraID:)`: what "Set up for Camera Bridge" would change (reads the camera only). Default throws.
+    func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport
+    /// `BridgeEngine.applyCameraSetup(cameraID:)`. Default throws.
+    func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport
+    /// `BridgeEngine.restoreCameraSetup(cameraID:)`. Default throws.
+    func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport
     /// Moves a pan/tilt camera (`BridgeEngine.panTilt`).
     func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws
     /// `BridgeEngine.localIPv4Addresses()`. The default has none.
@@ -231,6 +237,18 @@ public struct EngineBackend: BridgeBackend {
     public func undoHomeKitOptimization(cameraID: UUID) async throws {
         try await engine.undoHomeKitOptimization(cameraID: cameraID)
     }
+
+    public func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport {
+        try await engine.cameraSetupPreview(cameraID: cameraID)
+    }
+
+    public func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
+        try await engine.applyCameraSetup(cameraID: cameraID)
+    }
+
+    public func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
+        try await engine.restoreCameraSetup(cameraID: cameraID)
+    }
 }
 
 extension BridgeBackend {
@@ -262,6 +280,18 @@ extension BridgeBackend {
     }
 
     public func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange {
+        throw EngineError.cameraNotRunning
+    }
+
+    public func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport {
+        throw EngineError.cameraNotRunning
+    }
+
+    public func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
+        throw EngineError.cameraNotRunning
+    }
+
+    public func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
         throw EngineError.cameraNotRunning
     }
 

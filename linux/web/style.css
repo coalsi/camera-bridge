@@ -376,6 +376,15 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .type-group .footer-note { font-size: 0.85rem; color: var(--text-2); margin-top: 8px; }
 .steps { padding-left: 1.2em; margin: 8px 0; }
 .steps li { margin-bottom: 6px; }
+/* Set up for Camera Bridge: each step with its changes (now → after) and its status. */
+.setup-steps li { align-items: flex-start; }
+.setup-steps .title { font-weight: 600; }
+.setup-steps .change { font-size: 0.85rem; color: var(--text-2); margin-top: 2px; overflow-wrap: anywhere; }
+.setup-steps .pill { flex: none; }
+.camera-setup .setup-steps { max-height: 52vh; overflow-y: auto; margin: 12px 0; }
+.local-only { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+.local-only summary { cursor: pointer; }
+.local-only summary .section-title { display: inline; margin: 0; }
 .support-list { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; font-size: 0.92rem; }
 .support-list li { display: flex; gap: 8px; align-items: flex-start; }
 .support-list svg { width: 18px; height: 18px; flex: none; margin-top: 2px; color: var(--live); }

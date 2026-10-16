@@ -633,3 +633,16 @@ Pan and tilt (2026-10-16): `BridgeEngine.panTilt(cameraID:pan:tilt:)` moves a ca
 by itself 1.5 s after the last ask. `CameraStatus.panTilt` says whether a camera pans and tilts. Motion detection asks for
 `MediaCodecs.makeMotionDecoder(format:)` (default `makeVideoDecoder`), which may hand back smaller pictures decoded on the GPU.
 `CameraStatus.zoom` and `BridgeEngine.panTilt(cameraID:pan:tilt:zoom:)`: the runtime asks the control what it can do when the camera starts.
+
+## Additions beyond the contract: Set up for Camera Bridge (2026-10-16, docs/CONTRACT_CHANGES.md)
+
+`BridgeEngine.cameraSetupPreview(cameraID:)` (reads only), `BridgeEngine.applyCameraSetup(cameraID:)` and
+`BridgeEngine.restoreCameraSetup(cameraID:)` → `CameraSetupReport` (`CameraSetupStep`, `CameraSetupStepStatus`); `BridgeEngine.cameraSetupVendors`
+and `BridgeEngine.cameraSetupTitle(_:)` (the step names, one table). `CameraConfiguration.setupBackup` (`CameraSetupBackup`) and
+`CameraConfiguration.setupState` (`CameraSetupState`, with `currentVersion`: the setup's contents are versioned in code), engine-owned like
+`cleanPictureBackup` and decoded leniently. The backup is saved before the first change; an earlier run's values, Optimize's undo and Clean
+picture's backup are folded in (the oldest value wins), so there is one way back, and the Clean picture switch also restores from it. Steps run
+in order (time zone, time from the bridge, clean picture, streams, UPnP, cloud); a refusal stops the run, the steps before it stay done. The
+streams step is the HomeKit optimizer's plan (`plannedEncoderFixes`, shared with `optimizeForHomeKit`); a changed stream restarts the camera's
+ingest. `BridgeEnvironment.servesTime` (the daemon sets it where chrony serves the local network) offers "Time from the bridge", at the
+bridge's address on the camera's subnet.

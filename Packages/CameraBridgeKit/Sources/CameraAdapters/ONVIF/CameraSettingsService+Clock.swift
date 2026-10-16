@@ -189,7 +189,7 @@ extension CameraSettingsService {
 
     private func hideViaISAPI() async throws -> ClockOutcome {
         guard vendor == .hikvision else { return .failed(.unsupported("not a Hikvision camera")) }
-        let api = HikvisionISAPI(endpoint: endpoint, credentials: credentials)
+        let api = isapi()
         let input = HikvisionISAPI.inputChannel(streamingChannelID: hikvisionChannel(isSub: false))
         guard let shown = try await api.dateTimeOverlayEnabled(inputChannel: input) else {
             return .failed(.unsupported("no date and time overlay in the camera's on-screen display"))
@@ -202,7 +202,7 @@ extension CameraSettingsService {
     }
 
     /// GetTime, then SetTime with only `Dst.enable` changed (to `daylightSaving`). nil when it worked (or was already so), else why not.
-    private func setReolinkDaylightSaving(_ daylightSaving: Bool) async throws -> String? {
+    func setReolinkDaylightSaving(_ daylightSaving: Bool) async throws -> String? {
         let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
         defer { Task { await api.logout() } }
         do {
@@ -326,7 +326,7 @@ extension CameraSettingsService {
         case .hikvisionISAPI:
             guard vendor == .hikvision else { return .unsupported("not a Hikvision camera") }
             guard backup.wasShown != false else { return nil }   // it was off before: stays off
-            let api = HikvisionISAPI(endpoint: endpoint, credentials: credentials)
+            let api = isapi()
             let input = HikvisionISAPI.inputChannel(streamingChannelID: hikvisionChannel(isSub: false))
             try await api.setDateTimeOverlayEnabled(true, inputChannel: input)
             return try await api.dateTimeOverlayEnabled(inputChannel: input) == true ? nil : .didNotStick

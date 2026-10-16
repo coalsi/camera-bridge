@@ -111,6 +111,11 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
     public var hiddenCameraClock: HiddenCameraClock?
     /// Set while "Clean picture" has turned every label the camera draws itself off (`BridgeEngine.setCleanPicture`): what to write back.
     public var cleanPictureBackup: CleanPictureBackup?
+    /// Set while "Set up for Camera Bridge" has changed the camera (`BridgeEngine.applyCameraSetup`): every value it changed, as the camera had
+    /// it, for "Restore original settings". Engine-owned like `cleanPictureBackup`; nothing secret in it.
+    public var setupBackup: CameraSetupBackup?
+    /// The setup's record: its version, when it ran, and what each step did (an unfinished record: the bridge stopped during a run).
+    public var setupState: CameraSetupState?
     /// How the camera reaches its service, for a camera behind a cloud account or a console (`CameraVendor.go2rtc`,
     /// `.unifi`): the service and plain facts about the camera. Nothing secret; the service's token, key or source address is the
     /// camera's Keychain "password". nil for every other camera.
@@ -156,6 +161,8 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         self.timestampOverlay = TimestampOverlaySettings()
         self.hiddenCameraClock = nil
         self.cleanPictureBackup = nil
+        self.setupBackup = nil
+        self.setupState = nil
         self.integration = nil
         self.nvrEnabled = false
         self.nvrRecordSound = false
@@ -166,6 +173,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         case sensors, audioEnabled, twoWayAudio, hapPort, isEnabled, manufacturer, model, serialNumber, firmware, capabilities
         case liveStreamMode, liveQualityMode, liveMaxBitrateOverride, recordingStreamMode, recordingQualityMode
         case preferredConfigMethod, timestampOverlay, hiddenCameraClock, cleanPictureBackup, integration, nvrEnabled, nvrRecordSound
+        case setupBackup, setupState
     }
 
     public init(from decoder: any Decoder) throws {
@@ -207,6 +215,8 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         timestampOverlay = value(.timestampOverlay, default: timestampOverlay)
         hiddenCameraClock = value(.hiddenCameraClock, default: nil)
         cleanPictureBackup = value(.cleanPictureBackup, default: nil)
+        setupBackup = value(.setupBackup, default: nil)
+        setupState = value(.setupState, default: nil)
         integration = value(.integration, default: nil)
         nvrEnabled = value(.nvrEnabled, default: nvrEnabled)
         nvrRecordSound = value(.nvrRecordSound, default: nvrRecordSound)

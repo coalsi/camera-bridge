@@ -9,6 +9,8 @@ libsystemd), a journald-friendly log sink (`StdoutLogSink`), the operating syste
 
 ## Additions beyond the contract
 
+Time for the cameras (2026-10-16): on Linux the daemon sets `BridgeEnvironment.servesTime` when `/etc/chrony/chrony.conf` serves other machines (an `allow` line and no `port 0`: Camera Bridge OS's does), so "Set up for Camera Bridge" points cameras' clocks at the box. Internal: `Daemon.servesTime(chronyConfiguration:)`.
+
 Installer stick (2026-10-14): `RequestFileSystemControl.HostFacts.runningFromUSB` reads the device mounted at `/` from `/proc/self/mountinfo` and whether its path in /sys passes through USB; it fills `SystemInfo.runningFromUSB`.
 
 New module (additive; docs/CONTRACT_CHANGES.md 2026-10-08): `BridgeDaemon` with `Daemon`, `DaemonMain`, `DaemonOptions`,

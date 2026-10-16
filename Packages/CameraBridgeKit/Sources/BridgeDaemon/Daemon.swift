@@ -226,6 +226,9 @@ public final class Daemon {
         if options.development {
             environment.loopbackOnly = true
             environment.advertise = false
+        } else {
+            // Camera Bridge OS's chrony serves time to the local networks: "Set up for Camera Bridge" then points cameras at the box.
+            environment.servesTime = servesTime(chronyConfiguration: (try? String(contentsOfFile: "/etc/chrony/chrony.conf", encoding: .utf8)) ?? "")
         }
         return environment
         #elseif canImport(Darwin)
@@ -233,6 +236,13 @@ public final class Daemon {
         #else
         throw Failure.cannotPrepare("this platform has no bridge environment yet")
         #endif
+    }
+
+    /// Whether a chrony configuration serves time to other machines: an `allow` line, and no `port 0` (which turns the server off).
+    static func servesTime(chronyConfiguration text: String) -> Bool {
+        let lines = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.hasPrefix("#") && !$0.isEmpty }
+        let words = lines.map { $0.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init) }
+        return words.contains { $0.first == "allow" } && !words.contains { $0.count >= 2 && $0[0] == "port" && $0[1] == "0" }
     }
 
     // MARK: Files
@@ -333,6 +343,9 @@ struct DemoDiscoveryBackend: BridgeBackend {
     func localIPv4Addresses() async -> [String] { await base.localIPv4Addresses() }
     func setPluginSecret(id: String, _ data: Data?) async throws { try await base.setPluginSecret(id: id, data) }
     func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange { try await base.setCleanPicture(cameraID: cameraID, clean: clean) }
+    func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport { try await base.cameraSetupPreview(cameraID: cameraID) }
+    func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.applyCameraSetup(cameraID: cameraID) }
+    func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.restoreCameraSetup(cameraID: cameraID) }
     func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws { try await base.panTilt(cameraID: cameraID, pan: pan, tilt: tilt, zoom: zoom) }
     func triggerTestMotion(cameraID: UUID) async { await base.triggerTestMotion(cameraID: cameraID) }
     func pause() async { await base.pause() }

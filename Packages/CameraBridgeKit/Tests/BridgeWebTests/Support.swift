@@ -42,6 +42,9 @@ final class FakeBackend: BridgeBackend {
         var optimization: Result<HomeKitOptimizationResult, any Error> = .failure(EngineError.cameraNotRunning)
         var optimizeGate: AsyncGate?
         var undoError: (any Error)?
+        /// What the camera setup's three calls answer.
+        var setup: Result<CameraSetupReport, any Error> = .failure(EngineError.cameraNotRunning)
+        var setupGate: AsyncGate?
     }
 
     let box = Mutex(State())
@@ -164,6 +167,22 @@ final class FakeBackend: BridgeBackend {
     func undoHomeKitOptimization(cameraID: UUID) async throws {
         write { $0.calls.append("undo") }
         if let error = read({ $0.undoError }) { throw error }
+    }
+
+    func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport {
+        write { $0.calls.append("setupPreview") }
+        return try read { $0.setup }.get()
+    }
+
+    func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
+        write { $0.calls.append("setupApply") }
+        if let gate = read({ $0.setupGate }) { await gate.wait() }
+        return try read { $0.setup }.get()
+    }
+
+    func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
+        write { $0.calls.append("setupRestore") }
+        return try read { $0.setup }.get()
     }
 }
 

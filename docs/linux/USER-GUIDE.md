@@ -76,6 +76,8 @@ The first time, the page asks you to choose an administrator password. Until you
 
 Tips: give the cameras fixed addresses (a DHCP reservation in your router), and use a separate camera user with a strong password. Cameras on a different VLAN need your router to allow the box to reach them.
 
+**Set up for Camera Bridge** (offered right after you add a Hikvision, Reolink, Amcrest or ONVIF camera, and in its page's **Camera setup** section) makes the camera right for the box in one step: its streams for recording, Apple Home and live view, its own on-screen labels off, the box's time zone, its clock set from the box, and on Hikvision cameras Hik-Connect (the maker's cloud) and UPnP off. It reads the camera first and shows every change (now → after) before anything happens; it saves the camera's settings first, and **Restore original settings** puts them all back. It never changes the camera's address, ports, users or passwords, and never restarts it. The box answers time requests from your local network only (the firewall allows nothing else).
+
 ## 6. Add them to Apple Home
 
 Every camera appears in Home as its own accessory.

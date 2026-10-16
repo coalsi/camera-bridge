@@ -196,6 +196,24 @@ only); RTSP through `FakeRTSPSession` (no real RTSP or LAN traffic; the live mul
 Public ONVIF specifications, the Hikvision ISAPI and Reolink HTTP API v8 documents, the project's research notes (not
 published), and Scrypted's Hikvision, ONVIF and Reolink plugins (read for behaviour only; no code copied).
 
+## Additions beyond the contract: Set up for Camera Bridge (2026-10-16, docs/CONTRACT_CHANGES.md)
+
+The camera's side of "Set up for Camera Bridge" (design: `docs/superpowers/specs/2026-10-16-camera-setup-design.md`): every step is read
+(its value then is the backup), applied with a read-modify-write of the camera's own document, read back, and restorable.
+`CameraSetupStepID` (in apply order: `timeZone`, `timeSource`, `cleanPicture`, `streams`, `upnp`, `cloud`), `CameraSetupChange`,
+`CameraSetupReading` (`willChange`, `alreadyRight`, `notSupported`), `CameraSetupOutcome` (with `needsRestart` for ISAPI `statusCode` 7,
+which is noted and never acted on), `CameraSetupBackup` (one backup: `CameraTimeZoneBackup`, `CameraTimeSourceBackup`, `CleanPictureBackup`,
+`CameraStreamsBackup`, `CameraFeatureBackup`; nothing secret, never a Hik-Connect verification code), `CameraNetworkFeature`, `CameraSetupText`
+(the values in a person's words). `CameraSettingsService.readTimeZone(posix:zoneName:)` / `applyTimeZone(posix:)` / `restoreTimeZone(_:)`
+(Hikvision ISAPI `/ISAPI/System/time` `timeZone` in Hikvision's own text, else ONVIF; Reolink its daylight-saving switch),
+`CameraSettingsService.readTimeSource(server:)` / `applyTimeSource(server:)` / `restoreTimeSource(_:)` (ISAPI mode NTP and
+`/ISAPI/System/time/ntpServers/1`; ONVIF `SetNTP` then `SetSystemDateAndTime` with NTP), `CameraSettingsService.readCleanPicture()`,
+`CameraSettingsService.readFeature(_:)` / `setFeature(_:enabled:path:)` (Hikvision UPnP and Hik-Connect: `/ISAPI/System/Network/capabilities`
+says whether the camera has them, the cloud's path is tried as `EZVIZ` then `Ezviz`). Streams are only ever H.264/H.265: `CameraSettingsService.isStreamCodec(_:)`; `fetchSnapshot()` picks the main and sub
+profiles among those whose `GetStreamUri` path matches the configured URLs (`CameraSettingsService.init(…subStreamURL:)`), else the largest
+and smallest such profiles, never a JPEG one; `CameraSetupReading.note` says when one of them is not offered. A `CameraSettingsService` keeps one ISAPI client for its
+life (a client per request can crash FoundationNetworking on Linux).
+
 ## Additions beyond the contract: integrations beyond RTSP/ONVIF (2026-10-08, docs/CONTRACT_CHANGES.md; user docs: `docs/integrations/`)
 
 - **Native adapters** (`CameraVendor.amcrest`, `.doorbird`, `.unifi`): `AmcrestDriver` (Dahua/Amcrest CGI: `magicBox.cgi`, `snapshot.cgi`,

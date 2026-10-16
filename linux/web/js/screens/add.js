@@ -3,6 +3,7 @@
 import { get, post } from '../api.js';
 import { h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
+import { cameraSetupDialog, SETUP_TEXT, setupSupported } from './camera-setup.js';
 import { backLink, field, inlineError, switchRow } from './common.js';
 import { pairingPanel } from './pairing.js';
 
@@ -579,6 +580,7 @@ export function renderAdd({ navigate }) {
     try {
       const camera = await post('cameras', request(true));
       w.addedId = camera.id;
+      w.addedCamera = camera;
       w.adding = false;
       show('pair');
     } catch (error) {
@@ -599,7 +601,20 @@ export function renderAdd({ navigate }) {
       pairing.el,
       w.kind === 'doorbell' && w.probe?.ringsThroughWebhook
         ? h('div', { class: 'banner info' }, icon('info'), h('div', { class: 'text' }, 'Rings from this camera come through the webhook. Turn it on in Settings and send it a doorbell event from your other system.')) : null,
+      setupSupported(w.addedCamera) ? setupOffer(w.addedCamera) : null,
       h('div', { class: 'wizard-actions' }, h('a', { class: 'btn', href: '#/add' }, 'Add another camera'), h('a', { class: 'btn primary', href: '#/cameras' }, 'Done')));
+  }
+
+  // Offered, never run by itself: the person opens it, sees every change and confirms (or skips it; it stays on the camera's page).
+  function setupOffer(camera) {
+    const note = h('p', { class: 'small muted' }, `You can also do this later from the camera’s page.`);
+    return h('div', { class: 'card' }, h('h2', null, `${SETUP_TEXT.button}?`),
+      h('p', { class: 'desc' }, 'Camera Bridge can set this camera up to work hand in hand with it: streams for recording, Apple Home and live view, no labels of its own, the bridge’s time zone and time, and the maker’s cloud and UPnP off. You see every change first, and can put everything back.'),
+      h('div', { class: 'row' }, h('button', { class: 'btn small primary', type: 'button', onclick: async () => {
+        const outcome = await cameraSetupDialog({ ...camera, name: w.name.trim() || camera.name });
+        if (outcome === 'applied') replace(note, 'Set up. The camera’s page shows what changed and can put it back.');
+      } }, icon('sliders'), `${SETUP_TEXT.button}…`)),
+      note);
   }
 
   const STEP_TITLES = {

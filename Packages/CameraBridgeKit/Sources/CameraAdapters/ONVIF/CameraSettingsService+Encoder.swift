@@ -96,7 +96,7 @@ extension CameraSettingsService {
 
     private func viaISAPI(_ edit: CameraEncoderEdit) async throws -> AttemptOutcome {
         guard vendor == .hikvision else { return .failed(.unsupported("not a Hikvision camera")) }
-        let api = HikvisionISAPI(endpoint: endpoint, credentials: credentials)
+        let api = isapi()
         let channel = hikvisionChannel(isSub: edit.isSub)
         let (_, current) = try await api.encoderValues(channelID: channel)
         let (changes, unreadable) = current.changes(toReach: edit.desired)
@@ -226,7 +226,7 @@ extension CameraSettingsService {
     /// A Hikvision channel's encoder settings read over ISAPI as `CameraVideoEncoderSettings` (token and name empty: it
     /// can be applied only by ISAPI), for a camera whose ONVIF profiles can't be read. nil when the channel reports no codec.
     public func hikvisionEncoderSettings(isSub: Bool) async throws -> CameraVideoEncoderSettings? {
-        let (_, values) = try await HikvisionISAPI(endpoint: endpoint, credentials: credentials)
+        let (_, values) = try await isapi()
             .encoderValues(channelID: hikvisionChannel(isSub: isSub))
         guard let codec = values.codec else { return nil }
         let resolution = values.width.flatMap { width in values.height.map { CameraResolution(width: width, height: $0) } }

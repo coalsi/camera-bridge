@@ -51,7 +51,7 @@ test('index.html links only files that exist, and loads one module script and th
   const html = readFileSync(join(root, 'index.html'), 'utf8');
   const references = [...html.matchAll(/\s(?:src|href)\s*=\s*["']([^"'#]+)["']/g)].map((match) => match[1]).filter((value) => value.startsWith('/'));
   assert.ok(references.includes('/js/app.js'), 'index.html does not load /js/app.js');
-  const missing = references.filter((reference) => !existsSync(join(root, reference.slice(1))));
+  const missing = references.filter((reference) => !existsSync(join(root, reference.slice(1).split('?')[0])));   // `?v=` versions a file, it is not part of its name
   assert.deepEqual(missing, [], `index.html points at missing files: ${missing.join(', ')}`);
   // One module (the page) and one plain script before the stylesheet (theme-boot.js: the chosen appearance, before the first paint).
   assert.equal([...html.matchAll(/<script\b[^>]*type="module"/g)].length, 1, 'index.html has more than one module script');
