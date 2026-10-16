@@ -7,6 +7,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.106',
+    date: '2026-10-16',
+    title: 'A new logo, and a steadier start',
+    items: [
+      'The new Camera Bridge logo: a camera lens with the Golden Gate in its real colours through the glass.',
+      'Plugins that use a camera maker’s cloud (Wyze, eufy) say so with a “Needs internet” badge and what goes through the cloud.',
+      'Fixed: the bridge could stop once while starting with a eufy or Wyze camera (it started again by itself).',
+    ],
+  },
+  {
     version: '0.1.105',
     date: '2026-10-16',
     title: 'Plugins: Wyze and eufy, battery cameras, pan and tilt, and a new look',

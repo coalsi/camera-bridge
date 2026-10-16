@@ -96,8 +96,7 @@ public actor EufyBridge {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let client = AuthenticatingHTTPClient(credentials: nil, timeout: timeout, allowSelfSignedTLS: false, maximumBodySize: 8 << 20)
-        defer { client.invalidate() }
+        let client = client(timeout: timeout)
         do {
             let (data, response) = try await client.data(for: request)
             return (response.statusCode, data)
@@ -125,6 +124,17 @@ public actor EufyBridge {
     }
 
     private func unsubscribe(_ id: UUID) { subscribers[id] = nil }
+
+    /// One client per timeout, kept for the bridge's life: a session made and invalidated for every request crashed the Linux daemon at start,
+    /// when several requests overlapped (FoundationNetworking's `_MultiHandle` freed while still in use, 0.1.105).
+    private var clients: [Duration: AuthenticatingHTTPClient] = [:]
+
+    private func client(timeout: Duration) -> AuthenticatingHTTPClient {
+        if let client = clients[timeout] { return client }
+        let client = AuthenticatingHTTPClient(credentials: nil, timeout: timeout, allowSelfSignedTLS: false, maximumBodySize: 8 << 20)
+        clients[timeout] = client
+        return client
+    }
 
     static func safe(_ serial: String) -> String { serial.filter { $0.isASCII && ($0.isLetter || $0.isNumber) } }
 

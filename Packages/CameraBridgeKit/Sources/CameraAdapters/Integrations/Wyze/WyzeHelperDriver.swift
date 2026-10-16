@@ -175,6 +175,9 @@ struct WyzeLakePanTilt: PanTiltControl {
         return (direction, max(1, min(60, Int((abs(amount) * 20).rounded()))))
     }
 
+    /// Kept for the bridge's life (a session per request can crash FoundationNetworking on Linux when requests overlap).
+    private static let client = AuthenticatingHTTPClient(credentials: nil, timeout: .seconds(5), allowSelfSignedTLS: false, maximumBodySize: 64 << 10)
+
     func move(pan: Double, tilt: Double) async throws {
         guard let nudge = Self.nudge(pan: pan, tilt: tilt) else { return }
         guard let control = await supervisor.control() else { throw IntegrationError("The camera’s cloud session isn’t up yet. Try again in a moment.") }
@@ -184,8 +187,7 @@ struct WyzeLakePanTilt: PanTiltControl {
         request.setValue("Bearer \(control.token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(#"{"direction":"\#(nudge.direction)","step":\#(nudge.step),"speed":5}"#.utf8)
-        let client = AuthenticatingHTTPClient(credentials: nil, timeout: .seconds(5), allowSelfSignedTLS: false, maximumBodySize: 64 << 10)
-        defer { client.invalidate() }
+        let client = Self.client
         let status: Int
         do {
             status = try await client.data(for: request).1.statusCode

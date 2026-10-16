@@ -1,5 +1,6 @@
 import BridgeSupport
 import Foundation
+import Synchronization
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -18,13 +19,25 @@ public struct URLSessionWyzeTransport: WyzeTransport {
         self.timeout = timeout
     }
 
+    /// One client per timeout, kept for the bridge's life: sessions made and invalidated per request can crash FoundationNetworking on Linux
+    /// when requests overlap.
+    private static let clients = Mutex<[Duration: AuthenticatingHTTPClient]>([:])
+
+    private static func client(timeout: Duration) -> AuthenticatingHTTPClient {
+        clients.withLock { clients in
+            if let client = clients[timeout] { return client }
+            let client = AuthenticatingHTTPClient(credentials: nil, timeout: timeout, allowSelfSignedTLS: false, maximumBodySize: 4 << 20)
+            clients[timeout] = client
+            return client
+        }
+    }
+
     public func post(_ url: URL, headers: [String: String], json: Data) async throws -> (status: Int, body: Data) {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = json
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
-        let client = AuthenticatingHTTPClient(credentials: nil, timeout: timeout, allowSelfSignedTLS: false, maximumBodySize: 4 << 20)
-        defer { client.invalidate() }
+        let client = Self.client(timeout: timeout)
         do {
             let (data, response) = try await client.data(for: request)
             return (response.statusCode, data)
