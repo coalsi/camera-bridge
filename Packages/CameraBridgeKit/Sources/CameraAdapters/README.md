@@ -244,3 +244,5 @@ The Wyze plugin's cameras carry `IntegrationSettings.Key.wyzeMAC`, `wyzeModel` a
 
 Pan and tilt (2026-10-16): `PanTiltControl` (continuous `move(pan:tilt:)` in -1…1, `stop()`) and `CameraDriver.makePanTilt()` (default nil). The Wyze
 Cam Pan v4 (`WyzeModels.pansAndTilts(_:)`) turns through `wyze-lake`'s loopback control server, one nudge per move.
+`PanTiltControl.capabilities()` (`PanTiltCapabilities`: pan/tilt, zoom) and `zoom(_:)`; ONVIF cameras with a PTZ profile get `ONVIFPanTilt` (steps:
+`ContinuousMove` for 0.4 s then `Stop`, never left turning).

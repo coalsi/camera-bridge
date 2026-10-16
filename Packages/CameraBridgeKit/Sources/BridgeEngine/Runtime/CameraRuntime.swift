@@ -54,8 +54,9 @@ struct RuntimeStatus: Sendable, Equatable {
     var liveViewers = 0
     /// Viewers in CameraBridge's own window (`BridgeEngine.liveVideo`), apart from the HomeKit viewers.
     var appViewers = 0
-    /// `CameraStatus.panTilt`.
+    /// `CameraStatus.panTilt`, `CameraStatus.zoom`.
     var panTilt = false
+    var zoom = false
     /// Why the sub stream is offline while it should run (`CameraStatus.subStreamProblem`).
     var subStreamProblem: String?
     /// `CameraStatus.eventsNote`.
@@ -141,6 +142,9 @@ actor CameraRuntime {
     /// The camera's pan and tilt (nil: it has none), and the stop that follows a move nobody renewed.
     private let panTiltControl: (any PanTiltControl)?
     private var panTiltStop: Task<Void, Never>?
+    /// What the pan/tilt control can do, once the camera said (nil: not asked yet, or no answer yet).
+    private var panTiltKnown: PanTiltCapabilities?
+    private var panTiltDiscovery: Task<Void, Never>?
     /// Bumped by every `acquireSub`: an idle stop scheduled before a later user arrived does not apply.
     private var subGeneration = 0
     private var subIdleStop: Task<Void, Never>?
@@ -313,6 +317,7 @@ actor CameraRuntime {
             log.info("\(name) runs for Camera Bridge's own viewers only: its accessory is not published")
         }
         startEvents()
+        discoverPanTilt(epoch)
         dependencies.onChange()
         return listening
     }
@@ -565,6 +570,8 @@ actor CameraRuntime {
         subIdleStop = nil
         mainIdleStop?.cancel()
         mainIdleStop = nil
+        panTiltDiscovery?.cancel()
+        panTiltDiscovery = nil
         mainUsers = 0
         motionHoldsMain = false
         await mainIngest?.stop()
@@ -670,7 +677,8 @@ actor CameraRuntime {
         status.videoSummary = StreamSources.summary(await mainHub.videoFormat, frameRate: await mainHub.measuredFrameRate)
         status.isPaired = paired
         status.appViewers = appViewers
-        status.panTilt = panTiltControl != nil
+        status.panTilt = panTiltKnown?.panTilt ?? false
+        status.zoom = panTiltKnown?.zoom ?? false
         status.subStreamProblem = running ? subStreamProblem : nil
         status.eventsNote = running && eventsUnreliable ? Self.eventsUnreliableNote : nil
         status.homeKitNote = running ? await healthMonitor?.controllerSilenceNote : nil
@@ -1154,12 +1162,43 @@ actor CameraRuntime {
     /// A move lasts this long unless the page asks again: a page that closes (or a dropped connection) never leaves the camera turning.
     static let panTiltHold: Duration = .milliseconds(1500)
 
-    /// Moves the camera (`pan`, `tilt` in -1…1), or stops it when both are 0. Throws `EngineError.cameraNotRunning` for a camera without
-    /// pan and tilt or not running, and what the camera's control throws.
-    func panTilt(pan: Double, tilt: Double) async throws {
-        guard running, let control = panTiltControl else { throw EngineError.cameraNotRunning }
+    /// Asks the camera what its pan/tilt control can do, once it answers (a camera that is offline at the start is asked again, with
+    /// a growing pause, up to about an hour).
+    private func discoverPanTilt(_ epoch: Int) {
+        guard let control = panTiltControl, panTiltKnown == nil else { return }
+        panTiltDiscovery?.cancel()
+        panTiltDiscovery = Task { [weak self] in
+            var pause: Duration = .seconds(10)
+            for _ in 0..<12 {
+                if Task.isCancelled { return }
+                if let known = try? await control.capabilities() {
+                    await self?.setPanTilt(known, epoch: epoch)
+                    return
+                }
+                try? await Task.sleep(for: pause)
+                pause = min(pause * 2, .seconds(600))
+            }
+        }
+    }
+
+    private func setPanTilt(_ known: PanTiltCapabilities, epoch: Int) {
+        guard isCurrent(epoch) else { return }
+        panTiltKnown = known
+        dependencies.onChange()
+    }
+
+    /// Moves the camera (`pan`, `tilt` in -1…1), or stops it when both are 0; `zoom` (-1…1, out or in) zooms one step instead. Throws
+    /// `EngineError.cameraNotRunning` for a camera without pan and tilt (or zoom) or not running, and what the camera's control throws.
+    func panTilt(pan: Double, tilt: Double, zoom: Double = 0) async throws {
+        guard running, let control = panTiltControl, let known = panTiltKnown else { throw EngineError.cameraNotRunning }
         panTiltStop?.cancel()
         panTiltStop = nil
+        if zoom != 0 {
+            guard known.zoom else { throw EngineError.cameraNotRunning }
+            try await control.zoom(min(max(zoom, -1), 1))
+            return
+        }
+        guard known.panTilt else { throw EngineError.cameraNotRunning }
         let pan = min(max(pan, -1), 1), tilt = min(max(tilt, -1), 1)
         if pan == 0, tilt == 0 {
             try await control.stop()

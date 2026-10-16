@@ -153,6 +153,11 @@ final class ONVIFDriver: CameraDriver, Sendable {
         }
     }
 
+    /// Pan, tilt and zoom through the camera's PTZ service, when its profile has one (`ONVIFPanTilt.capabilities` asks the camera).
+    func makePanTilt() -> (any PanTiltControl)? {
+        sharedClient.map { ONVIFPanTilt(client: $0, log: Log(category: "onvif-ptz", cameraID: cameraID)) }
+    }
+
     func makeTalkbackSink() -> (any TalkbackSink)? {
         let (backchannel, cachedURL) = cache.withLock { ($0.backchannel, $0.mainStreamURL) }
         if backchannel == false { return nil }

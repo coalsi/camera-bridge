@@ -68,7 +68,7 @@ public protocol BridgeBackend: Sendable {
     /// `BridgeEngine.setCleanPicture(cameraID:clean:)`: every label the camera draws itself off, or back. Default throws.
     func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange
     /// Moves a pan/tilt camera (`BridgeEngine.panTilt`).
-    func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws
+    func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws
     /// `BridgeEngine.localIPv4Addresses()`. The default has none.
     func localIPv4Addresses() async -> [String]
     /// `BridgeEngine.portAnswer(host:port:timeout:)`. The default never reaches anything (`.silent`).
@@ -177,8 +177,8 @@ public struct EngineBackend: BridgeBackend {
         try await engine.setCleanPicture(cameraID: cameraID, clean: clean)
     }
 
-    public func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws {
-        try await engine.panTilt(cameraID: cameraID, pan: pan, tilt: tilt)
+    public func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws {
+        try await engine.panTilt(cameraID: cameraID, pan: pan, tilt: tilt, zoom: zoom)
     }
 
     public func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer {
@@ -265,7 +265,7 @@ extension BridgeBackend {
         throw EngineError.cameraNotRunning
     }
 
-    public func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws {
+    public func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws {
         throw EngineError.cameraNotRunning
     }
 }

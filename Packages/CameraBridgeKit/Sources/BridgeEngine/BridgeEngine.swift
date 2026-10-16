@@ -958,9 +958,9 @@ public final class BridgeEngine {
     /// only the engine writes. Throws `EngineError.unknownCamera`, `CameraOfflineError` for an unreachable camera, and `CancellationError`.
     /// Moves a pan/tilt camera (`pan`, `tilt` in -1…1; both 0 stops it). A move ends by itself 1.5 s after the last ask, so the page
     /// repeats it while a button is held. Throws `EngineError.cameraNotRunning` for a camera that isn't running or can't pan and tilt.
-    public func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws {
+    public func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double = 0) async throws {
         guard !isPreview, let runtime = runtimes[cameraID] else { throw EngineError.cameraNotRunning }
-        try await runtime.panTilt(pan: pan, tilt: tilt)
+        try await runtime.panTilt(pan: pan, tilt: tilt, zoom: zoom)
     }
 
     public func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange {
@@ -2128,6 +2128,7 @@ public final class BridgeEngine {
                 status.liveViewers = runtimeStatus.liveViewers
                 status.appViewers = runtimeStatus.appViewers
                 status.panTilt = runtimeStatus.panTilt
+                status.zoom = runtimeStatus.zoom
                 status.subStreamProblem = runtimeStatus.subStreamProblem
                 status.liveSessions = runtimeStatus.liveSessions
                 status.recordingSession = runtimeStatus.recordingSession

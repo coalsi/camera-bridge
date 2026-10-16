@@ -146,7 +146,7 @@ final class CountingBackend: BridgeBackend {
     func localIPv4Addresses() async -> [String] { await base.localIPv4Addresses() }
     func setPluginSecret(id: String, _ data: Data?) async throws { try await base.setPluginSecret(id: id, data) }
     func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange { try await base.setCleanPicture(cameraID: cameraID, clean: clean) }
-    func panTilt(cameraID: UUID, pan: Double, tilt: Double) async throws { try await base.panTilt(cameraID: cameraID, pan: pan, tilt: tilt) }
+    func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws { try await base.panTilt(cameraID: cameraID, pan: pan, tilt: tilt, zoom: zoom) }
     func triggerTestMotion(cameraID: UUID) async { await base.triggerTestMotion(cameraID: cameraID) }
     func pause() async { await base.pause() }
     func resume() async { await base.resume() }

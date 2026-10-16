@@ -7,6 +7,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.107',
+    date: '2026-10-16',
+    title: 'Pan, tilt and zoom for ONVIF cameras',
+    items: [
+      'ONVIF cameras that pan, tilt or zoom get the pad on the Monitor: open the camera on its own and the pad sits beside the events. Camera Bridge asks each camera what it can do, so only cameras that move show it.',
+      'One tap moves the camera one step and stops; hold an arrow to keep stepping. Nothing leaves a camera turning, so a cable never winds up.',
+      'Zoom in and out (+ and −) for cameras with a zoom lens.',
+    ],
+  },
+  {
     version: '0.1.106',
     date: '2026-10-16',
     title: 'A new logo, and a steadier start',

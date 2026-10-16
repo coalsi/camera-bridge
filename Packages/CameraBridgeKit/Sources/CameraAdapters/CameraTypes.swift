@@ -133,6 +133,30 @@ public protocol TalkbackSink: Sendable {
 public protocol PanTiltControl: Sendable {
     func move(pan: Double, tilt: Double) async throws
     func stop() async throws
+    /// What the camera can do (may ask the camera; called once when the camera starts, again until it answers). The default: pan and
+    /// tilt, no zoom.
+    func capabilities() async throws -> PanTiltCapabilities
+    /// Zooms one step in (`speed` > 0) or out (< 0), -1…1. The default throws `CameraAdapterError.unsupported`.
+    func zoom(_ speed: Double) async throws
+}
+
+/// What a camera's pan/tilt control can do.
+public struct PanTiltCapabilities: Sendable, Equatable {
+    public var panTilt: Bool
+    public var zoom: Bool
+
+    public init(panTilt: Bool, zoom: Bool) {
+        self.panTilt = panTilt
+        self.zoom = zoom
+    }
+}
+
+extension PanTiltControl {
+    public func capabilities() async throws -> PanTiltCapabilities { PanTiltCapabilities(panTilt: true, zoom: false) }
+
+    public func zoom(_ speed: Double) async throws {
+        throw CameraAdapterError.unsupported("this camera has no zoom")
+    }
 }
 
 public protocol CameraDriver: Sendable {

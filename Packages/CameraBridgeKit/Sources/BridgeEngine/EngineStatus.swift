@@ -82,6 +82,8 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     public var appViewers: Int
     /// The camera pans and tilts, and the bridge can move it (`BridgeEngine.panTilt`).
     public var panTilt = false
+    /// The camera zooms, and the bridge can zoom it.
+    public var zoom = false
     public var lastEvent: String?
     public var lastEventDate: Date?
     public var lastError: String?

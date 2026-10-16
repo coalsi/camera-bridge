@@ -239,6 +239,8 @@ struct CameraStatusResource: Encodable {
     var appViewers: Int
     /// The camera pans and tilts (`POST cameras/:id/pan-tilt`).
     var panTilt: Bool
+    /// The camera zooms (`POST cameras/:id/pan-tilt {zoom}`).
+    var zoom: Bool
     var lastEvent: String?
     var lastEventDate: Date?
     var lastError: String?
@@ -267,6 +269,7 @@ struct CameraStatusResource: Encodable {
         liveViewers = status.liveViewers
         appViewers = status.appViewers
         panTilt = status.panTilt
+        zoom = status.zoom
         lastEvent = status.lastEvent
         lastEventDate = status.lastEventDate
         lastError = status.lastError.map { Redact.string($0) }

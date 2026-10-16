@@ -181,3 +181,6 @@
 .mon-ptz-status { margin: 0; max-width: 160px; font-size: 0.78rem; color: var(--mon-dim); text-align: center; }
 .mon-ptz-status:empty { display: none; }
 @media (max-width: 900px) { .mon-bottom[data-ptz="true"] { grid-template-columns: minmax(0, 1fr); } }
+.mon-ptz-zoom { display: grid; grid-template-columns: repeat(2, 44px); gap: 6px; }
+.mon-ptz-zoom[hidden] { display: none; }
+.mon-ptz-btn.zoomIn, .mon-ptz-btn.zoomOut { font-size: 20px; font-weight: 600; }

@@ -257,8 +257,9 @@ export function renderNVR({ params, navigate, setTitle }) {
     allButton.hidden = soloId === null;
     cameraLink.hidden = soloId === null;
     if (soloId !== null) cameraLink.setAttribute('href', `#/camera/${soloId}`);
-    const turns = soloId !== null && cameraList().find((camera) => camera.id === soloId)?.status?.panTilt === true;
-    panTilt.setCamera(turns ? soloId : null);
+    const soloStatus = soloId !== null ? cameraList().find((camera) => camera.id === soloId)?.status : null;
+    const turns = soloStatus?.panTilt === true;
+    panTilt.setCamera(turns ? soloId : null, { zoom: soloStatus?.zoom === true });
     setData(bottom, 'ptz', String(turns));
     grid.hidden = view.noCameras;
     emptyHost.hidden = !view.noCameras;

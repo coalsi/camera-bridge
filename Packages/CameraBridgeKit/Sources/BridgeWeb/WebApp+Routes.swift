@@ -940,6 +940,8 @@ extension WebApp {
     private struct PanTiltBody: Decodable {
         var pan: Double
         var tilt: Double
+        /// One zoom step: positive in, negative out (pan and tilt are then ignored).
+        var zoom: Double?
     }
 
     /// `POST cameras/:id/pan-tilt {pan, tilt}` (-1…1 each; both 0 stops): moves a pan/tilt camera for 1.5 s; the page repeats it while a
@@ -947,14 +949,15 @@ extension WebApp {
     func panTilt(_ ctx: RequestContext) async throws -> HTTPResponse {
         let id = try ctx.uuid("id")
         let body = try decode(PanTiltBody.self, from: ctx)
-        guard body.pan.isFinite, body.tilt.isFinite, abs(body.pan) <= 1, abs(body.tilt) <= 1 else {
+        let zoom = body.zoom ?? 0
+        guard body.pan.isFinite, body.tilt.isFinite, zoom.isFinite, abs(body.pan) <= 1, abs(body.tilt) <= 1, abs(zoom) <= 1 else {
             throw APIError.badRequest("Pan and tilt are numbers from -1 to 1.", field: "pan")
         }
         guard await backend.overview().configurations.contains(where: { $0.id == id }) else {
             throw APIError.notFound("There is no camera with this identifier.")
         }
         do {
-            try await backend.panTilt(cameraID: id, pan: body.pan, tilt: body.tilt)
+            try await backend.panTilt(cameraID: id, pan: body.pan, tilt: body.tilt, zoom: zoom)
         } catch EngineError.cameraNotRunning {
             throw APIError(status: 409, code: "no_pan_tilt", message: "This camera can’t pan and tilt right now.")
         } catch {

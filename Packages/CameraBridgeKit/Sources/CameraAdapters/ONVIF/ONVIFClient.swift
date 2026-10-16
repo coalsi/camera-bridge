@@ -29,6 +29,8 @@ struct ONVIFProfile: Sendable, Equatable {
     var audioEncoding: String?
     /// Hz.
     var audioSampleRate: Int?
+    /// The profile carries a PTZ configuration (the camera pans, tilts or zooms through it).
+    var ptzConfigured = false
 
     var videoCodec: VideoCodec? {
         switch videoEncoding?.uppercased() {
@@ -315,7 +317,8 @@ actor ONVIFClient {
                                 width: CameraNumbers.dimension(video?.string("Resolution", "Width")),
                                 height: CameraNumbers.dimension(video?.string("Resolution", "Height")),
                                 frameRate: CameraNumbers.frameRate(video?.string("RateControl", "FrameRateLimit").flatMap(Double.init)),
-                                audioEncoding: audio?.string("Encoding"), audioSampleRate: CameraNumbers.sampleRate(audio?.string("SampleRate")))
+                                audioEncoding: audio?.string("Encoding"), audioSampleRate: CameraNumbers.sampleRate(audio?.string("SampleRate")),
+                                ptzConfigured: profile.child("PTZConfiguration") != nil)
         }
     }
 
