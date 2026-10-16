@@ -2,11 +2,15 @@
 
 ## Logo
 
-`camera-bridge-logo.svg` (200 × 200 viewBox): the Golden Gate Bridge seen through a camera lens. A covered-bridge red ring, a near-black lens, a
-cream suspension bridge (Art Deco towers with crossbeams, one main cable, suspenders, deck), a deep-red inner rim and a faint cream glint.
+`camera-bridge-logo.svg` (200 × 200 viewBox): a professional camera lens seen from the front, with the Golden Gate Bridge through its glass.
+A black ribbed barrel (focus ring), a thin bridge-red ring, white markings around the front ring ("CAMERA BRIDGE 24–70mm 1:2.8" and
+"ULTRASONIC · ⌀82mm · MACRO 0.38m/1.25ft": our own name, never a real lens maker's), and the glass with the bridge bent by the wide-angle lens:
+towers, cables, suspenders and the deck's side truss in International Orange (`#C0362C`, lighter `#E0573F` for cables), the grey road deck
+(`#8C8F95`), the bay (`#0B2733`) with the towers' reflection and a little fog, a highlight and the purple and green glare of coated glass.
 
-At small sizes (32 px and below: favicons, menu bar), use a simplified variant: thicker cable and deck, towers without the small crossbeams,
-three to five suspenders, no glint. The menu bar template is a single-colour (black, alpha) version of the same shape.
+`camera-bridge-logo-small.svg` is the icon size (favicons, 64 px and below, the web sidebar): no markings or ribs, a thick red ring, the dark
+glass and a bolder orange bridge with its grey road. The Mac app icon puts the logo on a dark tile. The menu bar template is a single-colour lens
+ring with a simple bridge.
 
 ## Colours
 

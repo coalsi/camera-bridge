@@ -9,7 +9,7 @@ Output (into the directory given as argv[2]):
   menubar_<px>.html       the menu bar template mark at <px> pixels
   brandmark.html          the in-app vector mark (rendered to PDF, so the asset stays vector)
 
-Usage: compose_brand_assets.py <brand dir> <out dir>   (env CB_ICON=dark|red picks the tile style; default red)
+Usage: compose_brand_assets.py <brand dir> <out dir>   (env CB_ICON=dark|red picks the tile style; default dark: the lens logo on a black tile)
 """
 import math
 import os
@@ -78,7 +78,7 @@ def page(svg: str) -> str:
 
 TILE = 824          # Apple's macOS icon grid: an 824 pt tile centred in the 1024 canvas (100 pt margin for the shadow)
 RADIUS = 185
-STYLE = os.environ.get("CB_ICON", "red")
+STYLE = os.environ.get("CB_ICON", "dark")
 
 
 def icon_svg(px: int) -> str:

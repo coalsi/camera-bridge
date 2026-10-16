@@ -1,25 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="512" height="512" role="img" aria-labelledby="t">
-  <title id="t">Camera Bridge (small sizes)</title>
-  <!-- Simplified variant of CameraBridgeLogo.svg for 64 px and below: thicker cable and deck, solid towers without crossbeams,
-       five suspenders, no glint, no hairline details. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="64" height="64">
+  <title>Camera Bridge</title>
   <defs>
-    <clipPath id="lens"><circle cx="100" cy="100" r="72"/></clipPath>
+    <radialGradient id="glass" cx="42%" cy="38%" r="70%"><stop offset="0" stop-color="#26303F"/><stop offset="0.6" stop-color="#10131A"/><stop offset="1" stop-color="#040506"/></radialGradient>
+    <clipPath id="g"><circle cx="100" cy="100" r="74"/></clipPath>
   </defs>
-  <circle cx="100" cy="100" r="94" fill="#9E2B20"/>
-  <circle cx="100" cy="100" r="74" fill="#151517"/>
-  <g clip-path="url(#lens)" fill="none" stroke="#EFE6D8" stroke-linecap="butt">
-    <path d="M67,46 Q100,166 133,46" stroke-width="8"/>
-    <path d="M67,46 Q48,98 20,126" stroke-width="8"/>
-    <path d="M133,46 Q152,98 180,126" stroke-width="8"/>
-    <g stroke-width="4.5">
-      <line x1="80" y1="84" x2="80" y2="124"/><line x1="90" y1="100" x2="90" y2="124"/><line x1="100" y1="106" x2="100" y2="124"/>
-      <line x1="110" y1="100" x2="110" y2="124"/><line x1="120" y1="84" x2="120" y2="124"/>
-    </g>
+  <circle cx="100" cy="100" r="98" fill="#141416"/>
+  <circle cx="100" cy="100" r="88" fill="none" stroke="#9E2B20" stroke-width="9"/>
+  <circle cx="100" cy="100" r="74" fill="url(#glass)"/>
+  <g clip-path="url(#g)">
+    <path d="M20,122 Q100,158 180,122 L180,180 L20,180 Z" fill="#0B2733"/>
   </g>
-  <g clip-path="url(#lens)" fill="#EFE6D8">
-    <rect x="20" y="120" width="160" height="14"/>
-    <rect x="59" y="38" width="16" height="120" rx="2"/>
-    <rect x="125" y="38" width="16" height="120" rx="2"/>
+  <g clip-path="url(#g)" fill="none" stroke-linecap="round">
+    <path d="M66,38 Q58,100 68,176" stroke="#C0362C" stroke-width="13"/>
+    <path d="M134,38 Q142,100 132,176" stroke="#C0362C" stroke-width="13"/>
+    <path d="M68,42 Q100,138 132,42" stroke="#E0573F" stroke-width="8"/>
+    <path d="M68,42 Q46,96 16,118" stroke="#E0573F" stroke-width="8"/><path d="M132,42 Q154,96 184,118" stroke="#E0573F" stroke-width="8"/>
+    <path d="M20,123 Q100,158 180,123" stroke="#C0362C" stroke-width="14"/>
+    <path d="M20,115 Q100,150 180,115" stroke="#8C8F95" stroke-width="5"/>
   </g>
-  <circle cx="100" cy="100" r="74" fill="none" stroke="#6E1A14" stroke-width="5"/>
+  <path d="M46,86 A60,60 0 0 1 96,36 A66,66 0 0 0 56,94 Z" fill="#FFFFFF" opacity="0.28"/>
 </svg>

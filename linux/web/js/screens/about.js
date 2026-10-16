@@ -26,7 +26,7 @@ export function renderAbout() {
     else if (update.checked) state = h('span', { class: 'pill idle' }, `Up to date · checked ${timeAgo(update.checked)}`);
     const row = (k, v) => v ? [h('dt', null, k), h('dd', null, v)] : null;
     return h('section', { class: 'card about-head' },
-      h('img', { src: '/mark.svg', alt: '', width: 64, height: 64 }),
+      h('img', { src: '/mark.svg?v=3', alt: '', width: 64, height: 64 }),
       h('div', { class: 'about-id' },
         h('h2', null, info.product || 'Camera Bridge OS'),
         h('p', { class: 'about-version' }, `Version ${info.version}`, String(info.version).startsWith('0.') ? h('span', { class: 'pill info', title: 'Versions before 1.0 are betas: the interface is still being refined.' }, 'Beta') : null),

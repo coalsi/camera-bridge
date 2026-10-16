@@ -13,6 +13,8 @@ extension WebApp {
         var summary: String
         var needs: String
         var caution: String?
+        var needsInternet: Bool
+        var internetNote: String?
         var enabled: Bool
         var account: String?
         var lastSync: Date?
@@ -23,7 +25,8 @@ extension WebApp {
         let states = await backend.overview().settings.plugins
         let items = PluginCatalog.all.map { plugin in
             let state = states[plugin.id] ?? PluginState()
-            return PluginItem(id: plugin.id, name: plugin.name, summary: plugin.summary, needs: plugin.needs, caution: plugin.caution, enabled: state.enabled,
+            return PluginItem(id: plugin.id, name: plugin.name, summary: plugin.summary, needs: plugin.needs, caution: plugin.caution,
+                              needsInternet: plugin.needsInternet, internetNote: plugin.internetNote, enabled: state.enabled,
                               account: state.account, lastSync: state.lastSync, lastError: state.lastError)
         }
         return .json(["plugins": items])

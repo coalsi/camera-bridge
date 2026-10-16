@@ -514,3 +514,10 @@ a.version:hover { color: var(--text); text-decoration: underline; }
 
 /* eufy plugin: the captcha picture eufy asks to type */
 .eufy-captcha { display: block; max-width: 100%; height: auto; min-height: 48px; border-radius: 8px; background: #fff; border: 1px solid var(--border); }
+
+/* Plugins: "Needs internet" — the warning colour (not an error, not the brand) on plugins that use the maker's cloud. */
+.pill.internet { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.pill.internet svg { width: 13px; height: 13px; }
+.plugin-internet { color: var(--text-2); margin: 4px 0 0; }
+.plugin-internet-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: -6px 0 14px; }
+.plugin-internet-head .plugin-internet { margin: 0; flex: 1 1 320px; }

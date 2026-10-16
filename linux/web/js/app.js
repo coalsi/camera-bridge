@@ -139,7 +139,7 @@ function buildShell() {
   root.classList.add('signed-in');
   replace(root,
     h('aside', { class: 'sidebar' },
-      h('a', { class: 'brand', href: '#/', title: store.session.bridgeName }, h('img', { src: '/mark-small.svg', alt: '', width: 30, height: 30 }), name),
+      h('a', { class: 'brand', href: '#/', title: store.session.bridgeName }, h('img', { src: '/mark-small.svg?v=3', alt: '', width: 30, height: 30 }), name),
       nav,
       h('div', { class: 'sidebar-foot' }, theme, power, version)),
     h('div', { class: 'app-main' }, reconnect, notice, main));

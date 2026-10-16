@@ -74,7 +74,7 @@ export function renderSetup({ session, onDone }) {
 
   return h('main', { class: 'center-page', id: 'main' },
     h('div', { class: 'card center-card' },
-      h('img', { class: 'logo', src: '/mark.svg', alt: '' }),
+      h('img', { class: 'logo', src: '/mark.svg?v=3', alt: '' }),
       h('h1', null, 'Welcome to Camera Bridge'),
       h('p', { class: 'lede' }, 'This box turns your IP cameras into Apple Home cameras, with HomeKit Secure Video recording. Let’s set it up: name it and choose a password. You’ll use the password to sign in from any phone or computer on this network.'),
       form));
@@ -124,7 +124,7 @@ export function renderLogin({ bridgeName, onSignedIn }) {
 
   return h('main', { class: 'center-page', id: 'main' },
     h('div', { class: 'card center-card' },
-      h('img', { class: 'logo', src: '/mark.svg', alt: '' }),
+      h('img', { class: 'logo', src: '/mark.svg?v=3', alt: '' }),
       h('h1', null, bridgeName),
       h('p', { class: 'lede' }, 'Sign in to see your cameras.'),
       form));

@@ -52,7 +52,7 @@ import TestSupport
     @Test(arguments: [
         ("/app/main.js", "text/javascript; charset=utf-8", "no-cache"),
         ("/app/style.css", "text/css; charset=utf-8", "no-cache"),
-        ("/icon.svg", "image/svg+xml", "public, max-age=86400"),
+        ("/icon.svg", "image/svg+xml", "no-cache"),
         ("/logo.png", "image/png", "public, max-age=86400"),
         ("/site.webmanifest", "application/manifest+json; charset=utf-8", "no-cache"),
     ])

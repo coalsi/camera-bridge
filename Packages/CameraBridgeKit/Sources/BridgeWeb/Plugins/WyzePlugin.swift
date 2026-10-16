@@ -58,9 +58,13 @@ actor WyzePlugin {
     /// The sync under way: callers that come while it runs wait for the same one.
     private var running: Task<[WyzeDevice], any Error>?
 
-    init(backend: any BridgeBackend, cloud: WyzeCloud = WyzeCloud()) {
+    /// The neighbour table's text (`NeighborTable.read`; nil off Linux). Tests give their own.
+    private let neighbors: @Sendable () -> String?
+
+    init(backend: any BridgeBackend, cloud: WyzeCloud = WyzeCloud(), neighbors: @escaping @Sendable () -> String? = { NeighborTable.read() }) {
         self.backend = backend
         self.cloud = cloud
+        self.neighbors = neighbors
     }
 
     // MARK: State
@@ -306,7 +310,7 @@ actor WyzePlugin {
     /// Where each camera is now: its MAC in the system's neighbour table; failing that the address Wyze reports is tried, and failing that
     /// the local subnets are swept once so the table learns every host.
     private func locate() async {
-        var table = NeighborTable.read() ?? ""
+        var table = neighbors() ?? ""
         // Only the cameras the bridge can connect to are looked for (a model it can't read has nothing to find).
         let wanted = devices.filter { $0.connection != .unsupported }
         var missing = wanted.filter { NeighborTable.ipv4(forMAC: $0.mac, in: table) == nil }
@@ -317,17 +321,17 @@ actor WyzePlugin {
                     group.addTask { [backend] in _ = await backend.portAnswer(host: ip, port: 554, timeout: .milliseconds(800)) }
                 }
             }
-            table = NeighborTable.read() ?? table
+            table = neighbors() ?? table
             missing = wanted.filter { NeighborTable.ipv4(forMAC: $0.mac, in: table) == nil }
         }
-        if !missing.isEmpty, NeighborTable.read() != nil {
+        if !missing.isEmpty, neighbors() != nil {
             await sweep()
-            table = NeighborTable.read() ?? table
+            table = neighbors() ?? table
         }
         var found: [String: String] = [:]
         for device in devices {
             // No neighbour table (not Linux): trust what Wyze reports.
-            if let ip = NeighborTable.read() == nil ? device.ip : NeighborTable.ipv4(forMAC: device.mac, in: table) {
+            if let ip = neighbors() == nil ? device.ip : NeighborTable.ipv4(forMAC: device.mac, in: table) {
                 found[Self.normalized(device.mac)] = ip
             }
         }

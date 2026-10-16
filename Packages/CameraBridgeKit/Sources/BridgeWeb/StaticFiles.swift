@@ -81,7 +81,8 @@ final class StaticFiles: Sendable {
 
     private static func cacheControl(for path: String) -> String {
         switch URL(fileURLWithPath: path).pathExtension.lowercased() {
-        case "png", "jpg", "jpeg", "svg", "ico", "woff2", "webp": "public, max-age=86400"
+        // SVG is the logo and the icons, which change with the brand: revalidated (an ETag answer is tiny), never kept stale for a day.
+        case "png", "jpg", "jpeg", "ico", "woff2", "webp": "public, max-age=86400"
         default: "no-cache"
         }
     }

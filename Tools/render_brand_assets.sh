@@ -6,7 +6,7 @@
 #   1. App icon (AppIcon.appiconset, 16...1024 @1x/@2x): a macOS-style tile (824 pt squircle in a 1024 canvas, bridge red with
 #      a soft top highlight and shadow) with the logo's lens filling it: the logo's red ring is the tile itself. 128 px and up
 #      use the full logo, 64 px and below CameraBridgeLogoSmall.svg (thicker cable and deck, no crossbeams or glint). Each size
-#      is rendered at its own pixel size by headless Chrome. (CB_ICON=dark builds the logo on a dark tile instead.)
+#      is rendered at its own pixel size by headless Chrome. (The lens logo sits on a dark tile; CB_ICON=red puts it on a red one.)
 #   2. Menu bar template mark (MenuBarIcon.imageset, 18 pt @1x/@2x/@3x): CameraBridgeMenuBarMark.svg, a lens ring and a simple
 #      suspension bridge, black, alpha only.
 #   3. In-app vector mark (BrandMark.imageset/BrandMark.pdf): the full logo as authored, for the sidebar, onboarding, About.

@@ -17,8 +17,10 @@ export function renderPlugins({ navigate }) {
       if (destroyed) return;
       replace(root, plugins.map((plugin) => h('div', { class: 'card plugin-card' },
         h('div', { class: 'plugin-head' }, h('h2', null, plugin.name),
+          plugin.needsInternet ? internetBadge() : null,
           plugin.account ? h('span', { class: 'pill live' }, plugin.account) : h('span', { class: 'pill idle' }, plugin.enabled ? 'On' : 'Off')),
         h('p', { class: 'desc' }, plugin.summary),
+        plugin.internetNote ? h('p', { class: 'small plugin-internet' }, plugin.internetNote) : null,
         h('p', { class: 'small muted' }, plugin.needs),
         plugin.lastError ? h('p', { class: 'problems' }, plugin.lastError) : null,
         switchRow({ title: 'Use this plugin', checked: plugin.enabled, onchange: async (on) => {
@@ -37,6 +39,24 @@ export function renderPlugins({ navigate }) {
       root),
     destroy() { destroyed = true; },
   };
+}
+
+/** The plugin needs the vendor's cloud: Camera Bridge itself works without the internet, so it is said plainly. */
+function internetBadge() {
+  return h('span', { class: 'pill internet', title: 'This plugin uses the camera maker’s cloud' }, icon('network'), 'Needs internet');
+}
+
+/** The badge and its sentence at the top of a plugin's own page. */
+function internetNotice(id) {
+  const note = h('p', { class: 'small plugin-internet' });
+  const el = h('div', { class: 'plugin-internet-head', hidden: true }, internetBadge(), note);
+  get('plugins').then(({ plugins }) => {
+    const plugin = plugins.find((p) => p.id === id);
+    if (!plugin?.needsInternet) return;
+    note.textContent = plugin.internetNote || '';
+    el.hidden = false;
+  }).catch(() => {});
+  return el;
 }
 
 const KIND_WORDS = { authenticatorApp: 'Authenticator app', textMessage: 'Text message', email: 'Email' };
@@ -181,6 +201,7 @@ export function renderWyzePlugin({ navigate }) {
     el: h('div', null,
       h('a', { class: 'breadcrumb', href: '#/plugins' }, icon('back'), 'Plugins'),
       h('div', { class: 'page-head' }, h('h1', null, 'Wyze')),
+      internetNotice('wyze'),
       root),
     destroy() { destroyed = true; },
   };
@@ -322,6 +343,7 @@ export function renderEufyPlugin({ navigate }) {
     el: h('div', null,
       h('a', { class: 'breadcrumb', href: '#/plugins' }, icon('back'), 'Plugins'),
       h('div', { class: 'page-head' }, h('h1', null, 'eufy')),
+      internetNotice('eufy'),
       root),
     destroy() { destroyed = true; },
   };

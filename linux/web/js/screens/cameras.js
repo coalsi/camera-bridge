@@ -148,7 +148,7 @@ export function renderCameras() {
     if (!cameras.length) {
       summary.textContent = '';
       replace(content, h('div', { class: 'empty' },
-        h('img', { src: '/mark.svg', alt: '' }),
+        h('img', { src: '/mark.svg?v=3', alt: '' }),
         h('h2', null, 'No cameras yet'),
         h('p', null, 'Add an ONVIF or RTSP camera and it shows up in the Apple Home app, with live view and HomeKit Secure Video recording. It only takes a minute.'),
         h('a', { class: 'btn primary', href: '#/add' }, icon('plus'), 'Add your first camera')));

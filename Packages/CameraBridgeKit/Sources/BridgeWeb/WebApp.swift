@@ -35,6 +35,8 @@ public struct WebConfiguration: Sendable {
     public var offersDemoCamera: Bool
     /// How the Wyze plugin reaches Wyze's servers (tests give a fake); nil: the real servers.
     public var wyzeTransport: (any WyzeTransport)? = nil
+    /// The neighbour table the Wyze plugin reads (tests give a fixed one); nil: the system's.
+    public var wyzeNeighborTable: (@Sendable () -> String?)? = nil
     /// How the eufy plugin reaches its helper (tests give a fake); nil: the real `eufy-bridge` (`EufyBridge.shared`).
     public var eufyBridge: (any EufyBridgeCalling)? = nil
     public var diagnosticsContext: @Sendable (_ launched: Date) -> DiagnosticsContext
@@ -188,7 +190,8 @@ public final class WebApp: Sendable {
         hub = EventHub(backend: backend, interval: configuration.eventInterval)
         files = StaticFiles(directory: configuration.staticDirectory)
         launched = Date()
-        wyze = WyzePlugin(backend: backend, cloud: configuration.wyzeTransport.map { WyzeCloud(transport: $0) } ?? WyzeCloud())
+        wyze = WyzePlugin(backend: backend, cloud: configuration.wyzeTransport.map { WyzeCloud(transport: $0) } ?? WyzeCloud(),
+                          neighbors: configuration.wyzeNeighborTable ?? { NeighborTable.read() })
         eufy = EufyPlugin(backend: backend, bridge: configuration.eufyBridge ?? EufyBridge.shared)
     }
 

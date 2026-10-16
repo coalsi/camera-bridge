@@ -43,7 +43,10 @@ final class FakeWyzeServer: WyzeTransport, Sendable {
     }
 
     static func harness(_ backend: FakeBackend = FakeBackend(), server: FakeWyzeServer = server()) throws -> Harness {
-        try Harness(backend: backend) { $0.wyzeTransport = server }
+        try Harness(backend: backend) {
+            $0.wyzeTransport = server
+            $0.wyzeNeighborTable = { nil }   // as on a Mac: the addresses Wyze reports (the CI's Linux has a real table)
+        }
     }
 
     nonisolated(unsafe) static let signInBody: [String: Any] = ["email": "someone@example.com", "password": "Hunter2-Secret!", "keyID": "KEYID-1", "apiKey": "APIKEY-SECRET"]

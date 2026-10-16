@@ -1,24 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-labelledby="cb-mark-small-t">
-  <title id="cb-mark-small-t">Camera Bridge</title>
-  <!-- The small-size logo (32 px and below: favicon, the sidebar): thicker cable and deck, towers without crossbeams, four suspenders, no glint. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="64" height="64">
+  <title>Camera Bridge</title>
   <defs>
-    <clipPath id="cb-mark-small-lens"><circle cx="100" cy="100" r="70"/></clipPath>
+    <radialGradient id="glass" cx="42%" cy="38%" r="70%"><stop offset="0" stop-color="#26303F"/><stop offset="0.6" stop-color="#10131A"/><stop offset="1" stop-color="#040506"/></radialGradient>
+    <clipPath id="g"><circle cx="100" cy="100" r="74"/></clipPath>
   </defs>
-  <circle cx="100" cy="100" r="96" fill="#9E2B20"/>
-  <circle cx="100" cy="100" r="72" fill="#151517"/>
-  <g clip-path="url(#cb-mark-small-lens)" fill="none" stroke="#EFE6D8" stroke-linecap="round">
-    <path d="M69,50 Q100,150 131,50" stroke-width="8"/>
-    <path d="M69,50 Q50,96 22,124" stroke-width="8"/>
-    <path d="M131,50 Q150,96 178,124" stroke-width="8"/>
-    <g stroke-width="5">
-      <line x1="87" y1="92" x2="87" y2="122"/><line x1="113" y1="92" x2="113" y2="122"/>
-      <line x1="50" y1="92" x2="50" y2="122"/><line x1="150" y1="92" x2="150" y2="122"/>
-    </g>
+  <circle cx="100" cy="100" r="98" fill="#141416"/>
+  <circle cx="100" cy="100" r="88" fill="none" stroke="#9E2B20" stroke-width="9"/>
+  <circle cx="100" cy="100" r="74" fill="url(#glass)"/>
+  <g clip-path="url(#g)">
+    <path d="M20,122 Q100,158 180,122 L180,180 L20,180 Z" fill="#0B2733"/>
   </g>
-  <g clip-path="url(#cb-mark-small-lens)" fill="#EFE6D8">
-    <rect x="20" y="120" width="160" height="13"/>
-    <rect x="60" y="40" width="7" height="114"/><rect x="71" y="40" width="7" height="114"/><rect x="59" y="36" width="20" height="7" rx="1.5"/>
-    <rect x="122" y="40" width="7" height="114"/><rect x="133" y="40" width="7" height="114"/><rect x="121" y="36" width="20" height="7" rx="1.5"/>
+  <g clip-path="url(#g)" fill="none" stroke-linecap="round">
+    <path d="M66,38 Q58,100 68,176" stroke="#C0362C" stroke-width="13"/>
+    <path d="M134,38 Q142,100 132,176" stroke="#C0362C" stroke-width="13"/>
+    <path d="M68,42 Q100,138 132,42" stroke="#E0573F" stroke-width="8"/>
+    <path d="M68,42 Q46,96 16,118" stroke="#E0573F" stroke-width="8"/><path d="M132,42 Q154,96 184,118" stroke="#E0573F" stroke-width="8"/>
+    <path d="M20,123 Q100,158 180,123" stroke="#C0362C" stroke-width="14"/>
+    <path d="M20,115 Q100,150 180,115" stroke="#8C8F95" stroke-width="5"/>
   </g>
-  <circle cx="100" cy="100" r="72" fill="none" stroke="#6E1A14" stroke-width="6"/>
+  <path d="M46,86 A60,60 0 0 1 96,36 A66,66 0 0 0 56,94 Z" fill="#FFFFFF" opacity="0.28"/>
 </svg>

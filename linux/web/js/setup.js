@@ -62,7 +62,7 @@ function form(state) {
 }
 
 function done(ssid) {
-  replace(root, h('img', { src: '/mark.svg', alt: '', width: 56, height: 56 }), h('h1', null, 'Joining your network'),
+  replace(root, h('img', { src: '/mark.svg?v=3', alt: '', width: 56, height: 56 }), h('h1', null, 'Joining your network'),
     h('div', { class: 'card' },
       h('p', null, `The box is restarting to join “${ssid}”. That takes about a minute.`),
       h('ol', { class: 'steps' },
@@ -74,10 +74,10 @@ function done(ssid) {
 async function start() {
   try {
     const state = await call('GET');
-    replace(root, h('img', { src: '/mark.svg', alt: '', width: 56, height: 56 }), h('h1', null, 'Connect Camera Bridge to your Wi-Fi'),
+    replace(root, h('img', { src: '/mark.svg?v=3', alt: '', width: 56, height: 56 }), h('h1', null, 'Connect Camera Bridge to your Wi-Fi'),
       state.networks.length === 0 ? h('p', { class: 'muted' }, 'No network was found. You can type its name below.') : null, form(state));
   } catch (error) {
-    replace(root, h('img', { src: '/mark.svg', alt: '', width: 56, height: 56 }), h('h1', null, 'Camera Bridge'), h('p', null, error.message),
+    replace(root, h('img', { src: '/mark.svg?v=3', alt: '', width: 56, height: 56 }), h('h1', null, 'Camera Bridge'), h('p', null, error.message),
       h('p', null, h('a', { class: 'btn', href: '/' }, 'Open Camera Bridge')));
   }
 }
