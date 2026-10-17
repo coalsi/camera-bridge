@@ -28,6 +28,7 @@ export const RELEASE_NOTES = [
       'Battery cameras show their charge and whether they are charging from solar or a cable. Camera events are kept with the recordings, so the Monitor’s events list covers the whole timeline.',
       'Set up for Camera Bridge checks the video the camera really sends (a camera that says H.264 but sends H.265 is fixed), turns off more cameras’ clouds, and can require a password for video on cameras that play it without one.',
       'The OS beta is one product now: About shows “Camera Bridge OS beta” with the build, and what changed by day.',
+      'Fixed: after a factory reset, SSH could stay on until the next restart.',
     ],
   },
   {

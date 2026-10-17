@@ -3,9 +3,13 @@ Description=Camera Bridge factory reset (marker file on the boot partition)
 # A file named camera-bridge-factory-reset on the FAT boot partition (readable from any Mac, Windows or Linux PC) wipes
 # the settings and HomeKit pairings on the next boot. The marker is removed first, so a failed wipe cannot loop.
 # (The boot partition is found with bootctl: gpt-auto mounts it at /boot or /efi.)
-After=var-lib-camera\x2dbridge.mount
+# The wipe removes the SSH flag and the guard's list, so it finishes before anything reads them: otherwise SSH could stay on after a reset
+# (camera-bridge-ssh opened port 22 and sshd started first), or a VM's credential could lose it half way (CI, 2026-10-17: "ssh did not come
+# back after the reset", the wipe landed between ssh-enable's flag and its firewall rule).
+After=var-lib-camera\x2dbridge.mount srv.mount
 Requires=var-lib-camera\x2dbridge.mount
 Before=camera-bridge-firstboot.service camerabridged.service
+Before=camera-bridge-ssh.service camera-bridge-credentials.service ssh.service camera-bridge-guard.service
 
 [Service]
 Type=oneshot

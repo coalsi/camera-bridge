@@ -257,6 +257,17 @@ wait_ssh() {
 
 dump_serial() { echo "  --- last serial output ---"; tail -40 "$work/serial.log" | sed 's/^/  | /'; }
 
+# ssh_why: when SSH does not answer, says which part is missing. QEMU's port forward always accepts, then: a banner means sshd runs (so it
+# is the key), a quick close means nothing listens on 22 (sshd did not start), and silence means the firewall drops it (port 22 not open).
+ssh_why() {
+    local start banner
+    start=$(date +%s)
+    banner=$(timeout 8 bash -c "exec 3<>/dev/tcp/127.0.0.1/$ssh_port && head -c 32 <&3" 2>/dev/null | tr -d '\r\n' || true)
+    if [ -n "$banner" ]; then echo "  (sshd answers \"$banner\": the key was not accepted)"
+    elif [ $(($(date +%s) - start)) -lt 6 ]; then echo "  (nothing listens on port 22: sshd did not start)"
+    else echo "  (no answer on port 22: the firewall drops it, so port 22 was not opened)"; fi
+}
+
 selected() { case ",$tests," in *",$1,"*) return 0 ;; esac; return 1; }
 
 # --- helpers of the nvr tests (their web client is test-nvr.py; docs/linux/BUILDING.md describes the tests) ---------------------
@@ -683,7 +694,9 @@ if selected nvr; then
         # What the daemon made on the data partition: as the camerabridge user, private, on the data partition itself.
         ssh_has "stat -c %U:%G:%a $rec" '^camerabridge:camerabridge:700$' && ok "the recordings folder was made by the daemon: camerabridge, mode 700" || no "the recordings folder is not camerabridge:camerabridge 700"
         [ "$(ssh_run "findmnt -no SOURCE -T $rec | sed 's/\[.*//'")" = "$(ssh_run "findmnt -no SOURCE /srv | sed 's/\[.*//'")" ] && ok "it is on the data partition" || no "the recordings folder is not on the data partition"
-        [ "$(ssh_run "ls -A $rec")" = "$cam" ] && ok "it holds one folder, named after the camera's ID in upper case" || no "the recordings folder holds: $(ssh_run "ls -A $rec" | tr '\n' ' ')"
+        # Besides the camera's folder only the hidden event log (.events/<camera>/<day>.jsonl, ArchiveEventLog) may be there.
+        [ "$(ssh_run "ls -A $rec | grep -vx .events")" = "$cam" ] && ok "it holds one camera folder, named after the camera's ID in upper case (and the event log)" || no "the recordings folder holds: $(ssh_run "ls -A $rec" | tr '\n' ' ')"
+        ssh_has "stat -c %U:%a $rec/.events 2>/dev/null || echo none" '^(camerabridge:700|none)$' && ok "the event log folder is private (camerabridge, 700) or not made yet" || no "the event log folder is not camerabridge 700"
         ssh_run "jq -e --arg id '$(nvr_state camera)' '(.id | ascii_downcase) == \$id and (.name | length) > 0' $rec/$cam/camera.json" >/dev/null 2>&1 && ok "camera.json names the camera (id and name)" || no "camera.json is missing or wrong"
         [ "$(ssh_run "ls $rec/$cam | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}\$' | tail -1")" = "$(ssh_run 'date -u +%F')" ] && ok "the day folder is today's date in UTC" || no "no day folder for today"
         names=$(ssh_run "find $rec/$cam -type f -name '*.mp4'")
@@ -904,7 +917,7 @@ if selected factory-reset; then
     drop_ssh_master
     sleep 15
     wait_http "$boot_timeout" || { no "web UI did not come back after the reset"; dump_serial; exit 1; }
-    wait_ssh || { no "ssh did not come back after the reset"; exit 1; }
+    wait_ssh || { no "ssh did not come back after the reset"; ssh_why; dump_serial; exit 1; }
     ssh_run 'test ! -e /var/lib/camera-bridge/testfile' && ok "settings were erased" || no "settings survived the factory reset"
     [ "$(ssh_run "find $rec -mindepth 1 2>/dev/null | wc -l" | tr -d ' ')" = 0 ] && ok "recordings were erased too (the folder is empty or gone)" || no "recordings survived the factory reset"
     ssh_run "test ! -e $esp/camera-bridge-factory-reset" && ok "marker file was removed (no reset loop)" || no "marker file still there"

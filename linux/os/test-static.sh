@@ -107,6 +107,8 @@ for u in "${units[@]}"; do
     if [ -z "$out" ]; then pass "systemd-analyze verify $u"; else bad "systemd-analyze verify $u"; sed 's/^/        /' <<<"$out"; fi
 done
 
+check "a factory reset finishes before SSH and the guard read their settings" bash -c 'u=/usr/lib/systemd/system/camera-bridge-factory-reset.service; for s in camera-bridge-ssh camera-bridge-credentials ssh camera-bridge-guard; do grep -Eq "^Before=.*\b$s\.service\b" "$u" || { echo "not Before=: $s.service"; exit 1; }; done'
+
 # --- the internet guard: its DNS configuration, its job, its units ------------------------------------------------------------
 check "the guard's DNS configuration is valid (dnsmasq --test)" bash -c '/usr/sbin/cb-guard config >/tmp/guard-dnsmasq.conf && dnsmasq --test --conf-file=/tmp/guard-dnsmasq.conf'
 check "the guard's DNS answers every name \"does not exist\" and never asks anyone" bash -c 'c=$(/usr/sbin/cb-guard config); grep -qx "address=/#/" <<<"$c" && grep -qx "no-resolv" <<<"$c" && ! grep -Eq "^(server|resolv-file|listen-address)=" <<<"$c"'
