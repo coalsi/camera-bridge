@@ -1,5 +1,6 @@
 // Cameras (#/cameras): managing them. One row per camera with everything about it: a small picture (with its date and time), what it is and
-// where, whether it answers, its video, recording, events and Apple Home, and the way into its page. Watching live is the Monitor's job, so
+// where, whether it answers, its security level (security.js, with what the colours mean under the table), its video, recording, events and
+// Apple Home, and the way into its page. Watching live is the Monitor's job, so
 // the pictures here are small and refreshed slowly, and only while the row is on screen.
 import { h, replace, toast } from '../dom.js';
 import { icon } from '../icons.js';
@@ -8,16 +9,39 @@ import { cameraList, subscribe } from '../store.js';
 import { stampText } from '../stamp.js';
 import { banners } from './banners.js';
 import { kindName, lastEventText, statePill } from './common.js';
+import { securityCell, securityLegend } from './security.js';
 
 const THUMB_INTERVAL = 30_000;
+/** Below this a battery is low (the bridge's HomeKit Battery service says so too). */
+const LOW_BATTERY = 20;
+
+/** How a battery camera charges, in words: "charging from solar", "charging", or null while it runs on its battery. */
+export function batteryCharging(battery) {
+  if (!battery?.charging) return null;
+  return battery.source === 'solar' ? 'charging from solar' : 'charging';
+}
+
+/** `status.battery` ({level, charging, source}) as a small pill: "Battery 22%", "Battery 64% · charging from solar"; below 20 % in the warning
+ * colour. `word: false` leaves out "Battery" (where a label already says it). Null for a camera without a battery. */
+export function batteryPill(battery, { word = true } = {}) {
+  if (!battery || typeof battery.level !== 'number') return null;
+  const low = battery.level < LOW_BATTERY;
+  const charging = batteryCharging(battery);
+  const level = `${word ? 'Battery ' : ''}${Math.round(battery.level)}%`;
+  const text = charging ? `${level} · ${charging}` : level;
+  const name = battery.charging ? 'batteryCharging' : low ? 'batteryLow' : 'battery';
+  return h('span', { class: `pill plain${low ? ' warning' : ''}`, title: low ? `${text} (low)` : text }, icon(name, { size: 14 }), text);
+}
 
 // The last picture of each camera (its address and when it was taken), kept while the bridge's pages are visited: coming back shows it at once.
 const lastPictures = new Map();
 
 function eventsText(camera) {
   const s = camera.status;
+  // What the camera's motion comes from (a go2rtc camera can have its own events too: eufy's notifications).
+  if (camera.motionSource === 'softMotion') return 'Built-in motion detection';
+  if (camera.motionSource === 'webhook') return 'Webhook';
   if (camera.vendor === 'rtsp') return 'None (RTSP cameras send no events)';
-  if (camera.vendor === 'go2rtc') return 'Built-in motion detection';
   return s?.eventChannelConnected ? 'Connected' : 'Not connected';
 }
 
@@ -41,6 +65,7 @@ function cameraRow(camera) {
   const name = h('a', { class: 'cam-name', href: `#/camera/${camera.id}` });
   const what = h('span', { class: 'cam-what' });
   const status = h('td', { dataset: { label: 'Status' } });
+  const security = h('td', { class: 'cam-security', dataset: { label: 'Security' } });
   const video = field('Video');
   const recordHost = h('div');
   const recording = field('Recording', recordHost);
@@ -48,7 +73,7 @@ function cameraRow(camera) {
   const home = field('Apple Home');
   const row = h('tr', { dataset: { id: camera.id } },
     h('td', { class: 'cam-main' }, thumb, h('div', { class: 'cam-ident' }, name, what)),
-    status, video, recording, events, home,
+    status, security, video, recording, events, home,
     h('td', { class: 'cam-open' }, h('a', { class: 'btn small', href: `#/camera/${camera.id}` }, 'Open', icon('chevron'))));
 
   let current = camera;
@@ -85,7 +110,9 @@ function cameraRow(camera) {
     const s = next.status;
     replace(name, next.name);
     replace(what, [kindName(next), next.vendorName, next.address].filter(Boolean).join(' · '));
-    replace(status, statePill(next), s?.connection === 'offline' && s.connectionReason ? h('div', { class: 'cam-sub warn' }, s.connectionReason) : null);
+    replace(status, statePill(next), s?.connection === 'offline' && s.connectionReason ? h('div', { class: 'cam-sub warn' }, s.connectionReason) : null,
+      s?.battery ? h('div', { class: 'cam-sub' }, batteryPill(s.battery)) : null);
+    replace(security, securityCell(next));
     replace(video, s?.videoSummary || h('span', { class: 'faint' }, 'No picture yet'),
       s?.subStreamProblem ? h('div', { class: 'cam-sub warn' }, `Sub stream: ${s.subStreamProblem}`) : null);
     const rec = recordingText(next);
@@ -161,8 +188,8 @@ export function renderCameras() {
       return row;
     }));
     replace(content, h('div', { class: 'cam-table-wrap' }, h('table', { class: 'cam-table' },
-      h('thead', null, h('tr', null, ['Camera', 'Status', 'Video', 'Recording', 'Events', 'Apple Home', ''].map((t) => h('th', { scope: 'col' }, t)))),
-      body)));
+      h('thead', null, h('tr', null, ['Camera', 'Status', 'Security', 'Video', 'Recording', 'Events', 'Apple Home', ''].map((t) => h('th', { scope: 'col' }, t)))),
+      body)), securityLegend());
   }
 
   const stop = subscribe((kind, detail) => {

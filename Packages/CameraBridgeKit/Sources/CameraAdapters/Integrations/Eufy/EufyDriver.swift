@@ -60,6 +60,12 @@ final class EufyDriver: StreamHoldingDriver, Sendable {
 
     func makeTalkbackSink() -> (any TalkbackSink)? { nil }
 
+    /// What eufy's cloud last heard from the camera (the helper's `/devices`): never wakes it.
+    func batteryStatus() async -> BatteryStatus? {
+        guard !serial.isEmpty else { return nil }
+        return await bridge.battery(serial: serial)
+    }
+
     func attachStreams() async throws -> URL {
         guard let provider else { throw IntegrationError("The streaming helper isn’t available in this copy of Camera Bridge.") }
         guard await bridge.isInstalled() else { throw IntegrationError("This copy of Camera Bridge OS doesn’t include the eufy helper.") }

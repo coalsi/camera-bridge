@@ -155,6 +155,12 @@ export function createCatalog({ fetcher, now = Date.now, perf = () => performanc
       const path = `nvr/activity?cameras=${ids}&from=${milliseconds(fromMs, 'fromMs')}&binMs=${clampInteger(binMs, 1000, 86_400_000, 1000)}&bins=${clampInteger(bins, 1, 2000, 1)}`;
       return noteAnswer(await fetcher.json(path, { key, priority: 0 }));
     },
+    /** GET nvr/events?cameras=&from=&to=&limit= : the archive's events of those cameras that began in from..<to, newest first. */
+    async events({ cameras, fromMs, toMs, limit = 200, key = 'wall-events' }) {
+      const ids = cameras.slice(0, 16).map((id) => encodeURIComponent(id)).join(',');
+      const path = `nvr/events?cameras=${ids}&from=${milliseconds(fromMs, 'fromMs')}&to=${milliseconds(toMs, 'toMs')}&limit=${clampInteger(limit, 1, 1000, 200)}`;
+      return noteAnswer(await fetcher.json(path, { key, priority: 0 }));
+    },
     file: (fileKey) => files.get(fileKey),
   };
 }

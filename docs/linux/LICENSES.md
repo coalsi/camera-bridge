@@ -25,6 +25,10 @@ Camera Bridge's license apply to Camera Bridge only, and never restrict what the
 
 * Every release lists the exact packages: `camera-bridge-os-<version>-packages.txt` (binary package, version, source package,
   source version), also inside the system at `/usr/share/camera-bridge/packages.txt`.
+* When an older beta is taken off the list of releases (the newest two stay), its package list and source offer are first
+  copied to the release [`os-sources`](https://github.com/coalsi/camera-bridge/releases/tag/os-sources), as
+  `camera-bridge-os-<version>-packages.txt` and `camera-bridge-os-<version>-SOURCE-OFFER.txt`, and they stay there. Its git
+  tag stays too.
 * Debian publishes the source of every package: <https://snapshot.debian.org/> (any exact version) and
   <https://sources.debian.org/>.
 * Or ask us: write to <legal@camera-bridge.app> naming the version. The written offer is in

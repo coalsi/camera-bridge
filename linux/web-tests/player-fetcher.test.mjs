@@ -87,6 +87,78 @@ describe('caps', () => {
     await tick();
     assert.deepEqual(fetcher.stats(), { bytesInFlight: 1, jsonInFlight: 2, queued: 2 });
   });
+
+  it('setMediaCap() lowers the media cap for what starts next (nothing running is stopped) and raising it starts what waits', async () => {
+    // The Monitor's live video holds a connection of its own: while it is open the page asks for one media request less.
+    const { fetcher, calls } = setup();
+    const done = Array.from({ length: 6 }, (_, i) => fetcher.bytes(`m${i}`, { key: `k${i}` }));
+    await tick();
+    assert.equal(fetcher.stats().bytesInFlight, 3);
+    fetcher.setMediaCap(2);
+    assert.equal(fetcher.stats().bytesInFlight, 3, 'the three that run go on');
+    calls[0].resolve(bytesOf(1));
+    await done[0];
+    await tick();
+    assert.equal(fetcher.stats().bytesInFlight, 2, 'the next one waits: three were running');
+    calls[1].resolve(bytesOf(1));
+    await done[1];
+    await tick();
+    assert.deepEqual(fetcher.stats(), { bytesInFlight: 2, jsonInFlight: 0, queued: 2 });
+    fetcher.setMediaCap(3);
+    await tick();
+    assert.deepEqual(fetcher.stats(), { bytesInFlight: 3, jsonInFlight: 0, queued: 1 });
+    fetcher.setMediaCap(0);
+    assert.equal(fetcher.stats().bytesInFlight, 3);
+    for (const call of calls) if (!call.settled) { call.settled = true; call.resolve(bytesOf(1)); }
+    await tick();
+    assert.equal(fetcher.stats().bytesInFlight, 1, 'never below one');
+  });
+});
+
+describe('slots for requests the page makes itself', () => {
+  it('slot() runs a picture load in a media slot: it waits while three media requests run, holds the slot until it ends, and takes no retry', async () => {
+    // A snapshot is an <img> load, not a fetch, but it holds one of the browser's six connections all the same.
+    const { fetcher, calls } = setup();
+    const media = Array.from({ length: 3 }, (_, i) => fetcher.bytes(`m${i}`, { key: `k${i}` }));
+    let started = 0;
+    let finishPicture;
+    const picture = fetcher.slot('bytes', () => { started += 1; return new Promise((resolve) => { finishPicture = resolve; }); }, { key: 'snapshot' });
+    await tick();
+    assert.equal(started, 0, 'three media requests run: the picture waits');
+    calls[0].resolve(bytesOf(1));
+    await media[0];
+    await tick();
+    assert.equal(started, 1);
+    assert.equal(fetcher.stats().bytesInFlight, 3, 'the picture counts');
+    const next = fetcher.bytes('m3', { key: 'k3' });
+    await tick();
+    assert.equal(calls.length, 3, 'm3 waits for the picture or a media request to end');
+    finishPicture(true);
+    assert.equal(await picture, true);
+    await tick();
+    assert.equal(calls.length, 4);
+    for (const call of calls) if (!call.settled) { call.settled = true; call.resolve(bytesOf(1)); }
+    await Promise.all([...media, next]);
+  });
+
+  it('a newer slot with the same key replaces one that waits, and a load that fails rejects without a retry', async () => {
+    const { fetcher, timers } = setup({ bytes: 1, json: 1 });
+    let release;
+    const first = fetcher.slot('bytes', () => new Promise((resolve) => { release = resolve; }), { key: 'snapshot' });
+    await tick();
+    const waiting = fetcher.slot('bytes', () => Promise.resolve('old'), { key: 'snapshot' });
+    const newest = fetcher.slot('bytes', () => Promise.resolve('new'), { key: 'snapshot' });
+    await assert.rejects(waiting, (error) => error.name === 'Superseded');
+    release('first');
+    assert.equal(await first, 'first');
+    assert.equal(await newest, 'new');
+    let runs = 0;
+    const broken = fetcher.slot('bytes', () => { runs += 1; return Promise.reject(Object.assign(new Error('no picture'), { status: 503 })); });
+    await assert.rejects(broken, /no picture/);
+    await timers.advance(10_000);
+    assert.equal(runs, 1);
+    assert.equal(fetcher.stats().bytesInFlight, 0);
+  });
 });
 
 describe('keys', () => {
@@ -243,6 +315,21 @@ describe('failures and retries', () => {
     calls[4].reject(new ApiError(0, 'timeout', 'Too long.'));
     await assert.rejects(stuck, (error) => error.code === 'timeout');
     assert.equal(calls.length, 5);
+  });
+
+  it('a request with retry: false rejects at once on a 503 or a lost connection (its caller tries again itself)', async () => {
+    const { fetcher, calls, timers } = setup();
+    const busy = fetcher.bytes('cameras/C/snapshot', { key: 'snapshot', retry: false });
+    await tick();
+    calls[0].reject(new ApiError(503, 'no_picture', 'No picture yet.', null, { retryAfter: 5 }));
+    await assert.rejects(busy, (error) => error.code === 'no_picture');
+    const lost = fetcher.bytes('cameras/C/snapshot', { key: 'snapshot', retry: false });
+    await tick();
+    calls[1].reject(new ApiError(0, 'network', 'Gone.'));
+    await assert.rejects(lost, (error) => error.code === 'network');
+    await timers.advance(10_000);
+    assert.equal(calls.length, 2, 'nothing was asked again');
+    assert.equal(fetcher.stats().bytesInFlight, 0);
   });
 
   it('410 rejects at once with the code gone', async () => {

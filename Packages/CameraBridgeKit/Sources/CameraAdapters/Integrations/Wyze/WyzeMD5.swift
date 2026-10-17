@@ -1,8 +1,9 @@
 import Foundation
 
-/// MD5 (RFC 1321), only for the Wyze sign-in: Wyze's login takes the password hashed three times with MD5 (`WyzeCloud.passwordHash`).
-/// The protocol fixes it; it is not used for anything else. Written here because CameraAdapters does not link swift-crypto and the
-/// hash must also work on Linux (no CryptoKit or CommonCrypto there).
+/// MD5 (RFC 1321), only for sign-ins whose protocol fixes it: Wyze's login takes the password hashed three times with MD5
+/// (`WyzeCloud.passwordHash`), and the IPCamera Web family's takes the MD5 of "username:password" (`IPCamWebClient.encrypted`). It is not
+/// used for anything else. Written here because CameraAdapters does not link swift-crypto and the hash must also work on Linux (no
+/// CryptoKit or CommonCrypto there).
 enum WyzeMD5 {
     /// The 16-byte digest of `bytes`.
     static func digest(_ bytes: some Collection<UInt8>) -> [UInt8] {

@@ -11,6 +11,8 @@ import { NVR_ROUTES } from './nvr-routes.mjs';
 import { withSecurityHeaders } from './security.mjs';
 import { DevState, SCENARIOS } from './state.mjs';
 import { loadFixtures } from './fixtures.mjs';
+import { changeNightVision, setNightVisionFailure } from './night-vision.mjs';
+import { checkSecurity } from './camera-security.mjs';
 
 export const DEFAULTS = {
   host: '127.0.0.1',
@@ -104,7 +106,8 @@ export function createDevServer(options) {
   }
 
   // "Set up for Camera Bridge" (GET/POST cameras/:id/setup, POST …/setup/restore): a scripted camera that needs every step but the time from
-  // the bridge (a dev server does not serve time). Applying marks the steps done and keeps a pretend backup; restoring clears both.
+  // the bridge (a dev server does not serve time); "Watch its internet" is offered, as on Camera Bridge OS, at a documentation address.
+  // Applying marks the steps done and keeps a pretend backup; restoring clears both.
   const SETUP_STEPS = [
     ['timeZone', 'Time zone', [['Time zone', 'UTC−8 with daylight saving', 'America/Phoenix (UTC−7)']]],
     ['timeSource', 'Time from the bridge', null],
@@ -113,7 +116,9 @@ export function createDevServer(options) {
       ['Main stream', 'H.265, 3840×2160, 20 fps, 4.1 Mbit/s, keyframe every 2.5 s', 'H.264, 3840×2160, 20 fps, 4.1 Mbit/s, keyframe every 2 s'],
       ['Sub stream', 'H.264, 640×480, 20 fps, keyframe every 2.5 s', 'H.264, 640×480, 20 fps, keyframe every 2 s']]],
     ['upnp', 'UPnP off', [['UPnP', 'on', 'off']]],
-    ['cloud', 'Cloud off (Hik-Connect)', [['Hik-Connect (the maker’s cloud)', 'on', 'off']]],
+    ['cloud', 'Cloud off', [['Hik-Connect (the maker’s cloud)', 'on', 'off']]],
+    // Last, as on the bridge: a camera that refuses it still gets every other step, and Restore puts its DNS back first.
+    ['internetWatch', 'Watch its internet', [['DNS', '8.8.8.8 and 1.1.1.1', 'the bridge (192.0.2.2)']]],
   ];
 
   function setupReport(camera, phase) {
@@ -154,6 +159,29 @@ export function createDevServer(options) {
     return json(report);
   }
 
+  // Night vision (night-vision.mjs): a malformed id is 404 before the body is read, as the bridge's ctx.uuid; the bridge answers 204.
+  function nightVision(ctx) {
+    if (!UUID.test(ctx.params.id)) throw ApiError.notFound('There is no camera with this identifier.');
+    changeNightVision(ctx.body, () => findCamera(ctx));
+    return empty(204);
+  }
+
+  // Pan and tilt (WebApp+Routes.swift panTilt), in the bridge's order: the id, the body (pan and tilt, and a zoom step, each -1…1), the
+  // camera, then whether it turns (or zooms, for a zoom step): 409 no_pan_tilt as for a camera that isn't running. Nothing moves; 204.
+  function panTilt(ctx) {
+    if (!UUID.test(ctx.params.id)) throw ApiError.notFound('There is no camera with this identifier.');
+    const { pan, tilt, zoom } = ctx.body;
+    for (const [name, value] of [['pan', pan], ['tilt', tilt]]) {
+      if (value === undefined) throw ApiError.invalid(`“${name}” is missing.`, name);
+      if (typeof value !== 'number') throw ApiError.invalid(`“${name}” has the wrong kind of value.`, name);
+    }
+    if (zoom !== undefined && zoom !== null && typeof zoom !== 'number') throw ApiError.invalid('“zoom” has the wrong kind of value.', 'zoom');
+    if ([pan, tilt, zoom ?? 0].some((value) => Math.abs(value) > 1)) throw ApiError.invalid('Pan and tilt are numbers from -1 to 1.', 'pan');
+    const { configuration, definition } = findCamera(ctx);
+    if (!configuration.isEnabled || !(zoom ? definition.zoom : definition.panTilt)) throw new ApiError(409, 'no_pan_tilt', 'This camera can’t pan and tilt right now.');
+    return empty(204);
+  }
+
   const settingsBody = { basePort: 21100, sensorsBridgePort: 21099, webhookEnabled: false, webhookPort: 21090, webhookToken: '00000000000000000000000000000000', webhookProblem: null, logLevel: 'info', motionShadowTest: false };
 
   const systemInfo = () => json({ product: 'Camera Bridge OS', version: '0.0-dev', build: 'development', mode: 'development', osName: 'Dev server', canUpdate: false, canReboot: false, canInstall: false, canManage: false });
@@ -185,6 +213,9 @@ export function createDevServer(options) {
     ['GET', 'cameras/:id/setup', 'session', false, setupPreview],
     ['POST', 'cameras/:id/setup', 'session', true, setupApply],
     ['POST', 'cameras/:id/setup/restore', 'session', true, setupRestore],
+    ['POST', 'cameras/:id/night-vision', 'session', true, nightVision],
+    ['POST', 'cameras/:id/security/check', 'session', false, (ctx) => json(checkSecurity(findCamera(ctx), state.serverNow()))],
+    ['POST', 'cameras/:id/pan-tilt', 'session', true, panTilt],
     ['GET', 'settings', 'session', false, () => json({ bridgeName: config.bridgeName, ...settingsBody })],
     ['PATCH', 'settings', 'session', true, (ctx) => {
       if (typeof ctx.body.bridgeName === 'string') config.bridgeName = ctx.body.bridgeName.slice(0, 60);
@@ -267,6 +298,17 @@ export function createDevServer(options) {
       const kind = input.kind === 'doorbell' ? 'doorbell' : 'motion';
       const resource = kind === 'doorbell' ? { id: input.id, name: camera.definition.name, date: new Date().toISOString() } : { id: input.id, name: camera.definition.name, active: true };
       for (const write of eventClients) write(kind, resource);
+      const seconds = Math.min(Math.max(Number(input.seconds) || 8, 1), 120);
+      state.noteEvent(camera, kind === 'doorbell' ? 'Doorbell ring' : 'Motion', kind === 'doorbell' ? 0 : seconds);
+      // Motion ends after `seconds` (8 by default), as a camera's would: the monitor's list shows how long it lasted.
+      if (kind === 'motion') {
+        setTimeout(() => { for (const write of eventClients) write('motion', { ...resource, active: false }); }, seconds * 1000).unref?.();
+      }
+    } else if (url.pathname === '/__dev/night-vision') {
+      // Makes camera `id`'s night vision changes fail with 422 (`fail`: true or a sentence), or work again (false): to try the page's error.
+      const camera = state.cameraList().find((c) => c.definition.id === input.id);
+      if (!camera) throw ApiError.invalid('No camera has that id.', 'id');
+      setNightVisionFailure(camera, input.fail);
     } else if (url.pathname === '/__dev/options') {
       for (const [name, value] of Object.entries(input)) if (typeof config[name] === 'number' && Number.isFinite(value)) config[name] = value;
     } else {

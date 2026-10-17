@@ -277,6 +277,31 @@ public actor CameraSettingsService {
         return made
     }
 
+    /// The IP camera web API client of an ONVIF camera, made once and kept for the service's life (like the ISAPI client).
+    private var ipcWebClient: IPCWebClient?
+
+    /// The camera's IP camera web API, when it is an ONVIF camera that speaks it (the client asks once; `IPCWebClient.device()`). Its
+    /// ONVIF on-screen display cannot be trusted then: the setup's clean picture and cloud steps go through the web API, and when a
+    /// camera of the family cannot be asked now (`.unavailable`) they say why instead of going through ONVIF. A web page that does not
+    /// load (and was not seen as the family's during this run) is taken as no web API. Throws the camera's login refusal and
+    /// `CancellationError`.
+    func ipcWeb() async throws -> IPCWebAccess {
+        guard vendor == .onvif else { return .none }
+        let client = ipcWebClient ?? IPCWebClient(endpoint: endpoint, credentials: credentials, cameraID: cameraID)
+        ipcWebClient = client
+        do {
+            guard let device = try await client.device() else { return .none }
+            return .speaks(client, device)
+        } catch let unavailable as IPCWebUnavailable {
+            return .unavailable(unavailable.reason)
+        }
+    }
+
+    /// The IPCamera Web API client of an ONVIF camera, made once and kept for the service's life (`ipcamWeb()`).
+    var ipcamWebClient: IPCamWebClient?
+    /// The last `readRemoteAccess()` stopped because the camera did not answer (a transport failure or a timeout, not a refused login).
+    public internal(set) var remoteAccessUnanswered = false
+
     func client() async -> ONVIFClient? {
         if let resolvedClient { return resolvedClient }
         var resolved = endpoint
@@ -425,10 +450,23 @@ public actor CameraSettingsService {
         return (main, sub)
     }
 
-    /// Two stream addresses name the same stream: the same path, letters' case ignored (host, port, credentials and query may differ).
+    /// Two stream addresses name the same stream: the same path, and the same value for every query parameter both name, letters' case
+    /// ignored throughout. Host, port, credentials and parameters only one of them names may differ (a camera's own address adds
+    /// `unicast=true&proto=Onvif`). Dahua and Amcrest tell main from sub only by `subtype` (and the camera by `channel`), so a missing
+    /// `subtype` is Dahua's default, 0, the main stream.
     static func sameStream(_ lhs: URL, _ rhs: URL) -> Bool {
         let a = lhs.path.lowercased(), b = rhs.path.lowercased()
-        return !a.isEmpty && a != "/" && a == b
+        guard !a.isEmpty, a != "/", a == b else { return false }
+        let left = queryValues(lhs), right = queryValues(rhs)
+        for (name, value) in left where right[name].map({ $0 != value }) == true { return false }
+        if left["subtype"] != nil || right["subtype"] != nil, (left["subtype"] ?? "0") != (right["subtype"] ?? "0") { return false }
+        return true
+    }
+
+    /// A stream address's query parameters, names and values lowercased (a repeated name keeps its last value).
+    private static func queryValues(_ url: URL) -> [String: String] {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return Dictionary(items.map { ($0.name.lowercased(), ($0.value ?? "").lowercased()) }, uniquingKeysWith: { _, last in last })
     }
 
     static func selectProfiles(_ profiles: [ONVIFMediaProfile]) -> (main: ONVIFMediaProfile?, sub: ONVIFMediaProfile?) {

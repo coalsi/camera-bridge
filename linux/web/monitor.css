@@ -7,8 +7,9 @@
   --bg: #000; --bg-raised: #0b0b0d; --surface: #0b0b0d; --surface-2: #1a1a1f; --border: #1f1f25; --border-strong: #3a3a42;
   --text: #e8e8ea; --text-2: #b4b4bc; --text-3: #8a8a93; --link: #e06a5a; --focus: #efe6d8; --brand-accent: #e06a5a;
   color-scheme: dark;
-  display: flex; flex-direction: column; gap: 10px; padding: 12px; height: calc(100vh - 56px); min-height: 600px;
-  background: var(--mon-bg); color: var(--mon-text); border-radius: var(--radius); position: relative;
+  /* From 900 px exactly the height the shell gives it (style.css, the Monitor's route): nothing on the page or in it scrolls. */
+  display: flex; flex-direction: column; gap: 10px; padding: 12px; flex: 1 1 auto; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden;
+  background: var(--mon-bg); color: var(--mon-text); position: relative;
 }
 .monitor:fullscreen { height: 100vh; border-radius: 0; padding: 10px; }
 .monitor h1 { font-size: 1.1rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--mon-dim); }
@@ -23,18 +24,31 @@
 .monitor select { width: auto; min-height: 32px; padding: 2px 30px 2px 10px; background-color: #15151a; color: var(--mon-text); border-color: #2c2c34; font-size: 0.85rem; }
 .mon-none { flex: 1; display: grid; place-items: center; gap: 12px; align-content: center; color: var(--mon-dim); }
 
-/* The wall: the tiles share the height that is left; a picture fits its tile (no cropping), the name and the clock sit on it. */
-.monitor .nvr-grid { flex: 1; min-height: 0; gap: 8px; grid-auto-rows: minmax(0, 1fr); }
-/* Columns for a wall that fills the screen (rows share the height): 2 across up to 4 tiles, 3 up to 9, 4 above. */
-.monitor .nvr-grid[data-count="1"] { --nvr-cols: 1; }
-.monitor .nvr-grid[data-count="2"], .monitor .nvr-grid[data-count="3"], .monitor .nvr-grid[data-count="4"] { --nvr-cols: 2; }
-.monitor .nvr-grid[data-count="5"], .monitor .nvr-grid[data-count="6"], .monitor .nvr-grid[data-count="7"],
-.monitor .nvr-grid[data-count="8"], .monitor .nvr-grid[data-count="9"] { --nvr-cols: 3; }
-.monitor .nvr-grid[data-count="10"], .monitor .nvr-grid[data-count="11"], .monitor .nvr-grid[data-count="12"], .monitor .nvr-grid[data-count="13"],
-.monitor .nvr-grid[data-count="14"], .monitor .nvr-grid[data-count="15"], .monitor .nvr-grid[data-count="16"] { --nvr-cols: 4; }
+/* The wall: the tiles share the height that is left; a picture fits its tile (Fit: no cropping) or fills it (Fill), the name and the clock sit
+   on it. */
+.monitor .nvr-grid { flex: 1; min-height: 0; gap: 8px; grid-template-rows: repeat(var(--nvr-rows, 1), minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); }
+/* A grid keeps its columns and rows (screens/nvr-layout.js gridShape: 2 across up to 4 cells, 3 up to 9, 4 above); the cells without a camera
+   are plain empty ones (.mon-vacant). One rule a count: web-tests/monitor-wall.test.mjs reads them. */
+.monitor .nvr-grid[data-count="1"] { --nvr-cols: 1; --nvr-rows: 1; }
+.monitor .nvr-grid[data-count="2"] { --nvr-cols: 2; --nvr-rows: 1; }
+.monitor .nvr-grid[data-count="3"] { --nvr-cols: 2; --nvr-rows: 2; }
+.monitor .nvr-grid[data-count="4"] { --nvr-cols: 2; --nvr-rows: 2; }
+.monitor .nvr-grid[data-count="5"] { --nvr-cols: 3; --nvr-rows: 2; }
+.monitor .nvr-grid[data-count="6"] { --nvr-cols: 3; --nvr-rows: 2; }
+.monitor .nvr-grid[data-count="7"] { --nvr-cols: 3; --nvr-rows: 3; }
+.monitor .nvr-grid[data-count="8"] { --nvr-cols: 3; --nvr-rows: 3; }
+.monitor .nvr-grid[data-count="9"] { --nvr-cols: 3; --nvr-rows: 3; }
+.monitor .nvr-grid[data-count="10"] { --nvr-cols: 4; --nvr-rows: 3; }
+.monitor .nvr-grid[data-count="11"] { --nvr-cols: 4; --nvr-rows: 3; }
+.monitor .nvr-grid[data-count="12"] { --nvr-cols: 4; --nvr-rows: 3; }
+.monitor .nvr-grid[data-count="13"] { --nvr-cols: 4; --nvr-rows: 4; }
+.monitor .nvr-grid[data-count="14"] { --nvr-cols: 4; --nvr-rows: 4; }
+.monitor .nvr-grid[data-count="15"] { --nvr-cols: 4; --nvr-rows: 4; }
+.monitor .nvr-grid[data-count="16"] { --nvr-cols: 4; --nvr-rows: 4; }
 @media (max-width: 640px) { .monitor .nvr-grid[data-count] { --nvr-cols: 1; } }
+.mon-vacant { min-width: 0; min-height: 0; border: 2px solid #111116; border-radius: 8px; background: #050506; pointer-events: none; }
 /* One camera on the whole wall (a click on its tile). */
-.monitor .nvr-grid[data-solo="true"] { --nvr-cols: 1; grid-auto-rows: minmax(0, 1fr); }
+.monitor .nvr-grid[data-solo="true"] { --nvr-cols: 1; --nvr-rows: 1; grid-auto-rows: minmax(0, 1fr); }
 .monitor .nvr-grid[data-solo="true"] .nvr-tile { cursor: zoom-out; }
 .monitor .nvr-grid[data-solo="false"] .nvr-tile { cursor: zoom-in; }
 .monitor .nvr-grid[data-solo="true"] .nvr-media { aspect-ratio: auto; height: 100%; }
@@ -45,6 +59,30 @@
 .monitor .nvr-tile-bar h3 { font-size: 0.95rem; }
 .monitor .nvr-tile-bar a { color: #fff; text-shadow: 0 1px 2px #000; }
 .monitor .nvr-caption { font-size: 0.9rem; }
+/* The name, and beside it the place for small marks about the camera (screens/nvr.js drawNameMarks; hidden while empty). */
+.monitor .nvr-tile-bar { display: flex; align-items: center; gap: 6px; }
+.nvr-name-slot { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+/* The security level's mark in that slot (screens/security.js drawSecurityDot): the level's small shield with its own mark (a lock, a tick, an
+   exclamation mark, a cross), so the levels differ by shape, not colour alone; the level's name as its label and tooltip. The Monitor is
+   always dark, so it keeps the dark colours and inks whatever the page's appearance; a dark shadow keeps it seen on any picture. */
+.monitor {
+  --sec-gold: #e2a33a; --sec-green: #3ddc97; --sec-yellow: #f4e04d; --sec-red: #ff6a61;
+  --sec-gold-ink: #241703; --sec-green-ink: #04210f; --sec-yellow-ink: #241f00; --sec-red-ink: #2a0503;
+}
+.sec-dot { flex: none; display: inline-flex; width: 14px; height: 14px; }
+.sec-dot .sec-shield { width: 14px; height: 14px; filter: drop-shadow(0 1px 1.5px rgb(0 0 0 / 0.85)); }
+/* With the name in a label at the top left, the marks go to the bar's other end, off the label. */
+.monitor .nvr-tile[data-labelname="true"][data-labelpos="topLeft"] .nvr-tile-bar { justify-content: flex-end; }
+
+/* Fill: every picture of a grid's tile covers it (live video, a recording, a snapshot, the key picture), the edges cut instead of black bars. */
+.monitor .nvr-grid[data-fit="fill"] .nvr-snap, .monitor .nvr-grid[data-fit="fill"] .nvr-live,
+.monitor .nvr-grid[data-fit="fill"] .nvr-stage video, .monitor .nvr-grid[data-fit="fill"] .nvr-stage canvas { object-fit: cover; }
+
+/* The mosaic (screens/nvr-layout.js packMosaic): each tile has its camera's shape and the place screens/nvr.js gives it (--tile-*), in rows
+   that fill the wall's width; the wall is as tall as it is (from 900 px) or as its rows (narrower). */
+.monitor .nvr-grid[data-layout="mosaic"] { display: block; position: relative; overflow: hidden; }
+.monitor .nvr-grid[data-layout="mosaic"] > .nvr-tile { position: absolute; left: var(--tile-x, 0); top: var(--tile-y, 0); width: var(--tile-w, 320px); height: var(--tile-h, 180px); }
+.monitor .nvr-grid[data-layout="mosaic"] .nvr-media { aspect-ratio: auto; height: 100%; }
 
 /* Live video over the snapshot once it plays (live only: a recording plays in the stage). */
 .nvr-live { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; background: #000; visibility: hidden; }
@@ -72,36 +110,67 @@
 .mon-banner[data-level="detection"] { background: #07121aee; border-color: #7fb2ff; }
 .mon-banner time { margin-left: auto; color: #c9c9d0; font-size: 0.82rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-/* Under the wall: the recordings' controls and timeline, and the events list. */
+/* Under the wall: the recordings' controls and timeline, and the events list. The list is as tall as the row (size containment: its events never
+   make the row taller, so the wall above keeps its height) and scrolls inside. */
 .mon-bottom { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 10px; flex: none; }
 .mon-timeline, .mon-activity { min-height: 0; display: flex; flex-direction: column; gap: 8px; background: var(--mon-panel); border: 1px solid var(--mon-line); border-radius: 8px; padding: 8px 10px; }
-.mon-activity { max-height: 260px; }
+.mon-activity { max-height: 260px; contain: size; }
 .monitor .nvr-transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .monitor .nvr-readout { font-variant-numeric: tabular-nums; font-weight: 650; }
 .monitor .nvr-grid-presets { display: flex; flex-wrap: wrap; gap: 6px; }
 .monitor .nvr-pager { margin-left: auto; }
 .mon-timeline-head { display: flex; align-items: center; gap: 10px; }
 .mon-timeline-head strong { font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mon-dim); }
-.mon-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; font-size: 0.88rem; }
-.mon-item { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; padding: 6px 2px; border-top: 1px solid var(--mon-line); }
+.mon-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; font-size: 0.88rem; overscroll-behavior: contain; }
+.mon-item { border-top: 1px solid var(--mon-line); }
 .mon-item:first-child { border-top: 0; }
-.mon-item time { grid-column: 1 / -1; color: var(--mon-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
-.mon-item a { color: var(--mon-text); font-weight: 650; text-decoration: none; }
-.mon-item span { color: #c9c9d0; }
-.mon-item[data-level="doorbell"] span { color: #ff6a61; }
-.mon-item[data-level="detection"] span { color: #7fb2ff; }
-.mon-item[data-level="motion"] span { color: #ffd36b; }
+.mon-event-count { margin-left: auto; color: var(--mon-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+/* One event: a button (Enter or Space plays it). Time on top; camera, kind and duration under it; a play mark on the right. */
+.mon-event {
+  display: grid; grid-template-columns: minmax(0, max-content) auto 1fr auto; align-items: baseline; gap: 2px 8px; width: 100%; padding: 6px 6px; margin: 0;
+  border: 0; border-left: 3px solid transparent; border-radius: 4px; background: transparent; color: var(--mon-text); font: inherit; text-align: left; cursor: pointer;
+}
+.mon-event:hover { background: #15151a; }
+.mon-event:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.mon-event[data-selected="true"] { background: #23232b; border-left-color: var(--brand-accent); }
+.mon-event[data-recorded="false"] { cursor: default; opacity: 0.6; }
+.mon-event[data-recorded="false"]:hover { background: transparent; }
+.mon-event time { grid-column: 1 / -1; color: var(--mon-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.mon-event-camera { font-weight: 650; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mon-event-kind { color: #c9c9d0; white-space: nowrap; }
+.mon-event[data-level="doorbell"] .mon-event-kind { color: #ff6a61; }
+.mon-event[data-level="detection"] .mon-event-kind { color: #7fb2ff; }
+.mon-event[data-level="motion"] .mon-event-kind { color: #ffd36b; }
+.mon-event-duration { color: var(--mon-dim); font-size: 0.8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mon-event-play, .mon-event-note { grid-column: 4; grid-row: 2; justify-self: end; color: var(--mon-dim); }
+.mon-event-note { font-size: 0.75rem; white-space: nowrap; }
+.mon-event:hover .mon-event-play, .mon-event[data-selected="true"] .mon-event-play { color: var(--brand-accent); }
+.mon-item-more { padding: 8px 2px; text-align: center; }
 .mon-empty { color: var(--mon-dim); padding: 8px 2px; }
 
-@media (max-width: 1100px) {
-  .mon-bottom { grid-template-columns: minmax(0, 1fr); }
-  .mon-activity { max-height: 200px; }
+/* A camera with a battery (status.battery): its level beside the Record chip; a bolt while charging; warning colour when low. */
+.mon-battery {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; font-size: 0.75rem; font-weight: 650; font-variant-numeric: tabular-nums;
+  background: rgb(15 15 17 / 0.82); border: 1px solid rgb(255 255 255 / 0.12); color: #d6d6dc; backdrop-filter: blur(6px); white-space: nowrap;
 }
-@media (max-width: 900px) {
-  .monitor { height: auto; min-height: 0; }
-  .monitor .nvr-grid { grid-auto-rows: auto; }
+.mon-battery[hidden] { display: none; }
+.mon-battery svg { display: block; }
+.mon-battery[data-low="true"] { color: #f0b254; border-color: #f0b25466; }
+.mon-battery[data-charging="true"] .mon-battery-fill { opacity: 0.45; }
+.mon-battery-bolt { fill: #ffd36b; stroke: #151517; stroke-width: 0.5; }
+
+@media (min-width: 900px) and (max-width: 1100px) { .mon-bottom { grid-template-columns: minmax(0, 1fr) 260px; } }
+/* Narrower than 900 px the Monitor grows with its content (the page scrolls): tiles are 16:9, the events list goes under the timeline. */
+@media (max-width: 899.98px) {
+  .monitor { height: auto; min-height: 0; overflow: visible; }
+  .monitor .nvr-grid { grid-template-rows: none; grid-auto-rows: auto; }
   .monitor .nvr-media { aspect-ratio: 16 / 9; height: auto; }
+  .mon-vacant { aspect-ratio: 16 / 9; }
+  .monitor .nvr-grid[data-layout="mosaic"] { flex: none; height: var(--wall-height, auto); }
+  .mon-bottom { grid-template-columns: minmax(0, 1fr); }
+  .mon-activity { max-height: 200px; contain: none; }
 }
+@media (max-width: 640px) { .mon-vacant { display: none; } }
 @media (max-width: 640px) { .mon-big-clock { margin-left: 0; font-size: 1.1rem; } }
 
 /* The video label (js/labels.js): the camera's name and the date and time as the bridge burns them into Apple Home's video and saved clips.
@@ -167,11 +236,18 @@
   background: rgba(0, 0, 0, .6); color: #fff;
 }
 
-/* Pan and tilt: a column between the timeline and the events, only for one pan/tilt camera opened on its own. */
+/* Pan and tilt, and night vision: a column between the timeline and the events, only for one camera opened on its own that has them. The
+   wall gets the height the row under it leaves, so with both (data-both; about 240 and 145 px tall, 170 px wide each) the column stays no
+   taller than the events (260 px): side by side from 1280 px, where the timeline keeps 250 px beside them; narrower, stacked in a column
+   that scrolls. From 900 px down the monitor grows with its content and the row is one column, so nothing is cut. */
 .mon-bottom[data-ptz="true"] { grid-template-columns: minmax(0, 1fr) auto 340px; }
-.mon-ptz { min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--mon-panel); border: 1px solid var(--mon-line); border-radius: 8px; padding: 8px 12px; }
-.mon-ptz[hidden] { display: none; }
-.mon-ptz .mon-timeline-head { align-self: stretch; }
+.mon-side { min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.mon-side[hidden] { display: none; }
+@media (min-width: 1280px) { .mon-side[data-both="true"] { flex-direction: row; } }
+@media (min-width: 900px) and (max-width: 1279px) { .mon-side[data-both="true"] { max-height: 260px; overflow: hidden auto; overscroll-behavior: contain; } }
+.mon-ptz, .mon-nv { min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--mon-panel); border: 1px solid var(--mon-line); border-radius: 8px; padding: 8px 12px; }
+.mon-ptz[hidden], .mon-nv[hidden] { display: none; }
+.mon-ptz .mon-timeline-head, .mon-nv .mon-timeline-head { align-self: stretch; }
 .mon-ptz-pad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); gap: 6px; grid-template-areas: ". up ." "left stop right" ". down ."; border-radius: 10px; outline-offset: 4px; }
 .mon-ptz-btn { display: grid; place-items: center; border-radius: 10px; border: 1px solid var(--mon-line); background: rgba(255, 255, 255, .06); color: inherit; font-size: 15px; cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none; }
 .mon-ptz-btn:hover { background: rgba(255, 255, 255, .12); }
@@ -180,7 +256,25 @@
 .mon-ptz-btn.stop { grid-area: stop; font-size: 12px; opacity: .8; }
 .mon-ptz-status { margin: 0; max-width: 160px; font-size: 0.78rem; color: var(--mon-dim); text-align: center; }
 .mon-ptz-status:empty { display: none; }
-@media (max-width: 900px) { .mon-bottom[data-ptz="true"] { grid-template-columns: minmax(0, 1fr); } }
+@media (min-width: 900px) and (max-width: 1100px) { .mon-bottom[data-ptz="true"] { grid-template-columns: minmax(0, 1fr) auto 260px; } }
+@media (max-width: 899.98px) { .mon-bottom[data-ptz="true"] { grid-template-columns: minmax(0, 1fr); } }
 .mon-ptz-zoom { display: grid; grid-template-columns: repeat(2, 44px); gap: 6px; }
 .mon-ptz-zoom[hidden] { display: none; }
 .mon-ptz-btn.zoomIn, .mon-ptz-btn.zoomOut { font-size: 20px; font-weight: 600; }
+/* Night vision (screens/night-vision.js): the modes as three buttons as wide as the pad, the IR lights as one toggle under them. */
+.mon-nv-modes { display: grid; grid-auto-flow: column; grid-auto-columns: 44px; gap: 6px; }
+.mon-nv-btn {
+  display: grid; place-items: center; align-content: center; gap: 2px; min-width: 44px; min-height: 48px; padding: 4px 2px; border-radius: 10px;
+  border: 1px solid var(--mon-line); background: rgba(255, 255, 255, .06); color: inherit; font: inherit; cursor: pointer; touch-action: manipulation;
+  user-select: none; -webkit-user-select: none;
+}
+.mon-nv-btn svg { width: 18px; height: 18px; }
+.mon-nv-btn:hover { background: rgba(255, 255, 255, .12); }
+.mon-nv-btn[aria-pressed="true"] { background: var(--brand); color: var(--on-brand); border-color: transparent; }
+.mon-nv-btn[aria-disabled="true"] { opacity: .5; cursor: progress; }
+.mon-nv-word { font-size: 0.68rem; line-height: 1.1; white-space: nowrap; }
+.mon-nv-light { width: 144px; min-height: 44px; grid-auto-flow: column; justify-content: center; gap: 6px; }
+.mon-nv-state { font-size: 0.68rem; color: var(--mon-dim); font-variant-numeric: tabular-nums; }
+.mon-nv-state:empty { display: none; }
+.mon-nv-light[aria-pressed="true"] .mon-nv-state { color: inherit; }
+.mon-nv .mon-ptz-status { max-width: 144px; }   /* a refusal wraps under the buttons, as wide as they are, so the column keeps its width */

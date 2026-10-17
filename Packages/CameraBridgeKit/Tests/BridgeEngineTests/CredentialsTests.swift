@@ -78,4 +78,33 @@ import Testing
         #expect(try secrets.read(account: HAPStorage.account(for: camera)) == nil)
         #expect(try credentials.password(for: other) == "b")
     }
+
+    /// The password cannot be deleted (a locked Keychain item, say): the cloud's kept sign-in and the HAP identity are deleted anyway, and
+    /// the failure is still reported.
+    @Test func forgettingACameraDeletesTheRestWhenThePasswordCannotBeDeleted() throws {
+        final class StuckPassword: SecretStore {
+            struct DeleteRefused: Error {}
+            let base = InMemorySecretStore()
+            let account: String
+            init(_ account: String) { self.account = account }
+            func read(account: String) throws -> Data? { try base.read(account: account) }
+            func write(_ data: Data?, account: String) throws {
+                if data == nil, account == self.account { throw DeleteRefused() }
+                try base.write(data, account: account)
+            }
+        }
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let camera = UUID()
+        let secrets = StuckPassword(CredentialStore.account(for: camera))
+        let credentials = CredentialStore(secrets: secrets)
+        try credentials.setPassword("a", for: camera)
+        try credentials.setSetupCloudAuthcode("kept", for: camera)
+        try HAPStorage.store(for: camera, dataDirectory: directory.url, secrets: secrets).saveIdentity(HAPIdentity.generate())
+
+        #expect(throws: StuckPassword.DeleteRefused.self) { try credentials.forgetCamera(camera, dataDirectory: directory.url) }
+        #expect(try credentials.setupCloudAuthcode(for: camera) == nil, "the cloud's sign-in is deleted anyway")
+        #expect(try secrets.read(account: HAPStorage.account(for: camera)) == nil, "and the HAP identity")
+        #expect(try credentials.password(for: camera) == "a", "only what could not be deleted stays")
+    }
 }

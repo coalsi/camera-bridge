@@ -42,6 +42,27 @@ import Testing
         #expect(first.frameCount + second.frameCount == 1_200)
     }
 
+    @Test func aCameraWhoseMediaRunsFastStartsEveryRolledFileAtTheCameraTime() async throws {
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        // The media time gains 0.1 % on the camera's wall clock: 0.9 s in a 900 s file, under the divergence limit. Each roll takes the camera's
+        // time again, so the drift never builds up from file to file into a divergence break (which would lose the frames up to the next keyframe).
+        await rig.feed(RecorderFixtures.videoFrames(0..<2_750, fps: 1, gop: 60, wallSkew: -0.001), to: recorder)
+        await recorder.stop()
+        let segments = rig.target.openedSegments
+        #expect(segments.count == 4, "three rolls, no divergence break: \(segments)")
+        var total = 0
+        for (number, segment) in segments.enumerated() {
+            let file = try RecordedFile(rig, segment: segment)
+            total += file.frameCount
+            let camera = Int64((RecorderFixtures.base.addingTimeInterval(Double(number * 900) * 0.999).timeIntervalSince1970 * 1_000).rounded())
+            #expect(file.index.startWallMs == camera, "file \(number) starts \(file.index.startWallMs - camera) ms from the camera's time")
+        }
+        #expect(total == 2_750, "every frame is kept")
+    }
+
     @Test func aCameraClockThatIsMinutesOffUsesTheHostClockAndNeverRolls() async throws {
         var rig = try RecorderRig(now: RecorderFixtures.base.addingTimeInterval(600))
         rig.clockFollowsFrames = false

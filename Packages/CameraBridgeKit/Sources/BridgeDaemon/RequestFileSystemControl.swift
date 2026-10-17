@@ -1,3 +1,4 @@
+import BridgeEngine
 import BridgeSupport
 import BridgeWeb
 import Foundation
@@ -21,6 +22,7 @@ import Darwin
 ///     status/install-candidates.json  {disks: [{name, path, model, sizeBytes, partitions, eligible, problems, phrase, ...}]}
 ///     status/install-to-disk.json   {state, step, device, message, updatedAt}
 ///     status/system.json            {version, sshEnabled, autoUpdate, bootEntry, updatedAt}
+///     status/guard.json             {available, running, timeZone, todayStart, cameras: [{address, level, today, last24h, names: [...]}], updatedAt}
 ///
 /// Nothing here waits without a bound: a check for updates gives up after 60 seconds, a request nobody picks up within 15 seconds
 /// is withdrawn and reported. A request file is written whole under a temporary name and moved into place (`rename`), so the
@@ -48,12 +50,13 @@ public struct RequestFileSystemControl: SystemControlling {
         case wifiScan = "wifi-scan"
         case wifiJoin = "wifi-join"
         case wifiForget = "wifi-forget"
+        case guardSet = "guard-set"
     }
 
     /// The files the system publishes.
     private enum StatusFile {
         case job(Request)
-        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, wifi, wifiNetworks
+        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, wifi, wifiNetworks, internetGuard
 
         var name: String {
             switch self {
@@ -66,6 +69,7 @@ public struct RequestFileSystemControl: SystemControlling {
             case .recordingDriveCandidates: "recording-drive-candidates.json"
             case .wifi: "wifi.json"
             case .wifiNetworks: "wifi-networks.json"
+            case .internetGuard: "guard.json"
             }
         }
     }
@@ -547,6 +551,73 @@ public struct RequestFileSystemControl: SystemControlling {
         return file.hotspot
     }
 
+    // MARK: The internet guard
+
+    /// At most this many cameras are watched (the helper checks it again).
+    static let maximumGuardedCameras = 64
+
+    public func setGuardedCameras(_ cameras: [GuardedCamera]) async throws {
+        try requireAvailable("The internet guard is part of Camera Bridge OS.")
+        struct Entry: Encodable {
+            var address: String
+            var level: String
+        }
+        struct Body: Encodable {
+            var cameras: [Entry]
+            /// The time zone "today" is counted in: the bridge's own (the engine makes it the process's).
+            var timeZone: String
+        }
+        var entries: [Entry] = []
+        for camera in cameras {
+            let text = camera.address.trimmingCharacters(in: .whitespaces)
+            guard let address = Self.guardedAddress(text) else {
+                throw SystemError("“\(Self.sentence(String(text.prefix(45))))” isn’t an address on the local network, so the internet guard can’t watch it.")
+            }
+            if !entries.contains(where: { $0.address == address }) { entries.append(Entry(address: address, level: camera.level.rawValue)) }
+        }
+        guard entries.count <= Self.maximumGuardedCameras else { throw SystemError("At most \(Self.maximumGuardedCameras) cameras can be watched.") }
+        let failure = "The system couldn’t change the internet guard."
+        try await runShortJob(.guardSet, Body(cameras: entries, timeZone: TimeZone.current.identifier), failure: failure)
+        // The job's end can be an older list's (one that ran while this one was sent): taken only when the box reports these cameras.
+        let reported = read(.internetGuard, maximum: Self.maximumGuardReportBytes).map { (report: GuardReport) in Set(report.cameras.map(\.address)) }
+        guard reported == Set(entries.map(\.address)) else {
+            log.warning("guard-set ended, but the box reports another list of cameras")
+            throw SystemError("\(failure) It still watches another list.")
+        }
+    }
+
+    public func guardReport() async -> GuardReport {
+        guard isAvailable, let report: GuardReport = read(.internetGuard, maximum: Self.maximumGuardReportBytes) else { return .unavailable }
+        return report
+    }
+
+    /// The address in the form the system logs it (IPv6 per RFC 5952, lowercase), when it is a private IPv4 address (10/8, 172.16/12,
+    /// 192.168/16, 169.254/16) or a unique-local or link-local IPv6 address (fc00::/7, fe80::/10, no zone); nil otherwise. The same ranges as
+    /// the firewall's `lan4`/`lan6` and the helper's check.
+    static func guardedAddress(_ text: String) -> String? {
+        guard !text.isEmpty, text.utf8.count <= 45 else { return nil }
+        // Spelled out here: inet_pton is laxer on some systems (leading zeros, a zone after "%").
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        let plainIPv4 = parts.count == 4 && parts.allSatisfy { part in
+            (1...3).contains(part.count) && part.allSatisfy { $0.isASCII && $0.isNumber } && (part.count == 1 || part.first != "0")
+        }
+        let plainIPv6 = text.contains(":") && text.unicodeScalars.allSatisfy { $0 == ":" || ($0.isASCII && $0.properties.isASCIIHexDigit) }
+        var v4 = in_addr()
+        if plainIPv4, inet_pton(AF_INET, text, &v4) == 1 {
+            let bytes = withUnsafeBytes(of: &v4) { Array($0) }
+            let isPrivate = bytes[0] == 10 || (bytes[0] == 172 && (16...31).contains(bytes[1])) || (bytes[0] == 192 && bytes[1] == 168)
+                || (bytes[0] == 169 && bytes[1] == 254)
+            return isPrivate ? bytes.map(String.init).joined(separator: ".") : nil
+        }
+        var v6 = in6_addr()
+        guard plainIPv6, inet_pton(AF_INET6, text, &v6) == 1 else { return nil }
+        let bytes = withUnsafeBytes(of: &v6) { Array($0) }
+        guard bytes[0] & 0xFE == 0xFC || (bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80) else { return nil }
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard inet_ntop(AF_INET6, &v6, &buffer, socklen_t(buffer.count)) != nil else { return nil }
+        return String(decoding: buffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self).lowercased()
+    }
+
     // MARK: Writing requests
 
     private struct Empty: Encodable {}
@@ -653,12 +724,14 @@ public struct RequestFileSystemControl: SystemControlling {
     // MARK: Reading status files
 
     private static let maximumStatusBytes = 256 * 1024
+    /// `guard.json` lists up to 64 cameras with 50 names each; the helper keeps it below this.
+    static let maximumGuardReportBytes = 1024 * 1024
 
-    private func read<T: Decodable>(_ file: StatusFile) -> T? {
+    private func read<T: Decodable>(_ file: StatusFile, maximum: Int = Self.maximumStatusBytes) -> T? {
         let url = statusDirectory.appending(path: file.name, directoryHint: .notDirectory)
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: Self.maximumStatusBytes + 1), !data.isEmpty, data.count <= Self.maximumStatusBytes else { return nil }
+        guard let data = try? handle.read(upToCount: maximum + 1), !data.isEmpty, data.count <= maximum else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }
 

@@ -9,7 +9,9 @@ import Synchronization
 /// frame) and appended to plain fragmented MP4 files through an `ArchiveFileWriter`; the store hears about every file and fragment through its
 /// `ArchiveWriteTarget`. The actor never waits for the disk and never touches it: the writer's own queue does.
 ///
-/// Time: a file has one anchor, the first frame's `wallClock + hub.wallClockOffset` (the host's clock instead when that is more than 60 s from it).
+/// Time: a file has one anchor, the first frame's `wallClock + hub.wallClockOffset` (the host's clock instead when that is more than 60 s from it),
+/// moved to the end of the file before it when it falls up to 1 s inside that one after a break (so files of one subscription never overlap that
+/// little there; after a planned roll the camera's time stands, so a move lasts one file and drift does not build up from file to file).
 /// Inside the file time is media time: a fragment starts at `anchor + (decode time - the file's first decode time) / 90 kHz`, and that derived time
 /// is what `prft` and the index carry. If a fragment's measured wall time differs from the derived one by more than 1 s twice in a row, the file ends.
 ///
@@ -50,6 +52,8 @@ actor CameraArchiveRecorder {
         var fileBytes: UInt64 = 0
         var fragments = 0
         var previousBackToKey: Int?
+        /// Where the last fragment written ends, in epoch milliseconds (the index's arithmetic); nil before the first.
+        var endWallMs: Int64?
         var divergentStreak = 0
         var lastSyncAt: TimeInterval
         var rollRequested = false
@@ -112,6 +116,9 @@ actor CameraArchiveRecorder {
     private var seenDiscontinuities = 0
     private var lastVideoAt: TimeInterval?
     private var run: FileRun?
+    /// The end of the last file this subscription wrote (epoch ms): the next file never starts just before it (`anchor(_:)`). Nil after a
+    /// planned roll.
+    private var previousFileEndMs: Int64?
     private var closing: [ArchiveFileWriter] = []
     private var abandoned: [ArchiveFileWriter] = []
     private var ownPause: ArchivePause?
@@ -237,6 +244,8 @@ actor CameraArchiveRecorder {
         subscription = new
         sessionGeneration = state.generation
         seenDiscontinuities = hub.discontinuityCount
+        // A new subscription replays the hub's newest group, which the last file may already hold: the later file wins that overlap.
+        previousFileEndMs = nil
         session += 1
         let mine = session
         consumer = Task { [weak self] in
@@ -312,9 +321,23 @@ actor CameraArchiveRecorder {
         let measured = frame.wallClock.addingTimeInterval(hub.wallClockOffset)
         let host = tuning.now()
         let fromCamera = abs(measured.timeIntervalSince(host)) <= ArchiveConstants.anchorSkewLimit
-        let new = FileRun(anchor: fromCamera ? measured : host, fromCamera: fromCamera, format: frame.format, firstDecode: decode, uptime: now)
+        let new = FileRun(anchor: anchor(fromCamera ? measured : host), fromCamera: fromCamera, format: frame.format, firstDecode: decode, uptime: now)
         run = new
         add(frame, decode, size, to: new)
+    }
+
+    /// The anchor of a new file whose first frame was captured at `measured`. A break whose camera time went back (a clock jump, a stretch the
+    /// media time ran ahead in) would start the file inside the one before it, and that time would then be in two files: up to
+    /// `wallDivergenceLimit` back, the file starts where the last one ended instead, so the files abut and no frame is hidden. Further back the
+    /// camera's clock really went back and the time stays the camera's (the reader's rule, the later file wins, decides that overlap). Not after a
+    /// planned roll: there the format is the same, the player plays a small overlap straight through, and taking the camera's time again keeps
+    /// a move to one file and the media clock's drift to what one file gathers (carried from roll to roll it would build up to a divergence break).
+    private func anchor(_ measured: Date) -> Date {
+        guard let previous = previousFileEndMs else { return measured }
+        let measuredMs = Int64((measured.timeIntervalSince1970 * 1_000).rounded())
+        let backMs = previous - measuredMs
+        guard backMs > 0, Double(backMs) <= ArchiveConstants.wallDivergenceLimit * 1_000 else { return measured }
+        return Date(timeIntervalSince1970: Double(previous) / 1_000)
     }
 
     /// 16 MiB less room for the box headers and the sample table of up to 900 samples.
@@ -478,6 +501,7 @@ actor CameraArchiveRecorder {
         run.fileBytes += UInt64(fragment.count)
         run.fragments += 1
         run.previousBackToKey = Int(record.backToKey)
+        run.endWallMs = FragmentIndexer.endWallMs(startWallMs: startWallMs, records: [record])
         run.group = Group()
 
         var reason: CloseReason?
@@ -529,6 +553,8 @@ actor CameraArchiveRecorder {
         if flush { _ = flushGroup(nextDecode: nil) }
         self.run = nil
         guard let writer = run.writer else { return }
+        // After a planned roll the next file takes the camera's time again: a move, or the media clock's drift, ends with the file.
+        previousFileEndMs = reason == .roll ? nil : run.endWallMs
         closing.append(writer)
         writer.close()
         if reason != .roll { keyframeNote.restart() }

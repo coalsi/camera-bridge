@@ -1,0 +1,48 @@
+[Unit]
+Description=Internet guard: DNS for the watched cameras (every name "does not exist")
+Documentation=https://github.com/coalsi/camera-bridge
+# Started and stopped by cb-guard, only while a camera is watched (camera-bridge-guard.service at boot, the guard-set request). Bound to the
+# firewall: its sets guarded4/guarded6 are the only way in to port 53, so without them this server must not run.
+BindsTo=nftables.service
+After=nftables.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# As root: writes /run/camera-bridge/guard/dnsmasq.conf and the log folder; refuses while the setup hotspot is open.
+ExecStartPre=+/usr/sbin/cb-guard dns-prepare
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/run/camera-bridge/guard/dnsmasq.conf
+Restart=on-failure
+RestartSec=5
+# The query log's times are read as UTC (cb-guard collect).
+Environment=TZ=UTC
+
+# Hardening: port 53 is the only privilege (bind-dynamic keeps it for an address the box gets later); it writes only its log.
+User=dnsmasq
+Group=nogroup
+UMask=0077
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/camera-bridge/guard/log
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

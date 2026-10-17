@@ -84,6 +84,11 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     public var panTilt = false
     /// The camera zooms, and the bridge can zoom it.
     public var zoom = false
+    /// The camera's night vision and lamp, when the bridge can switch them (nil: it can't).
+    public var nightVision: NightVisionState?
+    /// A battery camera's charge, as its driver last reported it (`CameraDriver.batteryStatus`, asked every 5 min without waking the
+    /// camera); nil for a camera without a battery, or before the first answer.
+    public var battery: BatteryStatus?
     public var lastEvent: String?
     public var lastEventDate: Date?
     public var lastError: String?
@@ -114,6 +119,9 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     public var motionShadow: MotionShadowStatus?
     /// The NVR recording of this camera (`nvrEnabled`): off, waiting, recording or paused, with notes. Changes rarely (see `CameraArchiveStatus`).
     public var nvr: CameraArchiveStatus
+    /// The camera's security level and what it rests on, from the last security check (`BridgeEngine.checkCameraSecurity`; at start, daily,
+    /// after "Set up for Camera Bridge"); nil before the first check, for the demo camera, and after a restart until it is checked again.
+    public var security: CameraSecurity?
 
     public init(id: UUID, name: String, kind: CameraKind, vendor: CameraVendor, connection: ConnectionState = .idle,
                 eventChannelConnected: Bool = false, videoSummary: String? = nil, isPaired: Bool = false, setupCode: String = "",
@@ -210,5 +218,24 @@ public enum EngineError: Error, Equatable, Sendable, CustomStringConvertible {
         case .configurationUnavailable(let reason): "The configuration could not be read: \(reason)"
         case .noCameraAPI(let host): "No supported camera API answered at \(host)."
         }
+    }
+}
+
+/// What a camera's night vision offers and where it is (`CameraStatus.nightVision`).
+public struct NightVisionState: Sendable, Equatable {
+    public var modes: [NightVisionMode]
+    /// The mode the camera reported (nil: unknown).
+    public var mode: NightVisionMode?
+    /// The camera has a lamp the bridge can switch.
+    public var light: Bool
+    /// The lamp as the camera says (`NightVisionControl.currentLight()`), else as last set from the bridge (nil: neither, since the camera
+    /// started).
+    public var lightOn: Bool?
+
+    public init(modes: [NightVisionMode], mode: NightVisionMode?, light: Bool, lightOn: Bool?) {
+        self.modes = modes
+        self.mode = mode
+        self.light = light
+        self.lightOn = lightOn
     }
 }

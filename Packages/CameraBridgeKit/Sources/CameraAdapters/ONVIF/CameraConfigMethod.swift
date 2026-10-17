@@ -15,6 +15,8 @@ public enum CameraConfigMethod: String, Sendable, Codable, CaseIterable, Hashabl
     case onvifMinimal
     /// ONVIF `SetVideoEncoderConfiguration` with CameraBridge's complete request.
     case onvifFull
+    /// The IP camera web API (`IPCWebClient`): only the camera's own labels ("Clean picture") go this way, never the encoder or the clock.
+    case ipcWebAPI
 
     /// Short name for results ("ONVIF minimal: InvalidArgVal; ISAPI: unsupported").
     public var displayName: String {
@@ -23,6 +25,7 @@ public enum CameraConfigMethod: String, Sendable, Codable, CaseIterable, Hashabl
         case .reolinkAPI: "Reolink API"
         case .onvifMinimal: "ONVIF minimal"
         case .onvifFull: "ONVIF full"
+        case .ipcWebAPI: "web API"
         }
     }
 
@@ -140,11 +143,15 @@ public struct CameraEncoderEdit: Sendable, Equatable {
     public var desired: CameraVideoEncoderSettings
     /// The camera's reported options for the stream, used to clamp values on ONVIF minimal.
     public var options: [CameraVideoEncoderOptions]
+    /// Write the desired codec even when the camera's settings already name it: a camera can report H.264 while it sends H.265 (a
+    /// Jennov's ONVIF did), and only writing the codec makes it send what it reports.
+    public var rewriteCodec: Bool
 
-    public init(isSub: Bool, desired: CameraVideoEncoderSettings, options: [CameraVideoEncoderOptions] = []) {
+    public init(isSub: Bool, desired: CameraVideoEncoderSettings, options: [CameraVideoEncoderOptions] = [], rewriteCodec: Bool = false) {
         self.isSub = isSub
         self.desired = desired
         self.options = options
+        self.rewriteCodec = rewriteCodec
     }
 }
 

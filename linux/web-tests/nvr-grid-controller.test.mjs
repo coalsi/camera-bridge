@@ -4,7 +4,7 @@ import { createGridController } from '../web/js/screens/nvr-controller.js';
 import { fakeTime, settle } from './nvr-grid-helpers.mjs';
 
 const T0 = 1760099000000;
-const id = (n) => `00000000-0000-4000-8000-00000000000${n}`;
+const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 function makeCamera(n, overrides = {}) {
   return {
@@ -59,7 +59,7 @@ function fakeCatalog() {
   };
 }
 
-function setup({ count = 9, perPage = 4, initialMs = null, initialPage = 0, initialFocus = null, playable = true, catalogTimeoutMs = 10_000 } = {}) {
+function setup({ count = 9, perPage = 4, initialMs = null, initialPage = 0, initialFocus = null, playable = true, catalogTimeoutMs = 10_000, paginate } = {}) {
   const time = fakeTime(0);
   const cameras = Array.from({ length: count }, (_, i) => makeCamera(i + 1));
   const session = fakeSession();
@@ -69,7 +69,7 @@ function setup({ count = 9, perPage = 4, initialMs = null, initialPage = 0, init
   const controller = createGridController({
     session, catalog, listCameras: () => cameras,
     subscribeCameras: (fn) => { cameraListeners.add(fn); return () => cameraListeners.delete(fn); },
-    perPage, initialMs, initialPage, initialFocus, playable, catalogTimeoutMs,
+    perPage, initialMs, initialPage, initialFocus, playable, catalogTimeoutMs, paginate,
     navigate: (path) => log.navigations.push(path), replaceHash: (path) => log.hashes.push(path), remember: (state) => log.remembered.push(state),
     formatTime: (ms) => `t${ms - T0}`, now: time.now,
     setWaveformCameras: (ids) => log.waveform.push([...ids]), setSnapshotIds: (ids) => log.snapshotIds.push([...ids]), pokeSnapshots: () => { log.pokes += 1; },
@@ -398,6 +398,96 @@ test('a camera that is added or removed changes the page; a status change alone 
   assert.deepEqual(t.session.calls[0], ['setCameras', ids(2, 3, 4, 5)]);
   assert.deepEqual(t.session.calls[1], ['focus', id(2)], 'the focused camera is gone');
   t.controller.destroy();
+});
+
+test('the mosaic gives the pages their lengths; a new layout keeps the page that holds the focused camera, else the first one on screen', async () => {
+  let lengths = [3, 4, 2];
+  const asked = [];
+  const t = setup({ count: 9, perPage: 16, paginate: (cameras) => { asked.push(cameras.length); return lengths; } });
+  const started = t.controller.start();
+  t.catalog.answer();
+  await started;
+  assert.deepEqual(t.session.calls[0], ['setCameras', ids(1, 2, 3)]);
+  assert.ok(asked.length > 0 && asked.every((n) => n === 9), 'paginate is asked with the whole camera list');
+  let view = t.controller.view();
+  assert.deepEqual([view.page, view.pages, view.first, view.last, view.total], [0, 3, 1, 3, 9]);
+  t.controller.nextPage();
+  view = t.controller.view();
+  assert.deepEqual(view.tiles.map((tile) => tile.id), ids(4, 5, 6, 7));
+  assert.deepEqual([view.page, view.first, view.last], [1, 4, 7]);
+  // The wall got smaller: two cameras a page. Camera 4 led the page; it is on the third page now, and that page shows.
+  lengths = [2, 2, 2, 2, 1];
+  t.session.calls.length = 0;
+  const before = t.emits.count;
+  t.controller.relayout();
+  view = t.controller.view();
+  assert.deepEqual([view.page, view.pages, view.first, view.last], [1, 5, 3, 4]);
+  assert.deepEqual(t.session.calls[0], ['setCameras', ids(3, 4)]);
+  await settle();
+  assert.equal(t.emits.count, before + 1, 'one redraw');
+  // Nothing changed: the session is not asked again.
+  t.session.calls.length = 0;
+  t.controller.relayout();
+  assert.deepEqual(t.session.calls, []);
+  // The focused (hovered) camera leads when there is one: cameras 5 and 6 are on screen, 6 is hovered, and the new pages split them.
+  t.controller.nextPage();
+  t.controller.focus(id(6));
+  lengths = [5, 4];
+  t.controller.relayout();
+  assert.deepEqual(t.controller.view().tiles.map((tile) => tile.id), ids(6, 7, 8, 9), 'the page that holds the focused camera');
+  assert.equal(t.controller.focusedId, id(6));
+  // The mosaic cannot say yet (no size): fixed pages of perPage.
+  lengths = null;
+  t.controller.relayout();
+  view = t.controller.view();
+  assert.deepEqual([view.page, view.pages, view.first, view.last], [0, 1, 1, 9]);
+  t.controller.destroy();
+});
+
+test('coming back with more than 16 cameras finds the remembered page and camera once the mosaic first gives its pages', async () => {
+  let lengths = null;   // the wall is not measured yet: pages of 16 stand in
+  const t = setup({ count: 20, perPage: 16, initialPage: 3, initialFocus: id(14), paginate: () => lengths });
+  const started = t.controller.start();
+  t.catalog.answer();
+  await started;
+  lengths = [4, 4, 4, 4, 4];   // the person was on the fourth page of four, hovering camera 14
+  t.controller.relayout();
+  const view = t.controller.view();
+  assert.deepEqual(view.tiles.map((tile) => tile.id), ids(13, 14, 15, 16));
+  assert.equal(view.page, 3);
+  assert.equal(t.controller.focusedId, id(14));
+  t.controller.destroy();
+});
+
+test('a camera added, removed or with a new shape re-packs the mosaic around the camera that led the page', async () => {
+  let lengths = [3, 4, 2];
+  const t = setup({ count: 9, perPage: 16, paginate: () => lengths });
+  const started = t.controller.start();
+  t.catalog.answer();
+  await started;
+  t.controller.nextPage();         // cameras 4 to 7
+  t.controller.focus(id(6));
+  lengths = [2, 2, 2, 2, 1];       // camera 1 reported a 4:3 stream: two cameras a page now
+  for (const fn of [...t.cameraListeners]) fn();
+  assert.deepEqual(t.controller.view().tiles.map((tile) => tile.id), ids(5, 6), 'the page that holds the hovered camera');
+  assert.equal(t.controller.focusedId, id(6));
+  t.controller.focus(id(5));
+  t.controller.nextPage();         // cameras 7 and 8; the person chose this page
+  assert.deepEqual(t.controller.view().tiles.map((tile) => tile.id), ids(7, 8), 'a page chosen by hand is not overruled');
+  t.controller.destroy();
+});
+
+test('without paginate the pages are perPage cameras each, and relayout changes nothing', async () => {
+  const t = setup({ count: 9, perPage: 4 });
+  const started = t.controller.start();
+  t.catalog.answer();
+  await started;
+  t.session.calls.length = 0;
+  t.controller.relayout();
+  assert.deepEqual(t.session.calls, []);
+  assert.deepEqual([t.controller.view().pages, t.controller.view().last], [3, 4]);
+  t.controller.destroy();
+  t.controller.relayout();
 });
 
 test('an empty bridge has no tiles and no page', async () => {

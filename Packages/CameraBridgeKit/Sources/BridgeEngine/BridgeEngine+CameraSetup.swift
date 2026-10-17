@@ -5,7 +5,8 @@ import Foundation
 // "Set up for Camera Bridge" (docs/superpowers/specs/2026-10-16-camera-setup-design.md, stages 1 and 2): one place per camera that makes it
 // right for the bridge. Every step is read first (its value then is the backup), shown as a preview, applied in a safe order and read
 // back; "Restore original settings" writes every saved value back. The steps themselves are CameraAdapters' (`CameraSettingsService`
-// +Setup, +NTP, +Network, +Encoder, +CleanPicture); the plan for the streams is the HomeKit optimizer's (`plannedEncoderFixes`).
+// +Setup, +NTP, +DNS, +Network, +Encoder, +CleanPicture); the plan for the streams is the HomeKit optimizer's (`plannedEncoderFixes`);
+// "Watch its internet" is offered where the bridge has Camera Bridge OS's internet guard (BridgeEngine+InternetGuard.swift).
 
 /// Where a step stands: in a preview (`willChange`, `alreadyRight`, `notSupported`, `notOffered`), after a run (`done`, `refused`, `notRun`),
 /// or after a restore (`restored`, `refused`).
@@ -36,7 +37,8 @@ public struct CameraSetupStep: Sendable, Codable, Equatable {
     }
 }
 
-/// The setup's record in a camera's configuration: which version of the setup ran, when, and what each step did.
+/// The setup's record in a camera's configuration: which version of the setup ran, when, and what each step did. A step this build does
+/// not know (a record written by a newer one) is left out when it is read, and the rest of the record is kept.
 public struct CameraSetupState: Sendable, Codable, Equatable {
     /// The setup's contents are versioned in code: a camera says which setup it has ("Set up for Camera Bridge (1)").
     public static let currentVersion = 1
@@ -70,6 +72,28 @@ public struct CameraSetupState: Sendable, Codable, Equatable {
 
     /// The run ended (it may have stopped at a step the camera refused).
     public var isFinished: Bool { applied != nil }
+
+    private enum CodingKeys: String, CodingKey { case version, started, applied, steps }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        started = try container.decode(Date.self, forKey: .started)
+        applied = try container.decodeIfPresent(Date.self, forKey: .applied)
+        steps = try container.decodeIfPresent([Lenient].self, forKey: .steps)?.compactMap(\.record) ?? []
+    }
+
+    /// One record, or nil for a step or status this build does not know.
+    private struct Lenient: Decodable {
+        var record: Record?
+        init(from decoder: any Decoder) throws { record = try? Record(from: decoder) }
+    }
+
+    /// The step's last record now says `status` (its value was put back).
+    mutating func mark(_ id: CameraSetupStepID, _ status: CameraSetupStepStatus) {
+        guard let index = steps.lastIndex(where: { $0.id == id }) else { return }
+        steps[index].status = status
+    }
 }
 
 /// What `cameraSetupPreview`, `applyCameraSetup` and `restoreCameraSetup` answer.
@@ -103,9 +127,13 @@ struct CameraSetupRead {
     var fresh = CameraSetupBackup(version: CameraSetupState.currentVersion, created: Date())
     var posix: String?
     var timeServer: String?
+    /// The bridge's address on the camera's network, for "Watch its internet".
+    var guardServer: String?
     var planned: [PlannedEncoderFix] = []
     var mainSmartCodecOn = false
     var subSmartCodecOn = false
+    /// The streams step's note without the "it sends H.265" sentence (which only describes the camera before the change).
+    var streamsNote: String?
 }
 
 extension BridgeEngine {
@@ -117,10 +145,14 @@ extension BridgeEngine {
         switch step {
         case .timeZone: "Time zone"
         case .timeSource: "Time from the bridge"
+        case .internetWatch: InternetGuardText.watchStep
         case .cleanPicture: "Clean picture"
         case .streams: "Streams for recording, Apple Home and live view"
+        case .videoPassword: "Video password"
+        case .extraServices: "Extra services off"
         case .upnp: "UPnP off"
-        case .cloud: "Cloud off (Hik-Connect)"
+        // Hikvision's Hik-Connect, or the cloud of a camera that speaks the IP camera web API: the change row names the service where known.
+        case .cloud: "Cloud off"
         }
     }
 
@@ -143,6 +175,10 @@ extension BridgeEngine {
             let read = try await readCameraSetup(camera, service: service)
             var backup = Self.mergedSetupBackup(existing: camera.setupBackup, fresh: read.fresh, readings: read.readings,
                                                 cleanPicture: camera.cleanPictureBackup, optimization: homeKitOptimizationSnapshots[cameraID])
+            if let code = backup.cloud?.cloudAuthcode {
+                await keepSetupCloudAuthcode(code, camera: camera)
+                backup.cloud?.cloudAuthcode = nil
+            }
             var state = CameraSetupState(started: Date())
             // The backup is saved before the first change.
             await changeConfiguration(cameraID) { configuration in
@@ -164,7 +200,8 @@ extension BridgeEngine {
                 } else if preview.status == .willChange {
                     let outcome = await applyStep(id, read: read, service: service, backup: &backup, camera: camera)
                     step.status = outcome.succeeded ? .done : .refused
-                    step.detail = outcome.succeeded ? (preview.detail ?? outcome.detail) : outcome.detail   // a note about a part not offered stays
+                    // A note about a part not offered stays; the streams step's "it sends H.265" sentence goes once it is changed.
+                    step.detail = outcome.succeeded ? ((id == .streams ? read.streamsNote : preview.detail) ?? outcome.detail) : outcome.detail
                     step.needsRestart = outcome.needsRestart
                     if outcome.succeeded, id == .streams {
                         streamChanged = true
@@ -188,8 +225,28 @@ extension BridgeEngine {
                 configuration.setupBackup = saved.isEmpty ? nil : saved
             }
             await rememberConfigMethod(cameraID: cameraID, service.memoryUpdate)
-            if streamChanged { await restartAfterCameraSetup(camera) }
-            return CameraSetupReport(steps: steps, state: finished, canRestore: !saved.isEmpty, stoppedAt: stoppedAt, streamRestarted: streamChanged,
+            var record = finished
+            if streamChanged {
+                await restartAfterCameraSetup(camera)
+                // The camera's own read-back can say H.264 while it still sends H.265: check what the restarted ingest receives.
+                let check = await streamsCheckAfterSetup(cameraID, planned: read.planned)
+                if codecChanged, let main = check.main, !Self.isH264(main) { codecChanged = false }   // the recordings' codec did not change
+                if let problem = check.problem {
+                    log.warning("\(camera.name): camera setup, streams: \(problem)")
+                    if let index = steps.firstIndex(where: { $0.id == .streams }) {
+                        steps[index].status = .refused
+                        steps[index].detail = problem
+                    }
+                    if let index = record.steps.firstIndex(where: { $0.id == .streams }) {
+                        record.steps[index].status = .refused
+                        record.steps[index].detail = problem
+                    }
+                    let checked = record
+                    await changeConfiguration(cameraID) { $0.setupState = checked }
+                }
+            }
+            scheduleSecurityCheck(cameraID, after: .zero, skipIfFresh: false)   // what the camera now lets out
+            return CameraSetupReport(steps: steps, state: record, canRestore: !saved.isEmpty, stoppedAt: stoppedAt, streamRestarted: streamChanged,
                                      mayNeedRecordingReEnabled: codecChanged)
         }
     }
@@ -211,7 +268,11 @@ extension BridgeEngine {
                     backup = backup.clearing(id)
                     if id == .streams { streamChanged = true }
                     let saved = backup
-                    await changeConfiguration(cameraID) { $0.setupBackup = saved.isEmpty ? nil : saved }
+                    await changeConfiguration(cameraID) { configuration in
+                        configuration.setupBackup = saved.isEmpty ? nil : saved
+                        // The camera asks its own DNS servers again: its Watch is over (the guard's list follows the save).
+                        if id == .internetWatch { configuration.setupState?.mark(.internetWatch, .restored) }
+                    }
                 }
                 log.info("\(camera.name): camera setup, \(Self.cameraSetupTitle(id).lowercased()) \(outcome.succeeded ? "restored" : "not restored") (\(outcome.detail))")
                 steps.append(CameraSetupStep(id: id, title: Self.cameraSetupTitle(id), status: outcome.succeeded ? .restored : .refused, detail: outcome.detail,
@@ -221,6 +282,7 @@ extension BridgeEngine {
             if cleared { await changeConfiguration(cameraID) { $0.setupBackup = nil; $0.setupState = nil } }
             await rememberConfigMethod(cameraID: cameraID, service.memoryUpdate)
             if streamChanged { await restartAfterCameraSetup(camera) }
+            scheduleSecurityCheck(cameraID, after: .zero, skipIfFresh: false)
             let state = configurations.first { $0.id == cameraID }?.setupState
             return CameraSetupReport(steps: Array(steps.reversed()), state: state, canRestore: !cleared, streamRestarted: streamChanged)
         }
@@ -277,6 +339,19 @@ extension BridgeEngine {
             read.fresh.timeSource = value
         }
 
+        // Watch its internet: only where the bridge has the internet guard (Camera Bridge OS), at its address on the camera's network.
+        if !offersInternetGuard {
+            read.readings[.internetWatch] = .notOffered(InternetGuardText.notOnThisBridge)
+        } else if let server = internetWatchServer(camera) {
+            read.guardServer = server
+            let (reading, value) = try await readStep({ try await service.readInternetWatch(server: server) },
+                                                      unreadable: { (CameraSetupReading.notSupported($0), nil) })
+            read.readings[.internetWatch] = reading
+            read.fresh.internetWatch = value
+        } else {
+            read.readings[.internetWatch] = .notOffered(InternetGuardText.notOnItsNetwork)
+        }
+
         // Clean picture: already done by the Clean picture switch when it has a backup.
         if camera.cleanPictureBackup != nil || camera.setupBackup?.cleanPicture != nil {
             read.readings[.cleanPicture] = CameraSetupReading(state: .alreadyRight)
@@ -288,12 +363,21 @@ extension BridgeEngine {
         let streams = try await readStep({ try await readStreams(camera, service: service) },
                                          unreadable: { StreamsRead(reading: CameraSetupReading.notSupported($0)) })
         read.readings[.streams] = streams.reading
+        read.streamsNote = streams.streamsNote
         read.planned = streams.planned
         read.mainSmartCodecOn = streams.mainSmartCodecOn
         read.subSmartCodecOn = streams.subSmartCodecOn
         read.fresh.streams = streams.backup
 
-        // UPnP and the maker's cloud (Hikvision's own settings).
+        // The IPCamera Web family's video password and extra services (not offered on other cameras).
+        let (password, passwordBackup) = try await readStep({ try await service.readVideoPassword() }, unreadable: { (CameraSetupReading.notSupported($0), nil) })
+        read.readings[.videoPassword] = password
+        read.fresh.videoPassword = passwordBackup
+        let (services, servicesBackup) = try await readStep({ try await service.readExtraServices() }, unreadable: { (CameraSetupReading.notSupported($0), nil) })
+        read.readings[.extraServices] = services
+        read.fresh.extraServices = servicesBackup
+
+        // UPnP and the maker's cloud (Hikvision's own settings, the cloud of the cameras with a web API of their own).
         for (id, feature) in [(CameraSetupStepID.upnp, CameraNetworkFeature.upnp), (.cloud, .cloud)] {
             let (reading, value) = try await readStep({ try await service.readFeature(feature) }, unreadable: { (CameraSetupReading.notSupported($0), nil) })
             read.readings[id] = reading
@@ -304,6 +388,7 @@ extension BridgeEngine {
 
     struct StreamsRead {
         var reading: CameraSetupReading
+        var streamsNote: String?
         var planned: [PlannedEncoderFix] = []
         var mainSmartCodecOn = false
         var subSmartCodecOn = false
@@ -338,18 +423,67 @@ extension BridgeEngine {
         }
         let note = main == nil ? "Main stream: not offered, the camera has no H.264 or H.265 main stream whose settings it shows."
             : sub == nil ? "Sub stream: not offered, the camera has no H.264 or H.265 sub stream whose settings it shows." : nil
-        let facts = await runtimes[camera.id]?.readinessFacts()
+        // The codecs the bridge really receives: a camera's settings can name H.264 while it sends H.265 (a Jennov's ONVIF did).
+        // A measurement counts only for the stream it is of: the same picture size (a camera whose stream addresses differ only in their
+        // query, as Dahua's do, can have its profiles matched to the wrong stream).
+        let facts = await measuredStreamFacts(camera.id)
+        let mainMeasured = Self.sameSize(main, facts?.main) ? facts?.main?.codec : nil
+        let subMeasured = Self.sameSize(sub, facts?.sub) ? facts?.sub?.codec : nil
         result.planned = Self.plannedEncoderFixes(main: main, mainProfile: snapshot?.mainProfile, sub: sub, subProfile: snapshot?.subProfile,
-                                                  mainHasBFrames: facts?.main?.hasBFrames == true)
+                                                  mainHasBFrames: facts?.main?.hasBFrames == true,
+                                                  mainMeasuredCodec: mainMeasured, subMeasuredCodec: subMeasured)
+        var notes = note.map { [$0] } ?? []
+        result.streamsNote = note
         for plan in result.planned {
-            changes.append(.init(label: plan.isSub ? "Sub stream" : "Main stream", now: CameraSetupText.encoder(plan.before),
+            let name = plan.isSub ? "sub" : "main"
+            var shown = plan.before
+            if let real = Self.measuredCodecMismatch(reported: plan.before.encoding, measured: plan.isSub ? subMeasured : mainMeasured) {
+                shown.encoding = real
+                notes.append("The camera says its \(name) stream is \(Self.codecDisplayName(plan.before.encoding)), but it sends \(real).")
+            }
+            changes.append(.init(label: plan.isSub ? "Sub stream" : "Main stream", now: CameraSetupText.encoder(shown),
                                  after: CameraSetupText.encoder(plan.edit.desired)))
             if plan.isSub { streams.subEncoder = plan.before; streams.subOptions = plan.options } else { streams.mainEncoder = plan.before; streams.mainOptions = plan.options }
         }
         result.backup = streams.isEmpty ? nil : streams
-        result.reading = changes.isEmpty ? CameraSetupReading(state: .alreadyRight, note: note)
-            : CameraSetupReading(state: .willChange, changes: changes, note: note)
+        let noted = notes.isEmpty ? nil : notes.joined(separator: " ")
+        result.reading = changes.isEmpty ? CameraSetupReading(state: .alreadyRight, note: noted)
+            : CameraSetupReading(state: .willChange, changes: changes, note: noted)
         return result
+    }
+
+    /// What the camera's ingest measures of its streams now (`CameraRuntime.readinessFacts`); nil without an ingest.
+    private func measuredStreamFacts(_ cameraID: UUID) async -> (main: MeasuredStreamFacts?, sub: MeasuredStreamFacts?)? {
+        if let measured = tuning.measuredStreamFacts { return await measured(cameraID) }
+        return await runtimes[cameraID]?.readinessFacts()
+    }
+
+    /// Whether a measurement is of this stream: the same picture size, give or take a few lines (1080 against 1088), or either unknown.
+    nonisolated static func sameSize(_ settings: CameraVideoEncoderSettings?, _ measured: MeasuredStreamFacts?) -> Bool {
+        guard let size = settings?.resolution, let width = measured?.width, let height = measured?.height else { return true }
+        return abs(size.width - width) <= 16 && abs(size.height - height) <= 16
+    }
+
+    /// After the setup changed a stream's codec and restarted the camera's ingest: watches the new ingest (up to
+    /// `EngineTuning.cameraSetupMeasureWait`, ending early once every changed stream arrives as H.264, since a camera can take a few
+    /// seconds to switch) and says when one still arrives as something else (`streamsStillWrong`). Streams whose codec the setup did not
+    /// change are not waited for. `problem` is nil when it is right or nothing was measured in time (a camera that sends nothing until
+    /// asked is not a failure); `main` is the main stream's measured codec, nil when not measured.
+    func streamsCheckAfterSetup(_ cameraID: UUID, planned: [PlannedEncoderFix]) async -> (problem: String?, main: String?) {
+        let changed = planned.filter { Self.isH264($0.edit.desired.encoding) && (!Self.isH264($0.before.encoding) || $0.edit.rewriteCodec) }
+        let wantsMain = changed.contains { !$0.isSub }, wantsSub = changed.contains { $0.isSub }
+        // Nothing to wait for without an ingest (the camera is off or not started in this bridge).
+        guard wantsMain || wantsSub, runtimes[cameraID] != nil || tuning.measuredStreamFacts != nil else { return (nil, nil) }
+        let clock = ContinuousClock(), deadline = clock.now + tuning.cameraSetupMeasureWait
+        var facts: (main: MeasuredStreamFacts?, sub: MeasuredStreamFacts?) = (nil, nil)
+        while true {
+            facts = await measuredStreamFacts(cameraID) ?? (nil, nil)
+            let right = (!wantsMain || facts.main?.codec.map(Self.isH264) == true) && (!wantsSub || facts.sub?.codec.map(Self.isH264) == true)
+            if right || clock.now >= deadline || Task.isCancelled { break }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        let problem = Self.streamsStillWrong(planned: changed, measuredMain: wantsMain ? facts.main?.codec : nil, measuredSub: wantsSub ? facts.sub?.codec : nil)
+        return (problem, facts.main?.codec)
     }
 
     static func previewStep(_ id: CameraSetupStepID, _ reading: CameraSetupReading?) -> CameraSetupStep {
@@ -362,6 +496,7 @@ extension BridgeEngine {
         case .willChange: return CameraSetupStep(id: id, title: title, status: .willChange, changes: reading.changes, detail: reading.note)
         case .alreadyRight: return CameraSetupStep(id: id, title: title, status: .alreadyRight, detail: reading.note)
         case .notSupported(let why): return CameraSetupStep(id: id, title: title, status: .notSupported, detail: why)
+        case .notOffered(let why): return CameraSetupStep(id: id, title: title, status: .notOffered, detail: why)
         }
     }
 
@@ -375,9 +510,12 @@ extension BridgeEngine {
         func changing(_ id: CameraSetupStepID) -> Bool { readings[id]?.state == .willChange }
         if backup.timeZone == nil, changing(.timeZone) { backup.timeZone = fresh.timeZone }
         if backup.timeSource == nil, changing(.timeSource) { backup.timeSource = fresh.timeSource }
+        if backup.internetWatch == nil, changing(.internetWatch) { backup.internetWatch = fresh.internetWatch }
         if backup.cleanPicture == nil { backup.cleanPicture = cleanPicture }
         if backup.upnp == nil, changing(.upnp) { backup.upnp = fresh.upnp }
         if backup.cloud == nil, changing(.cloud) { backup.cloud = fresh.cloud }
+        if backup.videoPassword == nil, changing(.videoPassword) { backup.videoPassword = fresh.videoPassword }
+        if backup.extraServices == nil, changing(.extraServices) { backup.extraServices = fresh.extraServices }
         // Streams: the oldest value of each field wins (an earlier run's, then Optimize's undo, then the values now).
         var streams = backup.streams ?? CameraStreamsBackup()
         if let optimization {
@@ -408,12 +546,19 @@ extension BridgeEngine {
             case .timeSource:
                 guard let server = read.timeServer else { return CameraSetupOutcome(succeeded: false, detail: "no address for the bridge") }
                 return try await service.applyTimeSource(server: server)
+            case .internetWatch:
+                guard let server = read.guardServer else { return CameraSetupOutcome(succeeded: false, detail: "no address for the bridge") }
+                return try await service.applyDNS(server: server)
             case .cleanPicture:
                 let change = try await service.cleanPicture()
                 if change.succeeded, backup.cleanPicture == nil { backup.cleanPicture = change.backup }
                 return CameraSetupOutcome(succeeded: change.succeeded, detail: change.summary)
             case .streams:
                 return try await applyStreams(read, service: service, camera: camera)
+            case .videoPassword:
+                return try await service.requireVideoPassword()
+            case .extraServices:
+                return try await service.turnOffExtraServices()
             case .upnp:
                 return try await service.setFeature(.upnp, enabled: false, path: backup.upnp?.path)
             case .cloud:
@@ -449,6 +594,9 @@ extension BridgeEngine {
             case .timeSource:
                 guard let value = backup.timeSource else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
                 return try await service.restoreTimeSource(value)
+            case .internetWatch:
+                guard let value = backup.internetWatch else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
+                return try await service.restoreDNS(value)
             case .cleanPicture:
                 guard let value = backup.cleanPicture else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
                 let change = try await service.restorePicture(value)
@@ -469,15 +617,48 @@ extension BridgeEngine {
                     try await service.setHikvisionSmartCodec(enabled: true, channelID: CameraDrivers.hikvisionChannelID(mainStreamURL: camera.mainStreamURL, sub: true))
                 }
                 return CameraSetupOutcome(succeeded: true, detail: "as the camera had them")
+            case .videoPassword:
+                guard let value = backup.videoPassword else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
+                return try await service.restoreServiceSwitches(value)
+            case .extraServices:
+                guard let value = backup.extraServices else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
+                return try await service.restoreServiceSwitches(value)
             case .upnp:
                 guard let value = backup.upnp else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
                 return try await service.setFeature(.upnp, enabled: value.enabled, path: value.path)
             case .cloud:
-                guard let value = backup.cloud else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
-                return try await service.setFeature(.cloud, enabled: value.enabled, path: value.path)
+                guard var value = backup.cloud else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
+                var kept = false
+                if value.cloudAuthcode == nil {
+                    // Kept apart from the configuration (`keepSetupCloudAuthcode`); none kept: the camera's own goes back with the switch.
+                    // A store that cannot be read fails the step, so a kept value is neither lost nor replaced by the camera's.
+                    let credentials = credentials, id = camera.id
+                    do {
+                        value.cloudAuthcode = try await Self.offMain { try credentials.setupCloudAuthcode(for: id) }
+                    } catch {
+                        log.warning("\(camera.name): camera setup, the cloud's sign-in value could not be read from the secret store")
+                        return CameraSetupOutcome(succeeded: false, detail: "Camera Bridge could not read the cloud’s saved sign-in, so nothing was changed")
+                    }
+                    kept = value.cloudAuthcode != nil
+                }
+                let outcome = try await service.setFeature(.cloud, enabled: value.enabled, path: value.path, saved: value)
+                if outcome.succeeded, kept { await keepSetupCloudAuthcode(nil, camera: camera) }   // given back: no longer kept
+                return outcome
             }
         } catch {
             return CameraSetupOutcome(succeeded: false, detail: Self.setupReason(error))
+        }
+    }
+
+    /// The sign-in value of the maker's cloud that the setup turns off (an IP camera web API camera's Authcode) goes to the platform's
+    /// secret store, never into the configuration, which reaches the page, its events and the Mac's backup file (nil deletes it, once
+    /// the cloud is back). A value that cannot be kept is said in the log without it: Restore then gives back the one the camera has.
+    private func keepSetupCloudAuthcode(_ code: String?, camera: CameraConfiguration) async {
+        let credentials = credentials, id = camera.id
+        do {
+            try await Self.offMain { try credentials.setSetupCloudAuthcode(code, for: id) }
+        } catch {
+            log.warning("\(camera.name): camera setup, the cloud's sign-in value could not be \(code == nil ? "deleted" : "kept") in the secret store")
         }
     }
 
@@ -501,22 +682,31 @@ extension BridgeEngine {
     /// The bridge's IPv4 address cameras should take time from: the one on the camera's own subnet when the camera's address is known,
     /// else the bridge's only private address, else its first. nil when it has none (only loopback, link-local or tunnels).
     nonisolated static func timeServerAddress(cameraHost: String, interfaces: [InterfaceAddress]) -> String? {
-        let candidates = interfaces.filter { entry in
-            guard !entry.isIPv6, !StreamAddress.isLoopback(entry.address), !MacVPNDetector.isTunnelName(entry.interface),
-                  let bytes = StreamAddress.addressBytes(entry.address), bytes.count == 4 else { return false }
-            return !(bytes[0] == 169 && bytes[1] == 254)
-        }
-        if let camera = StreamAddress.addressBytes(cameraHost), camera.count == 4,
-           let match = candidates.first(where: { entry in
-               guard let bits = entry.prefixLength, bits > 0, bits <= 32, let bytes = StreamAddress.addressBytes(entry.address) else { return false }
-               return StreamAddress.samePrefix(bytes, camera, bits: bits)
-           }) {
-            return match.address
-        }
+        let candidates = bridgeAddressCandidates(interfaces)
+        if let match = bridgeAddress(onNetworkOf: cameraHost, interfaces: interfaces) { return match }
         func isPrivate(_ address: String) -> Bool {
             guard let b = StreamAddress.addressBytes(address), b.count == 4 else { return false }
             return b[0] == 10 || (b[0] == 172 && (16...31).contains(b[1])) || (b[0] == 192 && b[1] == 168)
         }
         return candidates.first { isPrivate($0.address) }?.address ?? candidates.first?.address
+    }
+
+    /// The bridge's IPv4 address on the subnet of `cameraHost` (an IPv4 address); nil when it has none there (no fallback: "Watch its
+    /// internet" needs the camera to reach the bridge directly).
+    nonisolated static func bridgeAddress(onNetworkOf cameraHost: String, interfaces: [InterfaceAddress]) -> String? {
+        guard let camera = StreamAddress.addressBytes(cameraHost), camera.count == 4 else { return nil }
+        return bridgeAddressCandidates(interfaces).first { entry in
+            guard let bits = entry.prefixLength, bits > 0, bits <= 32, let bytes = StreamAddress.addressBytes(entry.address) else { return false }
+            return StreamAddress.samePrefix(bytes, camera, bits: bits)
+        }?.address
+    }
+
+    /// The bridge's IPv4 addresses a camera could use: no loopback, tunnel or link-local one.
+    private nonisolated static func bridgeAddressCandidates(_ interfaces: [InterfaceAddress]) -> [InterfaceAddress] {
+        interfaces.filter { entry in
+            guard !entry.isIPv6, !StreamAddress.isLoopback(entry.address), !MacVPNDetector.isTunnelName(entry.interface),
+                  let bytes = StreamAddress.addressBytes(entry.address), bytes.count == 4 else { return false }
+            return !(bytes[0] == 169 && bytes[1] == 254)
+        }
     }
 }

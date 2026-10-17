@@ -29,18 +29,28 @@ export function cameraList() {
 }
 
 let source = null;
+let retryTimer = null;
+let refusals = 0;
+const RETRY_MS = [3000, 6000, 12000, 30000];
 
 export function startEvents() {
   stopEvents();
-  source = new EventSource('/api/v1/events');
-  source.addEventListener('open', () => {
+  const opened = new EventSource('/api/v1/events');
+  source = opened;
+  opened.addEventListener('open', () => {
+    refusals = 0;
     if (!store.connected) { store.connected = true; emit('connection'); }
   });
-  source.addEventListener('error', () => {
-    // The browser reconnects by itself (the server asks it to every 3 s); say so meanwhile.
+  opened.addEventListener('error', () => {
+    // The browser reconnects by itself after a drop (the server asks it to every 3 s); say so meanwhile. An answer that is not the stream (a
+    // 502 or 503 while the bridge restarts) makes it give up for good (readyState CLOSED): then this opens a new one, a little later each time.
     if (store.connected) { store.connected = false; emit('connection'); }
+    if (opened.readyState === 2 && source === opened && retryTimer === null) {
+      retryTimer = setTimeout(() => { retryTimer = null; if (source === opened) startEvents(); }, RETRY_MS[Math.min(refusals, RETRY_MS.length - 1)]);
+      refusals += 1;
+    }
   });
-  const on = (name, fn) => source.addEventListener(name, (event) => {
+  const on = (name, fn) => opened.addEventListener(name, (event) => {
     try { fn(JSON.parse(event.data)); } catch (error) { console.error(error); }
   });
   on('bridge', (data) => { store.bridge = data; emit('bridge'); });
@@ -61,6 +71,7 @@ export function startEvents() {
 }
 
 export function stopEvents() {
+  if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
   if (source) source.close();
   source = null;
 }

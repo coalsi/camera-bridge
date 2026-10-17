@@ -131,14 +131,30 @@ export function createSession({
   function onCell(id, coverage) {
     emit({ kind: 'coverage', id, coverage });
     if (destroyed || suspended) return;
-    if (waiting && coverage.epoch === waiting.epoch && id === primaryId()) {
-      if (coverage.playing) startClock(waiting.epoch);
-      else if (coverage.kind === 'coarse' && Number.isFinite(coverage.snapMs)) startPlaying(coverage.snapMs);
-      else if (STOPPED.has(coverage.kind)) clearWait();
-    }
+    if (waiting && coverage.epoch === waiting.epoch) startOrCancel(id, coverage);
     if (coverage.kind === 'driveMissing') holdForDrive();
     else if (driveHold && !anyDriveMissing()) resumeAfterDrive();
     if (coverage.kind === 'gap') jumpOverGap();
+  }
+
+  /**
+   * While the clock waits to start, the main tile leads: its first playing frame starts the clock, a coarse picture moves the start to its key,
+   * and a stop cancels the start. A main tile with no recording at the start (a gap) hands the lead to the others: the first of them that plays
+   * starts the clock, and the main tile joins it at its next recording (cell.js). Only when no tile can show anything is the start cancelled.
+   */
+  function startOrCancel(id, coverage) {
+    const forEpoch = waiting.epoch;
+    const isMain = id === primaryId();
+    const main = cells.get(primaryId())?.cell.coverage;
+    const mainAtGap = main?.epoch === forEpoch && main.kind === 'gap';
+    if (!isMain && !mainAtGap) return;                                   // the main tile leads while it may have video
+    if (coverage.playing) { startClock(forEpoch); return; }
+    if (isMain && coverage.kind === 'coarse' && Number.isFinite(coverage.snapMs)) { startPlaying(coverage.snapMs); return; }
+    if (!STOPPED.has(coverage.kind)) return;
+    if (!mainAtGap) { clearWait(); return; }                            // unreadable, no drive, unsupported
+    const others = [...cells].filter(([other]) => other !== primaryId()).map(([, entry]) => entry.cell.coverage);
+    if (others.some((state) => state.epoch === forEpoch && state.playing)) startClock(forEpoch);
+    else if (others.every((state) => state.epoch === forEpoch && STOPPED.has(state.kind))) clearWait();
   }
 
   // MARK: The recordings drive
@@ -171,11 +187,14 @@ export function createSession({
   /** Playing into a place nobody has a recording for: go to the next recording of any camera, or live when there is none. */
   function jumpOverGap() {
     if (scrubbing || clock.mode === 'live' || (clock.mode !== 'playing' && !waiting)) return;
-    const states = [...cells.values()].map((entry) => entry.cell.coverage).filter((coverage) => coverage.kind !== 'idle');
+    // Every cell counts, the idle ones too: a cell that has not answered the newest desire yet (still idle on the first play from live, when
+    // a camera with nothing recorded there answers "gap" at once) may still have video, so nobody jumps before it has answered.
+    const states = [...cells.values()].map((entry) => entry.cell.coverage);
     if (states.some((coverage) => coverage.epoch < lastDispatch || SHOWING.has(coverage.kind))) return;       // someone still has video or is working
     const gaps = states.filter((coverage) => coverage.kind === 'gap');
     if (!gaps.length) return;
     const nexts = gaps.map((coverage) => coverage.next).filter((next) => Number.isFinite(next));
+    if (nexts.some((next) => next <= clock.position())) return;              // the clock is at that tile's next recording: it plays on by itself
     if (nexts.length) startPlaying(Math.min(...nexts));
     else goLiveNow();
   }

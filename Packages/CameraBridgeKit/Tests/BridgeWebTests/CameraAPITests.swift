@@ -492,6 +492,28 @@ import TestSupport
         #expect(offline.1 == "the connection was refused")
     }
 
+    /// `status.battery` = {level, charging, source}: absent for a camera without one, `source` null while not charging.
+    @Test func batteryInTheStatus() async throws {
+        let backend = FakeBackend()
+        let harness = try Harness(backend: backend)
+        let session = try await harness.signIn()
+        let id = try await addCamera(session)
+        func battery(_ battery: BatteryStatus?) async -> [String: Any]? {
+            var status = CameraStatus(id: id, name: "Front Door", kind: .camera, vendor: .go2rtc, connection: .online)
+            status.battery = battery
+            backend.write { $0.statusOverrides[id] = status }
+            let json = await session.get("/api/v1/cameras/\(id)").json["status"] as? [String: Any]
+            return json?["battery"] as? [String: Any]
+        }
+        #expect(await battery(nil) == nil)
+        let s220 = try #require(await battery(BatteryStatus(level: 22, charging: false)))
+        #expect(s220["level"] as? Int == 22 && s220["charging"] as? Bool == false)
+        #expect(s220.keys.contains("source") && s220["source"] is NSNull)
+        let solar = try #require(await battery(BatteryStatus(level: 64, charging: true, source: .solar)))
+        #expect(solar["level"] as? Int == 64 && solar["charging"] as? Bool == true && solar["source"] as? String == "solar")
+        #expect(try #require(await battery(BatteryStatus(level: 64, charging: true, source: .cable)))["source"] as? String == "cable")
+    }
+
     @Test func unknownCamerasAre404() async throws {
         let harness = try Harness()
         let session = try await harness.signIn()

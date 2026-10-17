@@ -19,11 +19,13 @@ public struct BridgeOverview: Sendable {
     public var streamingHelperInstalled: Bool
     /// The recordings folder as numbers; nil before the first measurement.
     public var nvrStorage: ArchiveStorageStatus?
+    /// The internet guard's notice for the day (`BridgeEngine.internetGuardNotice`); nil when nothing was blocked today or there is no guard.
+    public var internetGuardNotice: InternetGuardNotice?
 
     public init(state: EngineState, cameras: [CameraStatus], configurations: [CameraConfiguration], sensorsBridge: SensorsBridgeStatus? = nil,
                 localNetworkAccess: LocalNetworkAccess = .unknown, networkNotices: [NetworkNotice] = [], settings: BridgeSettings = BridgeSettings(),
                 webhookProblem: String? = nil, configurationRecovered: Bool = false, streamingHelperInstalled: Bool = false,
-                nvrStorage: ArchiveStorageStatus? = nil) {
+                nvrStorage: ArchiveStorageStatus? = nil, internetGuardNotice: InternetGuardNotice? = nil) {
         self.state = state
         self.cameras = cameras
         self.configurations = configurations
@@ -35,6 +37,7 @@ public struct BridgeOverview: Sendable {
         self.configurationRecovered = configurationRecovered
         self.streamingHelperInstalled = streamingHelperInstalled
         self.nvrStorage = nvrStorage
+        self.internetGuardNotice = internetGuardNotice
     }
 }
 
@@ -75,6 +78,10 @@ public protocol BridgeBackend: Sendable {
     func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport
     /// Moves a pan/tilt camera (`BridgeEngine.panTilt`).
     func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws
+    /// Sets a camera's night vision and/or lamp (`BridgeEngine.setNightVision`).
+    func setNightVision(cameraID: UUID, mode: NightVisionMode?, light: Bool?) async throws
+    /// `BridgeEngine.checkCameraSecurity(cameraID:)`: checks the camera now and answers its security level. Default throws.
+    func checkCameraSecurity(cameraID: UUID) async throws -> CameraSecurity
     /// `BridgeEngine.localIPv4Addresses()`. The default has none.
     func localIPv4Addresses() async -> [String]
     /// `BridgeEngine.portAnswer(host:port:timeout:)`. The default never reaches anything (`.silent`).
@@ -112,7 +119,8 @@ public struct EngineBackend: BridgeBackend {
             BridgeOverview(state: engine.state, cameras: engine.cameras, configurations: engine.configurations, sensorsBridge: engine.sensorsBridge,
                            localNetworkAccess: engine.localNetworkAccess, networkNotices: engine.recentNetworkNotices, settings: engine.settings,
                            webhookProblem: engine.webhookProblem, configurationRecovered: engine.configurationRecoveredFrom != nil,
-                           streamingHelperInstalled: engine.isStreamingHelperInstalled, nvrStorage: engine.nvrStorage)
+                           streamingHelperInstalled: engine.isStreamingHelperInstalled, nvrStorage: engine.nvrStorage,
+                           internetGuardNotice: engine.internetGuardNotice)
         }
     }
 
@@ -187,6 +195,10 @@ public struct EngineBackend: BridgeBackend {
         try await engine.panTilt(cameraID: cameraID, pan: pan, tilt: tilt, zoom: zoom)
     }
 
+    public func setNightVision(cameraID: UUID, mode: NightVisionMode?, light: Bool?) async throws {
+        try await engine.setNightVision(cameraID: cameraID, mode: mode, light: light)
+    }
+
     public func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer {
         await engine.portAnswer(host: host, port: port, timeout: timeout)
     }
@@ -249,6 +261,10 @@ public struct EngineBackend: BridgeBackend {
     public func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
         try await engine.restoreCameraSetup(cameraID: cameraID)
     }
+
+    public func checkCameraSecurity(cameraID: UUID) async throws -> CameraSecurity {
+        try await engine.checkCameraSecurity(cameraID: cameraID)
+    }
 }
 
 extension BridgeBackend {
@@ -296,6 +312,14 @@ extension BridgeBackend {
     }
 
     public func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws {
+        throw EngineError.cameraNotRunning
+    }
+
+    public func setNightVision(cameraID: UUID, mode: NightVisionMode?, light: Bool?) async throws {
+        throw EngineError.cameraNotRunning
+    }
+
+    public func checkCameraSecurity(cameraID: UUID) async throws -> CameraSecurity {
         throw EngineError.cameraNotRunning
     }
 }

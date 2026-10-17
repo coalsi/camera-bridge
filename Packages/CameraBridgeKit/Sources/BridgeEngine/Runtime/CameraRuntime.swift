@@ -57,6 +57,8 @@ struct RuntimeStatus: Sendable, Equatable {
     /// `CameraStatus.panTilt`, `CameraStatus.zoom`.
     var panTilt = false
     var zoom = false
+    /// `CameraStatus.nightVision`.
+    var nightVision: NightVisionState?
     /// Why the sub stream is offline while it should run (`CameraStatus.subStreamProblem`).
     var subStreamProblem: String?
     /// `CameraStatus.eventsNote`.
@@ -69,6 +71,8 @@ struct RuntimeStatus: Sendable, Equatable {
     var subStreamInfo: SourceStreamInfo?
     /// `CameraStatus.motionShadow`.
     var motionShadow: MotionShadowStatus?
+    /// `CameraStatus.battery`.
+    var battery: BatteryStatus?
 }
 
 /// One camera's bridge (plan W3-1 items 1, 2, 6, 8): media ingest (main stream always, sub stream on demand) into
@@ -145,6 +149,18 @@ actor CameraRuntime {
     /// What the pan/tilt control can do, once the camera said (nil: not asked yet, or no answer yet).
     private var panTiltKnown: PanTiltCapabilities?
     private var panTiltDiscovery: Task<Void, Never>?
+    /// The camera's night vision and lamp (nil: none), what it offers once it said, the mode it is in, and the lamp (as the camera says,
+    /// else as last set here).
+    private let nightVisionControl: (any NightVisionControl)?
+    private var nightVisionKnown: NightVisionCapabilities?
+    private var nightVisionMode: NightVisionMode?
+    private var lightOn: Bool?
+    private var nightVisionDiscovery: Task<Void, Never>?
+    /// Apple Home's writes of Night Vision on the accessory (`homeKitNightVision`).
+    private var nightVisionWrites: Task<Void, Never>?
+    /// What Home's Night Vision shows as far as the runtime knows (the value it last set there, at first the accessory's saved value):
+    /// what a Home write the camera did not take, or the runtime could not follow, goes back to when the camera cannot say its mode.
+    private var homeNightVision: Bool?
     /// Bumped by every `acquireSub`: an idle stop scheduled before a later user arrived does not apply.
     private var subGeneration = 0
     private var subIdleStop: Task<Void, Never>?
@@ -206,6 +222,10 @@ actor CameraRuntime {
     private var healthMonitor: HAPHealthMonitor?
     /// Soft motion's sensitivity (changed in place by `updateMotionSensitivity`).
     private var motionSensitivity: Double
+    /// The camera's last battery reading (`CameraDriver.batteryStatus`), kept when a later poll gets no answer.
+    private var battery: BatteryStatus?
+    /// Asks the driver for the battery (`startBatteryPolling`).
+    private var batteryTask: Task<Void, Never>?
 
     init(configuration: CameraConfiguration, credentials: HTTPCredentials?, dependencies: Dependencies) {
         id = configuration.id
@@ -237,6 +257,7 @@ actor CameraRuntime {
         }
         onDemand = driver.streamsOnDemand
         panTiltControl = driver.makePanTilt()
+        nightVisionControl = driver.makeNightVision()
     }
 
     /// `start` / `publish` could not bring the accessory up, but the camera itself (ingest, events, snapshots, the app's
@@ -318,6 +339,8 @@ actor CameraRuntime {
         }
         startEvents()
         discoverPanTilt(epoch)
+        discoverNightVision(epoch)
+        startBatteryPolling(epoch)
         dependencies.onChange()
         return listening
     }
@@ -348,6 +371,8 @@ actor CameraRuntime {
         serverEvents = nil
         operatingEvents?.cancel()
         operatingEvents = nil
+        nightVisionWrites?.cancel()
+        nightVisionWrites = nil
         formatTask?.cancel()
         formatTask = nil
         pendingFreeze = nil
@@ -444,7 +469,10 @@ actor CameraRuntime {
         self.streaming = streaming
         self.recording = recording
         self.stack = stack
+        if let battery { await stack.controller.setBattery(Self.homeKitBattery(battery)) }   // read before the accessory came up
+        homeNightVision = stack.controller.operatingState.nightVision   // as the saved state brought it back, before Home's first write
         watch(stack)   // pairing events from here on (they freeze pending recording options)
+        await showNightVisionInHome()   // known before the accessory came up (published again)
         await streaming.setSessionEnder { [weak controller = stack.controller] sessionID in
             controller?.stopStreamingSession(sessionID) ?? false
         }
@@ -548,6 +576,8 @@ actor CameraRuntime {
         pendingFreeze = nil
         serverEvents?.cancel()
         operatingEvents?.cancel()
+        nightVisionWrites?.cancel()
+        nightVisionWrites = nil
         await stopHealthMonitor()
         if let stack { dependencies.registry.remove(id, ifMatching: stack.controller) }
         await stopEvents()
@@ -572,6 +602,10 @@ actor CameraRuntime {
         mainIdleStop = nil
         panTiltDiscovery?.cancel()
         panTiltDiscovery = nil
+        nightVisionDiscovery?.cancel()
+        nightVisionDiscovery = nil
+        batteryTask?.cancel()
+        batteryTask = nil
         mainUsers = 0
         motionHoldsMain = false
         await mainIngest?.stop()
@@ -679,6 +713,9 @@ actor CameraRuntime {
         status.appViewers = appViewers
         status.panTilt = panTiltKnown?.panTilt ?? false
         status.zoom = panTiltKnown?.zoom ?? false
+        if let known = nightVisionKnown, !known.modes.isEmpty || known.light {
+            status.nightVision = NightVisionState(modes: known.modes, mode: nightVisionMode, light: known.light, lightOn: lightOn)
+        }
         status.subStreamProblem = running ? subStreamProblem : nil
         status.eventsNote = running && eventsUnreliable ? Self.eventsUnreliableNote : nil
         status.homeKitNote = running ? await healthMonitor?.controllerSilenceNote : nil
@@ -692,6 +729,7 @@ actor CameraRuntime {
             status.liveViewers = stack.controller.activeLiveStreams
         }
         status.motionShadow = await motionShadowStatus()
+        status.battery = battery
         if let streaming { status.liveSessions = await streaming.liveSessionStatuses() }
         if let recording { status.recordingSession = await recording.recordingSessionStatus() }
         if let format = await mainHub.videoFormat {
@@ -827,6 +865,10 @@ actor CameraRuntime {
         operatingEvents = Task {
             for await _ in changes { onChange() }
         }
+        let writes = stack.controller.nightVisionWrites
+        nightVisionWrites = Task { [weak self] in
+            for await enabled in writes { await self?.homeKitNightVision(enabled) }
+        }
     }
 
     private func setPaired(_ value: Bool) async {
@@ -951,8 +993,12 @@ actor CameraRuntime {
         probeWait = wait
     }
 
+    /// The stream addresses the ingest connected to last (the configured ones, or those the camera reported), for the security check.
+    private(set) var rtspAddresses: StreamSources.URLs?
+
     private func startRTSP(_ urls: StreamSources.URLs, epoch: Int) async {
         guard isCurrent(epoch), mainIngest == nil, let main = urls.main else { return }
+        rtspAddresses = urls
         let transport = dependencies.environment.platform.transport
         let name = configuration.name
         let mainSource = StreamSources.rtsp(url: main, credentials: credentials, displayName: name, cameraID: id, transport: transport)
@@ -992,14 +1038,21 @@ actor CameraRuntime {
         let onChange = dependencies.onChange
         let onLocalNetwork = dependencies.onLocalNetwork
         let remote = !Self.isLoopback(configuration.endpoint.host) && configuration.vendor != .demo
+        let onDemand = onDemand
         ingestEvents = Task { [weak self] in
+            // The main stream delivered video since it last started (an on-demand camera: during this wake).
+            var wakeDelivered = false
             for await event in events {
                 switch event {
                 case .state(.idle):
-                    break
+                    // An on-demand camera put to sleep after a wake that delivered video is online (asleep), even when that wake ended in a
+                    // stall (eufy's stream stops before the idle stop): only a wake that never delivered leaves it offline.
+                    if onDemand, wakeDelivered { await self?.reportAsleep(epoch) }
+                    wakeDelivered = false
                 case .state(.connecting):
                     await router.setStreamConnection(.connecting, for: cameraID)
                 case .state(.online):
+                    wakeDelivered = true
                     let eventsRefused = await router.credentialsRejected(by: .camera, for: cameraID)
                     await router.setStreamConnection(.online, for: cameraID)
                     if remote { onLocalNetwork(.granted) }
@@ -1033,6 +1086,12 @@ actor CameraRuntime {
             await subIngest?.stop()
             return
         }
+    }
+
+    /// An on-demand camera's stream stopped for idle after it delivered video: it sleeps, and reads as online.
+    private func reportAsleep(_ epoch: Int) async {
+        guard isCurrent(epoch) else { return }   // no state may land after the camera went idle
+        await dependencies.router.setStreamConnection(.online, for: id)
     }
 
     private func reportOffline(_ reason: String, rejectedCredentials: Bool = false, epoch: Int) async {
@@ -1212,6 +1271,169 @@ actor CameraRuntime {
             do { try await control.stop() } catch { log.info("Could not stop the camera turning: \(error)") }
         }
     }
+
+    // MARK: - Battery
+
+    /// Asks the driver for its battery at the start and every `batteryPollInterval` after it answered once. A driver that has not
+    /// answered yet (a eufy camera before the helper signed in) is asked again after 1/20, 1/10, 1/5 and 2/5 of the interval, then
+    /// no more: it has no battery. Never wakes the camera (`CameraDriver.batteryStatus`).
+    private func startBatteryPolling(_ epoch: Int) {
+        guard batteryTask == nil else { return }
+        let driver = driver
+        let interval = dependencies.tuning.batteryPollInterval
+        batteryTask = Task { [weak self] in
+            var retries = [interval / 20, interval / 10, interval / 5, interval * 2 / 5]
+            var answered = false
+            while !Task.isCancelled {
+                let reading = await driver.batteryStatus()
+                if let reading {
+                    answered = true
+                    guard await self?.noteBattery(reading, epoch: epoch) == true else { return }
+                }
+                let delay: Duration
+                if answered {
+                    delay = interval
+                } else if !retries.isEmpty {
+                    delay = retries.removeFirst()
+                } else {
+                    return
+                }
+                try? await Task.sleep(for: delay)
+            }
+        }
+    }
+
+    /// Keeps a new reading and shows it in the accessory's Battery service; false once the runtime stopped.
+    private func noteBattery(_ reading: BatteryStatus, epoch: Int) async -> Bool {
+        guard isCurrent(epoch) else { return false }
+        guard reading != battery else { return true }
+        if battery == nil { log.info("\(configuration.name) reports a battery (\(reading.level) %)") }
+        battery = reading
+        if let controller = stack?.controller { await controller.setBattery(Self.homeKitBattery(reading)) }
+        dependencies.onChange()
+        return true
+    }
+
+    static func homeKitBattery(_ battery: BatteryStatus) -> CameraBattery {
+        CameraBattery(level: battery.level, chargingState: battery.charging ? .charging : .notCharging)
+    }
+
+    /// Tests: the last battery reading.
+    var batteryReading: BatteryStatus? { battery }
+
+    // MARK: - Night vision
+
+    /// Asks the camera what its night vision offers and which mode it is in (again with a growing pause until it answers).
+    private func discoverNightVision(_ epoch: Int) {
+        guard let control = nightVisionControl, nightVisionKnown == nil else { return }
+        nightVisionDiscovery?.cancel()
+        nightVisionDiscovery = Task { [weak self] in
+            var pause: Duration = .seconds(10)
+            for _ in 0..<12 {
+                if Task.isCancelled { return }
+                if let known = try? await control.capabilities() {
+                    let mode = known.modes.isEmpty ? nil : try? await control.currentMode()
+                    let light = known.light ? (try? await control.currentLight()) : nil
+                    await self?.setNightVision(known, mode: mode, light: light, epoch: epoch)
+                    return
+                }
+                try? await Task.sleep(for: pause)
+                pause = min(pause * 2, .seconds(600))
+            }
+        }
+    }
+
+    private func setNightVision(_ known: NightVisionCapabilities, mode: NightVisionMode?, light: Bool?, epoch: Int) async {
+        guard isCurrent(epoch) else { return }
+        nightVisionKnown = known
+        nightVisionMode = mode
+        if let light { lightOn = light }
+        await showNightVisionInHome()
+        dependencies.onChange()
+    }
+
+    /// Sets the night vision mode and/or the lamp. Throws `EngineError.cameraNotRunning` when the camera has neither (or isn't running).
+    func setNightVision(mode: NightVisionMode?, light: Bool?) async throws {
+        guard running, let control = nightVisionControl, let known = nightVisionKnown else { throw EngineError.cameraNotRunning }
+        if let mode {
+            guard known.modes.contains(mode) else { throw EngineError.cameraNotRunning }
+            do {
+                try await control.setMode(mode)
+            } catch {
+                await nightVisionRefused()
+                throw error
+            }
+            nightVisionMode = (try? await control.currentMode()) ?? mode
+            await showNightVisionInHome()
+        }
+        if let light {
+            guard known.light else { throw EngineError.cameraNotRunning }
+            try await control.setLight(light)
+            lightOn = (try? await control.currentLight()) ?? light
+        }
+        dependencies.onChange()
+    }
+
+    /// Apple Home's Night Vision is offered once the camera's night vision can be both left to the camera and turned off.
+    static func offersHomeKitNightVision(_ known: NightVisionCapabilities) -> Bool {
+        known.modes.contains(.auto) && known.modes.contains(.off)
+    }
+
+    /// Home's Night Vision follows the camera: on unless it is in its day picture with the IR lights off (unknown: left as Home shows it).
+    private func showNightVisionInHome() async {
+        guard let controller = stack?.controller, let known = nightVisionKnown, Self.offersHomeKitNightVision(known) else { return }
+        let shown = nightVisionMode.map { $0 != .off }
+        await controller.setNightVision(shown)
+        // Mode unknown: Home keeps what it showed, or, Night Vision added just now, the accessory's own value.
+        homeNightVision = shown ?? homeNightVision ?? controller.operatingState.nightVision
+    }
+
+    /// Apple Home switched Night Vision: on is the camera's own automatic choice (a camera already in night vision stays so), off its day
+    /// picture with the IR lights off. A change the camera refuses puts Home back to what the camera does, or, when the camera cannot say,
+    /// to what Home showed before; so does a write the runtime cannot follow (the camera not running, its night vision not known yet).
+    func homeKitNightVision(_ enabled: Bool) async {
+        let before = homeNightVision ?? !enabled
+        guard running, let control = nightVisionControl, let known = nightVisionKnown, Self.offersHomeKitNightVision(known) else {
+            log.info("Apple Home turned night vision \(enabled ? "on" : "off") on \(configuration.name), but the bridge cannot change it now: "
+                     + "Home shows it as it was")
+            await putBackHomeNightVision(before)
+            return
+        }
+        let already = enabled ? (nightVisionMode == .auto || nightVisionMode == .on) : nightVisionMode == .off
+        if !already {
+            let mode: NightVisionMode = enabled ? .auto : .off
+            do {
+                try await control.setMode(mode)
+                nightVisionMode = (try? await control.currentMode()) ?? mode
+                log.info("Apple Home turned night vision \(enabled ? "on" : "off") on \(configuration.name)")
+            } catch {
+                log.warning("Apple Home turned night vision \(enabled ? "on" : "off") on \(configuration.name), but the camera did not take it: \(error)")
+                await nightVisionRefused()
+                if nightVisionMode == nil { await putBackHomeNightVision(before) }   // not the value the camera refused
+                return
+            }
+        }
+        await showNightVisionInHome()
+        dependencies.onChange()
+    }
+
+    /// Home's Night Vision as it was before a write the camera did not follow.
+    private func putBackHomeNightVision(_ value: Bool) async {
+        guard let controller = stack?.controller else { return }
+        await controller.setNightVision(value)
+        homeNightVision = value
+    }
+
+    /// After a mode change that failed part way (the camera may have taken some of it): the mode as the camera says now, nil when it
+    /// cannot say, so the page and Home do not show one it is not in.
+    private func nightVisionRefused() async {
+        nightVisionMode = try? await nightVisionControl?.currentMode()
+        await showNightVisionInHome()
+        dependencies.onChange()
+    }
+
+    /// Tests: the night vision mode and lamp as the runtime knows them.
+    var nightVisionReading: (mode: NightVisionMode?, lightOn: Bool?) { (nightVisionMode, lightOn) }
 
     // MARK: - On demand
 

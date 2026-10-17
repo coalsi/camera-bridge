@@ -7,7 +7,7 @@ set -euo pipefail
 
 # --- users and permissions ---------------------------------------------------------------------------------------------
 systemd-sysusers
-chmod 0755 /usr/sbin/cb-install-to-disk /usr/sbin/cb-update /usr/sbin/cb-system \
+chmod 0755 /usr/sbin/cb-install-to-disk /usr/sbin/cb-update /usr/sbin/cb-system /usr/sbin/cb-guard \
     /usr/lib/camera-bridge/cb-* /usr/lib/camera-bridge/lib.sh
 passwd -l root >/dev/null
 # SSH host keys are made on the box (when SSH is enabled), never shipped: they would be shared by every copy of the image.
@@ -46,6 +46,7 @@ systemctl enable \
     camera-bridge-update.timer \
     camera-bridge-banner.timer \
     camera-bridge-banner.service \
+    camera-bridge-guard.service \
     fstrim.timer
 
 # Debian ships two chrony units that conflict; with both enabled either may win. We want the one that can set the clock.

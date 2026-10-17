@@ -89,7 +89,13 @@ public final class Daemon {
             recordingsFolder = recordings
         }
 
-        let bridgeEnvironment = try Self.makeEnvironment(directory: directory, options: options)
+        let folders = options.requestDirectories
+        let system = RequestFileSystemControl(requestDirectory: folders.requests, statusDirectory: folders.status, product: DaemonInfo.product,
+                                              version: DaemonInfo.version, build: DaemonInfo.build(environment: environment))
+        var bridgeEnvironment = try Self.makeEnvironment(directory: directory, options: options)
+        if Self.offersInternetGuard(development: options.development, systemAvailable: system.isAvailable) {
+            bridgeEnvironment = Self.withInternetGuard(bridgeEnvironment, system: system)
+        }
         let engine = await makeEngine(environment: bridgeEnvironment)
         self.engine = engine
         if options.preview == nil { await engine.start() }
@@ -98,9 +104,6 @@ public final class Daemon {
         if options.preview != nil { backend = NoArchiveBackend(wrapping: backend) }
         if options.fakeDiscovery { backend = DemoDiscoveryBackend(wrapping: backend) }
         self.backend = backend
-        let folders = options.requestDirectories
-        let system = RequestFileSystemControl(requestDirectory: folders.requests, statusDirectory: folders.status, product: DaemonInfo.product,
-                                              version: DaemonInfo.version, build: DaemonInfo.build(environment: environment))
         log.notice(system.isAvailable ? "Camera Bridge OS: privileged requests go to \(folders.requests.path(percentEncoded: false))"
                                        : "no operating system underneath (\(folders.requests.path(percentEncoded: false)) is missing); updates, restarts and installs are off")
         var configuration = WebConfiguration(dataDirectory: directory, staticDirectory: options.staticDirectory ?? Self.defaultStaticDirectory(),
@@ -245,6 +248,31 @@ public final class Daemon {
         return words.contains { $0.first == "allow" } && !words.contains { $0.count >= 2 && $0[0] == "port" && $0[1] == "0" }
     }
 
+    // MARK: The internet guard
+
+    /// Where Camera Bridge OS's units are.
+    static let systemUnitDirectory = URL(fileURLWithPath: "/usr/lib/systemd/system", isDirectory: true)
+
+    /// Whether to offer Camera Bridge OS's internet guard: the image has its DNS unit (`camera-bridge-dns.service`), the system answers
+    /// requests, and this is not a development run.
+    static func offersInternetGuard(development: Bool, systemAvailable: Bool, unitDirectory: URL = systemUnitDirectory) -> Bool {
+        guard !development, systemAvailable else { return false }
+        return FileManager.default.fileExists(atPath: unitDirectory.appending(path: "camera-bridge-dns.service", directoryHint: .notDirectory).path(percentEncoded: false))
+    }
+
+    /// `environment` with the internet guard: the engine changes the list and reads the report through `system` (the `guard-set` request and
+    /// `status/guard.json`). A report the system does not have is nil.
+    static func withInternetGuard(_ environment: BridgeEnvironment, system: any SystemControlling) -> BridgeEnvironment {
+        var environment = environment
+        environment.hasInternetGuard = true
+        environment.setGuardedCameras = { cameras in try await system.setGuardedCameras(cameras) }
+        environment.guardReport = {
+            let report = await system.guardReport()
+            return report.available ? report : nil
+        }
+        return environment
+    }
+
     // MARK: Files
 
     /// Where the interface's files are: next to the installed system, or in the repository (`linux/web`) when run from a build.
@@ -347,6 +375,7 @@ struct DemoDiscoveryBackend: BridgeBackend {
     func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.applyCameraSetup(cameraID: cameraID) }
     func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.restoreCameraSetup(cameraID: cameraID) }
     func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws { try await base.panTilt(cameraID: cameraID, pan: pan, tilt: tilt, zoom: zoom) }
+    func setNightVision(cameraID: UUID, mode: NightVisionMode?, light: Bool?) async throws { try await base.setNightVision(cameraID: cameraID, mode: mode, light: light) }
     func triggerTestMotion(cameraID: UUID) async { await base.triggerTestMotion(cameraID: cameraID) }
     func pause() async { await base.pause() }
     func resume() async { await base.resume() }

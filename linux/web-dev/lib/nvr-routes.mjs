@@ -206,6 +206,50 @@ async function activity(app, ctx) {
   });
 }
 
+// ---- the cameras' events (GET nvr/events) -------------------------------------------------------------------------------------------
+
+/**
+ * The first `limit` of `sorted` (newest first), never splitting a millisecond, as ArchiveEventLog.page does on the bridge: the events of one
+ * start are all in this page or all in the next (asked with to = the oldest start here); when they are the whole page, it holds them all.
+ */
+export function eventPage(sorted, limit) {
+  if (sorted.length <= limit) return sorted;
+  const boundary = sorted[limit - 1].start;
+  if (sorted[limit].start !== boundary) return sorted.slice(0, limit);
+  const newer = sorted.filter((event) => event.start > boundary);
+  return newer.length ? newer : sorted.filter((event) => event.start === boundary);
+}
+
+async function events(app, ctx) {
+  const { query } = ctx;
+  // As WebApp+NVRCatalog.swift reads it: the cameras as for activity, then from and to (to after from, at most 31 days), then limit.
+  const items = (query.get('cameras') ?? '').split(',');
+  if (!items.every((item) => UUID.test(item))) throw ApiError.invalid('“cameras” lists camera identifiers separated by commas.', 'cameras');
+  const names = [...new Set(items.map((item) => item.toUpperCase()))];
+  if (names.length > 16) throw ApiError.invalid('Ask for 1 to 16 cameras at a time.', 'cameras');
+  const from = timeParam(query, 'from');
+  const to = timeParam(query, 'to');
+  if (to <= from) throw ApiError.invalid('“to” comes after “from”.', 'to');
+  if (to - from > 31 * 86_400_000) throw ApiError.invalid('Ask for at most 31 days at a time.', 'to');
+  const limit = integerParam(query, 'limit', [1, 1000], 200);
+  return withSlot(app, ctx, async () => {
+    const { state } = app;
+    // As the store answers: nothing without a place for recordings, "try again" (never an empty page) while the folder is missing.
+    if (state.settings.nvrFolder === null) return json({ from, to, serverTime: state.serverNow(), more: false, events: [] });
+    if (state.effects.folder === 'missing') {
+      throw new ApiError(503, 'archive_unavailable', 'The recordings drive isn’t connected.', { headers: { 'Retry-After': '5' } });
+    }
+    const found = [];
+    for (const id of names) {
+      const camera = state.cameras.get(id);
+      if (camera) found.push(...state.archivedEvents(camera, from, to));
+    }
+    found.sort((a, b) => b.start - a.start || (a.cameraID < b.cameraID ? -1 : a.cameraID > b.cameraID ? 1 : 0) || (a.id < b.id ? -1 : 1));
+    const page = eventPage(found, limit);
+    return json({ from, to, serverTime: state.serverNow(), more: page.length < found.length, events: page });
+  });
+}
+
 // ---- R7: fragments --------------------------------------------------------------------------------------------------------------------
 
 function afterParts(reader, id, previous, count) {
@@ -343,6 +387,7 @@ export const NVR_ROUTES = [
   ['PATCH', 'cameras/:id/nvr', patchCamera, true],
   ['GET', 'nvr/cameras', cameras, false],
   ['GET', 'nvr/activity', activity, false],
+  ['GET', 'nvr/events', events, false],
   ['GET', 'nvr/cameras/:id/fragments', fragments, false],
   ['GET', 'nvr/cameras/:id/fragments/:fid', (app, ctx) => fragmentBytes(app, ctx, 'fragment'), false],
   ['GET', 'nvr/cameras/:id/fragments/:fid/init', (app, ctx) => fragmentBytes(app, ctx, 'init'), false],

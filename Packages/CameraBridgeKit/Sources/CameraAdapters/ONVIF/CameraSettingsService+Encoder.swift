@@ -66,6 +66,7 @@ extension CameraSettingsService {
             case .reolinkAPI: return try await viaReolink(edit)
             case .onvifMinimal: return try await viaONVIF(edit, minimal: true)
             case .onvifFull: return try await viaONVIF(edit, minimal: false)
+            case .ipcWebAPI: return .failed(.unsupported("the web API does not change the encoder"))
             }
         } catch is CancellationError {
             throw CancellationError()
@@ -88,6 +89,12 @@ extension CameraSettingsService {
         }
     }
 
+    /// An edit that rewrites the codec (`CameraEncoderEdit.rewriteCodec`) writes it even when the camera's settings already name it.
+    private static func rewritingCodec(_ changes: inout EncoderValues, _ edit: CameraEncoderEdit) {
+        guard edit.rewriteCodec, changes.codec == nil else { return }
+        changes.codec = EncoderValues.normalizedCodec(edit.desired.encoding)
+    }
+
     private static func unreadableFailure(_ unreadable: [String]) -> CameraConfigFailure {
         .unsupported("can't read \(unreadable.joined(separator: ", "))")
     }
@@ -99,7 +106,8 @@ extension CameraSettingsService {
         let api = isapi()
         let channel = hikvisionChannel(isSub: edit.isSub)
         let (_, current) = try await api.encoderValues(channelID: channel)
-        let (changes, unreadable) = current.changes(toReach: edit.desired)
+        var (changes, unreadable) = current.changes(toReach: edit.desired)
+        Self.rewritingCodec(&changes, edit)
         if changes.isEmpty { return unreadable.isEmpty ? .done(changed: false) : .failed(Self.unreadableFailure(unreadable)) }
         try await api.setEncoderValues(changes, channelID: channel)
         guard try await verified(changes, read: { try await api.encoderValues(channelID: channel).values }) else { return .failed(.didNotStick) }
@@ -115,11 +123,13 @@ extension CameraSettingsService {
         let node = try await client.rawVideoEncoderConfiguration(token: token)
         let current = ONVIFClient.encoderValues(node)
         var (changes, unreadable) = current.changes(toReach: edit.desired)
+        Self.rewritingCodec(&changes, edit)
         if changes.isEmpty { return unreadable.isEmpty ? .done(changed: false) : .failed(Self.unreadableFailure(unreadable)) }
         if minimal {
             let codec = changes.codec ?? current.codec
             let options = edit.options.first { EncoderValues.normalizedCodec($0.encoding) == codec }
-            let clamped = changes.clamped(to: options).dropping(unchangedFrom: current)
+            var clamped = changes.clamped(to: options).dropping(unchangedFrom: current)
+            if edit.rewriteCodec, clamped.codec == nil { clamped.codec = changes.codec }   // the same codec, written on purpose
             if clamped.isEmpty { return .failed(.rejected("the value is outside the range the camera reports")) }
             changes = clamped
         }
@@ -171,6 +181,7 @@ extension CameraSettingsService {
         }
         let current = Self.reolinkValues(stream)
         var (changes, unreadable) = current.changes(toReach: edit.desired)
+        Self.rewritingCodec(&changes, edit)
         if changes.isEmpty { return unreadable.isEmpty ? .done(changed: false) : .failed(Self.unreadableFailure(unreadable)) }
         let fps = Int((changes.frameRate ?? current.frameRate ?? 15).rounded())
         if let gov = changes.govLength {

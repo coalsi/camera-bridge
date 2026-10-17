@@ -114,6 +114,42 @@ public actor EufyBridge {
         return status == 200 && !body.isEmpty ? body : nil
     }
 
+    /// What the helper's `GET /devices` says about a camera's battery (the fields the engine reads).
+    struct DeviceBattery: Decodable, Sendable, Equatable {
+        var serial: String
+        var battery: Int?
+        var charging: Bool?
+        /// `solar`, `cable` or null (not charging, or eufy doesn't say).
+        var chargingSource: String?
+    }
+
+    private struct DeviceList: Decodable { var devices: [DeviceBattery] }
+
+    /// The last `/devices` answer, shared by every eufy camera's battery poll for `deviceListLifetime`.
+    private var deviceList: (at: ContinuousClock.Instant, devices: [DeviceBattery])?
+    static let deviceListLifetime: Duration = .seconds(30)
+
+    /// The camera's battery as eufy's cloud last reported it (never wakes the camera); nil when it has none, the helper isn't running or
+    /// signed in, or the camera isn't on the account.
+    public func battery(serial: String) async -> BatteryStatus? {
+        let devices: [DeviceBattery]
+        if let cached = deviceList, ContinuousClock.now - cached.at < Self.deviceListLifetime {
+            devices = cached.devices
+        } else {
+            guard let (status, body) = try? await call("GET", "/devices", wait: .seconds(20)), status == 200,
+                  let list = try? JSONDecoder().decode(DeviceList.self, from: body) else { return nil }
+            devices = list.devices
+            deviceList = (ContinuousClock.now, devices)
+        }
+        return devices.first { $0.serial == serial }.flatMap(Self.batteryStatus)
+    }
+
+    static func batteryStatus(_ device: DeviceBattery) -> BatteryStatus? {
+        guard let level = device.battery, (0...100).contains(level) else { return nil }
+        let charging = device.charging ?? false
+        return BatteryStatus(level: level, charging: charging, source: device.chargingSource.flatMap(BatteryStatus.Source.init(rawValue:)))
+    }
+
     /// The events the helper reports for `serial`, until the stream's consumer stops reading.
     public func events(serial: String) -> AsyncStream<Event> {
         let (stream, continuation) = AsyncStream.makeStream(of: Event.self, bufferingPolicy: .bufferingNewest(32))

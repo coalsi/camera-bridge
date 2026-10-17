@@ -1,3 +1,4 @@
+import BridgeEngine
 import Foundation
 
 /// The operating system under the bridge: what version runs, whether an update waits, restarting, SSH, and installing to the
@@ -44,6 +45,10 @@ public protocol SystemControlling: Sendable {
     func forgetWifi(ssid: String) async throws
     /// The setup hotspot while it is open (the box has no other network), nil otherwise. Cheap: it is asked for requests to unknown host names.
     func setupHotspot() -> SetupHotspot?
+    /// Replaces the list of cameras the internet guard watches (an empty list turns it off). Only cameras on the local network.
+    func setGuardedCameras(_ cameras: [GuardedCamera]) async throws
+    /// What the internet guard saw; `GuardReport.unavailable` where there is none (or it has not reported yet).
+    func guardReport() async -> GuardReport
 }
 
 extension SystemControlling {
@@ -84,6 +89,10 @@ extension SystemControlling {
     public func forgetWifi(ssid: String) async throws { throw SystemError("Wi-Fi is managed by Camera Bridge OS.") }
 
     public func setupHotspot() -> SetupHotspot? { nil }
+
+    public func setGuardedCameras(_ cameras: [GuardedCamera]) async throws { throw SystemError("The internet guard is part of Camera Bridge OS.") }
+
+    public func guardReport() async -> GuardReport { .unavailable }
 }
 
 /// A Wi-Fi network in range.

@@ -241,6 +241,8 @@ struct CameraStatusResource: Encodable {
     var panTilt: Bool
     /// The camera zooms (`POST cameras/:id/pan-tilt {zoom}`).
     var zoom: Bool
+    /// The camera's night vision and lamp (`POST cameras/:id/night-vision`); absent when the bridge can't switch them.
+    var nightVision: NightVisionResource?
     var lastEvent: String?
     var lastEventDate: Date?
     var lastError: String?
@@ -254,6 +256,10 @@ struct CameraStatusResource: Encodable {
     var homeKitNote: String?
     /// The NVR recording of this camera; always present.
     var nvr: NVRStatusResource
+    /// A battery camera's charge (absent for a camera without a battery, or before the first reading).
+    var battery: BatteryResource?
+    /// The camera's security level (absent until its first check; `POST cameras/:id/security/check`).
+    var security: CameraSecurityResource?
 
     init(_ status: CameraStatus) {
         connection = StatusText.connectionName(status.connection)
@@ -270,6 +276,9 @@ struct CameraStatusResource: Encodable {
         appViewers = status.appViewers
         panTilt = status.panTilt
         zoom = status.zoom
+        nightVision = status.nightVision.map {
+            NightVisionResource(modes: $0.modes.map(\.rawValue), mode: $0.mode?.rawValue, light: $0.light, lightOn: $0.lightOn)
+        }
         lastEvent = status.lastEvent
         lastEventDate = status.lastEventDate
         lastError = status.lastError.map { Redact.string($0) }
@@ -282,6 +291,74 @@ struct CameraStatusResource: Encodable {
         eventsNote = status.eventsNote
         homeKitNote = status.homeKitNote
         nvr = NVRStatusResource(status.nvr)
+        battery = status.battery.map(BatteryResource.init)
+        security = status.security.map(CameraSecurityResource.init)
+    }
+}
+
+/// `CameraStatus.security`: `level` red, yellow, green or gold, its `title` and `summary`, when it was checked, and the `findings` worst first,
+/// each `{feature, state, level, sentence, canChange, linked, service}` (`feature`: cloud, upnp, ddns, rtmp, unauthenticatedVideo,
+/// extraService, internetGuard; `state`: on, off, absent, unknown; `linked` and `service` null when the camera does not say), and `guard`,
+/// what the internet guard saw (`{watched, today, last24h, names: [{name, count, last}]}`, the 10 most asked names of the last 7 days; null
+/// on a bridge without the guard). Every key is always there.
+struct CameraSecurityResource: Encodable {
+    struct Finding: Encodable {
+        var feature: String
+        var state: String
+        var level: String
+        var sentence: String
+        var canChange: Bool
+        var linked: OrNull<Bool>
+        var service: OrNull<String>
+    }
+
+    struct Guard: Encodable, Sendable {
+        struct Name: Encodable, Sendable {
+            var name: String
+            var count: Int
+            var last: OrNull<Date>
+        }
+
+        var watched: Bool
+        var today: Int
+        var last24h: Int
+        var names: [Name]
+    }
+
+    var level: String
+    var title: String
+    var summary: String
+    var checkedAt: Date
+    var findings: [Finding]
+    var `guard`: OrNull<Guard>
+
+    init(_ security: CameraSecurity) {
+        level = security.level.rawValue
+        title = security.title
+        summary = security.summary
+        checkedAt = security.checkedAt
+        findings = security.findings.map {
+            Finding(feature: $0.feature.rawValue, state: $0.state.rawValue, level: $0.level.rawValue, sentence: Redact.string($0.sentence),
+                    canChange: $0.canChange, linked: OrNull($0.linked), service: OrNull($0.service))
+        }
+        `guard` = OrNull(security.internetGuard.map { activity in
+            Guard(watched: activity.watched, today: activity.today, last24h: activity.last24h,
+                  names: activity.names.map { Guard.Name(name: $0.name, count: $0.count, last: OrNull($0.last)) })
+        })
+    }
+}
+
+/// `CameraStatus.battery`: `level` 0–100, `charging`, `source` `solar`, `cable` or null (not charging, or the camera doesn't say). Every key
+/// is always there.
+struct BatteryResource: Encodable {
+    var level: Int
+    var charging: Bool
+    var source: OrNull<String>
+
+    init(_ battery: BatteryStatus) {
+        level = battery.level
+        charging = battery.charging
+        source = OrNull(battery.source?.rawValue)
     }
 }
 
@@ -352,8 +429,9 @@ struct NoticeResource: Encodable {
     var cameraID: UUID?
     var cameraName: String?
     var date: Date
-    /// What the notice's button does: "choose-folder" (the storage chooser) or "open-settings" (Settings > Recording); nil for a notice with no
-    /// button. Always encoded, as null when nil (a page that does not know the field ignores it).
+    /// What the notice's button does: "choose-folder" (the storage chooser), "open-settings" (Settings > Recording) or "open-camera" (the page
+    /// of the notice's `cameraID`); nil for a notice with no button. Always encoded, as null when nil (a page that does not know the field
+    /// ignores it).
     var action: String?
 
     private enum CodingKeys: String, CodingKey { case id, kind, severity, title, detail, cameraID, cameraName, date, action }
@@ -371,12 +449,21 @@ struct NoticeResource: Encodable {
         try container.encode(action, forKey: .action)
     }
 
-    /// Everything the banner shows: the network notices (below) and at most one storage notice, first. This is what the status answer, the
-    /// event stream's snapshot and its change detection all use.
+    /// Everything the banner shows: the network notices (below), at most one storage notice, first, and the internet guard's notice for the
+    /// day, last. This is what the status answer, the event stream's snapshot and its change detection all use.
     static func resources(for overview: BridgeOverview, now: Date = Date()) -> [NoticeResource] {
         var notices = resources(for: overview.networkNotices, now: now)
         if let storage = storageNotice(for: overview, now: now) { notices.insert(storage, at: 0) }
+        if let blocked = internetGuardNotice(overview.internetGuardNotice) { notices.append(blocked) }
         return notices
+    }
+
+    /// "Internet guard blocked N lookups from M cameras today.": information, its button opens the page of the camera that tried most
+    /// (`action` "open-camera", with `cameraID`).
+    static func internetGuardNotice(_ notice: InternetGuardNotice?) -> NoticeResource? {
+        guard let notice else { return nil }
+        return NoticeResource(id: "internet-guard", kind: "internetGuard", severity: "info", title: notice.title, detail: notice.sentence,
+                              cameraID: notice.cameraID, cameraName: notice.cameraName, date: notice.date, action: notice.cameraID == nil ? nil : "open-camera")
     }
 
     /// "Recording Can't Continue" when recording is paused (or no folder is chosen), else "Recording Storage Almost Full" when less than
@@ -561,4 +648,11 @@ enum PairingBlocker: String {
         default: nil
         }
     }
+}
+
+struct NightVisionResource: Encodable {
+    var modes: [String]
+    var mode: String?
+    var light: Bool
+    var lightOn: Bool?
 }

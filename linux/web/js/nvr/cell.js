@@ -15,8 +15,8 @@
 // A request that was sent is never wasted: its bytes are appended and stay in the model whatever happened to the desire meanwhile.
 import { realTimers } from './clock.js';
 import {
-  DEFAULT_POLICY, MESSAGES, bufferSeconds, canSeekInChain, dedupeChains, extendChain, findChainPart, follows, keyStepLookup, lastChain, makeChain,
-  nextFetches, reconcileChains, seekSeconds, timestampOffsetSeconds,
+  DEFAULT_POLICY, MESSAGES, bufferSeconds, canSeekInChain, dedupeChains, extendChain, findChainPart, follows, heldRangeAt, keyStepLookup, lastChain,
+  makeChain, nextFetches, rangeAfterHole, reconcileChains, seekSeconds, timestampOffsetSeconds,
 } from './planner.js';
 
 const LOADING_AFTER_MS = 300;
@@ -72,6 +72,7 @@ export function createCell({
   let lastPrefetch = -Infinity;
   let lastDriftCheck = 0;
   let lastEndProbe = -Infinity;
+  let replannedFor = null;              // { epoch, id }: follow() planned again because no chain ended with this part, the one appended last
   let driveTimer = null;                // the next probe of a recordings drive that is gone
 
   // MARK: Waking the worker
@@ -366,8 +367,10 @@ export function createCell({
     if (stale(d)) return;
     if (!coarse) {
       // At the very end of the recordings nothing can follow: show the last picture a decoder will release instead of a seek that cannot succeed.
+      // A recording too short to release any picture is, for a playing tile, part of the hole (skipTooShort).
       const hit = findChainPart(chains, at);
       if (hit && !canSeekInChain(hit.chain, at, { marginMs: margin })) {
+        if (d.playing && !canSeekInChain(hit.chain, hit.chain.startMs + 1, { marginMs: margin })) { await skipTooShort(d, hit.chain); return; }
         at = Math.max(hit.chain.startMs + 1, hit.chain.endMs - margin);
         shown = findChainPart(chains, at)?.part ?? shown;
       }
@@ -394,13 +397,61 @@ export function createCell({
     }
   }
 
+  /**
+   * A playing tile in a recording too short for a decoder to show a picture from (shorter than its hold-back, and nothing continues it, as
+   * between two file breaks): that recording is part of the hole. The tile waits for the recording after it (waitForRecording), or plays at
+   * the clock when the clock is there already, instead of a seek that cannot succeed.
+   */
+  async function skipTooShort(d, chain) {
+    const next = (await catalog.after(cameraId, chain.tailId, { limit: 1, key: planKey })).parts[0] ?? null;
+    if (stale(d)) return;
+    if (next && clock.position() >= next.start) { restart = { ...d, targetMs: clock.position() }; return; }
+    surface?.pause();
+    setCoverage({ kind: 'gap', next: next?.start ?? null, epoch: d.epoch, playing: false });
+  }
+
   async function notFound(plan, d, target, oldest) {
-    if (plan.reason === 'beforeStart' && !oldest) {
-      const first = plan.next ?? catalog.extent(cameraId)?.oldest;
-      if (Number.isFinite(first)) { await exactStep(d, first, true); return; }
+    let next = plan.next ?? null;
+    if (plan.reason === 'beforeStart') {
+      next = plan.next ?? catalog.extent(cameraId)?.oldest ?? null;
+      // Before the first recording: as in handle(), a playing tile waits for the clock to get there (below).
+      if (!oldest && Number.isFinite(next) && !(d.playing && clock.position() < next)) { await exactStep(d, next, true); return; }
     }
-    if (plan.reason === 'empty') setCoverage({ kind: 'gap', next: null, message: MESSAGES.empty, epoch: d.epoch, playing: false });
-    else setCoverage({ kind: 'gap', next: plan.next ?? null, epoch: d.epoch, playing: false });
+    if (plan.reason === 'empty') { setCoverage({ kind: 'gap', next: null, message: MESSAGES.empty, epoch: d.epoch, playing: false }); return; }
+    // The clock plays on while the plan is on its way: when it has got to the next recording already, play there instead of naming a time behind it.
+    const reached = d.playing && Number.isFinite(next) && next > target && clock.position() >= next;
+    if (reached) { restart = { ...d, targetMs: clock.position() }; return; }
+    setCoverage({ kind: 'gap', next, epoch: d.epoch, playing: false });
+  }
+
+  /**
+   * A playing tile at a hole: the clock plays on (another tile has video, or the session jumps when none has). Waits, without a request, until
+   * the clock gets to the next recording, or when nothing followed until the catalog says this camera recorded past the playhead, and then plays
+   * again at the clock. Ends at once on a newer desire, a suspend or a destroy. `fromMs` is the target that led here: a next recording that is
+   * not after it is not believed (asking again at once would only get the same answer).
+   */
+  async function waitForRecording(d, fromMs) {
+    const next = Number.isFinite(coverage.next) && coverage.next > fromMs ? coverage.next : null;
+    const newestThen = catalog.extent(cameraId)?.newest ?? -Infinity;
+    while (!stale(d)) {
+      const at = clock.position();
+      const newest = catalog.extent(cameraId)?.newest ?? -Infinity;
+      if (next !== null ? at >= next : newest > newestThen && newest > at) {
+        restart = { ...d, targetMs: at };
+        loadingLater(d);
+        return;
+      }
+      await waitFor(TICK_MS);
+    }
+  }
+
+  /** The hole's sentence stops being true when the clock gets to the next recording: "Loading" if the picture there takes a moment. */
+  function loadingLater(d) {
+    if (loadingTimer !== null) timers.clearTimeout(loadingTimer);
+    loadingTimer = timers.setTimeout(() => {
+      loadingTimer = null;
+      if (!stale(d) && coverage.kind === 'gap' && coverage.epoch === d.epoch) setCoverage({ kind: 'loading', epoch: d.epoch, playing: false });
+    }, LOADING_AFTER_MS);
   }
 
   // MARK: Playing
@@ -418,16 +469,31 @@ export function createCell({
     }
     if (stale(d)) return;
     setCoverage({ kind: clock.mode === 'live' ? 'live' : 'recorded', epoch: d.epoch, playing: true });
+    let last = null;                                                                      // { videoMs, at } at the tick before
+    let stoppedAt = null;                                                                 // when the picture stopped at the end of what the video holds
     while (!stale(d)) {
       await waitFor(TICK_MS);
       if (stale(d)) return;
       if (playerError) { playerError = false; await recover(d); return; }
       const positionMs = clock.position();
-      const videoMs = base() + surface.currentTime() * 1000;
+      const videoSec = surface.currentTime();
+      const videoMs = base() + videoSec * 1000;
+      // The picture moved less than half as far as time did: the decoder waits for data. At the end of what the video holds it stands up to the
+      // margin before the end (a hardware decoder keeps its last frames back until more data comes), so a stop there is the end of what is held.
+      const stalled = last !== null && videoMs - last.videoMs < (timers.now() - last.at) / 2;
+      last = { videoMs, at: timers.now() };
+      const range = heldRangeAt(surface.held(), videoSec);
+      const atHeldEnd = range !== null && (range.end - videoSec) * 1000 <= margin;
+      stoppedAt = stalled && atHeldEnd ? (stoppedAt ?? timers.now()) : null;
+      if (stoppedAt !== null && (await stepOverHole(videoSec, positionMs))) { last = null; stoppedAt = null; continue; }
+      if (stale(d)) return;
       const here = findChainPart(chains, videoMs);
       const hereAheadMs = here ? here.chain.endMs - videoMs : -Infinity;
       const tail = lastChain(chains, lastAppendedId);                                     // the only chain that can be continued
-      if (timers.now() - lastDriftCheck >= DRIFT_CHECK_MS) {
+      // Near the end of what is held a seek cannot show a picture: what comes after the end is the end's business (below). A stop there that
+      // the end could do nothing about for a while counts as drift again.
+      const endsBusiness = atHeldEnd && (stoppedAt === null || timers.now() - stoppedAt < END_PROBE_MS + TICK_MS);
+      if (!endsBusiness && timers.now() - lastDriftCheck >= DRIFT_CHECK_MS) {
         lastDriftCheck = timers.now();
         if (Math.abs(videoMs - positionMs) > DRIFT_LIMIT_MS) {
           restart = { ...d, targetMs: positionMs };
@@ -437,16 +503,33 @@ export function createCell({
       if (hereAheadMs < PREFETCH_BELOW_MS && timers.now() - lastPrefetch >= PREFETCH_EVERY_MS) {
         lastPrefetch = timers.now();
         if (!tail || tail.endMs < videoMs) {
-          restart = { ...d, targetMs: videoMs };            // what plays cannot be continued: plan it again, so that it can
-          return;
-        }
-        if (tail.endMs - videoMs < PREFETCH_BELOW_MS) {
+          // What plays cannot be continued: plan it again, so that it can. Once for the same part appended last: a part too short for what
+          // the video holds to reach into it (its sound ends before it starts) is lost from the model as soon as it is appended again, and
+          // planning again for it would fetch it again and again. Then what is held plays out, and its end asks what follows (reachEnd).
+          if (replannedFor?.epoch !== d.epoch || replannedFor.id !== lastAppendedId) {
+            replannedFor = { epoch: d.epoch, id: lastAppendedId };
+            restart = { ...d, targetMs: videoMs };
+            return;
+          }
+        } else if (tail.endMs - videoMs < PREFETCH_BELOW_MS) {
           if ((await prefetch(tail, d)) === 'gone') { restart = { ...d, targetMs: positionMs }; return; }
           if (stale(d)) return;
         }
       }
-      if (hereAheadMs <= END_REACHED_MS && (await reachEnd(videoMs, d))) return;       // the playhead stands at the end of what is held
+      if ((hereAheadMs <= END_REACHED_MS || stoppedAt !== null) && (await reachEnd(videoMs, d))) return;       // the playhead stands at the end of what is held
     }
+  }
+
+  /**
+   * The picture stopped before a hole under a second in what the video holds (between two files, say): seeks to the held range after it, at the
+   * clock when the clock is inside it already. Returns true when it seeked.
+   */
+  async function stepOverHole(videoSec, positionMs) {
+    const after = rangeAfterHole(surface.held(), videoSec, { maxHoleSec: GAP_CONTINUOUS_MS / 1000, minSec: margin / 1000 });
+    if (!after) return false;
+    const target = Math.min(Math.max(after.start + 0.001, bufferSeconds(positionMs, base())), after.end - margin / 1000);
+    await surface.seek(target);
+    return true;
   }
 
   /** Fetches the parts after the chain's tail (one request for the list, then the bytes one by one). */
@@ -496,6 +579,7 @@ export function createCell({
     if (stale(d)) return true;
     if (next) {
       if (next.start - endMs >= GAP_CONTINUOUS_MS) {
+        if (clock.position() >= next.start) { restart = { ...d, targetMs: clock.position() }; return true; }        // the clock is there already
         setCoverage({ kind: 'gap', next: next.start, epoch: d.epoch, playing: false });
         surface.pause();
         return true;
@@ -505,7 +589,8 @@ export function createCell({
         surface.seek(seekSeconds(held.parts[0], held.startMs + 1, base())).catch(() => {});      // a hole under a second stalls the video: step over it
         return false;
       }
-      restart = { ...d, targetMs: next.start + 1 };
+      // A next file that starts inside what just played (files can overlap on disk): go on where this chain ends, never back into it.
+      restart = { ...d, targetMs: Math.max(next.start + 1, endMs) };
       return true;
     }
     const extent = catalog.extent(cameraId);
@@ -522,8 +607,14 @@ export function createCell({
     if (stale(d)) return;
     if (d.probe) { await probe(d); return; }
     const { ms, oldest } = clampToExtent(d.targetMs);
-    if (d.precision === 'key') await keyStep(d, ms, oldest);
+    if (d.playing && oldest && clock.position() < ms) {
+      // Before this camera's first recording. Paused, the tile shows that recording's first picture; playing (on a wall whose clock starts
+      // at another camera's older recording) it waits for the clock to get there, as at any hole, so the picture tells the clock's time.
+      surface?.pause();
+      setCoverage({ kind: 'gap', next: ms, epoch: d.epoch, playing: false });
+    } else if (d.precision === 'key') await keyStep(d, ms, oldest);
     else await exactStep(d, ms, oldest);
+    if (d.playing && !stale(d) && restart === null && coverage.kind === 'gap' && coverage.epoch === d.epoch) await waitForRecording(d, d.targetMs);
   }
 
   function fail(error, d) {

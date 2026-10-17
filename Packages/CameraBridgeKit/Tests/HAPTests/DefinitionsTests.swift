@@ -55,6 +55,14 @@ import Testing
         #expect(lux.format == .float && lux.minValue == 0.0001 && lux.maxValue == 100_000 && lux.unit == .lux)
         let temperature = CharacteristicType.currentTemperature
         #expect(temperature.minValue == -270 && temperature.maxValue == 100 && temperature.minStep == 0.1 && temperature.unit == .celsius)
+        // The Battery service a battery camera publishes (CameraController.setBattery).
+        let level = CharacteristicType.batteryLevel
+        #expect(level.format == .uint8 && level.unit == .percentage && level.minValue == 0 && level.maxValue == 100 && level.minStep == 1)
+        #expect(CharacteristicType.chargingState.format == .uint8 && CharacteristicType.chargingState.validValues == [0, 1, 2])
+        #expect(CharacteristicType.statusLowBattery.validValues == [0, 1])
+        for type in [level, .chargingState, .statusLowBattery] { #expect(type.permissions == [.pairedRead, .events], "\(type.name)") }
+        #expect(ServiceType.battery.required.map(\.uuid) == ["79"])
+        #expect(Set(ServiceType.battery.optional.map(\.uuid)).isSuperset(of: ["68", "8F"]))
         #expect(CharacteristicType.identify.permissions == [.pairedWrite])
         #expect(CharacteristicType.nightVision.permissions.contains(.timedWrite))
         #expect(CharacteristicType.cameraOperatingModeIndicator.permissions.contains(.timedWrite))

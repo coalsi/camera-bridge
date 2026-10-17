@@ -11,7 +11,7 @@ import TestSupport
 @Suite(.serialized, .timeLimit(.minutes(2))) struct NVRSecurityTests {
     /// Every route the NVR adds. A route added to `archiveRoutes` without a line here fails `everyNVRRouteIsListedHere`.
     private let expected = [
-        "GET nvr/storage", "GET nvr/storage/locations", "PATCH nvr/storage", "PATCH cameras/:id/nvr", "GET nvr/cameras", "GET nvr/activity",
+        "GET nvr/storage", "GET nvr/storage/locations", "PATCH nvr/storage", "PATCH cameras/:id/nvr", "GET nvr/cameras", "GET nvr/activity", "GET nvr/events",
         "GET nvr/cameras/:id/fragments", "GET nvr/cameras/:id/fragments/:fid", "GET nvr/cameras/:id/fragments/:fid/init", "GET nvr/cameras/:id/keyframe",
         "GET nvr/cameras/:id/clip-plan", "GET nvr/cameras/:id/clip", "POST cameras/:id/optimize", "POST cameras/:id/optimize/undo",
     ]
@@ -23,6 +23,7 @@ import TestSupport
         let path = "/api/v1/" + route.pattern.map { $0 == ":id" ? rig.cameraID : $0 == ":fid" ? fragment : $0 }.joined(separator: "/")
         switch route.pattern.joined(separator: "/") {
         case "nvr/activity": return path + "?cameras=\(rig.cameraID)&from=\(rig.ms(0))&binMs=60000&bins=4"
+        case "nvr/events": return path + "?cameras=\(rig.cameraID)&from=\(rig.ms(0))&to=\(rig.ms(60_000))"
         case "nvr/cameras/:id/fragments": return path + "?at=\(rig.ms(500))"
         case "nvr/cameras/:id/keyframe": return path + "?at=\(rig.ms(500))"
         case "nvr/cameras/:id/clip-plan", "nvr/cameras/:id/clip": return path + "?from=\(rig.ms(0))&to=\(rig.ms(1_000))"

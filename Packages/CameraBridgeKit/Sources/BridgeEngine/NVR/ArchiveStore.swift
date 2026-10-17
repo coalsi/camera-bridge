@@ -81,6 +81,8 @@ struct ArchiveStoreState: Sendable {
     /// Passes of the janitor loop that have finished (not counting the one at start). A test that has woken the janitor waits for this to move, so that
     /// the pass is over, and not half-way through a folder that is being moved, before it goes on.
     var retentionPasses = 0
+    /// The newest start of a file the size rule deleted in this folder: the camera events of the days before it go too (`pruneEvents`).
+    var eventSizeCutoffMs: Int64?
 
     var pause: ArchivePause?
     var space: VolumeMonitor.Space?
@@ -116,6 +118,7 @@ struct ArchiveStoreState: Sendable {
         damagedLogged = []
         lastKeyTicks = [:]
         keyIntervals = [:]
+        eventSizeCutoffMs = nil
         isReady = folder == nil
         isSettled = false
         reloadWhenFolderReturns = false
@@ -151,6 +154,8 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
     /// Wakes the janitor (a file closed, a limit changed) and the volume monitor (a write failed).
     let retentionWake = ChangeSignal()
     let probeWake = ChangeSignal()
+    /// The cameras' events beside the recordings (`ArchiveEventLog.swift`).
+    let eventLog: ArchiveEventLog
 
     init(environment: BridgeEnvironment, signal: ChangeSignal, tuning: ArchiveStoreTuning = ArchiveStoreTuning(),
          probes: ArchiveProbeQueue = ArchiveProbeQueue()) {
@@ -160,6 +165,7 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
         self.probes = probes
         log = tuning.log
         reads = ArchiveReadQueue(deadline: tuning.readDeadline)
+        eventLog = ArchiveEventLog(log: tuning.log)
     }
 
     // MARK: Lifecycle (called by NVRCoordinator)

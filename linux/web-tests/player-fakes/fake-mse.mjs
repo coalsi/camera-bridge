@@ -36,7 +36,13 @@ export class FakeSourceBuffer extends EventTarget {
     this.parserHasInit = false;    // only matters when owner.needInitAfterAbort: a browser that wants the init again after abort() (T06's conservative case)
   }
 
-  get ranges() { return mergeSegments(this.segments); }
+  /** With `audioShortMs` every range ends that much before its last segment: a range with sound is where both tracks have data. */
+  get ranges() {
+    const ranges = mergeSegments(this.segments);
+    const short = this.owner.audioShortMs / 1000;
+    if (short > 0) for (const range of ranges) range.end = Math.max(range.start, range.end - short);
+    return ranges;
+  }
 
   get heldBytes() { return this.segments.reduce((sum, segment) => sum + segment.bytes, 0); }
 
@@ -219,9 +225,9 @@ export class FakeCanvas {
 }
 
 /** Everything the surface needs, with `scope` as its globalThis. */
-export function createFakeMedia({ timers, managed = false, appendDelayMs = 2, seekDelayMs = 5, quotaBytes = null, needInitAfterAbort = false } = {}) {
+export function createFakeMedia({ timers, managed = false, appendDelayMs = 2, seekDelayMs = 5, quotaBytes = null, needInitAfterAbort = false, audioShortMs = 0 } = {}) {
   const owner = {
-    timers, appendDelayMs, seekDelayMs, quotaBytes, needInitAfterAbort,
+    timers, appendDelayMs, seekDelayMs, quotaBytes, needInitAfterAbort, audioShortMs,
     sourceBuffers: [], mediaSources: [], attached: null, urls: new Map(), revoked: [], playError: null, failNextAppend: null, neverOpen: false,
     heldRanges: () => (owner.attached ? owner.attached.sourceBuffers.flatMap((sb) => sb.ranges) : []),
   };

@@ -32,6 +32,9 @@ public final class CameraController: Sendable {
         var eventSnapshotsActive = true
         var periodicSnapshotsActive = true
         var nightVision = true
+        /// The operating mode service has the Night Vision characteristic: from the configuration, or added later (`setNightVision`,
+        /// or a saved state that had it).
+        var nightVisionOffered = false
         var indicatorEnabled = true
         var selected: (raw: Data, parsed: CameraRecordingConfiguration)?
         /// `setSensorStatus(active:)`; StatusActive is this AND HomeKitCameraActive.
@@ -50,6 +53,12 @@ public final class CameraController: Sendable {
         var watchedConnections: Set<UUID> = []
         /// Watches the server for `.unpaired` (→ `factoryReset`).
         var serverEvents: Task<Void, Never>?
+        /// The accessory `install(on:server:)` added the services to (the Battery service joins it later).
+        var accessory: Accessory?
+        /// The Battery service, once the camera reported a battery (`setBattery`) or one was saved.
+        var batteryService: Service?
+        /// What the Battery service shows (persisted).
+        var battery: CameraBattery?
     }
 
     /// A recording delegate call slower than this is logged (it holds up the hub's write and every later state write).
@@ -61,6 +70,8 @@ public final class CameraController: Sendable {
     private let dataStreamServer: DataStreamServer
     private let timings: CameraControllerTimings
     private let stateBroadcaster = AsyncBroadcaster<CameraOperatingState>()
+    /// A controller's writes of Night Vision (`nightVisionWrites`).
+    private let nightVisionBroadcaster = AsyncBroadcaster<Bool>()
     private let state = Mutex(State())
     /// Serializes state-changing writes, their delegate calls and persistence.
     private let writeLock = AsyncSerialLock()
@@ -173,7 +184,11 @@ public final class CameraController: Sendable {
             operatingMode = nil
         }
 
-        state.withLock { $0.publishedState = Self.operatingState(of: $0, configuration: configuration) }
+        let offered = operatingMode != nil && configuration.supportsNightVisionControl
+        state.withLock { state in
+            state.nightVisionOffered = offered
+            state.publishedState = Self.operatingState(of: state, configuration: configuration)
+        }
         wireHandlers()
     }
 
@@ -191,6 +206,7 @@ public final class CameraController: Sendable {
             guard !state.installed else { return false }
             state.installed = true
             state.server = server
+            state.accessory = accessory
             return true
         }
         guard first else {
@@ -205,6 +221,7 @@ public final class CameraController: Sendable {
         if let operatingMode { accessory.addService(operatingMode) }
         if let dataStreamManagement { accessory.addService(dataStreamManagement) }
         accessory.addService(motion)
+        if let battery = state.withLock({ $0.batteryService }) { accessory.addService(battery) }   // `setBattery` came first
 
         accessory.onResourceRequest { [weak self] request, _ async throws(HAPStatus) -> Data in
             guard let self else { throw .serviceCommunicationFailure }
@@ -229,6 +246,84 @@ public final class CameraController: Sendable {
 
     public func setMotionDetected(_ detected: Bool) {
         motion.characteristic(.motionDetected).update(.bool(detected))
+    }
+
+    /// Shows the camera's battery in a HAP Battery service (BatteryLevel, ChargingState, StatusLowBattery below
+    /// `CameraBattery.lowLevel`), adding the service to the accessory the first time (Home then reads the new structure under
+    /// the next `c#`). The reading is saved: after a restart the service is there from the start, with the last values. Only
+    /// changed characteristics notify the controllers.
+    public func setBattery(_ battery: CameraBattery) async {
+        await writeLock.withLock {
+            let unchanged = state.withLock { $0.battery == battery && $0.batteryService != nil }
+            guard !unchanged else { return }
+            showBattery(battery)
+            await persist()
+        }
+    }
+
+    /// Shows the camera's night vision in the Camera Operating Mode service's Night Vision (true: the camera may switch to its night
+    /// picture by itself), adding the characteristic the first time when the configuration did not have it (like `setBattery`: Home reads
+    /// the new structure under the next `c#`; the saved state brings it back from the start after a restart). nil keeps the value it
+    /// shows. Only a change notifies the controllers, and nothing goes to `nightVisionWrites` (this is the camera's side). Does nothing
+    /// on an accessory without the operating mode service.
+    public func setNightVision(_ enabled: Bool?) async {
+        await writeLock.withLock {
+            let added = !state.withLock { $0.nightVisionOffered }
+            guard offerNightVision() else { return }
+            let (changed, value) = state.withLock { state -> (Bool, Bool) in
+                defer { if let enabled { state.nightVision = enabled } }
+                return (enabled.map { $0 != state.nightVision } ?? false, enabled ?? state.nightVision)
+            }
+            guard added || changed else { return }
+            operatingMode?.characteristic(.nightVision).update(.bool(value))
+            await persist()
+            publishOperatingState()
+        }
+    }
+
+    /// A controller's writes of Night Vision, each one (also one that leaves it as it was): the camera is to follow them.
+    public nonisolated var nightVisionWrites: AsyncStream<Bool> { nightVisionBroadcaster.subscribe() }
+
+    /// The accessory offers Night Vision (configured, or added by `setNightVision`).
+    public var offersNightVision: Bool { state.withLock { $0.nightVisionOffered } }
+
+    /// Adds Night Vision to the operating mode service the first time, wired like a configured one. False without that service. Holds
+    /// `writeLock` (or runs in `restore`).
+    private func offerNightVision() -> Bool {
+        guard let operatingMode else { return false }
+        let added = state.withLock { state -> Bool in
+            defer { state.nightVisionOffered = true }
+            return !state.nightVisionOffered
+        }
+        if added {
+            wireNightVision(operatingMode.characteristic(.nightVision))
+            log.info("The camera's night vision can be switched: added Night Vision to its operating mode")
+        }
+        return true
+    }
+
+    /// The camera's last battery reading (nil: it has reported none).
+    public var battery: CameraBattery? { state.withLock { $0.battery } }
+
+    /// The Battery service, nil until the camera reported a battery.
+    public var batteryService: Service? { state.withLock { $0.batteryService } }
+
+    /// Creates and adds the Battery service on first use, then mirrors `battery` into it. Holds `writeLock` (or runs in `restore`).
+    private func showBattery(_ battery: CameraBattery) {
+        let (service, accessory, added) = state.withLock { state -> (Service, Accessory?, Bool) in
+            state.battery = battery
+            if let service = state.batteryService { return (service, state.accessory, false) }
+            let service = Service(.battery)
+            state.batteryService = service
+            return (service, state.accessory, true)
+        }
+        service.characteristic(.batteryLevel).update(.uint(UInt64(battery.level)))
+        service.characteristic(.chargingState).update(.uint(UInt64(battery.chargingState.rawValue)))
+        service.characteristic(.statusLowBattery).update(.uint(battery.isLow ? 1 : 0))
+        if added {
+            accessory?.addService(service)
+            log.info("The camera reports a battery: added a Battery service")
+        }
     }
 
     /// ProgrammableSwitchEvent 0 (+ caller also pulses motion). No-op for a camera that is not a doorbell.
@@ -284,6 +379,9 @@ public final class CameraController: Sendable {
     public nonisolated var operatingStateChanges: AsyncStream<CameraOperatingState> { stateBroadcaster.subscribe() }
 
     public var motionService: Service? { motion }
+
+    /// The Camera Operating Mode service (nil without recording, night vision or indicator control).
+    public var operatingModeService: Service? { operatingMode }
 
     public var activeRecordingStreams: Int { state.withLock { $0.recordingStream == nil ? 0 : 1 } }
 
@@ -342,11 +440,7 @@ public final class CameraController: Sendable {
             wireFlag(operatingMode.characteristic(.periodicSnapshotsActive), adminOnly: true) { controller, enabled in
                 await controller.updateFlag(\.periodicSnapshotsActive, enabled)
             }
-            if configuration.supportsNightVisionControl {
-                wireFlag(operatingMode.characteristic(.nightVision), adminOnly: false) { controller, enabled in
-                    await controller.updateFlag(\.nightVision, enabled)
-                }
-            }
+            if configuration.supportsNightVisionControl { wireNightVision(operatingMode.characteristic(.nightVision)) }
             if configuration.supportsIndicatorControl {
                 wireFlag(operatingMode.characteristic(.cameraOperatingModeIndicator), adminOnly: false) { controller, enabled in
                     await controller.updateFlag(\.indicatorEnabled, enabled)
@@ -362,6 +456,14 @@ public final class CameraController: Sendable {
                 guard let self else { throw .serviceCommunicationFailure }
                 return try await self.setUpDataStream(value, context: context)
             }
+        }
+    }
+
+    /// Night Vision: a controller's write changes the state and goes to `nightVisionWrites` (the camera follows it there).
+    private func wireNightVision(_ characteristic: Characteristic) {
+        wireFlag(characteristic, adminOnly: false) { controller, enabled in
+            await controller.updateFlag(\.nightVision, enabled)
+            controller.nightVisionBroadcaster.yield(enabled)
         }
     }
 
@@ -575,7 +677,7 @@ public final class CameraController: Sendable {
         return CameraOperatingState(homeKitCameraActive: state.homeKitCameraActive, eventSnapshotsActive: state.eventSnapshotsActive,
                                     periodicSnapshotsActive: state.periodicSnapshotsActive,
                                     recordingActive: recording && state.recordingActive, recordingAudioActive: recording && state.recordingAudioActive,
-                                    nightVision: configuration.supportsNightVisionControl ? state.nightVision : nil,
+                                    nightVision: state.nightVisionOffered ? state.nightVision : nil,
                                     indicatorEnabled: configuration.supportsIndicatorControl ? state.indicatorEnabled : nil)
     }
 
@@ -627,8 +729,13 @@ public final class CameraController: Sendable {
                 state.selected = selected
                 return state
             }
+            var nightVisionOffered = restored.nightVisionOffered
             if let persisted {
                 for (index, active) in persisted.streamActive.enumerated() where index < streams.count { streams[index].setActive(active) }
+                // Before the server starts: the Battery service is part of the structure Home already knows.
+                if let battery = persisted.battery { showBattery(battery) }
+                // Night Vision too, once the camera offered it (`setNightVision`).
+                if persisted.nightVision != nil { nightVisionOffered = offerNightVision() }
             }
 
             recordingManagement?.characteristic(.active).update(.uint(restored.recordingActive ? 1 : 0))
@@ -638,7 +745,7 @@ public final class CameraController: Sendable {
                 operatingMode.characteristic(.homeKitCameraActive).update(.uint(restored.homeKitCameraActive ? 1 : 0))
                 operatingMode.characteristic(.eventSnapshotsActive).update(.uint(restored.eventSnapshotsActive ? 1 : 0))
                 operatingMode.characteristic(.periodicSnapshotsActive).update(.uint(restored.periodicSnapshotsActive ? 1 : 0))
-                if configuration.supportsNightVisionControl { operatingMode.characteristic(.nightVision).update(.bool(restored.nightVision)) }
+                if nightVisionOffered { operatingMode.characteristic(.nightVision).update(.bool(restored.nightVision)) }
                 if configuration.supportsIndicatorControl {
                     operatingMode.characteristic(.cameraOperatingModeIndicator).update(.bool(restored.indicatorEnabled))
                 }
@@ -665,9 +772,9 @@ public final class CameraController: Sendable {
                                  recordingActive: state.recordingActive, recordingAudioActive: state.recordingAudioActive,
                                  homeKitCameraActive: state.homeKitCameraActive, eventSnapshotsActive: state.eventSnapshotsActive,
                                  periodicSnapshotsActive: state.periodicSnapshotsActive,
-                                 nightVision: configuration.supportsNightVisionControl ? state.nightVision : nil,
+                                 nightVision: state.nightVisionOffered ? state.nightVision : nil,
                                  indicatorEnabled: configuration.supportsIndicatorControl ? state.indicatorEnabled : nil,
-                                 streamActive: streamActive)
+                                 streamActive: streamActive, battery: state.battery)
         }
         do {
             let encoder = JSONEncoder()

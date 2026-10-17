@@ -6,6 +6,8 @@ Camera Bridge reads ONVIF and RTSP cameras directly. This folder describes every
 |---|---|---|---|---|---|
 | ONVIF / RTSP (auto-detect), Hikvision, Reolink | direct | yes | yes | camera events (ISAPI, Reolink API, ONVIF) or built-in motion | shipped earlier |
 | [TP-Link Tapo](tapo.md) | ONVIF + RTSP (preset and guide) | yes | yes | ONVIF where the model allows, else built-in motion | guide only |
+| [Cameras with the "IP Camera Web Login" page](ip-camera-web-api.md) (Anjvision platform, e.g. Jennov) | ONVIF + RTSP, the camera's own web API for night vision, its labels and its cloud | yes | yes | ONVIF where the model allows, else built-in motion | working against a fake; the protocol was checked by hand on one camera, the bridge's use of it needs a real-camera check |
+| [Cameras with the "IPCamera Web" page](ipcamera-web.md) (e.g. N801B-RB-IRC-WM701, the VisionEye app) | ONVIF + RTSP, the camera's own API for the security check, its cloud, its video password and its extra services | yes | yes | ONVIF where the model allows, else built-in motion | working against a fake; the protocol was checked by hand on one camera, the bridge's use of it needs a real-camera check |
 | [Amcrest / Dahua](amcrest-dahua.md) | native adapter | yes | yes | motion, people, vehicles, tamper, sound, doorbell press | working, needs a real-camera check |
 | [DoorBird](doorbird.md) | native adapter (official LAN API) | yes | yes | doorbell press, motion | working, needs a real-device check |
 | [UniFi Protect](unifi-protect.md) | official Integration API + go2rtc for RTSPS | yes | yes | motion, smart detections, doorbell ring (WebSocket) | working, needs a real-console check |

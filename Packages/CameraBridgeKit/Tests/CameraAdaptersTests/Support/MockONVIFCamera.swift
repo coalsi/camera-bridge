@@ -30,6 +30,11 @@ final class MockONVIFCamera: Sendable {
     let renewFaultReason = Box("renew failed")
     /// Every authenticated call answers `NotAuthorized` while set (the camera's ONVIF user has another password).
     let rejectCredentials = Box(false)
+    /// Stream addresses `GetStreamUri` answers per profile token, instead of the default Reolink-like paths (a Dahua/Amcrest camera's
+    /// differ only in their query: `/cam/realmonitor?channel=1&subtype=0` and `…subtype=1`).
+    let streamURIs = Box<[String: String]>([:])
+    /// `GetProfiles` lists the main profile ("000") first, as an Amcrest does, instead of the sub profile first.
+    let mainProfileFirst = Box(false)
     /// Configuration tokens of successive `SetVideoEncoderConfiguration` calls, in order.
     let setVideoEncoderConfigurationCalls = Box<[String]>([])
     /// Video source tokens of successive `SetImagingSettings` calls, in order.
@@ -74,6 +79,46 @@ final class MockONVIFCamera: Sendable {
     let noNTP = Box(false)
     /// Clock calls in order: "SetSystemDateAndTime", "SetNTP".
     let clockCalls = Box<[String]>([])
+
+    /// The device's DNS servers (`GetDNS` / `SetDNS`), as a camera keeps them; by default as camera A answered: from DHCP, with a search domain.
+    struct DNS: Sendable, Equatable {
+        var fromDHCP = true
+        var searchDomains = ["domain.name"]
+        /// What DHCP gave (`DNSFromDHCP`).
+        var dhcpServers = ["1.1.1.1", "8.8.8.8"]
+        /// The servers set by hand (`DNSManual`), IPv4 or IPv6.
+        var manualServers: [String] = []
+    }
+    let dns = Box(DNS())
+    /// `SetDNS` answers a fault while set (a camera whose ONVIF user may not change its network).
+    let refuseDNSChanges = Box(false)
+    /// `SetDNS` answers success and changes nothing while set.
+    let ignoreDNSChanges = Box(false)
+    /// The device has no `GetDNS` (answers `ActionNotSupported`).
+    let noDNS = Box(false)
+    /// Raw bodies of successive `SetDNS` requests.
+    let setDNSBodies = Box<[String]>([])
+    /// The `GetNetworkDefaultGateway` and `GetNetworkInterfaces` answers: camera A's (addresses changed to documentation ones, its MAC to
+    /// a documentation one, RFC 7042).
+    static let gatewayAnswer = """
+    <tds:GetNetworkDefaultGatewayResponse><tds:NetworkGateway><tt:IPv4Address>192.168.77.1</tt:IPv4Address></tds:NetworkGateway>\
+    </tds:GetNetworkDefaultGatewayResponse>
+    """
+    static let documentationMAC = "00:00:5e:00:53:22"
+    static let interfacesAnswer = """
+    <tds:GetNetworkInterfacesResponse><tds:NetworkInterfaces token="eth0"><tt:Enabled>true</tt:Enabled><tt:Info><tt:Name>eth0</tt:Name>\
+    <tt:HwAddress>\(documentationMAC)</tt:HwAddress><tt:MTU>1400</tt:MTU></tt:Info><tt:IPv4><tt:Enabled>true</tt:Enabled><tt:Config>\
+    <tt:LinkLocal><tt:Address>192.168.77.22</tt:Address><tt:PrefixLength>24</tt:PrefixLength></tt:LinkLocal><tt:FromDHCP>\
+    <tt:Address>192.168.77.22</tt:Address><tt:PrefixLength>24</tt:PrefixLength></tt:FromDHCP><tt:DHCP>true</tt:DHCP></tt:Config></tt:IPv4>\
+    </tds:NetworkInterfaces></tds:GetNetworkInterfacesResponse>
+    """
+    let interfaces = Box(MockONVIFCamera.interfacesAnswer)
+
+    /// One `IPAddress` entry (`DNSManual`, `DNSFromDHCP`) in the device's answer.
+    private static func addressEntry(_ element: String, _ address: String) -> String {
+        let type = ONVIFClient.isIPv4(address) ? "IPv4" : "IPv6"
+        return "<tt:\(element)><tt:Type>\(type)</tt:Type><tt:\(type)Address>\(address)</tt:\(type)Address></tt:\(element)>"
+    }
 
     /// An `OSD` element's children: a text element of `textType` (Plain, Date, Time, DateAndTime).
     static func osdChildren(textType: String, text: String?) -> String {
@@ -121,6 +166,21 @@ final class MockONVIFCamera: Sendable {
     var baseURL: URL { server.baseURL }
     var deviceServiceURL: URL { server.baseURL.appending(path: "onvif/device_service") }
     var endpoint: CameraEndpoint { CameraEndpoint(host: "127.0.0.1", httpPort: Int(server.port), onvifPort: Int(server.port)) }
+
+    /// The `GetProfiles` answer with the profile "000" moved in front of the others.
+    static func mainFirst(_ xml: String) -> String {
+        let marker = "<trt:Profiles "
+        var parts = xml.components(separatedBy: marker)
+        guard parts.count > 2 else { return xml }
+        let head = parts.removeFirst()
+        // Each part is one profile up to the next; the last one also carries the rest of the document.
+        guard let lastClose = parts[parts.count - 1].range(of: "</trt:Profiles>", options: .backwards) else { return xml }
+        let tail = String(parts[parts.count - 1][lastClose.upperBound...])
+        parts[parts.count - 1] = String(parts[parts.count - 1][..<lastClose.upperBound])
+        guard let index = parts.firstIndex(where: { $0.hasPrefix("token=\"000\"") }) else { return xml }
+        let main = parts.remove(at: index)
+        return head + ([main] + parts).map { marker + $0 }.joined() + tail
+    }
 
     private init(server: MockHTTPServer, pullQueue: Box<[String]>) {
         self.server = server
@@ -199,11 +259,15 @@ final class MockONVIFCamera: Sendable {
         case "GetDeviceInformation": return .soap(template("GetDeviceInformationResponse.xml"))
         case "GetCapabilities": return .soap(template("GetCapabilitiesResponse.xml"))
         case "GetServices": return .soap(template("GetServicesResponse.xml"))
-        case "GetProfiles": return .soap(withEncoderValues(template("GetProfilesResponse.xml")))
+        case "GetProfiles":
+            let profiles = withEncoderValues(template("GetProfilesResponse.xml"))
+            return .soap(mainProfileFirst.value ? Self.mainFirst(profiles) : profiles)
         case "GetStreamUri":
             let token = envelope.firstDescendant("ProfileToken")?.text ?? ""
-            let uri = token == "000" ? "rtsp://admin:secret@10.0.0.99:554/Preview_01_main" : "rtsp://127.0.0.1:554/Preview_01_sub"
-            return .soap(template("GetStreamUriResponse.xml").replacingOccurrences(of: "{{URI}}", with: uri))
+            let uri = streamURIs.value[token]
+                ?? (token == "000" ? "rtsp://admin:secret@10.0.0.99:554/Preview_01_main" : "rtsp://127.0.0.1:554/Preview_01_sub")
+            let escaped = uri.replacingOccurrences(of: "&", with: "&amp;")
+            return .soap(template("GetStreamUriResponse.xml").replacingOccurrences(of: "{{URI}}", with: escaped))
         case "GetSnapshotUri": return .soap(template("GetSnapshotUriResponse.xml"))
         case "GetEventProperties": return .soap(template("GetEventPropertiesResponse.xml"))
         case "GetVideoSources": return .soap(template("GetVideoSourcesResponse.xml"))
@@ -296,6 +360,31 @@ final class MockONVIFCamera: Sendable {
                 state.ntpServers = servers
             }
             return self.envelope("<tds:SetNTPResponse/>")
+        case "GetDNS":
+            if noDNS.value { return fault("ActionNotSupported", "GetDNS is not supported") }
+            let state = dns.value
+            let search = state.searchDomains.map { "<tt:SearchDomain>\($0)</tt:SearchDomain>" }.joined()
+            let fromDHCP = state.fromDHCP ? state.dhcpServers.map { Self.addressEntry("DNSFromDHCP", $0) }.joined() : ""
+            let manual = state.manualServers.map { Self.addressEntry("DNSManual", $0) }.joined()
+            return self.envelope("<tds:GetDNSResponse><tds:DNSInformation><tt:FromDHCP>\(state.fromDHCP)</tt:FromDHCP>\(search)\(fromDHCP)\(manual)"
+                + "</tds:DNSInformation></tds:GetDNSResponse>")
+        case "SetDNS":
+            setDNSBodies.update { $0.append(request.bodyText) }
+            if refuseDNSChanges.value { return fault("InvalidArgVal", "the DNS settings can not be changed") }
+            if ignoreDNSChanges.value { return self.envelope("<tds:SetDNSResponse/>") }
+            let set = envelope.firstDescendant("SetDNS")
+            let fromDHCP = set?.child("FromDHCP")?.text == "true"
+            let search = (set?.children("SearchDomain") ?? []).map(\.text)
+            // IPv6 addresses kept in lower case, as cameras echo them.
+            let servers = (set?.children("DNSManual") ?? []).compactMap { $0.string("IPv4Address") ?? $0.string("IPv6Address")?.lowercased() }
+            dns.update { state in
+                state.fromDHCP = fromDHCP
+                state.searchDomains = search
+                state.manualServers = servers
+            }
+            return self.envelope("<tds:SetDNSResponse/>")
+        case "GetNetworkDefaultGateway": return self.envelope(Self.gatewayAnswer)
+        case "GetNetworkInterfaces": return self.envelope(interfaces.value)
         case "GetImagingSettings": return .soap(template("GetImagingSettingsResponse.xml"))
         case "GetOptions": return .soap(template("GetImagingOptionsResponse.xml"))
         case "SetImagingSettings":

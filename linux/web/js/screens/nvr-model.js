@@ -44,13 +44,36 @@ function wholeTiles(text) {
   return n >= 1 && n <= MAX_TILES ? n : null;
 }
 
+/** The tile count the person chose: `?tiles=`, else localStorage `cb.nvr.tiles`; null when neither is one (1 to 16). */
+export function chosenTileCount({ query = null, stored = null } = {}) {
+  return wholeTiles(query) ?? wholeTiles(stored);
+}
+
 /** Tiles per page: `?tiles=` wins, then localStorage `cb.nvr.tiles`, then 9 (2 on a phone). Always 1 to 16. */
 export function resolveTileCount({ query = null, stored = null, viewportWidth = Infinity } = {}) {
-  return wholeTiles(query) ?? wholeTiles(stored) ?? (viewportWidth <= PHONE_MAX_WIDTH ? PHONE_TILES : DEFAULT_TILES);
+  return chosenTileCount({ query, stored }) ?? (viewportWidth <= PHONE_MAX_WIDTH ? PHONE_TILES : DEFAULT_TILES);
 }
 
 export function pageCount(total, perPage) {
   return total <= 0 ? 1 : Math.ceil(total / perPage);
+}
+
+/**
+ * The pages as [start, end) ranges of a list of `total` cameras: `lengths` in order (the mosaic's, which depend on the pictures' shapes and
+ * the wall's size), then pages of `perPage` for what they leave. Lengths that are not whole numbers above 0 count as none. Always one page at least.
+ */
+export function pageRanges(total, perPage, lengths = null) {
+  const valid = Array.isArray(lengths) && lengths.every((n) => Number.isInteger(n) && n > 0) ? lengths : [];
+  const size = Math.max(1, Math.trunc(perPage) || 1);
+  const ranges = [];
+  let start = 0;
+  for (const n of valid) {
+    if (start >= total) break;
+    ranges.push([start, Math.min(total, start + n)]);
+    start += n;
+  }
+  for (; start < total; start += size) ranges.push([start, Math.min(total, start + size)]);
+  return ranges.length > 0 ? ranges : [[0, 0]];
 }
 
 export function clampPage(page, total, perPage) {
@@ -333,6 +356,36 @@ export function budgetedCell(cell, { id, dispatcher, onRequest = () => {}, keyPi
 }
 
 // MARK: Snapshots
+
+/** Media requests the page has in flight (fetcher.js), its pictures counted: three, and two while the live video holds a connection of its own. */
+export const MEDIA_REQUESTS = 3;
+export const MEDIA_REQUESTS_WHILE_LIVE = 2;
+/** A picture that has not loaded after this long is given up. */
+export const SNAPSHOT_GUARD_MS = 10_000;
+
+/**
+ * Loads `url` into `img` (an <img>, or anything with `src`, `onload`, `onerror` and `removeAttribute`): resolves true when it loaded, false when it
+ * failed or took longer than `timeoutMs`. A load that took too long is cancelled (its `src` removed): an <img> that keeps loading keeps one of the
+ * browser's six connections to the bridge (a camera slow to give a picture), while the next picture and the player need them.
+ */
+export function loadPicture(img, url, { timeoutMs = SNAPSHOT_GUARD_MS, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (t) => clearTimeout(t) } = {}) {
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = (ok, cancel = false) => {
+      if (finished) return;
+      finished = true;
+      clearTimer(guard);
+      img.onload = null;
+      img.onerror = null;
+      if (cancel) img.removeAttribute('src');
+      resolve(ok);
+    };
+    const guard = setTimer(() => finish(false, true), timeoutMs);
+    img.onload = () => finish(true);
+    img.onerror = () => finish(false);
+    img.src = url;
+  });
+}
 
 /**
  * Refreshes the tiles' snapshots one at a time (the browser has six connections to the bridge and the player and the event stream use

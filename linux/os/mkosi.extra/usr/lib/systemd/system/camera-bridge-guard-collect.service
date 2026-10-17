@@ -1,0 +1,11 @@
+[Unit]
+Description=Internet guard: read what the watched cameras asked the DNS and publish status/guard.json
+Documentation=https://github.com/coalsi/camera-bridge
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/cb-guard collect
+# It holds the guard's lock: a collection that hangs must not keep the list from changing.
+TimeoutStartSec=5min
+Nice=10
+IOSchedulingClass=idle

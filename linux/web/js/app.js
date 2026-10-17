@@ -14,7 +14,7 @@ import { renderLogs } from './screens/logs.js';
 import { renderSystem } from './screens/system.js';
 import { renderAbout } from './screens/about.js';
 import { renderEufyPlugin, renderPlugins, renderWyzePlugin } from './screens/plugins.js';
-import { whatsNewNotice } from './whats-new.js';
+import { versionLabel, whatsNewNotice } from './whats-new.js';
 
 const root = document.getElementById('app');
 let screen = null;          // { el, destroy }
@@ -56,15 +56,16 @@ function lazy(importer, exportName) {
 }
 
 const ROUTES = [
-  { pattern: /^$/, title: 'Monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
+  // page: 'monitor' marks the shell for the Monitor (style.css: black beside the menu, the window's height from 900 px).
+  { pattern: /^$/, title: 'Monitor', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^cameras$/, title: 'Cameras', render: renderCameras },
   { pattern: /^add$/, title: 'Add a camera', render: renderAdd },
   { pattern: /^camera\/([0-9A-Fa-f-]{36})$/, title: 'Camera', render: renderCamera },
   { pattern: /^camera\/([0-9A-Fa-f-]{36})\/pair$/, title: 'Add to Apple Home', render: renderCameraPairing },
   { pattern: /^camera\/([0-9A-Fa-f-]{36})\/watch(?:\/(\d{12,13}))?$/, title: 'Recordings', render: lazy(() => import('./screens/watch.js'), 'renderWatch') },
   // The Monitor writes #/nvr/<epoch ms> while you look back in the recordings; #/monitor is its old address.
-  { pattern: /^nvr(?:\/(\d{12,13}))?$/, title: 'NVR', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
-  { pattern: /^monitor$/, title: 'Monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
+  { pattern: /^nvr(?:\/(\d{12,13}))?$/, title: 'NVR', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
+  { pattern: /^monitor$/, title: 'Monitor', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^pair\/sensors$/, title: 'Sensors bridge', render: renderSensorsPairing },
   { pattern: /^logs$/, title: 'Log', render: renderLogs },
   { pattern: /^system$/, title: 'System', render: renderSystem },
@@ -84,6 +85,12 @@ function currentPath() {
   return decodeURIComponent(location.hash.replace(/^#\/?/, '')).replace(/\/+$/, '');
 }
 
+/** Marks the shell with the screen's kind (`data-page`), or clears it: style.css lays out the Monitor's route on its own. */
+function markPage(page) {
+  if (page) root.dataset.page = page;
+  else delete root.dataset.page;
+}
+
 function setTitle(title) {
   document.title = title ? `${title} · ${store.session?.bridgeName || 'Camera Bridge'}` : 'Camera Bridge';
 }
@@ -96,6 +103,7 @@ function route() {
   for (const candidate of ROUTES) {
     const match = path.match(candidate.pattern);
     if (!match) continue;
+    markPage(candidate.page);
     screen = candidate.render({ params: match.slice(1), navigate, setTitle: (t) => setTitle(t || candidate.title) });
     setTitle(candidate.title);
     replace(shell.content, screen.el);
@@ -106,6 +114,7 @@ function route() {
   }
   replace(shell.content, h('div', { class: 'empty' }, h('h2', null, 'That page doesn’t exist'), h('p', null, 'It may have moved.'),
     h('a', { class: 'btn primary', href: '#/cameras' }, 'Back to your cameras')));
+  markPage(null);
   setTitle('Not found');
   markNav(path);
 }
@@ -125,7 +134,7 @@ function buildShell() {
   const content = h('div');
   const main = h('main', { id: 'main', class: 'main', tabindex: '-1' }, content);
   const reconnect = h('div', { class: 'reconnect', role: 'status', hidden: true }, 'Lost contact with the bridge. Trying again…');
-  // The system's version (Camera Bridge OS 0.2.0); a click opens About and its notes.
+  // The system's version (Camera Bridge OS beta · build 0.1.108, or Camera Bridge OS 1.0.0); a click opens About and its notes.
   const notice = h('div', { class: 'notice-host' });
   const version = h('a', { class: 'version', href: '#/about', title: 'About this version' });
   // Auto → Light → Dark (js/theme.js); showTheme() fills it in.
@@ -147,7 +156,7 @@ function buildShell() {
   showTheme();
   get('system').then((s) => {
     power.hidden = !s.canManage;
-    version.textContent = `${s.product} ${s.version}`;
+    version.textContent = versionLabel(s.product, s.version);
     const news = whatsNewNotice(s.version);
     if (news) notice.append(news);
   }).catch(() => {});
@@ -193,6 +202,7 @@ function showSignedOut() {
   stopEvents();
   shell = null;
   root.classList.remove('signed-in');
+  markPage(null);
   screen?.destroy?.();
   screen = null;
   document.title = 'Sign in · Camera Bridge';
@@ -203,6 +213,7 @@ function showSetup() {
   stopEvents();
   shell = null;
   root.classList.remove('signed-in');
+  markPage(null);
   document.title = 'Set up · Camera Bridge';
   replace(root, renderSetup({ session: store.session, onDone: showSignedIn }));
 }

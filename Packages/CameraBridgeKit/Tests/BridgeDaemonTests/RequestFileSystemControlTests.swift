@@ -27,7 +27,8 @@ final class FakeRootHelper: @unchecked Sendable {
     typealias Behavior = @Sendable (FakeRootHelper, _ name: String, _ body: Data) async -> Void
 
     static let allowed: Set<String> = ["ssh-enable", "ssh-disable", "auto-update", "update-check", "update-apply", "reboot", "poweroff", "factory-reset",
-                                       "install-list", "install-to-disk", "drive-list", "drive-use", "drive-forget", "wifi-scan", "wifi-join", "wifi-forget"]
+                                       "install-list", "install-to-disk", "drive-list", "drive-use", "drive-forget", "wifi-scan", "wifi-join", "wifi-forget",
+                                       "guard-set"]
 
     let requests: URL
     let status: URL
@@ -177,6 +178,13 @@ extension FakeRootHelper {
                 helper.writeData("recording-drive-candidates.json", candidates)
                 helper.writeStatus("recording-drive", "internal", "Recording to this box's own disk.")
                 if fixedStatus { helper.writeStatus(name, "ok", "done") }
+            case "guard-set":
+                // cb-guard set: the list is kept and status/guard.json lists it before the job ends.
+                let cameras = (request["cameras"] as? [[String: Any]] ?? []).map { ["address": $0["address"] ?? "", "level": $0["level"] ?? "",
+                                                                                     "today": 0, "last24h": 0, "names": []] as [String: Any] }
+                helper.write("guard.json", ["state": "ok", "available": true, "running": !cameras.isEmpty, "cameras": cameras,
+                                            "updatedAt": helper.clock.peek().formatted(Date.ISO8601FormatStyle())])
+                helper.writeStatus(name, "ok", "done")
             case "install-to-disk":
                 for step in ["checking", "partitioning", "copying", "done"] {
                     helper.writeStatus(name, step == "done" ? "ok" : "running", "step \(step)", extra: ["step": step, "device": request["device"] ?? ""])

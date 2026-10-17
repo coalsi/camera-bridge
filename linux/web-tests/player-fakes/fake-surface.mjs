@@ -3,15 +3,24 @@
 //   * a chain (or the first append) must start at a key part, and a part that is not a chain break must continue the previous one;
 //   * tfdt + timestampOffset must equal the start the cell believes in (this is what makes the time arithmetic checkable end to end);
 //   * a seek shows a picture only when at least 700 ms of the same buffered range lie after it (the decoders' hold-back).
+// Options make it behave like what was measured on the owner's Mac (Chrome, hardware decoders):
+//   stallBeforeEndMs  while playing, the picture stops this long before the end of a buffered range: the decoder holds its last frames back
+//                     until data comes that never does (Patio stood 590 ms before the end of what it held)
+//   audioShortMs      every buffered range ends this much before its last segment does: with sound the range is where both tracks have data,
+//                     and the sound of a part ends up to a frame before its picture does
+//   rate              how fast the picture plays (a decoder that cannot keep up plays slower than 1)
 import { unsupportedMessage } from '../../web/js/nvr/planner.js';
 import { decodeBytes } from './fake-archive.mjs';
 
 const EPSILON = 1e-6;
 
 export class FakeSurface {
-  constructor({ timers, holdBackMs = 700, seekMs = 5, appendMs = 2, unsupported = () => false } = {}) {
+  constructor({ timers, holdBackMs = 700, seekMs = 5, appendMs = 2, unsupported = () => false, stallBeforeEndMs = 0, audioShortMs = 0, rate = 1 } = {}) {
     this.timers = timers;
     this.holdBackSec = holdBackMs / 1000;
+    this.stallBeforeEndSec = stallBeforeEndMs / 1000;
+    this.audioShortSec = audioShortMs / 1000;
+    this.rate = rate;
     this.seekMs = seekMs;
     this.appendMs = appendMs;
     this.unsupported = unsupported;
@@ -112,6 +121,7 @@ export class FakeSurface {
       if (last && segment.startSec <= last.end + 0.003) last.end = Math.max(last.end, segment.endSec);
       else out.push({ start: segment.startSec, end: segment.endSec });
     }
+    if (this.audioShortSec > 0) for (const range of out) range.end = Math.max(range.start, range.end - this.audioShortSec);
     return out;
   }
 
@@ -126,7 +136,10 @@ export class FakeSurface {
     await this.#work(this.seekMs);
     const range = this.held().find((r) => sec >= r.start && sec < r.end);
     const presented = !!range && range.end - sec >= this.holdBackSec;
-    if (presented) this.time = sec;
+    if (presented) {
+      this.time = sec;
+      if (this.playing) { this.playedFrom = sec; this.playedAt = this.timers.now(); }      // a seek while playing plays on from there
+    }
     this.log.push({ op: 'seek', sec, presented, at: this.timers.now() });
     return { presented, mediaTime: presented ? sec : null };
   }
@@ -155,13 +168,14 @@ export class FakeSurface {
     this.playedAt = this.timers.now();
   }
 
-  /** While playing the position runs with the timers, and stops (stalls) at the end of what is held. */
+  /** While playing the position runs with the timers, and stops (stalls) at the end of what is held, or `stallBeforeEndMs` before it. */
   currentTime() {
     if (!this.playing) return this.time;
-    const wanted = this.playedFrom + (this.timers.now() - this.playedAt) / 1000;
+    const wanted = this.playedFrom + ((this.timers.now() - this.playedAt) / 1000) * this.rate;
     const range = this.held().find((r) => this.playedFrom >= r.start - 0.003 && this.playedFrom < r.end);
     if (!range) return this.playedFrom;
-    if (wanted > range.end) { this.stalledMs += (wanted - range.end) * 1000; return range.end; }
+    const stop = Math.max(this.playedFrom, range.end - this.stallBeforeEndSec);
+    if (wanted > stop) { this.stalledMs += (wanted - stop) * 1000; return stop; }
     return wanted;
   }
 

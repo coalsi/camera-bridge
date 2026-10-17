@@ -23,7 +23,7 @@ export CB_TAG=cb-system
 REQUESTS=$CB_RUN/requests
 JOBS=$CB_RUN/jobs
 MAX_REQUEST_BYTES=65536
-ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget wifi-scan wifi-join wifi-forget"
+ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget wifi-scan wifi-join wifi-forget guard-set"
 # Jobs that change disks or the running system image take this lock; only one at a time.
 HEAVY_JOBS=" update-apply install-to-disk factory-reset drive-use drive-forget "
 
@@ -111,6 +111,7 @@ cmd_auto_update() {
 wipe_settings() {
     cb_wipe_dir_contents "$CB_DATA" || true   # -xdev: a recording drive mounted below it is left alone
     rm -f "$CB_SYSTEM/first-boot-done" "$CB_SYSTEM/auto-update" "$SSH_DIR/enabled"
+    rm -rf "$CB_SYSTEM/guard"   # the internet guard's list of watched cameras and what they asked for
     sync
 }
 
@@ -169,9 +170,12 @@ process_requests() {
             cb_status "$name" failed "request is not a JSON object"
             continue
         fi
-        # Move the content into the root-only jobs folder first, so the file cannot change after validation.
-        head -c "$MAX_REQUEST_BYTES" -- "$f" >"$JOBS/$name.json"
-        chmod 0600 "$JOBS/$name.json"
+        # Move the content into the root-only jobs folder first, so the file cannot change after validation. A job still running has
+        # moved its own arguments aside (run_job): this request waits in $name.json, replacing an older one that waits, and that job
+        # runs it when it is done (a start of a running job merges into it).
+        head -c "$MAX_REQUEST_BYTES" -- "$f" >"$JOBS/.$name.new"
+        chmod 0600 "$JOBS/.$name.new"
+        mv -f "$JOBS/.$name.new" "$JOBS/$name.json"
         rm -f -- "$f"
         cb_status "$name" queued "waiting to run"
         systemctl start --no-block "camera-bridge-job@$name.service" || cb_log "could not start job $name"
@@ -180,22 +184,33 @@ process_requests() {
     find "$REQUESTS" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
 }
 
+# take_args NAME: moves the waiting request of the job aside as the one it runs now ($name.running.json); fails when none waits.
+take_args() { mv -f "$JOBS/$1.json" "$JOBS/$1.running.json" 2>/dev/null; }
+
 run_job() {
-    local name=$1 args=$JOBS/$1.json lock=$JOBS/.lock
+    local name=$1 args=$JOBS/$1.running.json lock=$JOBS/.lock
     job_allowed "$name" || cb_die "unknown job: $name"
-    [ -f "$args" ] || cb_die "no arguments for job $name"
+    take_args "$name" || cb_die "no arguments for job $name"
     if [[ "$HEAVY_JOBS" == *" $name "* ]]; then
         exec 9>"$lock"
         if ! flock -n 9; then
             cb_status "$name" failed "another system job is running; try again when it has finished"
-            rm -f "$args"
+            rm -f "$args" "$JOBS/$name.json"
             return 1
         fi
     fi
-    cb_status "$name" running "started"
     local rc=0
-    run_job_body "$name" "$args" || rc=$?
-    rm -f "$args"
+    # A request of the same job that came while it ran is run next by this job (its start merged into this one, so no other run would
+    # take it), and only the last one's end is reported: the daemon waiting for a newer request never reads an older one's result.
+    while :; do
+        cb_status "$name" running "started"
+        rc=0
+        run_job_body "$name" "$args" || rc=$?
+        rm -f "$args"
+        take_args "$name" && continue
+        refresh_status
+        take_args "$name" || break
+    done
     # The installer reports its own steps and its own end state in install-to-disk.json. Every other job ends here, so
     # status/<job>.json always reaches ok or failed (update.json carries the details of the update jobs).
     if [ "$name" != install-to-disk ]; then
@@ -205,7 +220,6 @@ run_job() {
             cb_status "$name" failed "failed (exit $rc); see the system log"
         fi
     fi
-    refresh_status
     return "$rc"
 }
 
@@ -267,6 +281,8 @@ run_job_body() {
             if [ "$(jq -r '.reboot == true' "$args")" = "true" ]; then systemctl reboot --no-block; fi
             ;;
         wifi-forget) /usr/sbin/cb-wifi --forget "$(jq -r '.ssid // ""' "$args")" ;;
+        # The internet guard's list of watched cameras; cb-guard checks every address (private ranges only, at most 64, level watch).
+        guard-set) /usr/sbin/cb-guard set "$args" ;;
         *) cb_die "unhandled job $name" ;;
     esac
 }

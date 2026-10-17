@@ -9,6 +9,13 @@ import { store } from '../store.js';
 import { banners } from './banners.js';
 import { inlineError, switchRow } from './common.js';
 import { askToPowerOff, powerOff as sendPowerOff } from '../power.js';
+import { isBeta } from '../release-notes.js';
+
+/** An update in words: "beta build 0.1.109" while the system is in beta, "version 1.0.0" from 1.0 (`capital`: at the start of a sentence). */
+export function updateLabel(version, capital = false) {
+  const text = isBeta(version) ? `beta build ${version}` : `version ${version}`;
+  return capital ? text[0].toUpperCase() + text.slice(1) : text;
+}
 
 const MODES = {
   installed: 'Camera Bridge OS',
@@ -112,14 +119,14 @@ export function renderSystem() {
     const state = update?.state;
     let message = null;
     if (state === 'downloading') {
-      message = h('div', { class: 'banner info', role: 'status' }, spinner(), h('div', { class: 'text' }, h('span', { class: 'title' }, update.latest ? `Installing version ${update.latest}` : 'Installing the update'),
+      message = h('div', { class: 'banner info', role: 'status' }, spinner(), h('div', { class: 'text' }, h('span', { class: 'title' }, update.latest ? `Installing ${updateLabel(update.latest)}` : 'Installing the update'),
         update.message || 'Downloading, checking and writing the update. Cameras keep working meanwhile.'));
     } else if (state === 'checking') {
       message = h('div', { class: 'banner info', role: 'status' }, spinner(), h('div', { class: 'text' }, 'Looking for updates…'));
     } else if (state === 'error') {
       message = h('div', { class: 'banner error', role: 'alert' }, icon('alert'), h('div', { class: 'text' }, update.message || 'The update did not work.'));
     } else if (update?.available) {
-      message = h('div', { class: 'banner info' }, icon('info'), h('div', { class: 'text' }, h('span', { class: 'title' }, `Version ${update.latest} is available`), update.notes || 'It installs next to the system you are running and takes effect when you restart.'));
+      message = h('div', { class: 'banner info' }, icon('info'), h('div', { class: 'text' }, h('span', { class: 'title' }, `${updateLabel(update.latest, true)} is available`), update.notes || 'It installs next to the system you are running and takes effect when you restart.'));
     } else if (update?.checked) {
       message = h('p', { class: 'muted' }, `You have the latest version. Checked ${timeAgo(update.checked)}.`);
     } else if (update?.message) {
@@ -135,7 +142,7 @@ export function renderSystem() {
         h('div', { class: 'row' },
           h('button', { class: 'btn', type: 'button', disabled: !idle, onclick: () => run('check', async () => { update = await post('system/update', { action: 'check' }); await refresh(); }) }, busy === 'check' ? spinner() : icon('refresh'), 'Check for updates'),
           update?.available && !update.rebootRequired && state !== 'downloading' ? h('button', { class: 'btn primary', type: 'button', disabled: !idle, onclick: async () => {
-            if (await confirmDialog({ title: `Install version ${update.latest}?`, body: 'It downloads, installs, and waits for you to restart the bridge. Cameras keep working meanwhile.', confirm: 'Install update' })) {
+            if (await confirmDialog({ title: `Install ${updateLabel(update.latest)}?`, body: 'It downloads, installs, and waits for you to restart the bridge. Cameras keep working meanwhile.', confirm: 'Install update' })) {
               run('apply', async () => { update = await post('system/update', { action: 'apply' }); });
             }
           } }, busy === 'apply' ? spinner() : icon('download'), 'Install update') : null),

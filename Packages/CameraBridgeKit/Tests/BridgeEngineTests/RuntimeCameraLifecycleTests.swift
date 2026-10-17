@@ -62,6 +62,15 @@ final class ScriptedEventDriver: CameraDriver {
 
     func snapshot() async throws -> Data? { nil }
     func makeTalkbackSink() -> (any TalkbackSink)? { nil }
+
+    /// What `batteryStatus()` answers (nil: no battery, the default), and how often it was asked.
+    let battery = Box<BatteryStatus?>(nil)
+    let batteryCalls = Box(0)
+
+    func batteryStatus() async -> BatteryStatus? {
+        batteryCalls.update { $0 += 1 }
+        return battery.value
+    }
 }
 
 /// Records the names of every advertisement and advertises nothing (never touches DNS-SD: nothing reaches the LAN).

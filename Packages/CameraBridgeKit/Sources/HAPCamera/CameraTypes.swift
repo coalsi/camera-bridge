@@ -292,6 +292,29 @@ public protocol CameraRecordingDelegate: AnyObject, Sendable {
     func closeRecordingStream(streamID: Int, reason: HDSProtocolReason?) async
 }
 
+/// What the camera's HAP Battery service shows (`CameraController.setBattery`): BatteryLevel, ChargingState and StatusLowBattery.
+public struct CameraBattery: Sendable, Equatable, Codable {
+    /// HAP ChargingState values.
+    public enum ChargingState: UInt8, Sendable, Equatable, Codable {
+        case notCharging = 0, charging = 1, notChargeable = 2
+    }
+
+    /// StatusLowBattery is 1 (low) below this level.
+    public static let lowLevel = 20
+
+    /// 0–100 %.
+    public var level: Int
+    public var chargingState: ChargingState
+
+    /// `level` is clamped to 0…100.
+    public init(level: Int, chargingState: ChargingState) {
+        self.level = min(max(level, 0), 100)
+        self.chargingState = chargingState
+    }
+
+    public var isLow: Bool { level < Self.lowLevel }
+}
+
 public struct CameraOperatingState: Sendable, Equatable {
     public var homeKitCameraActive: Bool
     public var eventSnapshotsActive: Bool

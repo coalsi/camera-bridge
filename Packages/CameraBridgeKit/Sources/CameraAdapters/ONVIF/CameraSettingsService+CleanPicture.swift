@@ -6,7 +6,8 @@ import Foundation
 public struct CleanPictureBackup: Sendable, Codable, Equatable {
     /// The way it was turned off.
     public var method: CameraConfigMethod
-    /// Hikvision: the whole overlays document as the camera had it (XML). Reolink: its `Osd` object (JSON). nil for ONVIF.
+    /// Hikvision: the whole overlays document as the camera had it (XML). Reolink: its `Osd` object (JSON). The IP camera web API: the
+    /// overlay's `Enable` as it was ("1"). nil for ONVIF.
     public var document: String?
     /// ONVIF: the text elements that were removed or blanked.
     public var removedOSDs: [HiddenCameraClock.RemovedOSD]
@@ -37,9 +38,30 @@ public struct CleanPictureChange: Sendable {
 
 /// "Clean picture": every label the camera draws itself (date and time, its name, text lines, a logo) off, so the bridge draws its own the same
 /// way on every camera. The vendor's API is tried first (Hikvision ISAPI's overlays document, Reolink's `Osd`), then ONVIF's OSD service (its
-/// text elements are removed). Turning it back on writes back what was saved.
+/// text elements are removed). An ONVIF camera that speaks the IP camera web API uses only that (its overlay switch): its ONVIF OSD answers
+/// cannot be trusted, also while that API cannot be asked. Turning it back on writes back what was saved.
 extension CameraSettingsService {
     public func cleanPicture() async throws -> CleanPictureChange {
+        let web: IPCWebAccess
+        do {
+            web = try await ipcWeb()
+        } catch let error as CameraAdapterError where error.isLoginRefusal {
+            return CleanPictureChange(succeeded: false, summary: "the camera refused the login")
+        }
+        if case .unavailable(let why) = web { return CleanPictureChange(succeeded: false, summary: why) }
+        if case .speaks(let client, _) = web {
+            do {
+                let backup = try await cleanViaIPCWeb(client)
+                log.info("Turned the camera's own labels off through \(CameraConfigMethod.ipcWebAPI.clockDisplayName)")
+                return CleanPictureChange(succeeded: true, method: .ipcWebAPI, backup: backup, summary: "via \(CameraConfigMethod.ipcWebAPI.clockDisplayName)")
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as CameraAdapterError where error.isLoginRefusal {
+                return CleanPictureChange(succeeded: false, summary: "the camera refused the login")
+            } catch {
+                return CleanPictureChange(succeeded: false, summary: "\(CameraConfigMethod.ipcWebAPI.clockDisplayName): \(Redact.string(String(describing: error)))")
+            }
+        }
         var reasons: [String] = []
         for method in CameraConfigMethod.clockOrder(vendor: vendor, preferred: preferredMethod) {
             try Task.checkCancellation()
@@ -82,6 +104,12 @@ extension CameraSettingsService {
                     case .deleted: try await client.createOSD(children: osd.children)
                     case .blanked: try await client.setOSD(token: osd.token, children: osd.children)
                     }
+                }
+            case .ipcWebAPI:
+                switch try await ipcWeb() {
+                case .speaks(let client, _): try await restoreViaIPCWeb(backup, client: client)
+                case .unavailable(let why): throw IPCWebUnavailable(reason: why)
+                case .none: throw CameraAdapterError.unsupported("the camera's web API does not answer")
                 }
             }
             log.info("Put the camera's own labels back through \(backup.method.clockDisplayName)")
@@ -144,6 +172,8 @@ extension CameraSettingsService {
             }
             guard !removed.isEmpty else { throw CameraAdapterError.unsupported("the camera kept its labels") }
             return CleanPictureBackup(method: method, removedOSDs: removed)
+        case .ipcWebAPI:
+            return nil   // not in the clock order: `cleanPicture()` asks the web API itself
         }
     }
 

@@ -14,9 +14,9 @@ const MIB = 1_048_576;
 const KEEP_INIT = Object.freeze({ ...DEFAULT_POLICY, initAfterBreak: false });
 const REINIT = Object.freeze({ ...DEFAULT_POLICY, initAfterBreak: true });
 
-function setup({ managed = false, policy, budget, canvas = true, quotaBytes = null, needInitAfterAbort = false } = {}) {
+function setup({ managed = false, policy, budget, canvas = true, quotaBytes = null, needInitAfterAbort = false, audioShortMs = 0 } = {}) {
   const timers = createFakeTimers();
-  const media = createFakeMedia({ timers, managed, quotaBytes, needInitAfterAbort });
+  const media = createFakeMedia({ timers, managed, quotaBytes, needInitAfterAbort, audioShortMs });
   const archive = createArchive({
     timers,
     files: [{ key: FILE_A, startMs: ORIGIN, parts: 40, gop: 2 }, { key: FILE_B, startMs: ORIGIN + 200_000, parts: 10, gop: 1 }],
@@ -388,6 +388,17 @@ describe('memory', () => {
     sb().evictByBrowser(sec(part(FILE_A, 0).start), sec(part(FILE_A, 1).end));
     await drive(surface.evict(sec(part(FILE_A, 2).start + 500)));
     assert.deepEqual(sb().removed, [], 'unit (0,1) is gone already and the rest fits');
+  });
+
+  it('keeps in its accounts a part whose sound ends a frame before its picture, so it can still be removed later', async () => {
+    const ctx = await opened({ budget: 2 * MIB, audioShortMs: 64 });       // every buffered range ends 64 ms before its last part does
+    const { feed, drive, surface, sb, sec, part } = ctx;
+    for (let i = 0; i < 4; i += 1) await drive(feed(FILE_A, i, { chainBreak: i === 0, size: MIB }));
+    await drive(surface.evict(sec(part(FILE_A, 3).start + 500)));                       // the playhead is in the last part: unit (2,3) stays
+    assert.equal(sb().heldBytes, 2 * MIB, 'unit (0,1) was removed');
+    for (let i = 4; i < 6; i += 1) await drive(feed(FILE_A, i, { size: MIB }));
+    await drive(surface.evict(sec(part(FILE_A, 5).start + 500)));
+    assert.equal(sb().heldBytes, 2 * MIB, 'unit (2,3) was removed, although its range ended a frame short while it was the newest');
   });
 
   it('on QuotaExceededError it makes room around the playhead and tries once more', async () => {

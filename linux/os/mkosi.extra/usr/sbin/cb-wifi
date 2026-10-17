@@ -79,6 +79,19 @@ write_state() {
 
 wired() { ip -4 route show default 2>/dev/null | grep -qv ' dev wl'; }
 
+# The internet guard's DNS (camera-bridge-dns.service) listens on the Wi-Fi interface too, so it would take port 53 on the hotspot's address,
+# where NetworkManager's own dnsmasq answers the phones. It waits while the hotspot is open: cb-guard does not start it while the flag exists.
+guard_pause() {
+    touch "$CB_HOTSPOT_FLAG"
+    systemctl stop camera-bridge-dns.service 2>/dev/null || true
+}
+
+guard_resume() {
+    [ -e "$CB_HOTSPOT_FLAG" ] || return 0
+    rm -f "$CB_HOTSPOT_FLAG"
+    /usr/sbin/cb-guard apply >/dev/null 2>&1 || true
+}
+
 start_hotspot() {
     local dev=$1 name
     name=$(hotspot_name "$dev")
@@ -86,15 +99,20 @@ start_hotspot() {
     nmcli connection add type wifi ifname "$dev" con-name "$HOTSPOT" autoconnect no ssid "$name" \
         802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 6 \
         ipv4.method shared ipv4.addresses "$HOTSPOT_ADDRESS/24" ipv6.method disabled >/dev/null
+    guard_pause
     if nmcli connection up id "$HOTSPOT" >/dev/null 2>&1; then
         cb_log "opened the setup hotspot $name"
         return 0
     fi
     cb_log "this Wi-Fi chip could not open the setup hotspot"
+    guard_resume
     return 1
 }
 
-stop_hotspot() { nmcli connection down id "$HOTSPOT" >/dev/null 2>&1 || true; }
+stop_hotspot() {
+    nmcli connection down id "$HOTSPOT" >/dev/null 2>&1 || true
+    guard_resume
+}
 
 stations() { iw dev "$1" station dump 2>/dev/null | grep -c '^Station' || true; }
 
@@ -158,6 +176,7 @@ do_watch() {
     while true; do
         dev=$(wifi_device)
         if online && ! hotspot_active; then
+            guard_resume
             rm -f "$PENDING"
             last_error=""
             write_state online "On the network." "$dev"

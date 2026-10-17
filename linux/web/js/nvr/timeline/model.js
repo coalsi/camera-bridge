@@ -37,7 +37,7 @@ export function createTimelineModel({
   let preset = PRESETS.includes(storage.getItem(ZOOM_KEY)) ? storage.getItem(ZOOM_KEY) : DEFAULT_PRESET;
   let following = session.mode === 'live';
   let lastMode = session.mode;
-  let data = null;                    // { plan, answer, combined, reference }
+  let data = null;                    // { plan, answer, combined, extents }: `extents` are the cameras' recorded spans when it was asked for
   let problem = false;                // the last two activity requests failed
   let wanted = null;                  // the plan to fetch next
   let inflight = false;
@@ -84,10 +84,36 @@ export function createTimelineModel({
     pump();
   }
 
+  /** Each camera's recorded span now, by id ({ oldest, newest } or null). */
+  function spans(ids) {
+    return new Map(ids.map((id) => {
+      const extent = catalog.extent(id);
+      return [id, extent ? { oldest: extent.oldest, newest: extent.newest } : null];
+    }));
+  }
+
+  /**
+   * True when what the catalog says now can change a bin of the answer held: a camera's span grew, shrank, appeared or went inside the time
+   * the answer covers. Footage recorded after it (playing the recordings of two hours ago while the cameras record) changes nothing there.
+   */
+  function changedInAnswer() {
+    if (!data?.extents) return true;
+    const fromMs = data.plan.fromMs;
+    const toMs = data.plan.fromMs + data.plan.bins * data.plan.binMs;
+    const touches = (a, b) => a !== b && Math.max(a, b) > fromMs && Math.min(a, b) < toMs;
+    for (const [id, now] of spans(cameras)) {
+      const then = data.extents.get(id);
+      if (!now || !then) { if (now !== then) return true; continue; }
+      if (touches(then.newest, now.newest) || touches(then.oldest, now.oldest)) return true;
+    }
+    return false;
+  }
+
   function pump() {
     if (disposed || inflight || !wanted || retryTimer) return;
     const plan = wanted;
     const ids = [...cameras];
+    const asked = spans(ids);
     wanted = null;
     inflight = true;
     lastFetchAt = perf();
@@ -100,7 +126,7 @@ export function createTimelineModel({
         problem = false;
         const effective = { ...plan, fromMs: Number.isFinite(answer.from) ? answer.from : plan.fromMs };
         const combined = combineActivity(answer.byCamera, plan.bins);
-        data = { plan: effective, answer, combined };
+        data = { plan: effective, answer, combined, extents: asked };
         const incomplete = Object.values(answer.byCamera || {}).some((c) => c && c.complete === false);
         if (incomplete && incompleteRetries < MAX_INCOMPLETE_RETRIES) { incompleteRetries += 1; stale = true; scheduleRefresh(); } else if (!incomplete) incompleteRetries = 0;
         emit('data');
@@ -127,6 +153,7 @@ export function createTimelineModel({
 
   const stopCatalog = catalog.onChange(() => {
     if (!initialised && extents().length) { initialised = true; reselect(); }
+    if (!changedInAnswer()) return;
     stale = true;
     scheduleRefresh();
   });

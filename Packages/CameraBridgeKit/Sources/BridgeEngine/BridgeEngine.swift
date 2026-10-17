@@ -49,6 +49,9 @@ public final class BridgeEngine {
     public private(set) var recentNetworkNotices: [NetworkNotice] = []
     /// The VPN this Mac is connected to, nil when there is none (or it was not checked yet).
     public private(set) var macVPN: MacVPNStatus?
+    /// Camera Bridge OS's internet guard: the day's "Internet guard blocked N lookups from M cameras today." (nil when nothing was blocked
+    /// today, and always on a bridge without the guard). Set by `pollGuardReport` (BridgeEngine+InternetGuard.swift).
+    public internal(set) var internetGuardNotice: InternetGuardNotice?
     /// Which cameras may be published to HomeKit (their accessory is advertised and their sensors are bridged); nil: every
     /// camera. A camera outside the set still runs for the app's own viewers (live view, snapshots, events) but has no
     /// accessory, so Home shows it as not responding. Not persisted: the host sets it before `start()` (a host that never
@@ -76,6 +79,10 @@ public final class BridgeEngine {
     @ObservationIgnored private(set) var runtimes: [UUID: CameraRuntime] = [:]
     /// The pre-optimization encoder/smart-codec values `optimizeForHomeKit` can still undo, per camera.
     @ObservationIgnored var homeKitOptimizationSnapshots: [UUID: HomeKitOptimizationSnapshot] = [:]
+    /// The cameras' security checks: the last result of each camera (in memory only), those under way and those scheduled.
+    @ObservationIgnored let securityChecks = CameraSecurityChecks()
+    /// The internet guard's side in the engine: the list of watched cameras sent to the box and the box's last report.
+    @ObservationIgnored let internetGuard = InternetGuardState()
     /// The camera profiles feed (`setCameraProfiles`): seeds the method tried first for a camera with no remembered one
     /// and replaces built-in manual steps. Never persisted into a camera's configuration.
     @ObservationIgnored var cameraProfiles = CameraProfileFeed.empty
@@ -549,7 +556,8 @@ public final class BridgeEngine {
     }
 
     /// Saves the configuration first: when it cannot be saved the camera stays (running, with its password and HomeKit
-    /// identity) and the failure is logged — `config.json` would bring it back at the next launch without them.
+    /// identity) and the failure is logged — `config.json` would bring it back at the next launch without them. A camera whose Watch
+    /// is done gets its own DNS servers back first (`giveDNSBackOnRemoval`): the box no longer answers it once it is gone.
     public func removeCamera(id: UUID) async {
         guard !isPreview else { return }
         await operations.withLock {
@@ -561,9 +569,11 @@ public final class BridgeEngine {
                 log.error("\(camera.name) was not removed: the configuration could not be saved (\(error))")
                 return
             }
+            await giveDNSBackOnRemoval(camera)
             await stopRuntime(id)
             onvifRefusals[id] = nil
             clockUnsupported[id] = nil
+            forgetSecurity(id)
             await router.unregister(cameraID: id)
             configurations = remaining
             statusInputsChanged()
@@ -897,8 +907,41 @@ public final class BridgeEngine {
     }
 
     /// Whether an ONVIF or ISAPI encoding name is H.264 ("H264", "H.264").
-    static func isH264(_ encoding: String) -> Bool {
+    nonisolated static func isH264(_ encoding: String) -> Bool {
         encoding.uppercased().replacingOccurrences(of: ".", with: "") == "H264"
+    }
+
+    /// A codec's name as people read it: "H.264", "H.265" (HEVC), else as given.
+    nonisolated static func codecDisplayName(_ codec: String) -> String {
+        let cleaned = codec.uppercased().filter { $0 != "." && $0 != "-" && $0 != " " }
+        switch cleaned {
+        case "H264", "AVC": return "H.264"
+        case "H265", "HEVC": return "H.265"
+        default: return codec
+        }
+    }
+
+    /// The measured codec's name when the camera's settings name another one (a camera whose ONVIF says H.264 while it sends H.265);
+    /// nil when they agree or nothing was measured.
+    nonisolated static func measuredCodecMismatch(reported: String, measured: String?) -> String? {
+        guard let measured else { return nil }
+        let real = codecDisplayName(measured), said = codecDisplayName(reported)
+        return real == said ? nil : real
+    }
+
+    /// After the setup changed the streams and the bridge started receiving them again: a sentence when a stream the setup set to H.264
+    /// still arrives as something else (the camera took the setting but kept its codec), nil when it is right or not measured yet.
+    nonisolated static func streamsStillWrong(planned: [PlannedEncoderFix], measuredMain: String?, measuredSub: String?) -> String? {
+        var wrong: [(name: String, codec: String)] = []
+        for plan in planned where isH264(plan.edit.desired.encoding) {
+            guard let measured = plan.isSub ? measuredSub : measuredMain, !isH264(measured) else { continue }
+            wrong.append((plan.isSub ? "sub" : "main", codecDisplayName(measured)))
+        }
+        guard !wrong.isEmpty else { return nil }
+        let codecs = Set(wrong.map(\.codec))
+        let names = wrong.map(\.name).joined(separator: " and ")
+        let streams = wrong.count == 1 ? "its \(names) stream is" : "its \(names) streams are"
+        return "The camera says \(streams) H.264 but still sends \(codecs.count == 1 ? codecs.first! : codecs.sorted().joined(separator: " and "))."
     }
 
     /// Reboots the camera (ONVIF `SystemReboot`). The app confirms with the person before calling this.
@@ -961,6 +1004,13 @@ public final class BridgeEngine {
     /// only the engine writes. Throws `EngineError.unknownCamera`, `CameraOfflineError` for an unreachable camera, and `CancellationError`.
     /// Moves a pan/tilt camera (`pan`, `tilt` in -1…1; both 0 stops it). A move ends by itself 1.5 s after the last ask, so the page
     /// repeats it while a button is held. Throws `EngineError.cameraNotRunning` for a camera that isn't running or can't pan and tilt.
+    /// Sets a camera's night vision mode and/or its lamp (`CameraStatus.nightVision` says what it offers). Throws
+    /// `EngineError.cameraNotRunning` for a camera that isn't running or can't do it.
+    public func setNightVision(cameraID: UUID, mode: NightVisionMode?, light: Bool?) async throws {
+        guard !isPreview, let runtime = runtimes[cameraID] else { throw EngineError.cameraNotRunning }
+        try await runtime.setNightVision(mode: mode, light: light)
+    }
+
     public func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double = 0) async throws {
         guard !isPreview, let runtime = runtimes[cameraID] else { throw EngineError.cameraNotRunning }
         try await runtime.panTilt(pan: pan, tilt: tilt, zoom: zoom)
@@ -1129,7 +1179,8 @@ public final class BridgeEngine {
             }
 
             let planned = Self.plannedEncoderFixes(main: main, mainProfile: before.mainProfile, sub: sub, subProfile: before.subProfile,
-                                                   mainHasBFrames: beforeFacts?.main?.hasBFrames == true)
+                                                   mainHasBFrames: beforeFacts?.main?.hasBFrames == true,
+                                                   mainMeasuredCodec: beforeFacts?.main?.codec, subMeasuredCodec: beforeFacts?.sub?.codec)
 
             // Each stream is changed through the first method that works (the camera's remembered one first) and read back.
             if !planned.isEmpty {
@@ -1191,8 +1242,11 @@ public final class BridgeEngine {
     /// The HomeKit optimizer's encoder changes for a camera's two streams (`optimizeForHomeKit`, and the streams step of "Set up for Camera
     /// Bridge"): the main stream H.264 at 15 to 25 fps, a keyframe every 2 seconds, 2 to 6 Mbit/s (8 for 4K: `HomeKitReadinessAdvisor.maximumMainBitrateKbps`), no B-frames; the sub stream H.264 at the
     /// same rate and keyframe interval, 360 to 720 lines high. Empty when both are right already. Only H.264/H.265 streams are planned.
+    /// `mainMeasuredCodec` / `subMeasuredCodec` are the codecs the bridge really receives (`MeasuredStreamFacts.codec`, nil when not
+    /// measured): a camera whose settings say H.264 while it sends H.265 (a Jennov's ONVIF did) is planned as a codec change too.
     static func plannedEncoderFixes(main: CameraVideoEncoderSettings?, mainProfile: CameraVideoProfile?, sub: CameraVideoEncoderSettings?,
-                                    subProfile: CameraVideoProfile?, mainHasBFrames: Bool) -> [PlannedEncoderFix] {
+                                    subProfile: CameraVideoProfile?, mainHasBFrames: Bool, mainMeasuredCodec: String? = nil,
+                                    subMeasuredCodec: String? = nil) -> [PlannedEncoderFix] {
         var planned: [PlannedEncoderFix] = []
         // Only streams: a JPEG/MJPEG encoder (a camera's snapshot profile) is never planned or written as one.
         let main = main.flatMap { CameraSettingsService.isStreamCodec($0.encoding) ? $0 : nil }
@@ -1206,7 +1260,7 @@ public final class BridgeEngine {
             let maxBitrate = HomeKitReadinessAdvisor.maximumMainBitrateKbps(width: main.resolution?.width, height: main.resolution?.height)
             let targetBitrate = main.bitrate.map { min(maxBitrate, max(2000, $0)) } ?? 4096
             let h264Offered = options.isEmpty || options.contains { Self.isH264($0.encoding) }
-            let needsCodec = !Self.isH264(main.encoding) && h264Offered
+            let needsCodec = (!Self.isH264(main.encoding) || mainMeasuredCodec.map { !Self.isH264($0) } == true) && h264Offered
             let needsGOP = main.iFrameInterval != targetGOP
             let baseline = current?.h264ProfilesSupported.first { $0.lowercased().hasPrefix("base") }
             let needsBFrames = mainHasBFrames && Self.isH264(main.encoding) && baseline != nil
@@ -1223,8 +1277,10 @@ public final class BridgeEngine {
                 if needsBFrames { fixed.h264Profile = baseline; fixes.append("bFrames") }
                 if needsFPS { fixed.frameRate = targetFPS; fixes.append("frameRate") }
                 if needsBitrate { fixed.bitrate = targetBitrate; fixes.append("bitrate") }
+                // A camera that already reports H.264 while it sends something else gets the codec written anyway.
                 planned.append(PlannedEncoderFix(isSub: false, before: main, options: options, fixes: fixes,
-                                                 edit: CameraEncoderEdit(isSub: false, desired: fixed, options: options)))
+                                                 edit: CameraEncoderEdit(isSub: false, desired: fixed, options: options,
+                                                                         rewriteCodec: needsCodec && Self.isH264(main.encoding))))
             }
         }
         if let sub {
@@ -1235,7 +1291,7 @@ public final class BridgeEngine {
             let height = sub.resolution?.height ?? 0
             let sizeOK = (360...720).contains(height)
             let h264Offered = options.isEmpty || options.contains { Self.isH264($0.encoding) }
-            let needsCodec = !Self.isH264(sub.encoding) && h264Offered
+            let needsCodec = (!Self.isH264(sub.encoding) || subMeasuredCodec.map { !Self.isH264($0) } == true) && h264Offered
             let needsGOP = sub.iFrameInterval != targetGOP
             let better = subProfile?.currentEncodingOptions?.resolutions.min { abs($0.height - 480) < abs($1.height - 480) }
             let needsSize = !sizeOK && better != nil
@@ -1246,7 +1302,8 @@ public final class BridgeEngine {
                 fixed.frameRate = targetFPS
                 if needsSize, let better { fixed.resolution = better }
                 planned.append(PlannedEncoderFix(isSub: true, before: sub, options: options, fixes: ["subStream"],
-                                                 edit: CameraEncoderEdit(isSub: true, desired: fixed, options: options)))
+                                                 edit: CameraEncoderEdit(isSub: true, desired: fixed, options: options,
+                                                                         rewriteCodec: needsCodec && Self.isH264(sub.encoding))))
             }
         }
         return planned
@@ -1512,6 +1569,8 @@ public final class BridgeEngine {
             registry.apply(output)
             changes.notify()
         }
+        let nvr = nvr
+        await router.setEdgeHandler { edges in nvr.recordEvents(edges) }   // the event log beside the recordings
         startStatusLoop()
         await startSensorsBridge()
         await startWebhookReporting(storedSettings)
@@ -1519,6 +1578,8 @@ public final class BridgeEngine {
         await startRuntimes(configurations.filter(\.isEnabled))
         startNetworkMonitoring()
         startHeartbeat()
+        startDailySecurityChecks()
+        startInternetGuard()
         state = .running
         statusInputsChanged()
         log.notice("Bridge running with \(configurations.count) camera\(configurations.count == 1 ? "" : "s")")
@@ -1531,6 +1592,8 @@ public final class BridgeEngine {
         heartbeatTask?.cancel()
         heartbeatTask = nil
         heartbeatStrikes.removeAll()
+        stopSecurityChecks()
+        stopInternetGuardPoll()
         pendingReconnect?.task.cancel()   // monitoring stopped (pause, stop); one that began finds the bridge inactive
         pendingReconnect = nil
         cancelAccessoryRetries()
@@ -1580,6 +1643,7 @@ public final class BridgeEngine {
             runtimes[camera.id] = runtime
             await nvr.attach(camera, hub: runtime.hub)   // the recorder subscribes to the main stream's hub; samples arrive once the ingest runs
             started.append((camera, runtime, reservedPorts(excluding: camera.id)))
+            scheduleSecurityCheck(camera.id, after: tuning.securityCheckDelay, skipIfFresh: true)
         }
         if !started.isEmpty { statusInputsChanged() }
         let results = await withTaskGroup(of: (UUID, Result<UInt16, any Error>).self) { group in
@@ -2141,6 +2205,7 @@ public final class BridgeEngine {
         for camera in configurations {
             var status = CameraStatus(id: camera.id, name: camera.name, kind: camera.kind, vendor: camera.vendor)
             status.nvr = nvr.status(for: camera, folderChosen: storedSettings.nvrFolder != nil)
+            status.security = securityChecks.records[camera.id]?.security
             if let sensor = await router.state(for: camera.id) { sensor.apply(to: &status) }
             if let runtime = runtimes[camera.id] {
                 let runtimeStatus = await runtime.status()
@@ -2155,6 +2220,8 @@ public final class BridgeEngine {
                 status.appViewers = runtimeStatus.appViewers
                 status.panTilt = runtimeStatus.panTilt
                 status.zoom = runtimeStatus.zoom
+                status.nightVision = runtimeStatus.nightVision
+                status.battery = runtimeStatus.battery
                 status.subStreamProblem = runtimeStatus.subStreamProblem
                 status.liveSessions = runtimeStatus.liveSessions
                 status.recordingSession = runtimeStatus.recordingSession
@@ -2341,10 +2408,12 @@ public final class BridgeEngine {
         if !existed || recovered != nil { await persist() }
     }
 
-    /// Writes `configuration` to `config.json` off the main actor.
+    /// Writes `configuration` to `config.json` off the main actor. The internet guard's list follows what was saved (a Watch done or
+    /// restored, a camera removed or moved: `syncInternetGuard`).
     private func save(_ configuration: BridgeConfiguration) async throws {
         let store = store
         try await Self.offMain { try store.save(configuration) }
+        syncInternetGuard(configuration.cameras)
     }
 
     func persist() async {

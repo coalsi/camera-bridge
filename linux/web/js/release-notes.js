@@ -1,11 +1,35 @@
-// What changed in each version of Camera Bridge OS, newest first. The About page (screens/about.js) shows them, and after an update the
-// page says once that there is something new. The file ships inside the system, so a bridge always has the notes of the version it runs.
+// What changed in Camera Bridge OS, newest first. The About page (screens/about.js) shows it, and after an update the page says once what is
+// new (js/whats-new.js). The file ships inside the system, so a bridge always has the notes of the version it runs.
 //
-// Releasing: add an entry at the top whose `version` is the os-v tag without "os-v" (os-v0.1.102 -> '0.1.102'), with the date and a few plain
-// lines about what an owner notices. Write for the person using the bridge, not for developers. The release workflow puts the same lines in
-// the GitHub release. Versions before 1.0 are betas.
+// Until 1.0 there is one product, "Camera Bridge OS beta", updated often but at most one beta a day. Each beta still has its own build
+// number (a box needs it to see an update, and it is in the signatures and in bug reports), so each build still gets its own entry here.
+// The page shows the beta as one list grouped by day (the date as the heading, each entry's title in bold, its build number small beside
+// it), and after an update the notice names every entry since the build the person last saw.
+//
+// Releasing: add an entry at the top whose `version` is the build number, the os-v tag without "os-v" (os-v0.1.109 -> '0.1.109'), with
+// the date, a title and a few plain lines about what an owner notices. Write for the person using the bridge, not for developers. The
+// release workflow puts the same lines in the GitHub release. From 1.0 (a version that does not start with "0.") the page shows each
+// version on its own again, by number, with no change here; the beta's days follow them.
+//
+// The release workflow imports this file on its own (notesFor), so it imports nothing.
 
 export const RELEASE_NOTES = [
+  {
+    version: '0.1.109',
+    date: '2026-10-17',
+    title: 'Security badges, the Internet guard, and a better Monitor',
+    items: [
+      'Every camera gets a security badge on the Cameras page, its own page and the Monitor: gold (local only), green (good), yellow (needs work) or red (outside access possible), with what Camera Bridge found and how to fix it.',
+      'Internet guard: Set up for Camera Bridge can now watch a camera’s internet. Camera Bridge OS answers the camera’s internet lookups itself, blocks every one, and shows what the camera tried to reach. A camera watched for a full day with nothing on earns gold.',
+      'Cameras that need their maker’s cloud (Wyze, eufy, Ring, Nest, Tuya, Tapo, Blink, Arlo, SimpliSafe) are marked red, and the router help shows how to keep a camera off the internet.',
+      'Recorded video plays through the gaps in a camera’s recording instead of freezing, and the Monitor no longer loses contact while scrubbing.',
+      'The Monitor fills the whole window with no scrolling, has a Mosaic layout that keeps each camera’s shape, a Fill option with no black bars, and 4 × 3 and 4 × 4 grids that keep their shape. Full quality is the default.',
+      'Night vision: switch between Auto, Night (IR on) and Day (IR off), and turn the IR lights on or off, from the camera’s page, the Monitor and Apple Home. Jennov and similar cameras use their own settings for it.',
+      'Battery cameras show their charge and whether they are charging from solar or a cable. Camera events are kept with the recordings, so the Monitor’s events list covers the whole timeline.',
+      'Set up for Camera Bridge checks the video the camera really sends (a camera that says H.264 but sends H.265 is fixed), turns off more cameras’ clouds, and can require a password for video on cameras that play it without one.',
+      'The OS beta is one product now: About shows “Camera Bridge OS beta” with the build, and what changed by day.',
+    ],
+  },
   {
     version: '0.1.108',
     date: '2026-10-16',
@@ -116,4 +140,35 @@ export function compareVersions(a, b) {
 /** The notes of `version` itself, if it has any. */
 export function notesFor(version) {
   return RELEASE_NOTES.find((entry) => compareVersions(entry.version, version) === 0) ?? null;
+}
+
+/** True for a beta: a version before 1.0 ("0.1.108"). "1.0.0" and later are numbered releases. */
+export function isBeta(version) {
+  const major = String(version ?? '').split('.')[0];
+  return /^\d+$/.test(major) && Number(major) === 0;
+}
+
+const newestFirst = (a, b) => compareVersions(b.version, a.version);
+
+/** `notes` by the day they came out, newest day first: [{ date, entries }], each day's entries newest first. */
+export function notesByDay(notes = RELEASE_NOTES) {
+  const days = new Map();
+  for (const entry of notes) {
+    if (!days.has(entry.date)) days.set(entry.date, []);
+    days.get(entry.date).push(entry);
+  }
+  return [...days].sort(([a], [b]) => (a < b ? 1 : a > b ? -1 : 0)).map(([date, entries]) => ({ date, entries: entries.sort(newestFirst) }));
+}
+
+/**
+ * What is new to someone who last saw `seen` and now runs `version`: the entries after `seen` up to `version`, newest first. When `seen`
+ * is not a version, or is older than every entry, only the newest one (a notice is not the whole history). Empty when nothing is new:
+ * `seen` is `version` or later (after a rollback), or no entry is as old as `version`.
+ */
+export function notesSince(seen, version, notes = RELEASE_NOTES) {
+  const upTo = notes.filter((entry) => compareVersions(entry.version, version) <= 0).sort(newestFirst);
+  if (!/^\d+(\.\d+)*$/.test(String(seen ?? '').trim())) return upTo.slice(0, 1);
+  const newer = upTo.filter((entry) => compareVersions(entry.version, seen) > 0);
+  const olderThanAll = notes.every((entry) => compareVersions(entry.version, seen) > 0);
+  return olderThanAll ? upTo.slice(0, 1) : newer;
 }

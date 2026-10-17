@@ -10,6 +10,7 @@ extension ArchiveStore {
             await retentionWake.wait(timeout: tuning.retentionInterval)
             guard !Task.isCancelled, state.withLock({ $0.isCurrent(run) }) else { return }
             await runRetention(run)
+            await pruneEvents(run)
             await repairQuiet(run)
             handles.sweep(grace: tuning.deletedHandleGrace)
             state.withLock { $0.retentionPasses += 1 }
@@ -19,7 +20,7 @@ extension ArchiveStore {
     /// One pass of the two retention rules (`RetentionPlanner`) over the closed files of every camera directory that holds a `camera.json`.
     /// Does nothing without a total size for the drive (no measurement yet) or while the folder is missing.
     func runRetention(_ run: ArchiveRun) async {
-        let plan = state.withLock { state -> (folder: URL, deletions: [RetentionCandidate])? in
+        let plan = state.withLock { state -> (folder: URL, deletions: [RetentionCandidate], ageCutoffMs: Int64)? in
             guard state.isCurrent(run), state.isReady, let folder = state.folder, state.pause != .noFolder, state.pause != .folderMissing,
                   !state.stalled, let space = state.space, space.total > 0 else { return nil }
             let limits = ArchiveStorageStatus(totalBytes: space.total, floorBytes: state.floorBytes)
@@ -29,13 +30,20 @@ extension ArchiveStore {
             let input = RetentionPlanner.Input(closed: closed, openBytes: state.catalog.openFiles.reduce(0) { $0 + $1.bytes },
                                                newestStartMs: state.catalog.newestStartMs, nowMs: ArchiveTime.ms(tuning.now()),
                                                keepDays: state.keepDays, maximumBytes: limits.effectiveMaximumBytes(maxSizeGB: state.maxSizeGB))
-            return (folder, RetentionPlanner.plan(input))
+            return (folder, RetentionPlanner.plan(input), input.nowMs - Int64(input.keepDays) * 86_400_000)
         }
         guard let plan, !plan.deletions.isEmpty else { return }
         var deleted = 0
         for candidate in plan.deletions {
             guard state.withLock({ $0.isCurrent(run) }) else { break }
-            if await delete(candidate, folder: plan.folder, run: run) { deleted += 1 }
+            guard await delete(candidate, folder: plan.folder, run: run) else { continue }
+            deleted += 1
+            // A file the size rule took (it had not aged out): the events of the days before it go with it.
+            if candidate.endMs >= plan.ageCutoffMs {
+                state.withLock { state in
+                    if state.isCurrent(run) { state.eventSizeCutoffMs = max(state.eventSizeCutoffMs ?? candidate.startMs, candidate.startMs) }
+                }
+            }
         }
         if deleted > 0 {
             log.info("Deleted \(deleted) old recordings")

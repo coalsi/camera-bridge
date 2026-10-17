@@ -1,0 +1,19 @@
+[Unit]
+Description=Apply the internet guard (firewall sets, DNS for the watched cameras) and publish its status
+Documentation=https://github.com/coalsi/camera-bridge
+# Fills the firewall's sets guarded4/guarded6 from /srv/system/guard/cameras.json, starts camera-bridge-dns.service and the collector's timer
+# while a camera is watched, and writes /run/camera-bridge/status/guard.json. After a factory reset by marker file the list is gone first.
+# Loading the firewall again empties its sets, so a restart or reload of nftables.service applies the guard again.
+After=nftables.service srv.mount camera-bridge-factory-reset.service
+Wants=nftables.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/cb-guard apply
+ExecReload=/usr/sbin/cb-guard apply
+
+[Install]
+WantedBy=multi-user.target

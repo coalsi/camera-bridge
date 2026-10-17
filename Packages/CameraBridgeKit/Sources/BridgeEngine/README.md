@@ -582,6 +582,22 @@ recording, real playable video from one synthetic clip), `nvrStorage` numbers an
 
 Cutting a stretch of one camera's recordings into a normal MP4 (the export-clip design, `docs/superpowers/specs/2026-10-12-export-clip-design.md`; the planner, the writer and `ClipExporter` come with the tasks that follow and are listed here when they land). The read seam gains one part, `ArchiveReadPart.header`: the first `headerLength` bytes of a fragment, that is `prft` + `moof` + the 8-byte `mdat` header, so that the sample tables of a clip are planned from headers alone, before any video is read. `ArchiveStore` serves it on the same read queue, with the same checks and cache as the other parts; `PreviewArchive` refuses it. Public types: `ClipLimits` (`standard`: 2 hours per camera, 20 GiB in all, a gap up to 10 s is held), `ClipRequest`, `ClipGap`, `ClipPart`, `ClipPlan` (the exact size of every part before a byte is written; a fake in another target builds one with the public initializer), `ClipError`, `ClipSink` (where the bytes go), `ClipExporting` (what the Mac app and the box's routes call) and `ClipFileName` (`part`, `folder`, `archive`, `unique`: the names of a clip's file, of the folder a multi-camera export makes on the Mac and of the ZIP the browser gets). Package-only: `ClipSample`, `ClipCopy`, `ClipPartTables` and `ClipPlan.tables`, which is what the planner hands the writer. `ClipPlanner` (package; `ClipPlanner(archive:limits:sizing:)`, `plan(_:)`) turns a `ClipRequest` into a `ClipPlan` from fragment headers alone: the key picture at or before the start, parts where the camera's init bytes change, gaps held, skipped or refused by the limits, and the exact size of every part from the writer's sizing function. `ClipLayout` and `ClipSizing` (package; the boxes are made with a small `ClipBoxBuilder`) build the `ftyp`, the complete `moov` and the `mdat` header of a progressive MP4 from a part's tables, so the file's exact size is known before a picture is read (`co64` and a 64-bit `mdat` from 4 GiB); `ClipWriter` (package) writes them and then copies each fragment's pictures untouched, cancellable between fragments. `ClipExporter` (public) is the facade the Mac app and the box's routes call: `plan(_:)` and `export(_:part:to:progress:)`, with parts counted from 1.
 
+## Additions beyond the contract: camera events beside the recordings (2026-10-16, docs/CONTRACT_CHANGES.md)
+
+`ArchiveReading.events(cameras:range:limit:)` → `ArchiveEventPage` (`events`, `isTruncated`) of `ArchiveEvent` (`id`, `camera`, `kind`, `start`,
+`end`, `hadVideo`, `recorded`), newest first; a page never splits a millisecond (the router stamps every edge of one publication alike, so
+the events of the oldest start are all in a page or all in the next, and a moment with more than `limit` events is one page). The
+requirement has an extension default (no events), so `PreviewArchive` and other conformers compile unchanged. Only "no place for recordings
+is chosen" answers no events without looking: while the catalog loads or the folder is missing it throws `ArchiveUnavailable` (`loading`,
+`folderMissing`), and `ArchiveError.timedOut` while reads are stalled. The store answers it from `ArchiveEventLog` (internal, `NVR/ArchiveEventLog.swift`): the router's rising and falling edges
+(`EventRouter.setEdgeHandler`, internal; the names `recentEvents` uses) go through `NVRCoordinator.recordEvents` to one append-only JSON-lines
+file per camera per UTC day, `<recordings>/.events/<CAMERA-UUID>/<yyyy-MM-dd>.jsonl`, written on a serial queue of its own (lines that cannot be
+written wait, at most 1000, the oldest dropped first but never the one being written; a new folder gives up the old one's; `.events` and the
+camera folders are never written, read or pruned through a link), kept whether or not the camera records, and read on the store's read queue
+with its deadline (a torn line is skipped). `recorded`: the catalog holds video at the event's start (from 3 s before a file), or the recorder
+was writing it less than 2 minutes ago. The janitor deletes whole day files after each pass: those that ended before `nvrKeepDays`, and those
+before the newest file the size rule deleted. Nothing is kept while no folder is chosen.
+
 ## The NVR (Sources/BridgeEngine/NVR)
 
 Recording the cameras' main streams and reading the recordings back (docs/CONTRACT_CHANGES.md 2026-10-10; the new public API is listed under "Additions beyond the contract: the NVR"). One `MediaHub` subscription per camera feeds one recorder; the store owns the catalog, the reads and the retention; the engine's own surface is `setNVR`, `archive` and `nvrStorage`.
@@ -606,6 +622,7 @@ MediaHub (per camera) ─► recorder ─► <recordings>/<camera folder>/<yyyy-
 | `NVRCoordinator.swift`, `ArchiveWriteTarget.swift` | The engine's one handle on the NVR; the seam between the recorders and the store |
 | `RecorderHost.swift`, `CameraArchiveRecorder.swift` and the files beside them | The recorders: file writing, folder naming, continuity rules |
 | `ArchiveStore.swift`, `FolderCheck.swift` and the files beside them | The store: catalog, index scanner and repair, retention, volume monitor, read queue, activity |
+| `ArchiveEventLog.swift` | The cameras' events beside the recordings: the day files, reading them with what the catalog holds, their retention |
 | `ArchiveMedia.swift` | The browser's video-only view of a file (`package`) |
 
 ## Additions beyond the contract: the bridge's time zone (2026-10-14, docs/CONTRACT_CHANGES.md)
@@ -626,13 +643,29 @@ On-demand cameras (2026-10-15): a camera whose driver says `CameraDriver.streams
 only while something wants it: a HomeKit or in-app live view (`lease`), an HKSV recording (the recording handler holds the main stream for its
 length), or a motion event (held while the event lasts; the start reaches the router once the picture flows, or after `onDemandWakeWait`, so the
 recording Home asks for starts with video). It is woken once at the start for its picture size, and sleeps `onDemandIdleStop` after its last user.
-Soft motion and the motion shadow test never run for it, and asleep is not offline (the last stream state stays). The engine hands
+Soft motion and the motion shadow test never run for it, and asleep is not offline: when the idle stop puts it to sleep after a wake that delivered
+video it reads as online, even if that wake ended in a stall (2026-10-16); a wake that never delivered leaves it offline. The engine hands
 `EufyBridge.shared` its helper launcher and the `plugins/eufy` folder of the data directory at every start.
 
 Pan and tilt (2026-10-16): `BridgeEngine.panTilt(cameraID:pan:tilt:)` moves a camera whose driver has `CameraDriver.makePanTilt()`; a move stops
 by itself 1.5 s after the last ask. `CameraStatus.panTilt` says whether a camera pans and tilts. Motion detection asks for
 `MediaCodecs.makeMotionDecoder(format:)` (default `makeVideoDecoder`), which may hand back smaller pictures decoded on the GPU.
 `CameraStatus.zoom` and `BridgeEngine.panTilt(cameraID:pan:tilt:zoom:)`: the runtime asks the control what it can do when the camera starts.
+
+Battery (2026-10-16): `CameraStatus.battery` (`BatteryStatus`, nil without one). The runtime asks `CameraDriver.batteryStatus()` at the start and
+every `EngineTuning.batteryPollInterval` (5 min) once it answered; one that has not answered yet is asked again after 1/20, 1/10, 1/5 and 2/5 of
+the interval, then no more. The last reading is kept when an answer is missing, and goes to the accessory's Battery service
+(`CameraController.setBattery`, ChargingState charging or not charging).
+
+Night vision in Apple Home (2026-10-16): `CameraStatus.nightVision.lightOn` is the lamp as the camera says (`NightVisionControl.currentLight()`,
+asked with the mode when the camera starts and after the page switches it), else as last set from the bridge. A camera whose night vision can go
+to both auto and off (`CameraRuntime.offersHomeKitNightVision`) gets Night Vision on its accessory's Camera Operating Mode
+(`CameraController.setNightVision`, added at run time and kept from then on): it shows the camera (on unless the camera is in its day picture
+with the IR lights off), a Home write turns the camera to auto (on; a camera already in night vision stays so) or off
+(`CameraController.nightVisionWrites`), the page's changes reach Home, and a change the camera refuses puts Home back to what the camera does
+(to what Home showed before when the camera cannot say; so does a write the runtime cannot follow, before the camera's night vision is known).
+What Home showed before starts as the accessory's saved Night Vision (`CameraController.operatingState`, read when the accessory comes up), so
+a write of the value Home already shows leaves it so.
 
 ## Additions beyond the contract: Set up for Camera Bridge (2026-10-16, docs/CONTRACT_CHANGES.md)
 
@@ -642,7 +675,116 @@ and `BridgeEngine.cameraSetupTitle(_:)` (the step names, one table). `CameraConf
 `CameraConfiguration.setupState` (`CameraSetupState`, with `currentVersion`: the setup's contents are versioned in code), engine-owned like
 `cleanPictureBackup` and decoded leniently. The backup is saved before the first change; an earlier run's values, Optimize's undo and Clean
 picture's backup are folded in (the oldest value wins), so there is one way back, and the Clean picture switch also restores from it. Steps run
-in order (time zone, time from the bridge, clean picture, streams, UPnP, cloud); a refusal stops the run, the steps before it stay done. The
-streams step is the HomeKit optimizer's plan (`plannedEncoderFixes`, shared with `optimizeForHomeKit`); a changed stream restarts the camera's
-ingest. `BridgeEnvironment.servesTime` (the daemon sets it where chrony serves the local network) offers "Time from the bridge", at the
-bridge's address on the camera's subnet.
+in order (time zone, time from the bridge, watch its internet, clean picture, streams, video password, extra services, UPnP, cloud); a refusal stops the run, the steps before it stay done. The
+streams step is the HomeKit optimizer's plan (`plannedEncoderFixes`, shared with `optimizeForHomeKit`), made from the codec the bridge really
+receives (`CameraRuntime.readinessFacts`, counted only when the measured picture size is the stream's) as well as the camera's settings: a
+camera whose settings say H.264 while it sends H.265 is planned as a codec change, written although the camera already names it
+(`CameraEncoderEdit.rewriteCodec`), and the preview says what it sends. A changed stream restarts the camera's ingest; when the setup changed
+a stream's codec it then watches the new ingest (`EngineTuning.cameraSetupMeasureWait`, 15 s, ending once the stream arrives as H.264) and
+marks the streams step refused ("The camera says its main stream is H.264 but still sends H.265.") when it still arrives as something else
+(`streamsCheckAfterSetup`, `streamsStillWrong`; nothing measured in time is not a failure, and the recording re-enable hint follows the
+result). `BridgeEnvironment.servesTime` (the daemon sets it where chrony serves the local network) offers "Time from the bridge", at the
+bridge's address on the camera's subnet. The cloud step is "Cloud off" (Hikvision's Hik-Connect, and the maker's cloud of an ONVIF camera that
+speaks the IP camera web API, whose clean picture also goes through that API: docs/integrations/ip-camera-web-api.md); its restore passes the
+saved `CameraFeatureBackup` (`setFeature(…saved:)`), which for those cameras holds the cloud's kind. Its sign-in value (the Authcode) is never
+in the configuration (which reaches the page, its events and the Mac's backup files): the engine keeps it in the platform `SecretStore`
+(`CredentialStore.setupCloudAuthcode(for:)`, account `camera.<UUID>.setup-cloud`), puts it back into the backup to restore, and deletes it once
+a restore gave it back or the camera is removed (`forgetCamera` tries every secret even when one fails). A store that cannot be read fails the
+cloud step and keeps the value for the next try.
+
+## Additions beyond the contract: the internet guard (2026-10-17, docs/CONTRACT_CHANGES.md)
+
+Camera Bridge OS's internet guard, Watch (docs/superpowers/specs/2026-10-17-internet-guard-design.md): the box answers a watched camera's DNS
+with "does not exist" and keeps what it asked for. `BridgeEnvironment.hasInternetGuard` (the daemon sets it on Camera Bridge OS, where the
+guard is installed; never on the Mac), `BridgeEnvironment.setGuardedCameras` (replaces the whole list of `GuardedCamera`, an `address` on the
+local network and a `GuardLevel`, only `watch` so far; an empty list turns the guard off; throws a sentence) and
+`BridgeEnvironment.guardReport` (a `GuardReport`, nil while the box has none): `available`, `running` (its DNS answers now), `timeZone` and
+`todayStart` (today is counted in the bridge's time zone, to the hour), `updatedAt`, and per watched camera a `GuardReport.Camera` (`address`,
+`level`, `since`: watched without a break since then, nil when the box does not say, `today`, `last24h`, `names`: `GuardReport.Lookup` `name`,
+`count`, `first`, `last`, the last 7 days' names, most asked first, at most 50; `GuardReport.camera(at:)`). `GuardReport.unavailable` is the report of a system without the guard. The report is read leniently (the root
+side writes it): a missing or odd field gets its default, a level this build does not know is nil, a camera without an address is left out.
+
+## Additions beyond the contract: camera security levels (2026-10-17, docs/CONTRACT_CHANGES.md)
+
+Each camera's security level (owner decision, 2026-10-17), from what Camera Bridge can read. `CameraSecurity` (`level`, `title`, `summary`,
+`findings`, `checkedAt`) and its pure `CameraSecurity.assess(_:cloudModel:internetGuard:checkedAt:)`; `CameraSecurityLevel` (`red` "Outside
+access possible", `yellow` "Needs work", `green` "Good", `gold` "Local only"; `Comparable`, red lowest; `title`); `CameraSecurityFinding`
+(`feature`, `state`, `level`: the best level the finding leaves, `sentence`, `canChange`, `linked`, `service`); `CameraSecurityFeature`
+(`RemoteAccessFeature`'s cases and `internetGuard`); `GuardEvidence` (`watched`, `outsideLookups24h`, `lastLookupNames`, `available`: what the
+Internet guard saw, nil without a guard, so green is the best there; `listed`: its Watch is done here, `asksBridge`: the camera's DNS read at
+its last check is the bridge's address now, nil when not read, `watchedFor`: how long the box has watched it without a break, nil when it
+does not say, `waitsForRestart`: the step was taken "after the camera restarts" (ISAPI `statusCode` 7: "The camera takes Camera Bridge as its
+DNS server when it restarts."); the init's `listed` defaults to `watched` and `asksBridge` to true for a watched camera; `GuardEvidence.quietDay`
+24 h);
+`CloudDependentModels.brand(integration:manufacturer:model:)` (Wyze and eufy through their plugins; Ring, Google Nest, TP-Link Tapo (also a
+maker "tp-link" with a model that is not VIGI, as Tapo's ONVIF names itself), Blink, Arlo, SimpliSafe by integration or maker: red, and never
+asked). Red: the cloud on and linked or of unknown link, UPnP, DDNS or RTMP on, a cloud-dependent model. Yellow: the cloud on but not linked
+or unknown (a camera without a reader), video (or another service, named) without a password, watched and still looking up internet names.
+Green: none of that, but an unknown, another service on, no guard, not watched, a camera that no longer asks the bridge or whose DNS could
+not be read, or watched for less than a day ("has watched it for 2 hours and seen no internet lookups yet"). Gold: all confirmed off or
+absent, the video locked, watched for a full day without a lookup. The guard's finding says "doesn't watch this camera" for a camera whose
+Watch is not done whatever the box's state (a box watching no camera has its DNS off), and "isn't running" only for a watched one.
+
+`BridgeEngine.checkCameraSecurity(cameraID:)` checks now (a check under way is joined; `CameraSecurityCheckTooSoon` with
+`retryAfterSeconds` within a minute of the camera's last check; not the demo camera; `CameraOfflineError` for a camera known unreachable or
+that stopped answering during the check, whose last result then stays) and `BridgeEngine.guardEvidenceChanged()` works every level out again
+from the last readings with the guard's evidence, without asking the cameras and keeping the readings' `checkedAt` (it runs at every poll of
+the box's report; the status is refreshed only when something changed). `CameraStatus.security` holds the last result (nil until the first check; in memory only). A check reads
+`CameraSettingsService.readRemoteAccess()` with the camera's credentials and sends one RTSP `DESCRIBE` without credentials to the configured
+sub stream (else the main, the vendor's usual one, or the address the running ingest got: `CameraRuntime.rtspAddresses`), never for a camera
+behind a helper or a console. A watched camera's DNS servers are read too (`CameraSettingsService.readDNS()`, kept with the readings as
+`CameraDNSCheck`), so the guard's gold rests on the camera asking the bridge's address now. It runs `EngineTuning.securityCheckDelay` (60 s)
+after a camera's runtime starts (unless checked within `securityCheckFreshness`, 10 min), every `securityCheckInterval` (24 h), and right after
+"Set up for Camera Bridge" ran or was restored; a camera unreachable at its time, or that stopped answering during the check
+(`CameraSettingsService.remoteAccessUnanswered`), is tried again after `securityCheckRetry` (10 min), doubling up to `securityCheckRetryCap`
+(2 h), and keeps its last readings meanwhile. It never holds the engine's operations and never writes. `EngineTuning.testing` turns these off
+(`securityChecks`); `securityReading` (nil: the camera did not answer), `securityDNS`, `rtspAccessProbe` and `guardEvidence` replace the
+readings in tests, and `guardEvidence(for:dns:)` is where the Internet guard's report goes in.
+
+Set up for Camera Bridge's new steps (the IPCamera Web family: docs/integrations/ipcamera-web.md): "Video password" and "Extra services off"
+(`cameraSetupTitle`), after UPnP off and Cloud off (a refused step stops the steps after it, and these are not yet tried on many cameras),
+their values in `CameraSetupBackup.videoPassword` / `extraServices`; other cameras show them "not offered for this camera"
+(`CameraSetupStepStatus.notOffered`).
+
+## Additions beyond the contract: the internet guard in the engine, Watch (2026-10-17, docs/CONTRACT_CHANGES.md)
+
+Stage 1 of docs/superpowers/specs/2026-10-17-internet-guard-design.md (owner's answers, 2026-10-17: the name "Internet guard", the levels
+"Watch" and "Seal", Watch on by default in Set up for Camera Bridge, Seal always its own choice, every lookup blocked at once). The words are
+one table, `InternetGuardText` (`name`, `watch`, `seal`, `watchStep` "Watch its internet", `sealStep`, `notOnThisBridge`, `notOnItsNetwork`;
+`GuardLevel.title`). Seal is not built: nothing sets it.
+
+- **The step.** `CameraSetupStepID.internetWatch` ("Watch its internet", last, after the cloud and the IPCamera Web family's steps, so a camera
+  that refuses it still gets every other step and Restore puts its DNS back first; part of every run like "Cloud off") points the camera's DNS
+  at the bridge's address on the camera's own network (`CameraSettingsService.readInternetWatch(server:)`,
+  `applyDNS`, `restoreDNS`; the preview row "DNS": "8.8.8.8 and 1.1.1.1" → "the bridge (192.168.77.2)"; the backup `CameraSetupBackup.internetWatch`).
+  It is offered only where the bridge has the guard (`BridgeEnvironment.hasInternetGuard` with `setGuardedCameras`) and has an address on the
+  camera's subnet (`bridgeAddress(onNetworkOf:interfaces:)`, no fallback, unlike the time source); otherwise not offered, "Camera Bridge OS
+  watches cameras’ internet; this bridge does not." or "Camera Bridge can watch only cameras on its own local network." A restore that gives
+  the DNS back marks the step's record `restored`.
+- **Whose Watch is done** (`internetWatchDone`), so the box watches its address: while the setup keeps the camera's DNS servers to give back
+  (`CameraSetupBackup.internetWatch`; a later run whose read of the step failed for a moment does not drop it), or the last record of the step
+  is done or already right; Restore gives the servers back and marks the record restored. Whether the camera really asks the bridge is the
+  security check's to read. A camera being removed whose servers are kept gets them back first (`giveDNSBackOnRemoval`, best effort, logged;
+  `EngineTuning.restoresWatchOnRemoval`, off in `EngineTuning.testing`). A stored `CameraSetupState` with a step or status this build does not
+  know keeps its other records.
+- **The list.** Every camera whose Watch is done, by its local IPv4 address (`guardAddress`: 10/8, 172.16/12, 192.168/16, 169.254/16, as the
+  box checks), level `watch`, once each (`guardedCameraList`). It is sent with `BridgeEnvironment.setGuardedCameras` when the bridge starts
+  and whenever a saved configuration changes it (the step applied or restored, a camera removed or moved: `syncInternetGuard`, called by the
+  engine's save). It never holds the setup: a refusal is logged and sent again after `EngineTuning.guardSyncRetry` (5 s), doubling up to
+  `guardSyncRetryCap` (5 min), until the box takes it or a newer list replaces it. A report that lists other cameras than the list the box
+  took sends the list again (the box's job can end with an older list's result).
+- **The evidence.** While the bridge runs the box's report (`BridgeEnvironment.guardReport`) is read every `guardPollInterval` (1 min,
+  `pollGuardReport`), and every level is worked out again (`guardEvidenceChanged`: the report may have changed, a day of watching passed, or
+  the bridge moved to another address). `GuardEvidence` gains `today` and `names`; a camera is `watched` when its Watch is done here, the box
+  watches its address and the camera's DNS, as its last check read it, is the bridge's address on its network now (`asksBridge`), and the
+  report is evidence (`available`) only while the box has the guard, its DNS answers and the report is younger than `guardReportStaleAfter`
+  (10 min) (`guardEvidence(address:listed:asksBridge:report:fresh:now:)`); `watchedFor` comes from the box's `since`. `lastLookupNames` are the last 24 hours' names, newest first. Names are shown as
+  `GuardNames.shown` has them: a part that looks like a camera's id (12 or more letters and digits, 4 or more digits) becomes "*".
+  `CameraSecurity.internetGuard` (`CameraGuardActivity`: `watched`, `today`, `last24h`, `names`, at most 10, most asked first; nil without a
+  guard) is `status.security.guard` on the web API.
+- **The notice.** `BridgeEngine.internetGuardNotice` (`InternetGuardNotice`: `day`, `lookups`, `cameras`, `cameraID` and `cameraName` of the
+  camera that tried most, `date`, `title`, `sentence` "Internet guard blocked 7 lookups from 2 cameras today."): one a day, from the first
+  blocked lookup of the guard's day; its figures change at most every `guardNoticeRefresh` (1 h); none when nothing was blocked today or the
+  report is no evidence. Only cameras whose Watch is done count.
+- Tests: `EngineTuning.guardCameraAddress` stands a loopback fake camera for one at 192.168.77.x; nothing else of the guard runs unless the
+  test's environment has it.

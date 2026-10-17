@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSnapshotScheduler, whenKnown, keyAction } from '../web/js/screens/nvr-model.js';
+import { MEDIA_REQUESTS, MEDIA_REQUESTS_WHILE_LIVE, SNAPSHOT_GUARD_MS, createSnapshotScheduler, loadPicture, whenKnown, keyAction } from '../web/js/screens/nvr-model.js';
 import { fakeTime, settle } from './nvr-grid-helpers.mjs';
 
 // MARK: snapshots
@@ -120,6 +120,51 @@ test('a load that throws or rejects counts as a failure and the schedule goes on
 
 
 // MARK: waiting and keys
+
+/** Just enough of an <img>: what it was told to load, and a way to finish that load. */
+function fakeImage() {
+  return {
+    src: '', onload: null, onerror: null, removed: 0,
+    removeAttribute(name) { if (name === 'src') { this.src = ''; this.removed += 1; } },
+  };
+}
+
+test('loadPicture resolves true when the picture loaded and false when it failed', async () => {
+  const time = fakeTime(0);
+  const img = fakeImage();
+  const loaded = loadPicture(img, '/api/v1/cameras/a/snapshot?t=1', { setTimer: time.setTimer, clearTimer: time.clearTimer });
+  assert.equal(img.src, '/api/v1/cameras/a/snapshot?t=1');
+  img.onload();
+  assert.equal(await loaded, true);
+  assert.equal(img.onload, null);
+  assert.equal(time.pendingTimers(), 0);
+  const failed = loadPicture(img, '/api/v1/cameras/a/snapshot?t=2', { setTimer: time.setTimer, clearTimer: time.clearTimer });
+  img.onerror();
+  assert.equal(await failed, false);
+  assert.equal(img.removed, 0, 'a picture that failed has nothing left to cancel');
+});
+
+test('a picture that takes too long is given up and its load cancelled, so it no longer holds one of the browser\'s connections', async () => {
+  // Before, the guard only stopped waiting: the <img> went on loading (a camera slow to give a snapshot) while the next picture started.
+  const time = fakeTime(0);
+  const img = fakeImage();
+  const loaded = loadPicture(img, '/api/v1/cameras/eufy/snapshot?t=1', { setTimer: time.setTimer, clearTimer: time.clearTimer });
+  time.advance(SNAPSHOT_GUARD_MS - 1);
+  await settle();
+  assert.equal(img.src, '/api/v1/cameras/eufy/snapshot?t=1');
+  time.advance(1);
+  assert.equal(await loaded, false);
+  assert.equal(img.src, '', 'the load was cancelled');
+  assert.equal(img.removed, 1);
+  img.onload?.();
+  assert.equal(img.onload, null);
+});
+
+test('the page leaves one of the six connections free: three media requests, two while the live video holds one', () => {
+  // Event stream 1 + live video 1 (live only) + JSON 1 + media (pictures counted): 1 + 3 + 1 = 5 while recordings play, 1 + 1 + 2 + 1 = 5 live.
+  assert.equal(1 + MEDIA_REQUESTS + 1, 5);
+  assert.equal(1 + 1 + MEDIA_REQUESTS_WHILE_LIVE + 1, 5);
+});
 
 test('whenKnown resolves at once, on a callback, or on a poll, and rejects at the deadline', async () => {
   const time = fakeTime(0);

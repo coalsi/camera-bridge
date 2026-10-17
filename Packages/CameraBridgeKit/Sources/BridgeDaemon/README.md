@@ -9,6 +9,10 @@ libsystemd), a journald-friendly log sink (`StdoutLogSink`), the operating syste
 
 ## Additions beyond the contract
 
+The internet guard, Watch (2026-10-17, docs/CONTRACT_CHANGES.md): `RequestFileSystemControl.setGuardedCameras(_:)` writes the `guard-set` request (`{"cameras": [{"address", "level": "watch"}], "timeZone"}`: each address checked and canonical, private IPv4 or unique-local/link-local IPv6, at most 64, the bridge's time zone for "today") and waits for the job, which counts as done only when `status/guard.json` then lists exactly those
+cameras (else "The system couldn’t change the internet guard. It still watches another list.", and the engine sends it again);
+`RequestFileSystemControl.guardReport()` reads `status/guard.json` (up to 1 MiB, `GuardReport.unavailable` without one). On Camera Bridge OS (the image has `camera-bridge-dns.service`, the request folders exist, not `--dev`) the daemon gives the engine `BridgeEnvironment.hasInternetGuard`, `setGuardedCameras` and `guardReport` through them. Internal: `RequestFileSystemControl.guardedAddress(_:)`, `Daemon.offersInternetGuard(development:systemAvailable:unitDirectory:)`, `Daemon.withInternetGuard(_:system:)`.
+
 Time for the cameras (2026-10-16): on Linux the daemon sets `BridgeEnvironment.servesTime` when `/etc/chrony/chrony.conf` serves other machines (an `allow` line and no `port 0`: Camera Bridge OS's does), so "Set up for Camera Bridge" points cameras' clocks at the box. Internal: `Daemon.servesTime(chronyConfiguration:)`.
 
 Installer stick (2026-10-14): `RequestFileSystemControl.HostFacts.runningFromUSB` reads the device mounted at `/` from `/proc/self/mountinfo` and whether its path in /sys passes through USB; it fills `SystemInfo.runningFromUSB`.
@@ -48,5 +52,6 @@ The recorder and the store are in `BridgeEngine/NVR`; the daemon only says where
 `RequestFileSystemControl` writes one JSON file per request into the OS image's request folder and reads the status files the
 image's root helper publishes (the contract is `linux/os/README.md`, the daemon's side is in `docs/linux/ARCHITECTURE.md`, "The
 system helper"). Without the two folders (a Mac, a plain Linux box) the system is a "development" one and refuses everything
-privileged. The tests run it against `FakeRootHelper`, a stand-in for `cb-system process-requests` that uses the same file names,
+privileged. The internet guard's list goes out as `guard-set` and its report comes back as `status/guard.json` (linux/os/README.md,
+"The internet guard"). The tests run it against `FakeRootHelper`, a stand-in for `cb-system process-requests` that uses the same file names,
 checks and status files.

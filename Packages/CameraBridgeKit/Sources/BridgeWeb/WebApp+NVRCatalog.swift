@@ -3,7 +3,7 @@ import BridgeSupport
 import CameraAdapters
 import Foundation
 
-// What is recorded, per camera, and how busy it was (`GET /nvr/cameras`, `GET /nvr/activity`).
+// What is recorded, per camera, how busy it was and what happened (`GET /nvr/cameras`, `GET /nvr/activity`, `GET /nvr/events`).
 
 extension WebApp {
     // MARK: Catalog and activity (R5, R6)
@@ -51,13 +51,7 @@ extension WebApp {
         }
         let request = ctx.request
         // 1. Validate.
-        let ids = (request.queryValue("cameras") ?? "").split(separator: ",", omittingEmptySubsequences: false).map { UUID(uuidString: String($0)) }
-        var cameras: [UUID] = []
-        for id in ids {
-            guard let id else { throw APIError.badRequest("“cameras” lists camera identifiers separated by commas.", field: "cameras") }
-            if !cameras.contains(id) { cameras.append(id) }
-        }
-        guard (1...16).contains(cameras.count) else { throw APIError.badRequest("Ask for 1 to 16 cameras at a time.", field: "cameras") }
+        let cameras = try queryCameras(request)
         let from = try queryTime("from", in: request)
         let binMs = try queryInteger("binMs", in: request, range: 1_000...86_400_000, sentence: "“binMs” is 1000 to 86400000.")
         let bins = try queryInteger("bins", in: request, range: 1...2_000, sentence: "“bins” is 1 to 2000.")
@@ -77,6 +71,70 @@ extension WebApp {
             }
             return .json(Answer(from: start, binMs: binMs, bins: bins, serverTime: Self.milliseconds(Date()), catalogVersion: archive.catalogVersion,
                                 byCamera: byCamera))
+        }
+    }
+
+    /// `cameras`: 1 to 16 camera identifiers separated by commas, the same one again (in either letter case) counted once.
+    private func queryCameras(_ request: HTTPRequest) throws -> [UUID] {
+        let ids = (request.queryValue("cameras") ?? "").split(separator: ",", omittingEmptySubsequences: false).map { UUID(uuidString: String($0)) }
+        var cameras: [UUID] = []
+        for id in ids {
+            guard let id else { throw APIError.badRequest("“cameras” lists camera identifiers separated by commas.", field: "cameras") }
+            if !cameras.contains(id) { cameras.append(id) }
+        }
+        guard (1...16).contains(cameras.count) else { throw APIError.badRequest("Ask for 1 to 16 cameras at a time.", field: "cameras") }
+        return cameras
+    }
+
+    // MARK: Events
+
+    /// The most events one answer carries, and how many when `limit` is not given.
+    static let maximumEventsPerAnswer: Int64 = 1_000
+    static let defaultEventsPerAnswer: Int64 = 200
+
+    private struct EventResource: Encodable {
+        var id: String
+        var cameraID: UUID
+        var kind: String
+        var start: Int64
+        var end: OrNull<Int64>
+        var recorded: Bool
+    }
+
+    /// `GET nvr/events?from=ms&to=ms&cameras=<id,…>&limit=n`: the events of those cameras that began in `from..<to` (at most 31 days), newest
+    /// first, at most `limit` (1 to 1000, 200 when absent); `more` says older ones in the range were left out (ask again with `to` = the oldest
+    /// `start`). A page never splits a millisecond, so that next page loses none: the events of the oldest start are all in this page or all in
+    /// the next, and when more than `limit` began in that one millisecond and nothing newer, the page holds them all. 503 `archive_unavailable`
+    /// (with `Retry-After`) while the recordings load or their folder is missing: never an empty answer then. Names and times only: no
+    /// address, path or credential.
+    func nvrEvents(_ ctx: RequestContext) async throws -> HTTPResponse {
+        struct Answer: Encodable {
+            var from: Int64
+            var to: Int64
+            var serverTime: Int64
+            var more: Bool
+            var events: [EventResource]
+        }
+        let request = ctx.request
+        let cameras = try queryCameras(request)
+        let from = try queryTime("from", in: request)
+        let to = try queryTime("to", in: request)
+        guard to > from else { throw APIError.badRequest("“to” comes after “from”.", field: "to") }
+        guard to - from <= 31 * 86_400_000 else { throw APIError.badRequest("Ask for at most 31 days at a time.", field: "to") }
+        let limit = try queryInteger("limit", in: request, range: 1...Self.maximumEventsPerAnswer, fallback: Self.defaultEventsPerAnswer,
+                                     sentence: "“limit” is 1 to \(Self.maximumEventsPerAnswer).")
+        return try await withArchiveSlot(ctx) { archive in
+            let page: ArchiveEventPage
+            do {
+                page = try await archive.events(cameras: cameras, range: Self.date(milliseconds: from)..<Self.date(milliseconds: to), limit: Int(limit))
+            } catch {
+                throw Self.archiveAPIError(error)
+            }
+            let events = page.events.map { event in
+                EventResource(id: event.id, cameraID: event.camera, kind: event.kind, start: Self.milliseconds(event.start),
+                              end: OrNull(event.end.map(Self.milliseconds)), recorded: event.recorded)
+            }
+            return .json(Answer(from: from, to: to, serverTime: Self.milliseconds(Date()), more: page.isTruncated, events: events))
         }
     }
 

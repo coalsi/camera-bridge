@@ -1,0 +1,8 @@
+[Unit]
+Description=Internet guard: read the DNS questions every minute
+# Started and stopped by cb-guard together with camera-bridge-dns.service (only while a camera is watched).
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s

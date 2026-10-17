@@ -22,6 +22,12 @@ export const FAKE_DEVICE = Object.freeze({
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** The fake camera charges from its solar panel from 10:00 to 15:59 (local time) and runs on its battery otherwise. */
+export function fakeCharge(now = Date.now()) {
+  const hour = new Date(now).getHours();
+  return hour >= 10 && hour < 16 ? { charging: true, chargingSource: "solar" } : { charging: false, chargingSource: null };
+}
+
 function pickH264Encoder(ffmpeg) {
   try {
     const r = spawnSync(ffmpeg, ["-hide_banner", "-encoders"], { encoding: "utf8", timeout: 10_000 });
@@ -63,8 +69,10 @@ export class AnnexBSplitter {
 }
 
 export class FakeBackend extends EventEmitter {
-  constructor({ state, ffmpeg, wakeMs = 2000, motionEveryMs = 60_000 }) {
+  /** @param {{clock?: () => number}} opts  `clock` (ms since the epoch) decides when the fake camera charges (tests). */
+  constructor({ state, ffmpeg, wakeMs = 2000, motionEveryMs = 60_000, clock = Date.now }) {
     super();
+    this.clock = clock;
     this.state = state;
     this.ffmpeg = ffmpeg;
     this.wakeMs = wakeMs;
@@ -167,7 +175,9 @@ export class FakeBackend extends EventEmitter {
   async devices() {
     if (!this.session) throw new Error("not signed in");
     await delay(50);
-    return [{ ...FAKE_DEVICE }];
+    const { charging, chargingSource } = fakeCharge(this.clock());
+    const { livestream, codec, ...rest } = FAKE_DEVICE;
+    return [{ ...rest, charging, chargingSource, livestream, codec }];
   }
 
   async hasCamera(serial) {

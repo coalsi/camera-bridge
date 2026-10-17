@@ -6,7 +6,7 @@
 #
 # Checks: shellcheck + bash -n on every script, the go2rtc pins (fetch-go2rtc.sh), the pins of our helpers (linux/helpers),
 # the nftables ruleset (nft -c), every systemd unit (systemd-analyze verify), sysusers/tmpfiles/repart definitions, the mkosi
-# configuration (mkosi summary), the stub daemon's syntax.
+# configuration (mkosi summary), the stub daemon's syntax, the internet guard's DNS configuration (dnsmasq --test).
 # What this does NOT prove: that the image boots (see test-vm.sh) or works on real hardware (docs/linux/BUILDING.md).
 # shellcheck disable=SC2016,SC2001
 set -euo pipefail
@@ -35,7 +35,7 @@ helper_scripts=(../helpers/wyze-lake/build.sh ../helpers/wyze-lake/test/run.sh
                 ../helpers/eufy-bridge/test/integration/run.sh ../helpers/eufy-bridge/test/integration/container.sh
                 ../helpers/eufy-bridge/test/integration/go2rtc.sh)
 scripts=(build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken
-         mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk
+         mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk mkosi.extra/usr/sbin/cb-guard
          mkosi.extra/usr/lib/camera-bridge/lib.sh "${helper_scripts[@]}")
 while IFS= read -r f; do scripts+=("$f"); done < <(find mkosi.extra/usr/lib/camera-bridge -name 'cb-*' -type f | sort)
 
@@ -74,6 +74,12 @@ check "nftables ruleset parses (nft -c)" nft -c -f mkosi.extra/etc/nftables.conf
 check "ruleset is default-deny inbound" grep -q 'policy drop' mkosi.extra/etc/nftables.conf
 # The box is the cameras' time server: NTP (UDP 123) only from local/private addresses, in the firewall and in chrony.
 check "firewall lets NTP in from local addresses only" bash -c 'f=mkosi.extra/etc/nftables.conf; grep -q "ip saddr @lan4 udp dport 123 accept" "$f" && grep -q "ip6 saddr @lan6 udp dport 123 accept" "$f" && ! grep -E "dport[^#]*\b123\b" "$f" | grep -vq "saddr @lan[46]"'
+# The internet guard (Watch): DNS (port 53) only from the setup hotspot and from the watched cameras' sets, so the box is never a resolver
+# for the house; nothing is logged or forwarded yet (Seal, the next stage, adds that).
+check "firewall has the sets of watched cameras" bash -c 'f=mkosi.extra/etc/nftables.conf; grep -Pzq "set guarded4 \\{\\s*type ipv4_addr\\s*\\}" "$f" && grep -Pzq "set guarded6 \\{\\s*type ipv6_addr\\s*\\}" "$f"'
+check "firewall lets DNS in from the watched cameras, a limited rate from each" bash -c 'f=mkosi.extra/etc/nftables.conf; for r in "ip saddr @guarded4 udp dport 53 meter guard_dns4 size 128 { ip saddr limit rate" "ip saddr @guarded4 tcp dport 53 meter guard_tcp4 size 128 { ip saddr limit rate" "ip6 saddr @guarded6 udp dport 53 meter guard_dns6 size 128 { ip6 saddr limit rate" "ip6 saddr @guarded6 tcp dport 53 meter guard_tcp6 size 128 { ip6 saddr limit rate"; do grep -qF "$r" "$f" || { echo "missing: $r"; exit 1; }; done'
+check "firewall lets DNS in only from the setup hotspot on the Wi-Fi and the watched cameras" bash -c 'f=mkosi.extra/etc/nftables.conf; ! sed "s/#.*//" "$f" | grep -E "dport[^;]*\b(53|domain)\b" | grep -Ev "^\s*(iifname \"wl\*\" ip saddr 10\.42\.0\.0/24 (udp|tcp) dport 53 accept|ip saddr @guarded4 (udp|tcp) dport 53 meter [a-z0-9_]+ size [0-9]+ \{ ip saddr limit rate [0-9]+/second burst [0-9]+ packets \} accept|ip6 saddr @guarded6 (udp|tcp) dport 53 meter [a-z0-9_]+ size [0-9]+ \{ ip6 saddr limit rate [0-9]+/second burst [0-9]+ packets \} accept)$"'
+check "firewall logs nothing and has no prerouting chain yet" bash -c 'f=mkosi.extra/etc/nftables.conf; ! sed "s/#.*//" "$f" | grep -Eq "\blog\b|hook prerouting"'
 check "chrony serves only local and private networks, also without the internet" bash -c 'f=mkosi.extra/etc/chrony/chrony.conf; grep -Eq "^allow " "$f" && ! grep -Eq "^(allow|allow all|allow 0\.0\.0\.0/0|allow ::/0)\s*$" "$f" && ! grep -Ev "^allow (10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16|169\.254\.0\.0/16|fc00::/7|fe80::/10)$" "$f" | grep -q "^allow" && grep -Eq "^local stratum [0-9]+" "$f" && ! grep -Eq "^port 0" "$f"'
 
 # --- units: install the tree into this disposable container, render the daemon unit, ask systemd to verify -------------------
@@ -100,6 +106,15 @@ for u in "${units[@]}"; do
     out=$(grep -v -E "srv\.mount|efi\.(auto)?mount|Failed to prepare filename|^$" <<<"$out" || true)
     if [ -z "$out" ]; then pass "systemd-analyze verify $u"; else bad "systemd-analyze verify $u"; sed 's/^/        /' <<<"$out"; fi
 done
+
+# --- the internet guard: its DNS configuration, its job, its units ------------------------------------------------------------
+check "the guard's DNS configuration is valid (dnsmasq --test)" bash -c '/usr/sbin/cb-guard config >/tmp/guard-dnsmasq.conf && dnsmasq --test --conf-file=/tmp/guard-dnsmasq.conf'
+check "the guard's DNS answers every name \"does not exist\" and never asks anyone" bash -c 'c=$(/usr/sbin/cb-guard config); grep -qx "address=/#/" <<<"$c" && grep -qx "no-resolv" <<<"$c" && ! grep -Eq "^(server|resolv-file|listen-address)=" <<<"$c"'
+check "the guard-set request is allowed and handled" bash -c 'grep -q "^ALLOWED_JOBS=\".*\bguard-set\b" mkosi.extra/usr/sbin/cb-system && grep -q "guard-set) /usr/sbin/cb-guard set" mkosi.extra/usr/sbin/cb-system'
+check "every allowed request is in the README's table" bash -c 'jobs=$(sed -n "s/^ALLOWED_JOBS=\"\(.*\)\"/\1/p" mkosi.extra/usr/sbin/cb-system); for j in $jobs; do grep -q "^| \`$j\`\|, \`$j\`" README.md || { echo "not in README.md: $j"; exit 1; }; done'
+check "the guard is applied at boot" grep -q "camera-bridge-guard.service" mkosi.postinst.chroot
+check "the guard's collector cannot hang with its lock" grep -Eq "^TimeoutStartSec=[0-9]+min$" /usr/lib/systemd/system/camera-bridge-guard-collect.service
+check "the guard's log is read in a folder only root can change" bash -c 'grep -q "^d /run/camera-bridge/guard/work 0700 root root -" /usr/lib/tmpfiles.d/camera-bridge.conf && grep -q "^WORKDIR=\$RUN/work" /usr/sbin/cb-guard'
 
 # --- sysusers / tmpfiles / repart definitions ---------------------------------------------------------------------------
 tmp=$(mktemp -d)

@@ -63,6 +63,34 @@ final class FakeSetupCamera: Sendable {
     </EZVIZ>
     """
 
+    /// The first network interface's addresses (`/ISAPI/System/Network/interfaces/1/ipAddress`) in the ISAPI 2.0 schema's shape, not yet
+    /// checked against a real camera's answer: the camera's own address and gateway come before the DNS servers, each an `ipAddress` too.
+    static func ipAddress(addressing: String = "dynamic", primaryDNS: String = "8.8.8.8", secondaryDNS: String? = "1.1.1.1") -> String {
+        let secondary = secondaryDNS.map { "<SecondaryDNS>\n<ipAddress>\($0)</ipAddress>\n</SecondaryDNS>\n" } ?? ""
+        return """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <IPAddress version="2.0" \(ns)>
+        <ipVersion>dual</ipVersion>
+        <addressingType>\(addressing)</addressingType>
+        <ipAddress>192.168.77.30</ipAddress>
+        <subnetMask>255.255.255.0</subnetMask>
+        <ipv6Address>::</ipv6Address>
+        <bitMask>0</bitMask>
+        <DefaultGateway>
+        <ipAddress>192.168.77.1</ipAddress>
+        <ipv6Address>::</ipv6Address>
+        </DefaultGateway>
+        <PrimaryDNS>
+        <ipAddress>\(primaryDNS)</ipAddress>
+        </PrimaryDNS>
+        \(secondary)<Ipv6Mode>
+        <ipV6AddressingType>ra</ipV6AddressingType>
+        <ipv6AddressList><v6Address><id>1</id><type>ra</type><address>::</address><bitMask>0</bitMask></v6Address></ipv6AddressList>
+        </Ipv6Mode>
+        </IPAddress>
+        """
+    }
+
     static func overlays(on: Bool) -> String {
         """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -107,6 +135,8 @@ final class FakeSetupCamera: Sendable {
     let rebootRequired = Box<Set<String>>([])
     /// Paths whose `PUT` is answered OK and changes nothing.
     let ignorePUT = Box<Set<String>>([])
+    /// Paths whose document is gone after a `PUT` (the answer is OK).
+    let vanishAfterPUT = Box<Set<String>>([])
     /// Every `PUT`, in order: path and body.
     let puts = Box<[(path: String, body: String)]>([])
 
@@ -125,6 +155,7 @@ final class FakeSetupCamera: Sendable {
             HikvisionISAPI.networkCapabilitiesPath: networkCapabilities,
             "/ISAPI/System/Network/UPnP": upnp,
             "/ISAPI/System/Network/EZVIZ": cloud,
+            HikvisionISAPI.ipAddressPath: ipAddress(),
             "/ISAPI/System/Video/inputs/channels/1/overlays": overlays(on: true),
             "/ISAPI/Streaming/channels/101": channel(id: "101"),
             "/ISAPI/Streaming/channels/102": channel(id: "102", codec: "H.264", width: 640, height: 480, gov: 50, smartCodec: false),
@@ -159,6 +190,7 @@ final class FakeSetupCamera: Sendable {
             guard documents.value[path] != nil else { return .xml(Self.status(4, "Invalid Operation", sub: "notSupport"), status: 404) }
             if refusePUT.value.contains(path) { return .xml(Self.status(6, "Invalid Content", sub: "badParameters"), status: 400) }
             if !ignorePUT.value.contains(path) { documents.update { $0[path] = request.bodyText } }
+            if vanishAfterPUT.value.contains(path) { documents.update { $0[path] = nil } }
             if rebootRequired.value.contains(path) { return .xml(Self.status(7, "Reboot Required", sub: "rebootRequired")) }
             return .xml(Self.status(1, "OK", sub: "ok"))
         default:

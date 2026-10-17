@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { RealBackend } from "../src/backend-real.js";
+import { RealBackend, chargingSource } from "../src/backend-real.js";
 import { startApp, request, openStream, waitFor, TOKEN, fakeAu, adtsFrame, captureLog, tempDir } from "./helpers.js";
 import { StateDir } from "../src/statedir.js";
 
@@ -49,7 +49,7 @@ function makeSdk(log) {
     async getDevices() {
       if (log.expire) throw new SessionExpiredError("gone");
       return [
-        { sn: "T8134ABCDEFG0001", name: "Porch", model: "T8134", raw: { device_type: 63, main_sw_version: "3.4.5" }, lastSeenMs: Date.now() - 60_000 },
+        { sn: "T8134ABCDEFG0001", name: "Porch", model: "T8134", raw: { device_type: 63, main_sw_version: "3.4.5" }, params: { 1101: "64", 2111: log.batteryStatus }, lastSeenMs: Date.now() - 60_000 },
         { sn: "T8010STATION0001", name: "Base", model: "T8010", raw: { device_type: 0 } },
       ];
     }
@@ -72,7 +72,7 @@ function makeSdk(log) {
         sn,
         name: sn.startsWith("T8134") ? "Porch" : "Base",
         has: (c) => c === "battery" && sn.startsWith("T8134"),
-        getProperty: (n) => ({ battery: { value: 64 }, charging: { value: false }, wifiRssi: { value: -58 } })[n],
+        getProperty: (n) => ({ battery: { value: 64 }, charging: { value: log.charging }, wifiRssi: { value: -58 } })[n],
         camera,
         info: () => ({ firmwareVersion: "3.4.5", deviceType: 63 }),
       };
@@ -89,7 +89,7 @@ function makeSdk(log) {
 }
 
 function newLog() {
-  return { clients: [], calls: [], liveOpts: [], streams: [], expire: false };
+  return { clients: [], calls: [], liveOpts: [], streams: [], expire: false, charging: false, batteryStatus: "2" };
 }
 
 test("real backend: sign-in steps, identity, no password on disk, device mapping", async () => {
@@ -122,8 +122,17 @@ test("real backend: sign-in steps, identity, no password on disk, device mapping
 
     const d = await request(app.port, "GET", "/devices");
     assert.deepEqual(d.json.devices, [
-      { serial: "T8134ABCDEFG0001", name: "Porch", model: "T8134", type: 63, online: true, livestream: true, battery: 64, charging: false, wifiRSSI: -58, firmware: "3.4.5" },
+      { serial: "T8134ABCDEFG0001", name: "Porch", model: "T8134", type: 63, online: true, livestream: true, battery: 64, charging: false, chargingSource: null, wifiRSSI: -58, firmware: "3.4.5" },
     ]);
+    // Charging from its solar panel (BATTERY_STATUS 4), then from a cable (3): the raw param tells them apart.
+    for (const [status, source] of [["4", "solar"], ["3", "cable"]]) {
+      log.charging = true;
+      log.batteryStatus = status;
+      backend.listCache = null;
+      const c = await request(app.port, "GET", "/devices");
+      assert.equal(c.json.devices[0].charging, true);
+      assert.equal(c.json.devices[0].chargingSource, source, `BATTERY_STATUS ${status}`);
+    }
   } finally {
     await app.close();
   }
@@ -216,4 +225,15 @@ test("real backend: sign-out logs out and forgets session, push and account file
     await app.close();
     app.cleanup();
   }
+});
+
+test("real backend: charging source from BATTERY_STATUS", () => {
+  assert.equal(chargingSource(false, "4"), null, "not charging");
+  assert.equal(chargingSource(undefined, "4"), null, "charging unknown");
+  assert.equal(chargingSource(true, undefined), null, "no raw status");
+  assert.equal(chargingSource(true, "2"), null, "the raw status says not charging");
+  assert.equal(chargingSource(true, "0"), null);
+  assert.equal(chargingSource(true, "x"), null);
+  for (const v of ["4", "5", "12", "20", 4]) assert.equal(chargingSource(true, v), "solar", `solar ${v}`);
+  for (const v of ["1", "3"]) assert.equal(chargingSource(true, v), "cable", `cable ${v}`);
 });

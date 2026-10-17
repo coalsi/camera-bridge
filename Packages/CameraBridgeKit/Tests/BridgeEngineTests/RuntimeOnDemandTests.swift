@@ -58,5 +58,62 @@ import PlatformApple
         await fixture.tearDown()
         await server.stop()
     }
+
+    /// The box, 0.1.108: a wake delivered video, then the picture stopped ("no video for 10 s": eufy's stream ends before the idle stop),
+    /// and the camera list kept "offline" while it slept. Asleep after a wake that delivered is online; a wake that never delivered stays
+    /// offline.
+    @MainActor @Test(.timeLimit(.minutes(2))) func asleepAfterAWakeThatDeliveredIsOnlineEvenWhenItStalledLate() async throws {
+        var tuning = EngineTuning.testing
+        tuning.onDemandIdleStop = .milliseconds(2500)
+        tuning.onDemandWakeWait = .seconds(3)
+        tuning.ingest.watchdog = .milliseconds(800)
+        tuning.ingest.initialBackoff = .milliseconds(200)
+        tuning.ingest.maximumBackoff = .milliseconds(400)
+        let driver = ScriptedEventDriver(streamsOnDemand: true)
+        tuning.driverFactory = { _, _, _ in driver }
+        let server = RTSPTestServer(source: syntheticSource(width: 320, height: 180, fps: 15, gop: .seconds(1), audio: nil), transport: AppleNetworkTransport())
+        try await server.start()
+        let fixture = try await EngineFixture(tuning: tuning)
+        let engine = fixture.engine
+        var camera = RuntimeCameraLifecycleTests.rtspCamera("Solo", server: server)
+        camera.motionSource = .cameraEvents
+        try await engine.addCamera(camera, password: nil)
+        await engine.start()
+        let runtime = try #require(engine.runtimes[camera.id])
+        let isOffline: @MainActor () -> Bool = {
+            if case .offline = fixture.status(camera.id)?.connection { return true }
+            return false
+        }
+
+        // The start's wake delivers, then the picture stops for good: offline while it retries in that wake…
+        #expect(await fixture.waitFor(.seconds(10)) { fixture.status(camera.id)?.connection == .online })
+        let stalled = RTSPTestServer.Faults(stall: RTSPTestServer.Stall(after: .zero, duration: .seconds(600)))
+        server.setFaults(stalled)
+        #expect(await fixture.waitFor(.seconds(5)) { isOffline() }, "\(String(describing: fixture.status(camera.id)?.connection))")
+        // …and asleep (online) once the idle stop lets it sleep: that wake delivered video.
+        #expect(await fixture.until(.seconds(10)) { !(await runtime.isMainStreamRunning) })
+        #expect(await fixture.waitFor(.seconds(2)) { fixture.status(camera.id)?.connection == .online },
+                "asleep after a wake that delivered: \(String(describing: fixture.status(camera.id)?.connection))")
+
+        // A wake that never delivers: offline, and still offline once it sleeps again.
+        let lease = await runtime.lease(preferSub: false)
+        #expect(await fixture.waitFor(.seconds(5)) { isOffline() })
+        await lease.release()
+        #expect(await fixture.until(.seconds(10)) { !(await runtime.isMainStreamRunning) })
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(isOffline(), "a wake that never delivered stays offline: \(String(describing: fixture.status(camera.id)?.connection))")
+
+        // The camera delivers again: online, and online while it sleeps.
+        server.setFaults(RTSPTestServer.Faults())
+        let again = await runtime.lease(preferSub: false)
+        #expect(await fixture.waitFor(.seconds(5)) { fixture.status(camera.id)?.connection == .online })
+        await again.release()
+        #expect(await fixture.until(.seconds(10)) { !(await runtime.isMainStreamRunning) })
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(fixture.status(camera.id)?.connection == .online)
+
+        await fixture.tearDown()
+        await server.stop()
+    }
 }
 #endif

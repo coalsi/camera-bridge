@@ -8,8 +8,12 @@ licenses that give you the right to the source code. This note tells you how to 
 1. Where the source is
 
    The exact list of installed packages is in /usr/share/camera-bridge/packages.txt on the running system, and is also
-   published next to this release as "camera-bridge-os-@VERSION@-packages.txt". Each line gives the binary package, its
-   version, the Debian source package it was built from and that source package's version.
+   published with this release on GitHub as "camera-bridge-os-@VERSION@-packages.txt". Each line gives the binary package,
+   its version, the Debian source package it was built from and that source package's version.
+
+   If this release is taken off the list of releases later (older beta builds are), its package list and this offer
+   are first copied to the release "os-sources" (https://github.com/coalsi/camera-bridge/releases/tag/os-sources) as
+   "camera-bridge-os-@VERSION@-packages.txt" and "camera-bridge-os-@VERSION@-SOURCE-OFFER.txt", and they stay there.
 
    Camera Bridge OS contains these packages unmodified, exactly as Debian publishes them. The corresponding source code
    of every one of them is available from Debian:

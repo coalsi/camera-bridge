@@ -32,6 +32,8 @@ struct EngineTuning: Sendable {
     var onDemandIdleStop: Duration = .seconds(15)
     /// How long a live view, recording or motion event waits for an on-demand camera to wake and send its first picture.
     var onDemandWakeWait: Duration = .seconds(25)
+    /// How often a camera whose driver reports a battery (`CameraDriver.batteryStatus`) is asked for it.
+    var batteryPollInterval: Duration = BatteryStatus.pollInterval
     /// A live view waits this long for the sub stream's first picture before using the main stream.
     var subStreamStartWait: Duration = .seconds(3)
     /// Status is aggregated at most this often (contract: ≤ 4 Hz).
@@ -50,6 +52,50 @@ struct EngineTuning: Sendable {
     /// Replaces this machine's interface addresses where "Set up for Camera Bridge" looks for the bridge's own (tests: documentation
     /// addresses, never the machine's real LAN address).
     var interfaceAddresses: (@Sendable () -> [InterfaceAddress])?
+    /// Replaces the running ingest's measured stream facts (`CameraRuntime.readinessFacts`) where "Set up for Camera Bridge" plans and checks
+    /// the streams (tests: a camera whose settings name another codec than the one it sends).
+    var measuredStreamFacts: (@Sendable (_ cameraID: UUID) async -> (main: MeasuredStreamFacts?, sub: MeasuredStreamFacts?))?
+    /// How long "Set up for Camera Bridge" waits, after it changed a stream's codec, for the restarted ingest to receive H.264.
+    var cameraSetupMeasureWait: Duration = .seconds(15)
+    /// The cameras' security checks (`BridgeEngine+Security.swift`) at their runtime's start, daily and after "Set up for Camera Bridge";
+    /// tests turn them off (`EngineTuning.testing`) so no test sees camera requests it did not ask for. A check on demand always runs.
+    var securityChecks = true
+    /// How long after a camera's runtime starts its check runs (the camera settles first).
+    var securityCheckDelay: Duration = .seconds(60)
+    /// How often every camera is checked again.
+    var securityCheckInterval: Duration = .seconds(86_400)
+    /// A check on demand waits this long after the camera's last one (`CameraSecurityCheckTooSoon`).
+    var securityCheckCooldown: Duration = .seconds(60)
+    /// A runtime start does not check a camera checked this recently.
+    var securityCheckFreshness: Duration = .seconds(600)
+    /// A check skipped because the camera did not answer (unreachable at its time, or it stopped answering during the check) is tried again
+    /// after this long, then twice as long each time, up to `securityCheckRetryCap`.
+    var securityCheckRetry: Duration = .seconds(600)
+    var securityCheckRetryCap: Duration = .seconds(7200)
+    /// Replaces a camera's readings (`CameraSettingsService.readRemoteAccess()`) in a security check (tests); nil from it: the camera did not
+    /// answer.
+    var securityReading: (@Sendable (_ camera: CameraConfiguration, _ credentials: HTTPCredentials?) async -> [RemoteAccessFinding]?)?
+    /// Replaces the read of a watched camera's DNS servers (`CameraSettingsService.readDNS()`) in a security check (tests); nil from it: not
+    /// readable.
+    var securityDNS: (@Sendable (_ camera: CameraConfiguration, _ credentials: HTTPCredentials?) async -> CameraDNSReading?)?
+    /// Removing a camera whose Watch is done gives it its own DNS servers back first (tests turn it off: `EngineTuning.testing`).
+    var restoresWatchOnRemoval = true
+    /// Replaces the RTSP check (`RTSPAccessProbe`) of a camera's stream address (tests).
+    var rtspAccessProbe: (@Sendable (_ url: URL) async -> RemoteAccessState)?
+    /// What the Internet guard saw of a camera (tests; on Camera Bridge OS the guard's own evidence). nil: no guard.
+    var guardEvidence: (@Sendable (_ camera: CameraConfiguration) async -> GuardEvidence?)?
+    /// Replaces the camera's address on the local network as the internet guard knows it (tests: the loopback fake camera stands for one
+    /// at 192.168.77.x); nil: the camera's own host when it is a local IPv4 address (`BridgeEngine.guardAddress`).
+    var guardCameraAddress: (@Sendable (_ camera: CameraConfiguration) -> String?)?
+    /// How often the box's report is read while the bridge runs on Camera Bridge OS (a small file).
+    var guardPollInterval: Duration = .seconds(60)
+    /// A list the box refused is sent again after this long, then twice as long each time, up to `guardSyncRetryCap`.
+    var guardSyncRetry: Duration = .seconds(5)
+    var guardSyncRetryCap: Duration = .seconds(300)
+    /// A report not updated for this long (the box's collector writes it every minute) is no evidence.
+    var guardReportStaleAfter: Duration = .seconds(600)
+    /// The day's notice changes its figures at most this often.
+    var guardNoticeRefresh: Duration = .seconds(3600)
     /// Replaces `CameraDrivers.detect` in `probeCamera` (tests).
     var detectVendor: (@Sendable (_ endpoint: CameraEndpoint, _ credentials: HTTPCredentials?) async -> VendorDetection?)?
     /// Replaces `CameraDrivers.onvifPort` in `probeCamera` (tests).

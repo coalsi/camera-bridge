@@ -137,6 +137,9 @@ final class FakeArchiveReading: ArchiveReading {
         var activitiesInFlight = 0
         var mostActivitiesInFlight = 0
         var activityCalls: [(camera: UUID, range: Range<Date>, binCount: Int)] = []
+        var events: [ArchiveEvent] = []
+        var eventsFailure: (any Error & Sendable)?
+        var eventCalls: [(cameras: [UUID], range: Range<Date>, limit: Int)] = []
     }
 
     private let state = Mutex(State())
@@ -158,6 +161,10 @@ final class FakeArchiveReading: ArchiveReading {
     func setActivityDelay(_ delay: Duration) { state.withLock { $0.activityDelay = delay } }
     func setActivityProvider(_ provider: (@Sendable (UUID, Range<Date>, Int) -> ArchiveActivity)?) { state.withLock { $0.activityProvider = provider } }
     func bumpCatalogVersion() { state.withLock { $0.version += 1 } }
+    /// What `events(cameras:range:limit:)` answers from (filtered and ordered like the store), and a failure it throws instead.
+    func setEvents(_ events: [ArchiveEvent]) { state.withLock { $0.events = events } }
+    func failEvents(with error: (any Error & Sendable)?) { state.withLock { $0.eventsFailure = error } }
+    var eventCalls: [(cameras: [UUID], range: Range<Date>, limit: Int)] { state.withLock { $0.eventCalls } }
 
     /// Retention removed this fragment: lookups by id answer nil and reads fail with `fileGone`.
     func remove(_ id: String) { state.withLock { _ = $0.removed.insert(id) } }
@@ -218,6 +225,16 @@ final class FakeArchiveReading: ArchiveReading {
             return ArchiveActivity.Bin(coverage: min(1, covered / width), level: covered > 0 ? 1_000 : 0, peak: covered > 0 ? 2_000 : 0)
         }
         return ArchiveActivity(start: range.lowerBound, binDuration: width, bins: bins, typical: 1_000, isComplete: true)
+    }
+
+    func events(cameras: [UUID], range: Range<Date>, limit: Int) async throws -> ArchiveEventPage {
+        let (events, failure) = state.withLock { state in
+            state.eventCalls.append((cameras, range, limit))
+            return (state.events, state.eventsFailure)
+        }
+        if let failure { throw failure }
+        let found = events.filter { cameras.contains($0.camera) && range.contains($0.start) }.sorted { $0.start > $1.start }
+        return ArchiveEventPage(events: Array(found.prefix(limit)), isTruncated: found.count > limit)
     }
 
     func read(_ fragment: ArchiveFragment, _ part: ArchiveReadPart) async throws -> Data {

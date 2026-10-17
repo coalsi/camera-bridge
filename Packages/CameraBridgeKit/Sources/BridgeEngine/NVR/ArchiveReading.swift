@@ -19,6 +19,63 @@ public protocol ArchiveReading: Sendable {
     var catalogVersion: Int { get }
     /// False while the store repairs and loads its catalog after start (and for the placeholder archive): every lookup then answers nil or empty.
     var isReady: Bool { get }
+    /// The cameras' events that began in `range`, newest first, at most `limit` (`ArchiveEventLog`: kept beside the recordings, whether or not
+    /// video was recorded, and deleted with them). A page never splits a millisecond: when `limit` would cut through the events of one, they are
+    /// left for the next page (asked with the range ending at the oldest start), unless they are all the page has, which then holds them all.
+    /// Empty when no place for recordings is chosen. Throws `ArchiveUnavailable` while the catalog loads or the folder is missing (not "no
+    /// events": ask again later), `ArchiveError.timedOut` when the drive does not answer. The default has none.
+    func events(cameras: [UUID], range: Range<Date>, limit: Int) async throws -> ArchiveEventPage
+}
+
+extension ArchiveReading {
+    public func events(cameras: [UUID], range: Range<Date>, limit: Int) async throws -> ArchiveEventPage {
+        ArchiveEventPage(events: [], isTruncated: false)
+    }
+}
+
+/// One event of a camera as the archive's event log keeps it.
+public struct ArchiveEvent: Sendable, Equatable, Hashable, Identifiable {
+    /// Unique per camera, stable across restarts, safe in a URL.
+    public var id: String
+    public var camera: UUID
+    /// The bridge's word for it, as `SensorState.recentEvents` has it: "Motion", "Person", "Vehicle", "Doorbell ring", "Tamper", …
+    public var kind: String
+    public var start: Date
+    /// Nil while it lasts, or when the bridge stopped before it ended.
+    public var end: Date?
+    /// The camera's recorder was writing when it began.
+    public var hadVideo: Bool
+    /// The recordings hold video of its start now (retention may have taken it since), or are still being written up to it.
+    public var recorded: Bool
+
+    public init(id: String, camera: UUID, kind: String, start: Date, end: Date? = nil, hadVideo: Bool = false, recorded: Bool = false) {
+        self.id = id
+        self.camera = camera
+        self.kind = kind
+        self.start = start
+        self.end = end
+        self.hadVideo = hadVideo
+        self.recorded = recorded
+    }
+}
+
+/// Events newest first; `isTruncated` when `limit` cut older ones in the range off.
+public struct ArchiveEventPage: Sendable, Equatable {
+    public var events: [ArchiveEvent]
+    public var isTruncated: Bool
+
+    public init(events: [ArchiveEvent], isTruncated: Bool) {
+        self.events = events
+        self.isTruncated = isTruncated
+    }
+}
+
+/// The archive cannot say which events there are now, and an empty answer would be wrong: ask again later.
+public enum ArchiveUnavailable: Error, Equatable, Sendable {
+    /// The store is still loading the folder's catalog.
+    case loading
+    /// The recordings folder is not there (its drive is away).
+    case folderMissing
 }
 
 /// One fragment: `prft` + `moof` + `mdat`, at most `ArchiveConstants.fragmentMaximumDuration` of video, 16 MiB.

@@ -38,6 +38,8 @@ extension EngineTuning {
         tuning.aspectWait = .seconds(3)
         tuning.statusInterval = .milliseconds(50)
         tuning.localNetworkRetryInterval = .milliseconds(20)
+        tuning.securityChecks = false   // no camera requests a test did not ask for
+        tuning.restoresWatchOnRemoval = false
         return tuning
     }
 }
@@ -68,12 +70,14 @@ struct EngineFixture {
     /// `advertiser`: a fake that records advertisements (Bonjour stays off without one; never a real advertiser).
     /// `transport`: replaces the loopback transport (a `ScriptedTransport` over it).
     /// `secrets`: replaces the in-memory secret store (Keychain).
+    /// `adjust`: changes the environment before the engine is made (a fake internet guard).
     init(tuning: EngineTuning = .testing, directory: TemporaryDirectory? = nil, advertiser: (any ServiceAdvertiser)? = nil,
          transport: (any NetworkTransport)? = nil, secrets: (any SecretStore)? = nil, servesTime: Bool = false,
-         configure: (inout BridgeSettings) -> Void = { _ in }) async throws {
+         configure: (inout BridgeSettings) -> Void = { _ in }, adjust: (inout BridgeEnvironment) -> Void = { _ in }) async throws {
         let directory = try directory ?? TemporaryDirectory()
         var environment = BridgeEnvironment.testing(directory: directory.url)
         environment.servesTime = servesTime
+        adjust(&environment)
         let power = RecordingPowerManager()
         let networkChanges = ManualNetworkChanges()
         environment.platform.power = power

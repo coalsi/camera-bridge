@@ -12,7 +12,7 @@ import Synchronization
 // cooperative pool: `ArchiveReading.read` runs on the store's own queue, and folder checks on the engine's probe queue.
 //
 // This file: the route table, admission, the gates, request parsing, the error mapping and the state the routes share. The routes themselves
-// are in WebApp+NVRStorage.swift (storage and the Record switch), WebApp+NVRCatalog.swift (catalog and activity), WebApp+NVRMedia.swift
+// are in WebApp+NVRStorage.swift (storage and the Record switch), WebApp+NVRCatalog.swift (catalog, activity and events), WebApp+NVRMedia.swift
 // (fragments, init segments and key pictures) and WebApp+NVROptimize.swift (the optimizer, second tier).
 
 extension WebApp {
@@ -23,6 +23,7 @@ extension WebApp {
         Route("PATCH", "cameras/:id/nvr", takesBody: true) { app, ctx in try await app.patchCameraNVR(ctx) },
         Route("GET", "nvr/cameras") { app, _ in try await app.nvrCameras() },
         Route("GET", "nvr/activity") { app, ctx in try await app.nvrActivity(ctx) },
+        Route("GET", "nvr/events") { app, ctx in try await app.nvrEvents(ctx) },
         Route("GET", "nvr/cameras/:id/fragments") { app, ctx in try await app.nvrFragments(ctx) },
         Route("GET", "nvr/cameras/:id/fragments/:fid") { app, ctx in try await app.nvrFragment(ctx) },
         Route("GET", "nvr/cameras/:id/fragments/:fid/init") { app, ctx in try await app.nvrFragmentInit(ctx) },
@@ -131,8 +132,9 @@ extension WebApp {
 
     // MARK: Errors
 
-    /// Every archive failure as one API error: a removed file or part is gone, a drive that does not answer is slow, anything else about a
-    /// fragment (a damaged one, an MP4 the browser view cannot be made from) is unreadable. The sentences name no path and no file.
+    /// Every archive failure as one API error: a removed file or part is gone, a drive that does not answer is slow, an archive that cannot say
+    /// now (loading, its folder missing) is unavailable for a moment, anything else about a fragment (a damaged one, an MP4 the browser view
+    /// cannot be made from) is unreadable. The sentences name no path and no file.
     static func archiveAPIError(_ error: any Error) -> APIError {
         switch error {
         case let error as APIError:
@@ -141,6 +143,11 @@ extension WebApp {
             return APIError(status: 410, code: "gone", message: "That part of the recording is no longer there.")
         case ArchiveError.timedOut, is DeadlineExceeded:
             return APIError(status: 504, code: "drive_slow", message: "The recordings drive isn’t answering.", headers: [("Retry-After", "2")])
+        case ArchiveUnavailable.loading:
+            return APIError(status: 503, code: "archive_unavailable", message: "The recordings are still loading. Try again in a moment.",
+                            headers: [("Retry-After", "2")])
+        case ArchiveUnavailable.folderMissing:
+            return APIError(status: 503, code: "archive_unavailable", message: "The recordings drive isn’t connected.", headers: [("Retry-After", "5")])
         case is CancellationError:
             return APIError(status: 503, code: "archive_unavailable", message: "The request was cancelled.", headers: [("Retry-After", "2")])
         default:

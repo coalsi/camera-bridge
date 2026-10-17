@@ -26,7 +26,7 @@ export function decodeBytes(data) {
  */
 export function createArchive({ timers, cameraId = 'CAM-1', files, serverEpochAtZero = ORIGIN + 3_600_000 }) {
   let version = 1;
-  const state = files.map((spec) => {
+  const build = (spec) => {
     const file = { mime: MIME, width: 2688, height: 1520, partMs: 2000, gop: 1, keyBytes: 700_000, deltaBytes: 100_000, mediaStartTicks: MEDIA_START_TICKS, ...spec };
     file.anchor = file.startMs - file.mediaStartTicks / 90;
     file.parts = Array.from({ length: file.parts }, (_, index) => ({
@@ -39,7 +39,8 @@ export function createArchive({ timers, cameraId = 'CAM-1', files, serverEpochAt
       byteLength: 32 + (index % file.gop === 0 ? file.keyBytes : file.deltaBytes),
     }));
     return file;
-  });
+  };
+  const state = files.map(build);
 
   const idOf = (part) => `${part.file}.${part.index}`;
   const fileOf = (key) => state.find((file) => file.key === key);
@@ -96,6 +97,12 @@ export function createArchive({ timers, cameraId = 'CAM-1', files, serverEpochAt
           key: index % file.gop === 0, backToKey: index % file.gop, byteLength: 32 + (index % file.gop === 0 ? file.keyBytes : file.deltaBytes),
         });
       }
+      version += 1;
+    },
+
+    /** Recording starts again in a new file (same shape as the `files` entries), after the ones there are. */
+    addFile(spec) {
+      state.push(build(spec));
       version += 1;
     },
 

@@ -4,6 +4,8 @@
 
 import { CAMERA_DEFINITIONS, cameraConfiguration, DAY } from './cameras.mjs';
 import { VirtualArchive } from './archive.mjs';
+import { nightVisionStatus } from './night-vision.mjs';
+import { securityStatus } from './camera-security.mjs';
 
 export const BUILTIN = { id: 'builtin', label: 'This box’s storage', path: '/var/lib/camera-bridge/recordings' };
 export const GIB = 1_073_741_824;
@@ -11,6 +13,7 @@ export const GB = 1_000_000_000;
 export const LOW_SPACE_MARGIN = 5 * GIB; // ArchiveConstants.lowSpaceMarginBytes
 export const OTHER_BYTES = 40 * GB; // what the system, settings and the journal use on the data partition
 export const OPTIMIZE_GAP_MS = 3000;
+export const LIVE_GRACE_MS = 120_000; // ArchiveStore.eventLiveGraceMs: an event this new of a recording camera counts as recorded
 export const KEEP_DAYS_RANGE = [1, 365];
 export const MAX_SIZE_RANGE = [10, 100_000];
 
@@ -138,6 +141,9 @@ export class DevState {
     const { configuration, definition } = camera;
     const fixtureName = typeof definition.fixture === 'string' ? definition.fixture : 'gop2';
     const fixture = this.fixtures.get(fixtureName);
+    const recentEvents = this.recentEvents(camera);
+    const nightVision = nightVisionStatus(camera);
+    const security = securityStatus(camera, this.serverNow());
     return {
       ...configuration,
       status: {
@@ -153,10 +159,15 @@ export class DevState {
         recordingNow: false,
         liveViewers: 0,
         appViewers: 0,
-        lastEvent: null,
-        lastEventDate: null,
+        panTilt: definition.panTilt === true,
+        zoom: definition.zoom === true,
+        ...(nightVision ? { nightVision } : {}),
+        lastEvent: recentEvents.at(-1)?.name ?? null,
+        lastEventDate: recentEvents.at(-1)?.date ?? null,
         lastError: null,
-        recentEvents: [],
+        recentEvents,
+        ...(definition.battery ? { battery: { ...definition.battery } } : {}),
+        ...(security ? { security } : {}),
         subStreamProblem: null,
         liveSessions: [],
         recordingSession: null,
@@ -175,6 +186,66 @@ export class DevState {
 
   cameraList() {
     return [...this.cameras.values()];
+  }
+
+  /**
+   * status.recentEvents of a camera, as the bridge keeps them (the newest 20 rising edges, oldest first): a made-up event every 8 to 24
+   * minutes (the camera's index sets the pace), plus those sent with POST /__dev/event. Deterministic, so a reload shows the same list.
+   */
+  recentEvents(camera) {
+    const { definition, configuration } = camera;
+    if (!configuration.isEnabled) return [];
+    const period = (6 + definition.index * 2) * 60_000;
+    const offset = definition.index * 97_000;
+    const names = definition.kind === 'doorbell' ? ['Motion', 'Doorbell ring', 'Person', 'Motion'] : ['Motion', 'Person', 'Motion', 'Vehicle'];
+    const out = [];
+    for (let slot = Math.floor((this.serverNow() - offset) / period), k = 0; k < 20; k += 1, slot -= 1) {
+      out.push({ name: names[((slot % 4) + 4) % 4], date: new Date(slot * period + offset).toISOString() });
+    }
+    out.push(...(camera.sentEvents ?? []));
+    return out.sort((a, b) => Date.parse(a.date) - Date.parse(b.date)).slice(-20);
+  }
+
+  /** POST /__dev/event: the event joins the camera's recent events and the archive's events (a motion ends after `seconds`, a ring at once). */
+  noteEvent(camera, name, seconds = 0) {
+    const at = this.serverNow();
+    const video = this.reader !== EMPTY_READER && this.archive.isRecording(camera.definition.id);   // the event log's `video`: the recorder was writing
+    camera.sentEvents = [...(camera.sentEvents ?? []), { name, date: new Date(at).toISOString() }].slice(-20);
+    camera.sentArchive = [...(camera.sentArchive ?? []), { id: `dev-${at.toString(16)}-${(camera.sentArchive?.length ?? 0) + 1}`, name, start: at, end: at + seconds * 1000, video }]
+      .slice(-500);
+  }
+
+  /**
+   * GET nvr/events for one camera: what the bridge's event log would hold, the same made-up schedule as recentEvents over the last
+   * seven days (each event lasts 8 to 62 s, a doorbell ring none), plus those sent with POST /__dev/event. `recorded`, as the bridge
+   * answers it: the virtual archive holds video at the event's start, or the event began less than LIVE_GRACE_MS ago while the camera's
+   * recorder was writing (its fragment may not be readable yet). Oldest first; the route sorts and cuts.
+   */
+  archivedEvents(camera, fromMs, toMs) {
+    const { definition, configuration } = camera;
+    if (!configuration.isEnabled) return [];
+    const now = this.serverNow();
+    const period = (6 + definition.index * 2) * 60_000;
+    const offset = definition.index * 97_000;
+    const names = definition.kind === 'doorbell' ? ['Motion', 'Doorbell ring', 'Person', 'Motion'] : ['Motion', 'Person', 'Motion', 'Vehicle'];
+    const reader = this.reader;
+    const recording = reader !== EMPTY_READER && this.archive.isRecording(definition.id);
+    const out = [];
+    const first = Math.ceil((Math.max(fromMs, now - 7 * 86_400_000) - offset) / period);
+    const last = Math.floor((Math.min(toMs - 1, now) - offset) / period);
+    const recordedAt = (start, video) => reader.containing(definition.id, start) !== null || reader.containing(definition.id, start + 3000) !== null
+      || (video && start >= now - LIVE_GRACE_MS);
+    for (let slot = first; slot <= last; slot += 1) {
+      const name = names[((slot % 4) + 4) % 4];
+      const start = slot * period + offset;
+      const end = name === 'Doorbell ring' ? start : start + (8 + (((slot % 7) + 7) % 7) * 9) * 1000;
+      out.push({ id: `${start.toString(16)}-${definition.index}`, cameraID: definition.id, kind: name, start, end: end <= now ? end : null, recorded: recordedAt(start, recording) });
+    }
+    for (const sent of camera.sentArchive ?? []) {
+      if (sent.start < fromMs || sent.start >= toMs) continue;
+      out.push({ id: sent.id, cameraID: definition.id, kind: sent.name, start: sent.start, end: sent.end <= now ? sent.end : null, recorded: recordedAt(sent.start, sent.video === true) });
+    }
+    return out;
   }
 
   /** `PATCH /cameras/:id/nvr`: the engine's setNVR, which never restarts the camera. A sound change makes a new run, like a new recorder. */

@@ -37,6 +37,18 @@ busy. A stream that replaces another asks the delegate for its packets only afte
 delegate (`RecordingStream` predecessor, bounded by the stop timeout), so a late end of an old stream never cancels a new
 producer that reuses its stream ID.
 
+Battery (2026-10-16): `CameraController.setBattery(_:)` with a `CameraBattery` (`level` 0–100, `chargingState` `.notCharging` / `.charging` /
+`.notChargeable`; `CameraBattery.lowLevel` 20) adds a Battery service (BatteryLevel, ChargingState, StatusLowBattery 1 below 20 %) the first
+time and mirrors each reading into it (only changed values notify). The reading is saved with the camera's state (`PersistedCameraState.battery`,
+kept by a factory reset), so after a restart the service is published from the start and `c#` stays. `CameraController.battery` and
+`CameraController.batteryService` read it back.
+
+Night Vision from the camera (2026-10-16): `CameraController.setNightVision(_:)` (Bool?, nil keeps the value) shows the camera's night vision
+in the Camera Operating Mode service's Night Vision, adding the characteristic the first time when the configuration did not have it (like
+the Battery service: Home reads the new structure under the next `c#`; the saved state's `nightVision` brings it back from the start after a
+restart); only a change notifies. `CameraController.nightVisionWrites` (every controller write of Night Vision; the camera's own changes
+through `setNightVision` are not in it), `CameraController.offersNightVision` and `CameraController.operatingModeService`.
+
 ## Invariants
 
 - TLVs are byte-exact to HAP-NodeJS (list items separated by `00 00`; Opus-only audio, comfort noise off, 1 channel,

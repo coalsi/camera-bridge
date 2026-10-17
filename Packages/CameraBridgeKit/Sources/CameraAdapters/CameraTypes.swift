@@ -159,6 +159,38 @@ extension PanTiltControl {
     }
 }
 
+/// A camera's night vision: `auto` (the camera switches), `on` (night mode, IR lights on), `off` (day mode, IR lights off).
+public enum NightVisionMode: String, Sendable, Codable, CaseIterable {
+    case auto, on, off
+}
+
+/// What a camera's night vision control offers: the modes, and a separate lamp (a white spotlight or IR lamp) the camera switches.
+public struct NightVisionCapabilities: Sendable, Equatable {
+    public var modes: [NightVisionMode]
+    public var light: Bool
+
+    public init(modes: [NightVisionMode], light: Bool) {
+        self.modes = modes
+        self.light = light
+    }
+}
+
+/// A camera's night vision and lamp.
+public protocol NightVisionControl: Sendable {
+    /// Asks the camera (once when the camera starts, again until it answers).
+    func capabilities() async throws -> NightVisionCapabilities
+    /// The mode the camera is in now (nil: unknown).
+    func currentMode() async throws -> NightVisionMode?
+    func setMode(_ mode: NightVisionMode) async throws
+    func setLight(_ on: Bool) async throws
+    /// The lamp as the camera has it now (nil: the camera can't be asked, the default).
+    func currentLight() async throws -> Bool?
+}
+
+extension NightVisionControl {
+    public func currentLight() async throws -> Bool? { nil }
+}
+
 public protocol CameraDriver: Sendable {
     var vendor: CameraVendor { get }
     func probe() async throws -> CameraProbeResult
@@ -187,6 +219,39 @@ public protocol CameraDriver: Sendable {
 
     /// The camera's pan and tilt, nil when it has none (the default).
     func makePanTilt() -> (any PanTiltControl)?
+
+    /// The camera's night vision and lamp, nil when the bridge can't switch them (the default).
+    func makeNightVision() -> (any NightVisionControl)?
+
+    /// The camera's battery, nil when it has none or can't tell (the default). Must never wake the camera (a battery camera's
+    /// account or hub says it); the engine asks every `BatteryStatus.pollInterval` for as long as the answer is not nil.
+    func batteryStatus() async -> BatteryStatus?
+}
+
+/// A battery camera's charge: `level` 0–100 %, whether it is charging and from what (nil: not charging, or the camera doesn't
+/// say).
+public struct BatteryStatus: Sendable, Equatable, Codable {
+    public enum Source: String, Sendable, Equatable, Codable {
+        case solar, cable
+    }
+
+    /// Below this level the battery is low (HomeKit's StatusLowBattery, the page's warning colour).
+    public static let lowLevel = 20
+    /// How often the engine asks a driver that reports a battery.
+    public static let pollInterval: Duration = .seconds(300)
+
+    public var level: Int
+    public var charging: Bool
+    public var source: Source?
+
+    /// `level` is clamped to 0…100; `source` is dropped while not charging.
+    public init(level: Int, charging: Bool, source: Source? = nil) {
+        self.level = min(max(level, 0), 100)
+        self.charging = charging
+        self.source = charging ? source : nil
+    }
+
+    public var isLow: Bool { level < Self.lowLevel }
 }
 
 extension CameraDriver {
@@ -195,6 +260,10 @@ extension CameraDriver {
     public var streamsOnDemand: Bool { false }
 
     public func makePanTilt() -> (any PanTiltControl)? { nil }
+
+    public func makeNightVision() -> (any NightVisionControl)? { nil }
+
+    public func batteryStatus() async -> BatteryStatus? { nil }
 
     public func requestKeyframe(subStream: Bool) async throws {
         throw CameraAdapterError.unsupported("this camera has no keyframe request")

@@ -3,6 +3,15 @@ name: Camera Bridge OS image
 # Builds the Camera Bridge OS disk image (Debian 13, mkosi) and, for tags os-v*, publishes it as a GitHub Release.
 # Tag os-v0.1 -> version 0.1 -> camera-bridge-os-0.1-amd64.img.xz. (The Mac app uses v* tags; the two never mix.)
 #
+# Until 1.0 the OS is one product in public beta, "Camera Bridge OS beta". Every beta still gets its own build number and tag
+# (os-v0.1.109, os-v0.1.110, ...): boxes need it to see an update, and signatures and bug reports name it. At most one beta a day:
+# gather the day's changes into one tag. After a beta is published and checked, the release job removes older betas from GitHub
+# Releases and keeps the newest two (linux/os/prune-betas.sh); their git tags stay, and each one's package list and source offer are
+# first copied to the release os-sources (the source offer in every image promises them for three years). It only lists what it
+# would remove until the repository variable PRUNE_OS_BETAS is "on" (Settings > Secrets and variables > Actions > Variables). From
+# 1.0 on (no leading "0."), releases are normal numbered full releases and are never removed. No OS release is ever "Latest": that is
+# the Mac app's newest v* release, which the site's "Download for Mac" opens.
+#
 # Needed once, as repository secrets (see docs/linux/BUILDING.md, "Release signing"):
 #   MINISIGN_SECRET_KEY   content of the minisign secret key file (create it without a password, or also set the next one)
 #   MINISIGN_PASSWORD     only if the key has a password
@@ -51,6 +60,16 @@ jobs:
         run: linux/os/test-static.sh
       - name: Self-test of the NVR test client (linux/os/test-nvr.py)
         run: python3 -I linux/os/test-nvr.py selftest
+      - name: Self-test of the beta clean-up (linux/os/prune-betas.sh)
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck; }
+          shellcheck linux/os/prune-betas.sh linux/os/test-prune-betas.sh
+          bash linux/os/test-prune-betas.sh
+      - name: Self-test of the internet guard (linux/os/test-guard.sh, cb-guard against recorded dnsmasq lines)
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck; }
+          shellcheck -x linux/os/test-guard.sh linux/os/mkosi.extra/usr/sbin/cb-guard
+          bash linux/os/test-guard.sh
 
   build:
     name: Build image (amd64)
@@ -159,31 +178,49 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          sparse-checkout: linux/web/js/release-notes.js
+          # The notes, the public key the boxes check updates with, and the beta clean-up.
+          sparse-checkout: |
+            linux/web/js/release-notes.js
+            linux/os/mkosi.extra/usr/share/camera-bridge/update-key.pub
+            linux/os/prune-betas.sh
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: camera-bridge-os-${{ needs.build.outputs.version }}-amd64
           path: out
       - name: Check the signatures once more before publishing
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+          key="$GITHUB_WORKSPACE/linux/os/mkosi.extra/usr/share/camera-bridge/update-key.pub"
           cd out
           sha256sum -c SHA256SUMS
-          test -s SHA256SUMS.sig && test -s "camera-bridge-os-${{ needs.build.outputs.version }}-amd64.img.xz.sig"
+          test -s SHA256SUMS.sig && test -s "camera-bridge-os-$VERSION-amd64.img.xz.sig"
+          # With the key that ships in the image, as a box checks an update.
+          minisign -V -q -p "$key" -m SHA256SUMS -x SHA256SUMS.sig
+          minisign -V -q -p "$key" -m "camera-bridge-os-$VERSION-amd64.img.xz" -x "camera-bridge-os-$VERSION-amd64.img.xz.sig"
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.build.outputs.version }}
+          PRUNE_OS_BETAS: ${{ vars.PRUNE_OS_BETAS }}
         run: |
           # Versions before 1.0 are betas, published as pre-releases: a box on a beta takes the next one (cb-update's beta channel), a box on
-          # 1.0 or later only full releases.
+          # 1.0 or later only full releases. A beta is one product, "Camera Bridge OS beta"; the version is its build number.
           PRERELEASE=()
+          TITLE="Camera Bridge OS $VERSION"
+          FIRST_LINE="Camera Bridge OS $VERSION (amd64)."
           WARNING=""
           case "$VERSION" in 0.*)
             PRERELEASE=(--prerelease)
+            TITLE="Camera Bridge OS beta $VERSION"
+            FIRST_LINE="Camera Bridge OS beta, build $VERSION (amd64)."
             WARNING="**Beta.** Camera Bridge OS runs every day on the reference box (Beelink Mini S, Intel N150, 12 GB) and passes automated tests on virtual machines, including install to a disk, updates and automatic rollback. The interface is still being refined before 1.0. Please report what you find in an issue."
+            if [ "$PRUNE_OS_BETAS" = on ]; then
+              WARNING="$WARNING Only the two newest beta builds are listed here. Older builds keep their git tags, and their package lists and source offers are kept in the release os-sources."
+            fi
             ;;
           esac
           # What changed, from the notes the page's About shows (linux/web/js/release-notes.js), when they have this version.
@@ -193,7 +230,7 @@ jobs:
             if (entry) console.log('## ' + entry.title + '\n\n' + entry.items.map((item) => '- ' + item).join('\n'));
           " 2>/dev/null || true)
           cat > notes.md <<EOF
-          Camera Bridge OS $VERSION (amd64).
+          $FIRST_LINE
 
           $WARNING
 
@@ -203,17 +240,67 @@ jobs:
           Licenses and source code: \`SOURCE-OFFER.txt\` and \`camera-bridge-os-$VERSION-packages.txt\` (the exact packages), and docs/linux/LICENSES.md.
           Guide: docs/linux/USER-GUIDE.md. Updates inside the running system use \`SHA256SUMS\`, \`SHA256SUMS.sig\` and the \`cb-os_*\` files.
           EOF
+          FILES=(
+            out/camera-bridge-os-"$VERSION"-amd64.img.xz
+            out/camera-bridge-os-"$VERSION"-amd64.img.xz.sha256
+            out/camera-bridge-os-"$VERSION"-amd64.img.xz.sig
+            out/SHA256SUMS
+            out/SHA256SUMS.sig
+            out/camera-bridge-os-"$VERSION"-packages.txt
+            out/SOURCE-OFFER.txt
+            out/cb-os_"$VERSION"_amd64.efi
+            out/cb-os_"$VERSION"_amd64_root.raw.zst
+          )
+          printf '%s\n' "${FILES[@]#out/}" > release-files.txt   # the next step checks each one on the published release
+          # --latest=false: "Latest" belongs to the Mac app (its v* releases). GitHub would make a full release such as os-v1.0 Latest, and
+          # the site's "Download for Mac" (releases/latest) would then open Camera Bridge OS.
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Camera Bridge OS $VERSION" \
+            --title "$TITLE" \
             --notes-file notes.md \
+            --latest=false \
             "${PRERELEASE[@]}" \
-            out/camera-bridge-os-"$VERSION"-amd64.img.xz \
-            out/camera-bridge-os-"$VERSION"-amd64.img.xz.sha256 \
-            out/camera-bridge-os-"$VERSION"-amd64.img.xz.sig \
-            out/SHA256SUMS \
-            out/SHA256SUMS.sig \
-            out/camera-bridge-os-"$VERSION"-packages.txt \
-            out/SOURCE-OFFER.txt \
-            out/cb-os_"$VERSION"_amd64.efi \
-            out/cb-os_"$VERSION"_amd64_root.raw.zst
+            "${FILES[@]}"
+      - name: Check the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # Older betas are removed only after this passes: the release is there and not a draft, a beta is a pre-release, every file is on
+          # it with the size it has here, the signed list on the release is ours and verifies with the key the boxes use, and the release
+          # did not take "Latest" from the Mac app.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,assets > published.json
+          beta=false; case "$VERSION" in 0.*) beta=true ;; esac
+          jq -e --arg tag "$TAG" --argjson beta "$beta" '.tagName == $tag and .isDraft == false and .isPrerelease == $beta' published.json >/dev/null \
+            || { echo "::error::$TAG is not published as expected"; jq '{tagName, isDraft, isPrerelease}' published.json; exit 1; }
+          while IFS= read -r name; do
+            size=$(jq -r --arg n "$name" '[.assets[] | select(.name == $n) | .size][0] // "missing"' published.json)
+            here=$(stat -c %s "out/$name")
+            [ "$size" = "$here" ] || { echo "::error::$name on the release: $size bytes; built: $here bytes"; exit 1; }
+          done < release-files.txt
+          mkdir -p published
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published --pattern SHA256SUMS --pattern SHA256SUMS.sig
+          cmp published/SHA256SUMS out/SHA256SUMS
+          minisign -V -q -p linux/os/mkosi.extra/usr/share/camera-bridge/update-key.pub -m published/SHA256SUMS -x published/SHA256SUMS.sig
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
+          [ "$latest" != "$TAG" ] || { echo "::error::$TAG became the repository's Latest release, which is the Mac app's. Mark the newest v* release Latest again."; exit 1; }
+          echo "$TAG is published with its $(wc -l < release-files.txt) files and a good signature."
+      - name: Remove older betas (the newest two stay, git tags stay; only listed until PRUNE_OS_BETAS is on)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          KEEP: '2'
+          PRUNE_OS_BETAS: ${{ vars.PRUNE_OS_BETAS }}
+        run: |
+          # Only os-v0.x pre-releases are removed, never the one just published, never a Mac (v*) or full release. Each one's package list
+          # and source offer are copied to the release os-sources and checked there first. The release is published and checked by now,
+          # so a failure here only leaves extra betas listed: it is logged, not fatal. Until the repository variable PRUNE_OS_BETAS is
+          # "on" this is a dry run. By hand, from a checkout: linux/os/prune-betas.sh --repo OWNER/NAME --dry-run.
+          mode=(--dry-run)
+          if [ "$PRUNE_OS_BETAS" = on ]; then mode=(); else
+            echo "::notice::Dry run: older betas are listed, not removed. Set the repository variable PRUNE_OS_BETAS to on to remove them."
+          fi
+          if ! bash linux/os/prune-betas.sh --repo "$GITHUB_REPOSITORY" --except "$TAG" "${mode[@]}"; then
+            echo "::warning::Older betas were not removed (see the log above). The release itself is published."
+          fi

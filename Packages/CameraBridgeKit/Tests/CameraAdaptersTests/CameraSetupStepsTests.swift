@@ -191,8 +191,11 @@ import Testing
         let camera = try await MockONVIFCamera.start()
         defer { camera.stop() }
         let service = CameraSettingsService(endpoint: camera.endpoint, credentials: onvifCredentials, vendor: .onvif)
-        #expect(try await service.readFeature(.cloud).0.state == .notSupported("not supported by this camera"))
-        #expect(try await service.readFeature(.upnp).0.state == .notSupported("not supported by this camera"))
+        #expect(try await service.readFeature(.cloud).0.state == .notSupported("Camera Bridge can’t change this camera’s cloud setting yet. If it has one, "
+            + "block the camera’s internet in your router (see Keep this camera local)."))
+        #expect(try await service.readFeature(.upnp).0.state == .notSupported("Camera Bridge can’t change this camera’s UPnP setting yet. If it has one, "
+            + "block the camera’s internet in your router (see Keep this camera local)."))
+        #expect(try await service.setFeature(.cloud, enabled: false).detail.hasPrefix("Camera Bridge can’t change this camera’s cloud setting yet."))
     }
 
     @Test func theCamerasOwnLabelsAreListed() async throws {

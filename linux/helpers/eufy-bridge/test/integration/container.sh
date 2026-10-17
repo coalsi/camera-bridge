@@ -50,7 +50,9 @@ R=$(api -X POST 127.0.0.1:$PORT/captcha -d "{\"id\":\"$ID\",\"answer\":\"1234\"}
 check "captcha 1234 → signedIn" '[ "$R" = "{\"state\":\"signedIn\",\"account\":\"owner@example.com\"}" ]'
 check "state lines logged" 'grep -q "event=state state=needsCaptcha" "$LOG" && grep -q "event=state state=signedIn" "$LOG"'
 R=$(api 127.0.0.1:$PORT/devices)
-check "devices lists the fake SoloCam" '[ "$R" = "{\"devices\":[{\"serial\":\"T8134FAKE0000001\",\"name\":\"Fake SoloCam\",\"model\":\"T8134\",\"type\":63,\"online\":true,\"battery\":87,\"livestream\":true,\"codec\":\"h264\"}]}" ]'
+# The fake camera charges from its solar panel at midday and runs on its battery otherwise.
+check "devices lists the fake SoloCam" '[ "$(echo "$R" | sed -E "s/\"charging\":(true,\"chargingSource\":\"solar\"|false,\"chargingSource\":null),//")" = "{\"devices\":[{\"serial\":\"T8134FAKE0000001\",\"name\":\"Fake SoloCam\",\"model\":\"T8134\",\"type\":63,\"online\":true,\"battery\":87,\"livestream\":true,\"codec\":\"h264\"}]}" ]'
+check "devices says how the fake SoloCam charges" 'echo "$R" | grep -Eq "\"charging\":(true,\"chargingSource\":\"solar\"|false,\"chargingSource\":null)"'
 
 # 5. Events
 api -N 127.0.0.1:$PORT/events > /tmp/events.ndjson &

@@ -5,6 +5,7 @@ import http from 'node:http';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { CSP, SECURITY_HEADERS } from '../web-dev/lib/security.mjs';
+import { eventPage } from '../web-dev/lib/nvr-routes.mjs';
 import { CAMERA_DEFINITIONS, DAY, HOUR } from '../web-dev/lib/cameras.mjs';
 import { client, startDevServer } from './support/dev-server.mjs';
 import { ensureFixtures, WEB_ROOT } from './support/fixtures.mjs';
@@ -152,6 +153,86 @@ test('activity (R6): a camera listed again is one camera in either letter case, 
   }
   const none = await server.api.get(`nvr/activity?from=${Date.now() - 600_000}&binMs=60000&bins=2`);
   refused(none, 'no cameras parameter');
+});
+
+test('events: the fake event log over the last week, newest first, with ends, recorded where there is footage, paged with more', opts, async () => {
+  await reset();
+  const id = camera('Front Door');
+  const now = (await server.api.get('nvr/cameras')).json.serverTime;
+  const week = await server.api.get(`nvr/events?cameras=${id}&from=${now - 7 * DAY}&to=${now}&limit=1000`);
+  assert.equal(week.status, 200, week.text);
+  assert.equal(week.headers['cache-control'], 'no-store');
+  assert.deepEqual(Object.keys(week.json).sort(), ['events', 'from', 'more', 'serverTime', 'to']);
+  const { events } = week.json;
+  assert.ok(events.length > 100, `${events.length} events in a week`);
+  assert.ok(events.every((e, i) => i === 0 || events[i - 1].start >= e.start), 'newest first');
+  assert.ok(events.every((e) => e.cameraID === id && e.start >= now - 7 * DAY && e.start < now && (e.end === null || e.end >= e.start)));
+  assert.ok(events.some((e) => e.recorded) && events.some((e) => !e.recorded), 'footage covers three of the seven days');
+  assert.ok(events.filter((e) => e.start > now - 2 * DAY && e.start < now - HOUR).every((e) => e.recorded), 'Front Door records without gaps');
+  assert.ok(events.filter((e) => e.start < now - 3.1 * DAY).every((e) => !e.recorded), 'nothing before the footage');
+
+  const page = await server.api.get(`nvr/events?cameras=${id},${camera('Driveway')}&from=${now - DAY}&to=${now}&limit=5`);
+  assert.equal(page.json.events.length, 5);
+  assert.equal(page.json.more, true);
+  const next = await server.api.get(`nvr/events?cameras=${id},${camera('Driveway')}&from=${now - DAY}&to=${page.json.events.at(-1).start}&limit=5`);
+  assert.ok(next.json.events.every((e) => e.start < page.json.events.at(-1).start), 'the next page is older');
+
+  await server.api.dev('event', { id, kind: 'doorbell' });
+  const after = await server.api.get(`nvr/events?cameras=${id}&from=${now - 60_000}&to=${now + 60_000}`);
+  const ring = after.json.events.find((e) => e.kind === 'Doorbell ring' && e.id.startsWith('dev-'));
+  assert.ok(ring, 'an event sent with POST /__dev/event joins the log');
+  assert.equal(ring.end, ring.start, 'a ring ends as it begins');
+
+  const bad = await server.api.get(`nvr/events?cameras=${id}&from=${now}&to=${now}`);
+  assert.deepEqual([bad.status, bad.json?.error, bad.json?.field], [400, 'invalid', 'to']);
+});
+
+test('events: a page never splits a millisecond, so paging below the oldest start gets every event once (eventPage, as ArchiveEventLog.page)', () => {
+  const at = (start, n) => Array.from({ length: n }, (_, i) => ({ id: `${start}-${i}`, start }));
+  const sorted = [...at(9_000, 3), ...at(8_000, 2), ...at(7_000, 1)];   // a ring with its motion and person, as the router stamps them, and more
+  assert.deepEqual(eventPage(sorted, 10), sorted);
+  assert.deepEqual(eventPage(sorted, 2).map((e) => e.start), [9_000, 9_000, 9_000], 'more than the limit at the newest moment: all of it');
+  assert.deepEqual(eventPage(sorted, 4).map((e) => e.start), [9_000, 9_000, 9_000], 'a cut inside a moment leaves all of it for the next page');
+  assert.deepEqual(eventPage(sorted, 5).map((e) => e.start), [9_000, 9_000, 9_000, 8_000, 8_000]);
+  for (let limit = 1; limit <= 7; limit += 1) {
+    let rest = sorted;
+    const seen = [];
+    while (rest.length) {
+      const page = eventPage(rest, limit);
+      seen.push(...page);
+      const oldest = page.at(-1).start;
+      rest = rest.filter((e) => e.start < oldest);   // the next page: to = the oldest start, which the route leaves out
+    }
+    assert.deepEqual(seen, sorted, `limit ${limit}`);
+  }
+});
+
+test('events: an event just sent is recorded while its camera records (the bridge counts the last 2 minutes), not for a camera with Record off', opts, async () => {
+  await reset();
+  const now = (await server.api.get('nvr/cameras')).json.serverTime;
+  for (const [name, recorded] of [['Front Door', true], ['Shed', false]]) {
+    const id = camera(name);
+    await server.api.dev('event', { id, kind: 'motion', seconds: 1 });
+    const answer = await server.api.get(`nvr/events?cameras=${id}&from=${now - 60_000}&to=${now + 60_000}`);
+    const sent = answer.json.events.find((e) => e.id.startsWith('dev-'));
+    assert.ok(sent, `${name}: the event sent is in the log`);
+    assert.equal(sent.recorded, recorded, name);
+  }
+});
+
+test('events: a missing folder is 503 with Retry-After (never an empty page); no place for recordings is no events', opts, async () => {
+  const id = camera('Front Door');
+  const query = (now) => `nvr/events?cameras=${id}&from=${now - DAY}&to=${now}`;
+  await reset('folderMissing');
+  let now = (await server.api.get('nvr/cameras')).json.serverTime;
+  const missing = await server.api.get(query(now));
+  assert.deepEqual([missing.status, missing.json?.error, missing.headers['retry-after']], [503, 'archive_unavailable', '5']);
+  assert.equal(missing.json?.events, undefined);
+  await reset('noFolder');
+  now = (await server.api.get('nvr/cameras')).json.serverTime;
+  const none = await server.api.get(query(now));
+  assert.deepEqual([none.status, none.json?.events, none.json?.more], [200, [], false]);
+  await reset();
 });
 
 // ---- scenarios -------------------------------------------------------------------------------------------------------------------

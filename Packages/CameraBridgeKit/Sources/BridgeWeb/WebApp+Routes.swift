@@ -33,6 +33,8 @@ extension WebApp {
         Route("POST", "cameras/:id/camera-time-zone", takesBody: true) { app, ctx in try await app.cameraTimeZone(ctx) },
         Route("POST", "cameras/:id/clean-picture", takesBody: true) { app, ctx in try await app.cleanPicture(ctx) },
         Route("POST", "cameras/:id/pan-tilt", takesBody: true) { app, ctx in try await app.panTilt(ctx) },
+        Route("POST", "cameras/:id/night-vision", takesBody: true) { app, ctx in try await app.nightVision(ctx) },
+        Route("POST", "cameras/:id/security/check") { app, ctx in try await app.checkSecurity(ctx) },
         Route("GET", "cameras/:id/pairing") { app, ctx in try await app.pairing(ctx) },
         Route("POST", "cameras/:id/reset-pairing") { app, ctx in try await app.resetPairing(ctx) },
         Route("POST", "cameras/:id/test-motion") { app, ctx in try await app.testMotion(ctx) },
@@ -964,5 +966,68 @@ extension WebApp {
             throw APIError(status: 422, code: "pan_tilt_failed", message: ErrorText.describe(error))
         }
         return .empty()
+    }
+}
+
+// MARK: Night vision
+
+extension WebApp {
+    private struct NightVisionBody: Decodable {
+        /// `auto`, `on` (IR lights on), `off`.
+        var mode: String?
+        /// The camera's lamp on or off.
+        var light: Bool?
+    }
+
+    /// `POST cameras/:id/night-vision {mode?, light?}`: sets the camera's night vision mode and/or lamp.
+    func nightVision(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let id = try ctx.uuid("id")
+        let body = try decode(NightVisionBody.self, from: ctx)
+        var mode: NightVisionMode?
+        if let text = body.mode {
+            guard let parsed = NightVisionMode(rawValue: text) else { throw APIError.badRequest("Night vision is auto, on or off.", field: "mode") }
+            mode = parsed
+        }
+        guard mode != nil || body.light != nil else { throw APIError.badRequest("Say the night vision mode or the light.", field: "mode") }
+        guard await backend.overview().configurations.contains(where: { $0.id == id }) else {
+            throw APIError.notFound("There is no camera with this identifier.")
+        }
+        do {
+            try await backend.setNightVision(cameraID: id, mode: mode, light: body.light)
+        } catch EngineError.cameraNotRunning {
+            throw APIError(status: 409, code: "no_night_vision", message: "This camera can’t switch that right now.")
+        } catch {
+            throw APIError(status: 422, code: "night_vision_failed", message: ErrorText.describe(error))
+        }
+        return .empty()
+    }
+}
+
+// MARK: Security
+
+extension WebApp {
+    /// `POST cameras/:id/security/check`: checks the camera now (it is only read) and answers its security level, as `status.security` has
+    /// it. At most once a minute per camera: sooner is 429 with `Retry-After`.
+    func checkSecurity(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let id = try ctx.uuid("id")
+        guard await backend.overview().configurations.contains(where: { $0.id == id }) else {
+            throw APIError.notFound("There is no camera with this identifier.")
+        }
+        do {
+            return .json(CameraSecurityResource(try await backend.checkCameraSecurity(cameraID: id)))
+        } catch let tooSoon as CameraSecurityCheckTooSoon {
+            throw APIError(status: 429, code: "security_check_too_soon", message: "This camera was checked less than a minute ago. Try again in a minute.",
+                           headers: [("Retry-After", String(tooSoon.retryAfterSeconds))])
+        } catch is CameraOfflineError {
+            throw APIError(status: 409, code: "camera_offline", message: "The camera isn’t answering, so it can’t be checked now.")
+        } catch EngineError.unknownCamera {
+            throw APIError.notFound("This camera was removed.")
+        } catch EngineError.cameraNotRunning {
+            throw APIError(status: 422, code: "security_check_unavailable", message: "This bridge can’t check cameras.")
+        } catch EngineError.invalidSettings(let reason) {
+            throw APIError(status: 422, code: "security_check_unavailable", message: ErrorText.sentence(reason))
+        } catch {
+            throw APIError(status: 422, code: "security_check_failed", message: ErrorText.describe(error))
+        }
     }
 }

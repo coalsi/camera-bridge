@@ -8,9 +8,12 @@ import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
 import { loadNVR, nvrSupported } from '../nvr/lite.js';
 import { putCamera, store, subscribe } from '../store.js';
 import { banners } from './banners.js';
-import { cameraSetupCard, setupSupported } from './camera-setup.js';
+import { cameraSetupCard, cameraSetupDialog, localOnlyCard, removalNote, setupSupported } from './camera-setup.js';
+import { batteryCharging, batteryPill } from './cameras.js';
 import { backLink, field, homeState, inlineError, selectField, statePill, switchRow } from './common.js';
+import { createNightVisionCard } from './night-vision.js';
 import { pairingPanel } from './pairing.js';
+import { createSecurityCard, securityBadge, securityView } from './security.js';
 
 const SENSORS = [
   ['person', 'Person Detection', 'person', 'Occupancy sensor (stays on for 60 seconds)'],
@@ -69,6 +72,8 @@ export function renderCamera({ params, navigate, setTitle }) {
   let destroyed = false;
   let pairing = null;
   let recordHandle = null;   // the Record card (from the recording code, which may fail to load)
+  let nightHandle = null;    // the Night vision card: it follows status.nightVision in place, hidden while the camera offers none
+  let securityHandle = null; // the Security card: it follows status.security in place
   let live = false;
   let pictureTimer = null;
   let previewStop = null;   // stops the clock of the preview on screen
@@ -210,6 +215,13 @@ export function renderCamera({ params, navigate, setTitle }) {
     return h('div', null, h('div', { class: 'preview' }, img, video, placeholder, stamp, h('div', { class: 'overlay' }, note, toggle)));
   }
 
+  /** The battery tile's line under the level: how it charges, or that it runs on its battery (low: charge it soon). */
+  function batteryText(battery) {
+    const charging = batteryCharging(battery);
+    if (charging) return charging[0].toUpperCase() + charging.slice(1);
+    return battery.level < 20 ? 'Low: charge it soon' : 'On battery';
+  }
+
   function tiles() {
     const s = camera.status;
     const tile = (k, v, d) => h('div', { class: 'tile' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), d ? h('div', { class: 'd' }, d) : null);
@@ -220,7 +232,8 @@ export function renderCamera({ params, navigate, setTitle }) {
       tile('Picture', s?.videoSummary || 'No picture yet', s?.subStreamProblem ? `Sub stream: ${s.subStreamProblem}` : null),
       tile('Live view', viewersText(s), viewersDetail(s)),
       tile('Home recording', recording, s?.recordingEnabled ? null : 'Turn it on for this camera in the Home app'),
-      tile('Last event', s?.lastEvent || 'None yet', s?.lastEventDate ? timeAgo(s.lastEventDate) : null));
+      tile('Last event', s?.lastEvent || 'None yet', s?.lastEventDate ? timeAgo(s.lastEventDate) : null),
+      s?.battery ? tile('Battery', batteryPill(s.battery, { word: false }), batteryText(s.battery)) : null);
   }
 
   function eventsCard() {
@@ -272,6 +285,12 @@ export function renderCamera({ params, navigate, setTitle }) {
       camera = updated;
       renderAll();
     } catch { /* the event stream brings it */ }
+  }
+
+  // "Fix with Set up for Camera Bridge" and "Watch its internet" on the Security card: the setup's own dialog (it shows every change first).
+  async function openSetup() {
+    const outcome = await cameraSetupDialog(camera);
+    if (outcome !== 'cancelled') refreshCamera();
   }
 
   async function triggerMotion() {
@@ -380,7 +399,8 @@ export function renderCamera({ params, navigate, setTitle }) {
   async function removeCamera() {
     const ok = await confirmDialog({
       title: `Remove “${camera.name}”?`,
-      body: 'Camera Bridge stops publishing this camera and deletes its saved password. Remove it from the Home app as well.',
+      body: ['Camera Bridge stops publishing this camera and deletes its saved password. Remove it from the Home app as well.', removalNote(camera)]
+        .filter(Boolean).join(' '),
       confirm: 'Remove camera', danger: true,
     });
     if (!ok) return;
@@ -417,7 +437,8 @@ export function renderCamera({ params, navigate, setTitle }) {
 
   function renderHead() {
     setTitle(camera.name);
-    replace(headingHost, h('h1', null, camera.name), statePill(camera),
+    const security = securityView(camera);
+    replace(headingHost, h('h1', null, camera.name), statePill(camera), security ? securityBadge(security.level, { prefix: true }) : null,
       h('div', { class: 'actions' }, h('button', { class: 'btn small', type: 'button', onclick: rename }, 'Rename'), saveState));
   }
 
@@ -433,9 +454,14 @@ export function renderCamera({ params, navigate, setTitle }) {
     if (destroyed) return;
     recordHandle?.destroy();
     recordHandle = nvr ? nvr.recordCard(camera) : null;
+    nightHandle?.destroy();
+    nightHandle = createNightVisionCard(camera);
+    securityHandle?.destroy();
+    const canSetUp = setupSupported(camera);
+    securityHandle = createSecurityCard(camera, { canSetUp, openSetup, routerHelp: localOnlyCard });
     const home = homeCard();
     if (camera.status?.paired) { replace(homeHost); replace(homeBottomHost, home); } else { replace(homeBottomHost); replace(homeHost, home); }
-    replace(right, recordHandle?.el, setupSupported(camera) ? cameraSetupCard(camera, { onDone: refreshCamera }) : null, motionCard(), audioCard(), qualityCard(), overlayCard(), hook, connectionCard(),
+    replace(right, recordHandle?.el, securityHandle.el, canSetUp ? cameraSetupCard(camera, { onDone: refreshCamera, localHelp: false }) : null, motionCard(), audioCard(), nightHandle.el, qualityCard(), overlayCard(), hook, connectionCard(),
       h('div', { class: 'card' }, h('h2', null, 'Remove'), h('p', { class: 'desc' }, 'Removes the camera from Camera Bridge. Remove it from the Home app as well.'),
         h('button', { class: 'btn danger', type: 'button', onclick: removeCamera }, icon('trash'), 'Remove camera…')));
   }
@@ -452,6 +478,8 @@ export function renderCamera({ params, navigate, setTitle }) {
       camera = detail;
       renderHead();
       renderStatus();
+      nightHandle?.update(detail);
+      securityHandle?.update(detail);
       // The structure only changes when something other than a status moved (another browser edited it).
       if (before && structure(before) !== structure(detail) && !Object.keys(pending).length) renderAll();
     }
@@ -474,6 +502,8 @@ export function renderCamera({ params, navigate, setTitle }) {
       stop();
       pairing?.destroy();
       recordHandle?.destroy();
+      nightHandle?.destroy();
+      securityHandle?.destroy();
       bannerHost.destroy();
       for (const img of root.querySelectorAll('img')) img.removeAttribute('src');   // closes a live preview
     },

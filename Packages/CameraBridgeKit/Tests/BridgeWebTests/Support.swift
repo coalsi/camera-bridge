@@ -45,6 +45,8 @@ final class FakeBackend: BridgeBackend {
         /// What the camera setup's three calls answer.
         var setup: Result<CameraSetupReport, any Error> = .failure(EngineError.cameraNotRunning)
         var setupGate: AsyncGate?
+        /// What a security check answers.
+        var security: Result<CameraSecurity, any Error> = .failure(EngineError.cameraNotRunning)
     }
 
     let box = Mutex(State())
@@ -183,6 +185,11 @@ final class FakeBackend: BridgeBackend {
     func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
         write { $0.calls.append("setupRestore") }
         return try read { $0.setup }.get()
+    }
+
+    func checkCameraSecurity(cameraID: UUID) async throws -> CameraSecurity {
+        write { $0.calls.append("checkSecurity") }
+        return try read { $0.security }.get()
     }
 }
 

@@ -31,16 +31,37 @@ public struct CredentialStore: Sendable {
         return HTTPCredentials(username: camera.username, password: password ?? "")
     }
 
-    /// Removes everything secret the engine keeps for a camera: its password and its HAP identity and pairing state
-    /// (`HAPStorage.removeAll`). Used when the camera is removed.
+    /// Removes everything secret the engine keeps for a camera: its password, the cloud sign-in its setup kept, and its HAP identity and
+    /// pairing state (`HAPStorage.removeAll`). Used when the camera is removed. Each is tried even when one before it failed, so only
+    /// what could not be deleted stays; the first failure is thrown.
     public func forgetCamera(_ cameraID: UUID, dataDirectory: URL) throws {
-        try setPassword(nil, for: cameraID)
-        try HAPStorage.removeAll(for: cameraID, dataDirectory: dataDirectory, secrets: secrets)
+        var failure: (any Error)?
+        do { try setPassword(nil, for: cameraID) } catch { failure = error }
+        do { try setSetupCloudAuthcode(nil, for: cameraID) } catch { failure = failure ?? error }
+        do { try HAPStorage.removeAll(for: cameraID, dataDirectory: dataDirectory, secrets: secrets) } catch { failure = failure ?? error }
+        if let failure { throw failure }
     }
 
     /// `camera.<UUID>`.
     public static func account(for cameraID: UUID) -> String {
         "camera.\(cameraID.uuidString)"
+    }
+
+    /// The sign-in value of the maker's cloud that "Set up for Camera Bridge" turned off on a camera that speaks the IP camera web API
+    /// (`CameraFeatureBackup.cloudAuthcode`, which is never encoded with the configuration): kept while the setup's backup holds the
+    /// cloud, to give it back with "Restore original settings".
+    func setupCloudAuthcode(for cameraID: UUID) throws -> String? {
+        try secrets.read(account: Self.setupCloudAccount(for: cameraID)).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// nil deletes it.
+    func setSetupCloudAuthcode(_ value: String?, for cameraID: UUID) throws {
+        try secrets.write(value.map { Data($0.utf8) }, account: Self.setupCloudAccount(for: cameraID))
+    }
+
+    /// `camera.<UUID>.setup-cloud`.
+    static func setupCloudAccount(for cameraID: UUID) -> String {
+        "\(account(for: cameraID)).setup-cloud"
     }
 }
 

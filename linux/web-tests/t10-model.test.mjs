@@ -136,16 +136,41 @@ test('new footage refreshes the waveform at most every two seconds', async () =>
   r.model.setCameras([CAM]);
   await r.answer(0);
   assert.equal(r.requests.length, 1);
+  const recorded = () => { r.catalog.extents.get(CAM).newest += 1000; r.catalogChanged(); };
   r.advance(500);
-  r.catalogChanged();
+  recorded();
   assert.equal(r.requests.length, 1, 'too soon');
   r.advance(REFRESH_MS);
   await r.flush();
   assert.equal(r.requests.length, 2);
   await r.answer(1);
   r.advance(REFRESH_MS + 1);
-  r.catalogChanged();
+  recorded();
   assert.equal(r.requests.length, 3, 'after two quiet seconds a change refreshes at once');
+});
+
+test('while the window shows only the past, new footage (after it) asks for nothing; retention inside it does', async () => {
+  // Playing recordings from two hours ago: the catalog changes every second while the cameras record, and the bins on screen stay the same.
+  const r = rig({ mode: 'playing' });
+  r.model.setCameras([CAM]);
+  r.model.select('1h');
+  await r.answer(r.requests.length - 1);
+  const asked = r.requests.length;
+  for (let second = 0; second < 30; second += 1) {
+    r.catalog.extents.get(CAM).newest += 1000;
+    r.catalogChanged();
+    r.advance(1000);
+    r.model.tick();
+    await r.flush();
+    if (r.requests.length > asked) await r.answer(r.requests.length - 1);
+  }
+  assert.equal(r.requests.length, asked, 'nothing new can show in a window that ends before the newest recording');
+  r.catalog.extents.get(CAM).oldest = r.model.viewport.startMs + 10 * MIN;     // retention removed the start of what is on screen
+  r.catalogChanged();
+  r.advance(REFRESH_MS + 1);
+  r.model.tick();
+  await r.flush();
+  assert.equal(r.requests.length, asked + 1);
 });
 
 test('failures retry after 2, 4, 8, 16, 16 seconds and show a problem from the second one', async () => {

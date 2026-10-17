@@ -3,14 +3,17 @@
 // It opens on snapshots: no MediaSource, decoder or byte fetch exists until the first scrub, Play or tile open. The rules are in
 // nvr-model.js (pure) and nvr-controller.js (no DOM); this file builds the session, the cells and the DOM, and draws what the controller says.
 import { get, getBytes } from '../api.js';
-import { h, replace } from '../dom.js';
+import { h, replace, svg } from '../dom.js';
 import { icon } from '../icons.js';
 import { cameraList, subscribe } from '../store.js';
 import { stampText } from '../stamp.js';
 import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
 import { createZoom } from '../live/zoom.js';
 import { createPanTiltPad } from '../live/pan-tilt.js';
+import { createMonitorSide, createNightVisionButtons } from './night-vision.js';
+import { drawSecurityDot } from './security.js';
 import { createWallEvents } from './wall-events.js';
+import { batteryBadge, eventRange, pickAction } from './wall-events-model.js';
 import { labelStyle, showLabel } from '../labels.js';
 import { createFetcher } from '../nvr/fetcher.js';
 import { createCatalog } from '../nvr/catalog.js';
@@ -22,8 +25,12 @@ import { createTimeline } from '../nvr/timeline/view.js';
 import { PRESETS } from '../nvr/timeline/viewport.js';
 import { banners } from './banners.js';
 import {
-  PAGE_SIZES, GRID_LEAD_LIMIT_BYTES, budgetedCell, createKeyDispatcher, createSnapshotScheduler, createTokenBucket, keyAction, parseEpochMs, resolveTileCount, sameLocalDay,
+  PAGE_SIZES, GRID_LEAD_LIMIT_BYTES, MEDIA_REQUESTS, MEDIA_REQUESTS_WHILE_LIVE, budgetedCell, createKeyDispatcher, createSnapshotScheduler, createTokenBucket, keyAction,
+  loadPicture, parseEpochMs, sameLocalDay,
 } from './nvr-model.js';
+import {
+  MOSAIC_MAX_TILES, MOSAIC_MIN_WIDTHS, WALL_GAP, layoutMosaicPage, packMosaic, packingBox, pictureAspect, pictureFit, readWallPrefs, wallCells, writeWallPref,
+} from './nvr-layout.js';
 import { createGridController } from './nvr-controller.js';
 import { createClip } from '../nvr/clip.js';
 import { createRecordingSound, soundSupported } from '../nvr/sound.js';
@@ -31,10 +38,11 @@ import { createRecordingSound, soundSupported } from '../nvr/sound.js';
 const PRESET_LABELS = { '10m': '10 min', '1h': '1 hour', '6h': '6 hours', '24h': '24 hours', all: 'All' };
 const DEFAULT_PRESET = '1h';
 const MODE_WORDS = { snapshots: 'Showing live pictures', live: 'Live', paused: 'Paused', playing: 'Playing' };
-const SNAPSHOT_GUARD_MS = 10_000;
 const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
 /** The grid sizes as the wall's display menu names them. */
 const GRID_LABELS = { 4: 'Grid 2 × 2', 6: 'Grid 3 × 2', 9: 'Grid 3 × 3', 12: 'Grid 4 × 3', 16: 'Grid 4 × 4' };
+/** From this width the Monitor is exactly the window's height and the wall takes what the rows around it leave (monitor.css). */
+const WALL_FIXED_QUERY = '(min-width: 900px)';
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 /** The clock on a picture: day and time ("Tue 14 Oct · 6:27:14 PM"). */
@@ -68,7 +76,13 @@ function setText(el, text) {
 export function renderNVR({ params, navigate, setTitle }) {
   setTitle('Monitor');
   const initialMs = parseEpochMs(params?.[0]);
-  const perPage = resolveTileCount({ query: readQuery('tiles'), stored: readStored('cb.nvr.tiles'), viewportWidth: window.innerWidth });
+  // The wall's choices on this browser (nvr-layout.js): a grid of a size, or the mosaic with its smallest width; Fit or Fill; the live quality.
+  const prefs = readWallPrefs(readStored, { query: readQuery('tiles'), viewportWidth: window.innerWidth });
+  const mosaic = prefs.layout === 'mosaic';
+  // The mosaic's pages hold as many cameras as fit (up to 16): the session is made for 16, and the controller asks the mosaic for the pages.
+  const perPage = mosaic ? MOSAIC_MAX_TILES : prefs.tiles;
+  let fit = prefs.fit;
+  let minWidth = prefs.minWidth;
   const playable = typeof window.MediaSource !== 'undefined' || typeof window.ManagedMediaSource !== 'undefined';
   const memory = remembered;
   remembered = { ...memory, opened: null };
@@ -120,43 +134,37 @@ export function renderNVR({ params, navigate, setTitle }) {
 
   // MARK: Snapshots
 
+  // A picture is an <img> load in a media slot of the page's budget (fetcher.js `slot`): it holds one of the browser's six connections like a
+  // recording's part does, and one that takes too long is cancelled (loadPicture), not left loading.
   function loadSnapshot(id) {
-    return new Promise((resolve) => {
-      const parts = tileParts.get(id);
-      if (!parts) { resolve(false); return; }
-      const back = parts.snaps[parts.front === 0 ? 1 : 0];
-      const front = parts.snaps[parts.front];
-      let finished = false;
-      const finish = (ok) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(guard);
-        back.onload = null;
-        back.onerror = null;
-        resolve(ok);
-      };
-      const guard = setTimeout(() => finish(false), SNAPSHOT_GUARD_MS);
-      back.onload = () => {
-        if (destroyed || tileParts.get(id) !== parts) { finish(false); return; }
-        parts.front = parts.front === 0 ? 1 : 0;
-        setData(back, 'front', 'true');
-        setData(front, 'front', 'false');
-        front.removeAttribute('src');
-        parts.snapshotLoaded = true;
-        parts.snapshotAt = stampText();
-        parts.snapshotMs = Date.now();
-        applySnapshotVisibility(parts);
-        drawLabel(parts);
-        finish(true);
-      };
-      back.onerror = () => finish(false);
-      back.src = `/api/v1/cameras/${id}/snapshot?t=${Date.now()}`;
+    const parts = tileParts.get(id);
+    if (!parts) return Promise.resolve(false);
+    const back = parts.snaps[parts.front === 0 ? 1 : 0];
+    const front = parts.snaps[parts.front];
+    const load = () => loadPicture(back, `/api/v1/cameras/${id}/snapshot?t=${Date.now()}`);
+    return fetcher.slot('bytes', load, { key: 'snapshot' }).catch(() => false).then((ok) => {
+      if (!ok || destroyed || tileParts.get(id) !== parts) return false;
+      parts.front = parts.front === 0 ? 1 : 0;
+      setData(back, 'front', 'true');
+      setData(front, 'front', 'false');
+      front.removeAttribute('src');
+      parts.snapshotLoaded = true;
+      parts.snapshotAt = stampText();
+      parts.snapshotMs = Date.now();
+      applySnapshotVisibility(parts);
+      drawLabel(parts);
+      noteSize(id, back.naturalWidth, back.naturalHeight);
+      return true;
     });
   }
 
-  // The wall refreshes its pictures every 2 s (one at a time) while they are snapshots; tiles playing live video or a recording ask for none.
+  // The wall refreshes its pictures every 2 s (one at a time) while they are snapshots; tiles playing live video or a recording ask for none,
+  // and neither do the tiles hidden behind the one camera opened on its own.
   const snapshots = createSnapshotScheduler({ load: loadSnapshot, intervalMs: 2000,
-    shouldRefresh: (id) => tileParts.get(id)?.look?.refresh === true && tileParts.get(id)?.el.dataset.livevideo !== 'true' });
+    shouldRefresh: (id) => {
+      const parts = tileParts.get(id);
+      return parts?.look?.refresh === true && parts.el.dataset.livevideo !== 'true' && !parts.el.hidden;
+    } });
 
   function applySnapshotVisibility(parts) {
     const shown = parts.look?.snapshot === true && parts.snapshotLoaded;
@@ -182,11 +190,21 @@ export function renderNVR({ params, navigate, setTitle }) {
     const summary = h('span', { class: 'sr-only' });
     const liveVideo = h('video', { class: 'nvr-live', muted: true, playsinline: true, 'aria-label': `Live video from ${tile.name}` });
     const flag = h('span', { class: 'mon-flag', hidden: true });
+    const battery = h('span', { class: 'mon-battery', hidden: true });   // a camera with a battery: its level (status.battery)
     // The camera's sound while the wall is live: one camera at a time (a click on another moves it there).
     const sound = h('button', { class: 'nvr-sound', type: 'button', hidden: true, onclick: (event) => { event.stopPropagation(); setAudible(audibleId === tile.id ? null : tile.id); } });
-    const media = h('div', { class: 'nvr-media' }, snaps, liveVideo, stageFor(tile.id), note, caption, label, sound, h('div', { class: 'nvr-badges' }, flag, busy, chip));
+    const media = h('div', { class: 'nvr-media' }, snaps, liveVideo, stageFor(tile.id), note, caption, label, sound, h('div', { class: 'nvr-badges' }, flag, battery, busy, chip));
+    // Beside the name in the tile's bar: the place for small marks about the camera (drawNameMarks). Empty, it is hidden.
+    const nameSlot = h('span', { class: 'nvr-name-slot', hidden: true });
     const el = h('article', { class: 'nvr-tile', dataset: { id: tile.id, state: 'snapshot', video: 'false', focus: 'false', snapshot: 'hidden', livevideo: 'false', alert: '' }, 'aria-label': tile.name },
-      media, h('div', { class: 'nvr-tile-bar' }, h('h3', null, link)), summary);
+      media, h('div', { class: 'nvr-tile-bar' }, h('h3', null, link), nameSlot), summary);
+    // The picture's size as the page shows it (the live video, or a recording in the stage: media events reach the stage while capturing): the
+    // mosaic's shape for a camera whose status gives no stream size.
+    const sized = (event) => noteSize(tile.id, event.target.videoWidth, event.target.videoHeight);
+    for (const type of ['loadedmetadata', 'resize']) {
+      liveVideo.addEventListener(type, sized);
+      stageFor(tile.id).addEventListener(type, sized, true);
+    }
     el.addEventListener('click', (event) => {
       if (event.defaultPrevented || event.target === link || event.target.closest('button, a')) return;
       if (clip.choosing()) { event.preventDefault(); clip.toggle(tile.id); return; }
@@ -201,7 +219,17 @@ export function renderNVR({ params, navigate, setTitle }) {
       setSolo(soloId === tile.id ? null : tile.id);
     });
     return { el, media, snaps, front: 0, snapshotLoaded: false, link, chip, note, title, detail, retry, busy, caption, summary, look: null,
-      liveVideo, flag, label, sound, player: null, alertTimer: null, snapshotMs: null };
+      liveVideo, flag, battery, batteryKey: '', label, sound, player: null, alertTimer: null, snapshotMs: null, nameSlot, placed: '' };
+  }
+
+  /**
+   * Marks beside a tile's name: `parts.nameSlot` (a <span class="nvr-name-slot"> after the name's heading in the tile's bar) is the place for a
+   * small badge about `camera` (the store's camera, or null), drawn with the tile on every render: its security level's dot (security.js,
+   * none before the camera's first check). The slot shows only when something is in it.
+   */
+  function drawNameMarks(parts, camera) {
+    drawSecurityDot(parts.nameSlot, camera);
+    parts.nameSlot.hidden = !camera || parts.nameSlot.childNodes.length === 0;
   }
 
   function updateTile(parts, tile, started) {
@@ -235,6 +263,8 @@ export function renderNVR({ params, navigate, setTitle }) {
     if (look.caption === 'coarse') { parts.caption.hidden = false; setText(parts.caption, 'Coarse picture'); }
     drawLabel(parts);
     drawSound(parts);
+    drawBattery(parts);
+    drawNameMarks(parts, cameraList().find((camera) => camera.id === tile.id) ?? null);
     setText(parts.summary, tile.summary);
   }
 
@@ -252,17 +282,143 @@ export function renderNVR({ params, navigate, setTitle }) {
     });
     if (soloId !== null && !wanted.has(soloId)) { soloId = null; zoom?.destroy(); zoom = null; }   // the camera left the page
     for (const [id, parts] of tileParts) parts.el.hidden = soloId !== null && id !== soloId;
-    setData(grid, 'count', soloId !== null ? '1' : String(Math.max(1, Math.min(perPage, view.total))));
+    drawShape(view);
     setData(grid, 'solo', String(soloId !== null));
     allButton.hidden = soloId === null;
     cameraLink.hidden = soloId === null;
     if (soloId !== null) cameraLink.setAttribute('href', `#/camera/${soloId}`);
-    const soloStatus = soloId !== null ? cameraList().find((camera) => camera.id === soloId)?.status : null;
-    const turns = soloStatus?.panTilt === true;
-    panTilt.setCamera(turns ? soloId : null, { zoom: soloStatus?.zoom === true });
-    setData(bottom, 'ptz', String(turns));
+    side.setCamera(soloId !== null ? cameraList().find((camera) => camera.id === soloId) ?? null : null);
+    setData(bottom, 'ptz', String(!side.el.hidden));
     grid.hidden = view.noCameras;
     emptyHost.hidden = !view.noCameras;
+  }
+
+  // MARK: The wall's shape: grid cells, the mosaic, Fit or Fill
+
+  const vacantCells = [];          // the plain empty cells after the tiles of a grid that has more cells than cameras
+  const seenSizes = new Map();     // camera id -> { width, height } of a picture the page showed
+  const wideQuery = window.matchMedia?.(WALL_FIXED_QUERY) ?? null;
+  let wallBox = null;              // { width, height } of the wall as it is: where the tiles of the page on screen are placed
+  let packBox = null;              // { width, height } the mosaic's pages are packed into (packingBox: a little more room keeps the pages)
+  let paginatedKey = null;         // what the controller's pages were made from (mosaicKey)
+  const packed = { key: null, lengths: null };
+  const pageLayout = { key: null, layout: null };
+
+  const aspectOf = (camera) => pictureAspect(camera, seenSizes.get(camera.id));
+  /** Narrower than 900 px the Monitor grows with its content: the mosaic packs into the window's height, top-aligned. */
+  const wallFixed = () => wideQuery?.matches ?? true;
+
+  /** The wall's size now (0 × 0 and the like included: a short window can leave it no height); null while it is not on the page. */
+  function measureWall() {
+    if (!grid.isConnected || grid.hidden) return null;
+    const width = grid.clientWidth;
+    const height = wallFixed() ? grid.clientHeight : (document.documentElement.clientHeight || window.innerHeight);
+    return { width, height };
+  }
+
+  /** Takes a measured size: the tiles' box is the wall as it is (none without a size: the grid stands in), the pages' box follows packingBox.
+   *  Whether either changed. */
+  function takeWallSize(measured) {
+    const placed = measured && measured.width > 0 && measured.height > 0 ? measured : null;
+    const pack = packingBox(packBox, measured);
+    const changed = pack !== packBox || placed?.width !== wallBox?.width || placed?.height !== wallBox?.height;
+    wallBox = placed;
+    packBox = placed ? pack : null;
+    return changed;
+  }
+
+  function mosaicKey(cameras) {
+    if (!packBox) return 'unmeasured';
+    return `${packBox.width}x${packBox.height}@${minWidth}:${cameras.map((camera) => `${camera.id}=${aspectOf(camera).toFixed(3)}`).join(',')}`;
+  }
+
+  /** The controller's paginate: the mosaic's page lengths for the whole camera list, or null (a grid, or a wall not measured yet). */
+  function mosaicPages(cameras) {
+    if (!mosaic) return null;
+    const key = mosaicKey(cameras);
+    paginatedKey = key;
+    if (!packBox) return null;
+    if (packed.key !== key) {
+      packed.key = key;
+      packed.lengths = packMosaic(cameras.map(aspectOf), { ...packBox, gap: WALL_GAP, minWidth })?.pages.map((page) => page.count) ?? null;
+    }
+    return packed.lengths;
+  }
+
+  /** The tiles of the page on screen, placed by the mosaic (the same packing as their page's). */
+  function mosaicLayout(tiles) {
+    const byId = new Map(cameraList().map((camera) => [camera.id, camera]));
+    const aspects = tiles.map((tile) => (byId.has(tile.id) ? aspectOf(byId.get(tile.id)) : null));
+    const key = `${wallBox.width}x${wallBox.height}@${minWidth}:${aspects.map((a) => a?.toFixed(3)).join(',')}`;
+    if (pageLayout.key !== key) {
+      pageLayout.key = key;
+      pageLayout.layout = layoutMosaicPage(aspects, { ...wallBox, gap: WALL_GAP, minWidth });
+    }
+    return pageLayout.layout;
+  }
+
+  function placeTile(parts, rect, lift) {
+    const key = rect ? `${rect.left},${rect.top - lift},${rect.width},${rect.height}` : '';
+    if (parts.placed === key || !rect) return;
+    parts.placed = key;
+    parts.el.style.setProperty('--tile-x', `${rect.left}px`);
+    parts.el.style.setProperty('--tile-y', `${rect.top - lift}px`);
+    parts.el.style.setProperty('--tile-w', `${rect.width}px`);
+    parts.el.style.setProperty('--tile-h', `${rect.height}px`);
+  }
+
+  /** Grid or mosaic, the cells of a grid (its empty ones after the tiles), the mosaic's places, and Fit or Fill for every picture. */
+  function drawShape(view) {
+    const solo = soloId !== null;
+    const layoutName = mosaic && !solo && wallBox && packBox && view.tiles.length > 0 ? 'mosaic' : 'grid';
+    setData(grid, 'layout', layoutName);
+    // One camera on its own shows its whole picture (the zoom maps the fitted picture); a mosaic tile has its main stream's shape, but live
+    // video in Smooth is the sub stream, often of another shape: whole too, never cut.
+    setData(grid, 'fit', pictureFit({ solo, mosaic, chosen: fit }));
+    let vacant = 0;
+    if (solo) setData(grid, 'count', '1');
+    else if (mosaic) setData(grid, 'count', String(Math.max(1, view.tiles.length)));
+    else {
+      const cells = wallCells({ perPage, chosen: prefs.tilesChosen, tiles: view.tiles.length, total: view.total });
+      setData(grid, 'count', String(cells.count));
+      vacant = view.noCameras ? 0 : cells.vacant;
+    }
+    while (vacantCells.length < vacant) vacantCells.push(h('div', { class: 'mon-vacant', 'aria-hidden': 'true' }));
+    vacantCells.forEach((cell, i) => {
+      const at = view.tiles.length + i;
+      if (i >= vacant) cell.remove();
+      else if (grid.children[at] !== cell) grid.insertBefore(cell, grid.children[at] ?? null);
+    });
+    if (layoutName !== 'mosaic') return;
+    const layout = mosaicLayout(view.tiles);
+    // Narrower than 900 px the wall is as tall as its rows, from the top.
+    const lift = wallFixed() ? 0 : Math.min(...layout.tiles.map((rect) => rect.top));
+    const bottom = Math.max(...layout.tiles.map((rect) => rect.top + rect.height)) - lift;
+    view.tiles.forEach((tile, i) => { const parts = tileParts.get(tile.id); if (parts) placeTile(parts, layout.tiles[i], lift); });
+    const height = `${bottom}px`;
+    if (grid.style.getPropertyValue('--wall-height') !== height) grid.style.setProperty('--wall-height', height);
+  }
+
+  /** A picture of `id` the page showed is `width` × `height`: the mosaic takes it for a camera whose status gives no stream size. */
+  function noteSize(id, width, height) {
+    if (!(width > 0 && height > 0)) return;
+    const was = seenSizes.get(id);
+    if (was && was.width === width && was.height === height) return;
+    seenSizes.set(id, { width, height });
+    if (mosaic && controller) render();
+  }
+
+  // The wall's size (the window, full screen, a notice or the column beside the events coming and going): measured once a frame, and the
+  // mosaic packed again when it changed.
+  let layoutFrame = null;
+  function layoutWall() {
+    if (destroyed || !mosaic || layoutFrame !== null) return;
+    layoutFrame = requestAnimationFrame(() => {
+      layoutFrame = null;
+      if (destroyed || soloId !== null) return;      // measured again when the wall shows every camera (setSolo)
+      const next = measureWall();
+      if (next && takeWallSize(next)) render();
+    });
   }
 
   // MARK: Transport, pager, notice
@@ -317,12 +473,26 @@ export function renderNVR({ params, navigate, setTitle }) {
   const prevButton = h('button', { class: 'btn small', type: 'button', 'aria-label': 'Previous cameras', onclick: () => controller.previousPage() }, icon('back'));
   const nextButton = h('button', { class: 'btn small', type: 'button', 'aria-label': 'Next cameras', onclick: () => controller.nextPage() }, icon('chevron'));
   const pageLabel = h('span', { class: 'nvr-page-label muted small' });
-  // Cameras per page. Changing it is kept on this browser and the screen is drawn again (the grid takes its size when it is made).
-  const sizes = [...new Set([...PAGE_SIZES, perPage])].sort((a, b) => a - b);
-  const sizeSelect = h('select', { class: 'nvr-size', 'aria-label': 'Cameras per page', onchange: (event) => {
-    writeStored('cb.nvr.tiles', event.target.value);
+  // The wall's layout: a grid of a size, or the mosaic. Changing it is kept on this browser and the screen is drawn again (the session and the
+  // grid take their size when they are made).
+  const sizes = [...new Set([...PAGE_SIZES, prefs.tiles])].sort((a, b) => a - b);
+  const sizeSelect = h('select', { class: 'nvr-size', 'aria-label': 'Wall layout', onchange: (event) => {
+    if (event.target.value === 'mosaic') writeWallPref(writeStored, 'layout', 'mosaic');
+    else { writeWallPref(writeStored, 'layout', 'grid'); writeWallPref(writeStored, 'tiles', event.target.value); }
     window.dispatchEvent(new HashChangeEvent('hashchange'));
-  } }, sizes.map((size) => h('option', { value: String(size), selected: size === perPage }, GRID_LABELS[size] ?? `${size} cameras`)));
+  } },
+  sizes.map((size) => h('option', { value: String(size), selected: !mosaic && size === prefs.tiles }, GRID_LABELS[size] ?? `${size} cameras`)),
+  h('option', { value: 'mosaic', selected: mosaic }, 'Mosaic'));
+  // The mosaic: no tile narrower than this. The cameras that do not fit go on the next page.
+  const minWidthSelect = h('select', { class: 'mon-min-width', 'aria-label': 'Smallest tile width', onchange: (event) => {
+    minWidth = writeWallPref(writeStored, 'minWidth', event.target.value) ?? minWidth;
+    render();
+  } }, MOSAIC_MIN_WIDTHS.map((width) => h('option', { value: String(width), selected: width === minWidth }, `Min ${width} px`)));
+  // A grid's pictures: whole, with black bars where the shapes differ (Fit), or filling the tile, the edges cut (Fill).
+  const fitSelect = h('select', { class: 'mon-fit', 'aria-label': 'Picture in each tile', onchange: (event) => {
+    fit = writeWallPref(writeStored, 'fit', event.target.value) ?? fit;
+    render();
+  } }, h('option', { value: 'fit', selected: fit === 'fit' }, 'Fit: whole picture'), h('option', { value: 'fill', selected: fit === 'fill' }, 'Fill: no black bars'));
   function renderPager(view) {
     prevButton.disabled = view.page <= 0;
     nextButton.disabled = view.page >= view.pages - 1;
@@ -396,6 +566,7 @@ export function renderNVR({ params, navigate, setTitle }) {
     controller.showOnly(id);                // the timeline: that camera's recordings alone, or every camera's again
     render();
     setZoom(id);
+    if (id === null) layoutWall();           // the mosaic's wall may have changed size meanwhile
   }
 
   // Digital zoom on the camera that fills the wall (js/live/zoom.js): drag a box, wheel or pinch; double-click or Esc for the whole picture.
@@ -420,18 +591,18 @@ export function renderNVR({ params, navigate, setTitle }) {
   // live starts it again.
   const liveOn = liveSupported();
   let audibleId = null;   // the camera whose sound plays (none after a page load: browsers play sound only after a click)
-  let liveQuality = readStored('cb.monitor.quality') === 'main' ? 'main' : 'sub';
+  let liveQuality = prefs.quality;   // Full quality (the main stream) unless Smooth was chosen on this browser
   let live = null;   // { request, ids }
   const qualitySelect = h('select', { class: 'mon-quality', 'aria-label': 'Live quality', onchange: (event) => {
-    liveQuality = event.target.value === 'main' ? 'main' : 'sub';
-    writeStored('cb.monitor.quality', liveQuality);
+    liveQuality = writeWallPref(writeStored, 'quality', event.target.value) ?? 'main';
     stopLive();
     render();
-  } }, h('option', { value: 'sub', selected: liveQuality === 'sub' }, 'Smooth'), h('option', { value: 'main', selected: liveQuality === 'main' }, 'Full quality'));
+  } }, h('option', { value: 'main', selected: liveQuality === 'main' }, 'Full quality'), h('option', { value: 'sub', selected: liveQuality === 'sub' }, 'Smooth'));
 
   function stopLive() {
     live?.request.close();
     live = null;
+    fetcher.setMediaCap(MEDIA_REQUESTS);
     for (const parts of tileParts.values()) {
       parts.player?.destroy();
       parts.player = null;
@@ -441,6 +612,7 @@ export function renderNVR({ params, navigate, setTitle }) {
 
   function startLive(ids, stream = liveQuality) {
     stopLive();
+    fetcher.setMediaCap(MEDIA_REQUESTS_WHILE_LIVE);      // the live request holds a connection of its own
     const ordered = ids.map((id) => tileParts.get(id)).filter(Boolean);
     for (const parts of ordered) {
       parts.player = createLivePlayer(parts.liveVideo, {
@@ -501,9 +673,37 @@ export function renderNVR({ params, navigate, setTitle }) {
     }
   }
 
+  /** The battery badge of a camera that reports one (status.battery; another camera shows nothing): level, a bolt while charging, warning colour when low. */
+  function drawBattery(parts) {
+    const badge = batteryBadge(cameraList().find((c) => c.id === parts.el.dataset.id));
+    const key = badge ? `${badge.level}|${badge.charging}|${badge.low}` : '';
+    if (key === parts.batteryKey) return;
+    parts.batteryKey = key;
+    parts.battery.hidden = !badge;
+    if (!badge) { replace(parts.battery); return; }
+    setData(parts.battery, 'low', String(badge.low));
+    setData(parts.battery, 'charging', String(badge.charging));
+    const words = `Battery ${badge.text}${badge.charging ? ', charging' : ''}${badge.low ? ', low' : ''}`;
+    parts.battery.setAttribute('aria-label', words);
+    parts.battery.setAttribute('role', 'img');
+    parts.battery.title = words;
+    const fill = Math.max(1, Math.round((badge.level / 100) * 12));
+    replace(parts.battery,
+      svg('svg', { viewBox: '0 0 18 10', width: 18, height: 10, 'aria-hidden': 'true', focusable: 'false' },
+        svg('rect', { x: 0.5, y: 0.5, width: 15, height: 9, rx: 2, fill: 'none', stroke: 'currentColor' }),
+        svg('rect', { x: 16, y: 3, width: 1.6, height: 4, rx: 0.6, fill: 'currentColor' }),
+        svg('rect', { x: 2, y: 2, width: fill, height: 6, rx: 1, fill: 'currentColor', class: 'mon-battery-fill' }),
+        badge.charging ? svg('path', { d: 'M9 1.2 5.6 5.6h2.6L7 8.8l3.4-4.4H7.8z', class: 'mon-battery-bolt' }) : null),
+      h('span', { 'aria-hidden': 'true' }, badge.text));
+  }
+
   // MARK: Events, clock, full screen
 
   const events = createWallEvents({
+    now: () => catalog.serverNow(),
+    loadEvents: (query) => catalog.events(query),
+    onChange: () => refreshEvents(),
+    onPick: (event) => pickEvent(event),
     onAlert: (id, text, level) => {
       const parts = tileParts.get(id);
       if (!parts) return;
@@ -514,6 +714,33 @@ export function renderNVR({ params, navigate, setTitle }) {
       parts.alertTimer = setTimeout(() => { setData(parts.el, 'alert', ''); parts.flag.hidden = true; }, 12_000);
     },
   });
+
+  /** The events list follows the cameras on the wall (the one opened on its own, alone) and the timeline's range, as the timeline does. */
+  function refreshEvents() {
+    if (destroyed || !lastView) return;
+    const model = timeline.model;
+    events.update({
+      cameraIds: soloId !== null ? [soloId] : lastView.tiles.map((tile) => tile.id),
+      range: eventRange(model?.viewport, { following: model?.following === true }),
+      extentOf: (id) => catalog.extent(id),
+    });
+  }
+
+  /** A row of the list: the playhead a few seconds before the event, every camera of the wall (or the one opened on its own) playing. */
+  function pickEvent(event) {
+    const action = pickAction(event, { extent: catalog.extent(event.cameraId), soloId });
+    if (!action) return;
+    if (action.leaveSolo) setSolo(null);
+    if (clip.choosing()) clip.cancel();
+    controller.focus(event.cameraId);     // the event's camera leads: it has the recording, so its first frame starts the clock
+    if (controller.playAt(action.targetMs)) {
+      announcer.textContent = `Playing from ${timeFormat.format(action.targetMs)}, ${event.label} at ${event.cameraName}`;
+    } else {
+      events.select(null);
+      announcer.textContent = lastView?.playable === false ? 'This browser can’t play recordings.' : 'The recordings aren’t ready yet. Try again in a moment.';
+    }
+  }
+
   const bigClock = h('span', { class: 'mon-big-clock', role: 'timer', 'aria-live': 'off' });
   const fullButton = h('button', { class: 'btn small', type: 'button', onclick: () => toggleFullScreen() });
 
@@ -538,8 +765,10 @@ export function renderNVR({ params, navigate, setTitle }) {
   function drawLabel(parts) {
     const camera = cameraList().find((c) => c.id === parts.el.dataset.id);
     showLabel(parts.label, camera, camera ? labelTime(parts) : null);
-    // The label carries the name: the tile's own heading steps aside (it stays for screen readers and the keyboard).
+    // The label carries the name: the tile's own heading steps aside (it stays for screen readers and the keyboard), and the marks beside it
+    // move away from a label at the top left (monitor.css).
     setData(parts.el, 'labelname', String(!parts.label.hidden && !!camera && labelStyle(camera).showCameraName));
+    setData(parts.el, 'labelpos', camera ? labelStyle(camera).position : '');
   }
 
   function tickClock() {
@@ -555,13 +784,13 @@ export function renderNVR({ params, navigate, setTitle }) {
   const emptyHost = h('div', { class: 'mon-none', hidden: true },
     h('p', null, 'No cameras yet.'), h('a', { class: 'btn primary', href: '#/add' }, icon('plus'), 'Add a camera'));
   const bannerHost = banners();
-  // Pan and tilt: only for one pan/tilt camera opened on its own, beside the events.
-  const panTilt = createPanTiltPad();
+  // Pan and tilt, and night vision: only for one camera opened on its own that has them, in a column beside the events.
+  const side = createMonitorSide(createPanTiltPad(), createNightVisionButtons());
   const bottom = h('div', { class: 'mon-bottom' });
   const el = h('section', { class: 'monitor nvr-page', 'aria-label': 'Monitor' },
     h('div', { class: 'mon-head' },
       h('h1', null, 'Monitor'), allButton, cameraLink, bigClock,
-      h('div', { class: 'mon-actions' }, liveOn ? qualitySelect : null, sizeSelect, events.soundButton, fullButton)),
+      h('div', { class: 'mon-actions' }, liveOn ? qualitySelect : null, sizeSelect, mosaic ? minWidthSelect : fitSelect, events.soundButton, fullButton)),
     events.banners, bannerHost, notice, grid, emptyHost,
     replace(bottom,
       h('div', { class: 'mon-timeline nvr-controls' },
@@ -570,14 +799,20 @@ export function renderNVR({ params, navigate, setTitle }) {
           h('nav', { class: 'nvr-pager', 'aria-label': 'Camera pages' }, prevButton, pageLabel, nextButton)),
         clip.el,
         timelineHost),
-      panTilt.el,
-      h('div', { class: 'mon-activity' }, h('div', { class: 'mon-timeline-head' }, h('strong', null, 'Events')), events.list)),
+      side.el,
+      h('section', { class: 'mon-activity', 'aria-labelledby': 'mon-events-title' }, events.head, events.list)),
     announcer);
 
   let lastView = null;
 
   function render() {
     if (destroyed) return;
+    if (mosaic && soloId === null) {
+      // The first draw after the page is in place measures the wall; a new size, smallest width or picture shape makes new pages. Not while
+      // one camera fills the wall: its column beside the events changes the wall's height, and new pages could take that camera away.
+      if (!wallBox) takeWallSize(measureWall());
+      if (mosaicKey(cameraList()) !== paginatedKey) controller.relayout();
+    }
     const view = controller.view();
     lastView = view;
     renderTiles(view);
@@ -587,6 +822,7 @@ export function renderNVR({ params, navigate, setTitle }) {
     renderNotice(view);
     announce(view);
     clip.tick();
+    refreshEvents();
     snapshots.poke();
     if (pendingFocus !== null) {
       // Back from the watch screen: the tile that was opened gets the keyboard focus again (app.js focuses <main> before this first draw).
@@ -598,14 +834,14 @@ export function renderNVR({ params, navigate, setTitle }) {
   controller = createGridController({
     session, catalog, listCameras: cameraList,
     subscribeCameras: (fn) => subscribe((kind) => { if (kind === 'camera' || kind === 'removed') fn(); }),
-    perPage, initialMs, initialPage: memory.page, initialFocus: memory.focusId, playable,
+    perPage, initialMs, initialPage: memory.page, initialFocus: memory.focusId, playable, paginate: mosaicPages,
     navigate, replaceHash: (path) => { try { history.replaceState(history.state, '', `#${path}`); } catch { /* the address stays as it is */ } },
     remember: (state) => { remembered = { ...remembered, ...state }; },
     formatTime: clockText, now: () => Date.now(),
     setWaveformCameras: (ids) => timeline.setCameras(ids), setSnapshotIds: (ids) => snapshots.setIds(ids), pokeSnapshots: () => snapshots.poke(),
   });
   const stopRendering = controller.subscribe(render);
-  const stopModel = timeline.model?.onChange?.(() => { if (!destroyed) syncPresets(); });
+  const stopModel = timeline.model?.onChange?.(() => { if (!destroyed) { syncPresets(); refreshEvents(); } });
 
   // MARK: Keys and visibility
 
@@ -630,6 +866,12 @@ export function renderNVR({ params, navigate, setTitle }) {
   document.addEventListener('keydown', onKeyDown, true);
   document.addEventListener('visibilitychange', onVisibility);
   document.addEventListener('fullscreenchange', showFullScreen);
+  const wallObserver = mosaic && typeof ResizeObserver === 'function' ? new ResizeObserver(layoutWall) : null;
+  wallObserver?.observe(grid);
+  if (mosaic) {
+    window.addEventListener('resize', layoutWall);
+    wideQuery?.addEventListener?.('change', layoutWall);
+  }
   showFullScreen();
   tickClock();
 
@@ -644,11 +886,15 @@ export function renderNVR({ params, navigate, setTitle }) {
       document.removeEventListener('keydown', onKeyDown, true);
       document.removeEventListener('visibilitychange', onVisibility);
       document.removeEventListener('fullscreenchange', showFullScreen);
+      wallObserver?.disconnect();
+      window.removeEventListener('resize', layoutWall);
+      wideQuery?.removeEventListener?.('change', layoutWall);
+      if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
       if (document.fullscreenElement === el) document.exitFullscreen?.();
       clearInterval(clockTimer);
       stopLive();
       events.destroy();
-      panTilt.destroy();
+      side.destroy();
       for (const parts of tileParts.values()) clearTimeout(parts.alertTimer);
       stopRendering();
       if (typeof stopModel === 'function') stopModel();

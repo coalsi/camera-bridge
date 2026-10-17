@@ -23,20 +23,23 @@ struct PersistedCameraState: Codable, Equatable, Sendable {
     var indicatorEnabled: Bool?
     /// RTP stream management `Active`, by stream index.
     var streamActive: [Bool] = []
+    /// The camera's last battery reading, nil while it has reported none: a camera that has a battery publishes its Battery
+    /// service from the start (before the first new reading), so the accessory's structure, and `c#`, stay the same.
+    var battery: CameraBattery?
 
     enum CodingKeys: String, CodingKey {
         case version, configurationHash, selectedConfiguration, recordingActive, recordingAudioActive, homeKitCameraActive
-        case eventSnapshotsActive, periodicSnapshotsActive, nightVision, indicatorEnabled, streamActive
+        case eventSnapshotsActive, periodicSnapshotsActive, nightVision, indicatorEnabled, streamActive, battery
     }
 }
 
 extension PersistedCameraState {
     /// What HAP-NodeJS `handleFactoryReset` leaves (the accessory lost its last pairing): night vision and the indicator
-    /// (camera settings) stay; the hub's selection, recording, the operating-mode flags and every stream `Active` go back
-    /// to their defaults.
+    /// (camera settings) stay, and so does the battery reading (a fact about the camera); the hub's selection, recording, the
+    /// operating-mode flags and every stream `Active` go back to their defaults.
     func afterFactoryReset() -> PersistedCameraState {
         PersistedCameraState(configurationHash: configurationHash, nightVision: nightVision, indicatorEnabled: indicatorEnabled,
-                             streamActive: streamActive.map { _ in true })
+                             streamActive: streamActive.map { _ in true }, battery: battery)
     }
 
     init(from decoder: any Decoder) throws {
@@ -53,5 +56,6 @@ extension PersistedCameraState {
         nightVision = try container.decodeIfPresent(Bool.self, forKey: .nightVision)
         indicatorEnabled = try container.decodeIfPresent(Bool.self, forKey: .indicatorEnabled)
         streamActive = try container.decodeIfPresent([Bool].self, forKey: .streamActive) ?? defaults.streamActive
+        battery = (try? container.decodeIfPresent(CameraBattery.self, forKey: .battery)) ?? nil
     }
 }

@@ -9,6 +9,15 @@ enum HoldOwner: Hashable, Sendable {
     case doorbell
 }
 
+/// One edge of a camera's event for the archive's event log (`ArchiveEventLog`): `kind` (the names of `SensorState.recentEvents`: "Motion",
+/// "Person", "Doorbell ring", "Tamper", "Alarm input 1", "Sound", …) began or ended at `date`. A doorbell ring begins and ends at once.
+struct EventEdge: Sendable, Equatable {
+    var cameraID: UUID
+    var kind: String
+    var date: Date
+    var began: Bool
+}
+
 /// A true/false signal fed by several origins: on while an origin that reports ends says so (a level), and while any
 /// owner's hold lasts. Every owner has its own hold:
 /// - a start holds the signal for `hold` from that start (pulses: webhook, user, doorbell);
@@ -199,6 +208,7 @@ public actor EventRouter {
     private let date: @Sendable () -> Date
     private let broadcaster = AsyncBroadcaster<EventRouterOutput>(bufferingNewest: 1024)
     private var handler: (@Sendable (EventRouterOutput) -> Void)?
+    private var edgeHandler: (@Sendable ([EventEdge]) -> Void)?
     private var cameras: [UUID: Camera] = [:]
 
     /// `clock` drives hold timers (a manual clock in tests); `date` stamps `lastEventDate` / `lastRingDate`.
@@ -218,6 +228,12 @@ public actor EventRouter {
     /// Called synchronously on the router for every output, before `outputs` subscribers see it. Keep it short.
     public func setOutputHandler(_ handler: (@Sendable (EventRouterOutput) -> Void)?) {
         self.handler = handler
+    }
+
+    /// Called synchronously on the router with the edges of every publication that has any (the rising edges `recentEvents` records, and
+    /// the matching falling edges), all stamped with one date. Keep it short: the engine hands them to the NVR's event log.
+    func setEdgeHandler(_ handler: (@Sendable ([EventEdge]) -> Void)?) {
+        edgeHandler = handler
     }
 
     /// Adds a camera or applies a changed configuration (name, hold, enabled). Disabling ends every state.
@@ -243,6 +259,11 @@ public actor EventRouter {
     public func unregister(cameraID: UUID) {
         guard let camera = cameras.removeValue(forKey: cameraID) else { return }
         camera.timer?.task.cancel()
+        let ending = camera.published.map(Self.activeKinds) ?? []
+        if !ending.isEmpty, let edgeHandler {
+            let stamp = date()
+            edgeHandler(ending.map { EventEdge(cameraID: cameraID, kind: $0, date: stamp, began: false) })
+        }
         if camera.published?.motion == true { emit(.motion(cameraID: cameraID, active: false)) }
     }
 
@@ -457,8 +478,12 @@ public actor EventRouter {
             events.info("\(name) sound \(state.audioAlarm ? "detected" : "ended")")
             if state.audioAlarm { risingEdges.append("Sound") }
         }
-        if let latest = risingEdges.first {
-            let stamp = date()
+        // What ended: a kind active in the last publication that is not now. A ring has no length: it ends as it begins.
+        let nowActive = Set(Self.activeKinds(state))
+        var fallingEdges = Self.activeKinds(previous).filter { !nowActive.contains($0) }
+        if camera.ringPending { fallingEdges.append("Doorbell ring") }
+        let stamp = risingEdges.isEmpty && fallingEdges.isEmpty ? nil : date()
+        if let latest = risingEdges.first, let stamp {
             camera.lastEvent = latest
             camera.lastEventDate = stamp
             // The history the camera page shows (not derived from the log, which the log level may filter): the most
@@ -478,9 +503,23 @@ public actor EventRouter {
         cameras[id] = camera
         schedule(id, now: now)
 
+        if let stamp, let edgeHandler {
+            edgeHandler(risingEdges.reversed().map { EventEdge(cameraID: id, kind: $0, date: stamp, began: true) }
+                + fallingEdges.map { EventEdge(cameraID: id, kind: $0, date: stamp, began: false) })
+        }
         if ring { emit(.doorbell(cameraID: id)) }
         if motionChanged { emit(.motion(cameraID: id, active: state.motion)) }
         if stateChanged { emit(.state(state)) }
+    }
+
+    /// The kinds a state has on, by the names `publish` records: detections, motion, tamper, alarm inputs, sound.
+    static func activeKinds(_ state: SensorState) -> [String] {
+        var kinds = DetectedObjectKind.allCases.filter { state.objects.contains($0) }.map { $0.rawValue.capitalized }
+        if state.motion { kinds.append("Motion") }
+        if state.tampered { kinds.append("Tamper") }
+        kinds += state.digitalInputs.filter(\.value).keys.sorted().map { "Alarm input \($0)" }
+        if state.audioAlarm { kinds.append("Sound") }
+        return kinds
     }
 
     private func schedule(_ id: UUID, now: Duration) {

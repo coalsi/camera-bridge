@@ -45,6 +45,88 @@ import Testing
         #expect(rig.target.openedSegments.count == 3 && rig.target.closedSegments.count == 3)
     }
 
+    /// Frames `range` of a camera whose decode times started again at 0 and whose wall clock says the first of them came at `base + wallStart`.
+    private static func restarted(_ range: Range<Int>, fps: Int = 30, wallStart: TimeInterval) -> [EncodedVideoFrame] {
+        range.map { number in
+            var frame = RecorderFixtures.video(number, fps: fps, gop: 60)
+            frame.wallClock = RecorderFixtures.base.addingTimeInterval(wallStart + Double(number) / Double(fps))
+            return frame
+        }
+    }
+
+    @Test func aFileAfterAClockJumpStartsWhereThePreviousEndedWhenItWouldOverlapIt() async throws {
+        // A camera's timestamps went back (Patio on the box): the new file's first keyframe has a wall clock 0.7 s before the end the first
+        // file's media time reached. The new file starts at that end: no time is in two files and every frame is kept.
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, gop: 60), to: recorder)                 // 0 to 3.333 s
+        await rig.feed(Self.restarted(0..<90, wallStart: 100.0 / 30 - 0.7), to: recorder)           // decode 0 again, captured at 2.633 s
+        await recorder.stop()
+        let segments = rig.target.openedSegments
+        #expect(segments.count == 2, "\(segments)")
+        guard segments.count == 2 else { return }
+        let first = try RecordedFile(rig, segment: item(segments, 0)), second = try RecordedFile(rig, segment: item(segments, 1))
+        #expect(first.index.endWallMs == Int64(RecorderFixtures.base.timeIntervalSince1970 * 1_000) + 3_333)
+        #expect(second.index.startWallMs == first.index.endWallMs, "the second file starts where the first ended, not 700 ms inside it")
+        #expect(first.frameCount == 100 && second.frameCount == 90, "every frame is kept")
+        #expect(try second.rescanned() == second.index, "the mp4's own times say the same")
+    }
+
+    @Test func theFileAfterAMovedFileRollsStartsAtTheCameraTimeAgain() async throws {
+        // The moved file lasts until its roll at 900 s; the next file takes the camera's time again, so the move does not follow the camera
+        // from roll to roll (at a roll the format is the same and the player plays the small overlap straight through).
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, fps: 1, gop: 60), to: recorder)                 // 0 to 100 s
+        await rig.feed(Self.restarted(0..<1_000, fps: 1, wallStart: 100 - 0.7), to: recorder)               // decode 0 again, captured at 99.3 s
+        await recorder.stop()
+        let segments = rig.target.openedSegments
+        #expect(segments.count == 3, "\(segments)")
+        guard segments.count == 3 else { return }
+        let second = try RecordedFile(rig, segment: item(segments, 1)), third = try RecordedFile(rig, segment: item(segments, 2))
+        let baseMs = Int64(RecorderFixtures.base.timeIntervalSince1970 * 1_000)
+        #expect(second.index.startWallMs == baseMs + 100_000, "the file after the clock jump is moved to where the first ended")
+        #expect(third.index.startWallMs == baseMs + 999_300, "the roll's keyframe was captured at 99.3 s + 900 s: \(third.index.startWallMs - baseMs)")
+        #expect(second.frameCount == 900 && third.frameCount == 100, "every frame is kept")
+    }
+
+    @Test func aFileThatWouldOverlapThePreviousByMoreThanTheDivergenceLimitKeepsTheCameraTime() async throws {
+        // More than a second back: the camera's clock really went back, and the file is not moved that far from it (the reader's rule, the
+        // later file wins, decides the overlap).
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, gop: 60), to: recorder)
+        await rig.feed(Self.restarted(0..<90, wallStart: 100.0 / 30 - 1.5), to: recorder)
+        await recorder.stop()
+        let segments = rig.target.openedSegments
+        #expect(segments.count == 2, "\(segments)")
+        guard segments.count == 2 else { return }
+        let first = try RecordedFile(rig, segment: item(segments, 0)), second = try RecordedFile(rig, segment: item(segments, 1))
+        #expect(second.index.startWallMs == first.index.endWallMs - 1_500)
+    }
+
+    @Test func aFileAfterAHoleKeepsTheCameraTime() async throws {
+        // Frames were lost between the files: the hole is real and stays.
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, gop: 60), to: recorder)
+        await rig.feed(Self.restarted(0..<90, wallStart: 100.0 / 30 + 0.4), to: recorder)
+        await recorder.stop()
+        let segments = rig.target.openedSegments
+        #expect(segments.count == 2, "\(segments)")
+        guard segments.count == 2 else { return }
+        let first = try RecordedFile(rig, segment: item(segments, 0)), second = try RecordedFile(rig, segment: item(segments, 1))
+        #expect(second.index.startWallMs == first.index.endWallMs + 400)
+    }
+
     @Test func aSmallGapIsNotABreakAndTheLimitFollowsTheFrameInterval() async throws {
         // 30 fps: a step of 1.4 s stays under max(1.5 s, 4 frame intervals).
         let rig = try RecorderRig()

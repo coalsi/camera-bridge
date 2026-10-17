@@ -54,6 +54,24 @@ function num(v) {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/**
+ * BATTERY_STATUS (param 2111) values the eufy app reads as "solar panel connected"; the SDK's `charging` is
+ * this param decoded as `value ∉ {0,2}` (0/2 = not charging, 3 = plugged in, 4 = charging from a solar panel).
+ */
+const SOLAR_BATTERY_STATUS = new Set([4, 5, 12, 20]);
+const BATTERY_STATUS_PARAM = "2111";
+
+/**
+ * Where a charging camera's power comes from: "solar", "cable", or null (not charging, or the raw status is
+ * unknown or disagrees with `charging`). `status` is the raw BATTERY_STATUS the cloud reported.
+ */
+export function chargingSource(charging, status) {
+  if (charging !== true) return null;
+  const n = num(status);
+  if (n === undefined || n === 0 || n === 2) return null;
+  return SOLAR_BATTERY_STATUS.has(n) ? "solar" : "cable";
+}
+
 function propValue(dev, name) {
   try {
     return dev.getProperty?.(name)?.value;
@@ -313,6 +331,9 @@ export class RealBackend extends EventEmitter {
       if (dev.has?.("battery") && battery !== undefined && battery >= 0 && battery <= 100) d.battery = battery;
       const charging = propValue(dev, "charging");
       if (typeof charging === "boolean") d.charging = charging;
+      // The SDK keeps BATTERY_STATUS only as the `charging` bool; the cloud record's raw param tells solar from cable.
+      const params = rec.params && typeof rec.params === "object" ? rec.params : {};
+      d.chargingSource = chargingSource(charging, params[BATTERY_STATUS_PARAM]);
       const rssi = num(propValue(dev, "wifiRssi")) ?? num(propValue(dev, "rssi"));
       if (rssi !== undefined && rssi < 0) d.wifiRSSI = rssi;
       const fw = info?.firmwareVersion ?? raw.main_sw_version;

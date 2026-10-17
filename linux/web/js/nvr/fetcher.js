@@ -1,7 +1,9 @@
 // The page-wide scheduler for requests to the recordings routes.
 //
-// A browser keeps six connections per host over plain HTTP, and the event stream and a preview picture use two of them, so the page never
-// has more than `caps.bytes` media requests (3) and `caps.json` JSON requests (1) in flight, however many tiles it shows. The server keeps
+// A browser keeps six connections per host over plain HTTP, for every tab of the bridge together. The event stream holds one and, while the wall
+// is live, the live video another; the rest is this: at most `caps.bytes` media requests (3; the Monitor lowers it to 2 while its live video is
+// open, `setMediaCap`) and `caps.json` JSON requests (1) in flight, however many tiles it shows, the snapshots' <img> loads (`slot`) counted as
+// media. So one connection is always free: for the event stream to come back after a drop, a button's request, or another page. The server keeps
 // answering a request after the page lost interest and holds its admission slot until the engine's 5 s deadline, so a request is never
 // aborted to cancel it: a newer request with the same key replaces an OLDER ONE THAT HAS NOT STARTED, and the result of one that has
 // started is simply not used. The only aborts are destroy() and a request stuck beyond STUCK_MS (api.js does that one through `timeoutMs`).
@@ -30,7 +32,8 @@ function retryDelay(error, attempt) {
   return RETRY_DELAYS_MS[attempt];
 }
 
-export function createFetcher({ get, getBytes, sleep, caps = { bytes: 3, json: 1 } }) {
+export function createFetcher({ get, getBytes, sleep, caps: given = { bytes: 3, json: 1 } }) {
+  const caps = { ...given };
   const controller = new AbortController();
   const queue = [];                          // requests that are not running: state 'queued' or 'backoff'
   const running = { bytes: 0, json: 0 };
@@ -73,7 +76,8 @@ export function createFetcher({ get, getBytes, sleep, caps = { bytes: 3, json: 1
     if (request.key != null) busy.add(slot(request));
     let promise;
     try {
-      promise = Promise.resolve((request.kind === 'bytes' ? getBytes : get)(request.path, { signal: controller.signal, timeoutMs: STUCK_MS }));
+      const options = { signal: controller.signal, timeoutMs: STUCK_MS };
+      promise = Promise.resolve(request.run ? request.run(options) : (request.kind === 'bytes' ? getBytes : get)(request.path, options));
     } catch (error) {
       promise = Promise.reject(error);
     }
@@ -84,7 +88,7 @@ export function createFetcher({ get, getBytes, sleep, caps = { bytes: 3, json: 1
   }
 
   function fail(request, error) {
-    if (!isDestroyed && isRetriable(error) && request.attempt < RETRY_DELAYS_MS.length) {
+    if (!isDestroyed && request.retry && isRetriable(error) && request.attempt < RETRY_DELAYS_MS.length) {
       const delay = retryDelay(error, request.attempt);
       request.attempt += 1;
       request.state = 'backoff';              // not running: its slot is free and a newer request with the same key may replace it
@@ -100,11 +104,15 @@ export function createFetcher({ get, getBytes, sleep, caps = { bytes: 3, json: 1
     request.reject(error);
   }
 
-  function enqueue(kind, path, { key, priority = 0 } = {}) {
+  /**
+   * `retry: false`: a 429, 503, 504 or lost connection rejects at once (a caller that tries again on its own schedule). `run({ signal, timeoutMs })`
+   * in place of a path: the page's own request (an <img> load), which holds the slot until its promise settles.
+   */
+  function enqueue(kind, path, { key, priority = 0, retry = true, run = null } = {}) {
     if (isDestroyed) return Promise.reject(destroyedError());
     return new Promise((resolve, reject) => {
       if (key != null) supersede(key, kind);
-      queue.push({ kind, path, key, priority, seq: (sequence += 1), attempt: 0, state: 'queued', resolve, reject });
+      queue.push({ kind, path, run, key, priority, retry, seq: (sequence += 1), attempt: 0, state: 'queued', resolve, reject });
       pump();
     });
   }
@@ -120,7 +128,14 @@ export function createFetcher({ get, getBytes, sleep, caps = { bytes: 3, json: 1
   return {
     json: (path, options) => enqueue('json', path, options),
     bytes: (path, options) => enqueue('bytes', path, options),
+    /** Runs `run({ signal, timeoutMs })` (a request the page makes itself, such as a picture's <img> load) in a `kind` slot, without retries. */
+    slot: (kind, run, options = {}) => enqueue(kind, null, { ...options, run, retry: false }),
     supersede: (key) => supersede(key),
+    /** The most media requests in flight from now on (at least 1): what runs goes on, the next one waits until fewer run. */
+    setMediaCap(count) {
+      caps.bytes = Math.max(1, Math.trunc(count) || 1);
+      pump();
+    },
     stats: () => ({ bytesInFlight: running.bytes, jsonInFlight: running.json, queued: queue.length }),
     destroy() {
       if (isDestroyed) return;

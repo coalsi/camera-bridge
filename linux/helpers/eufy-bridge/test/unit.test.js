@@ -119,3 +119,13 @@ test("tsmux: ADTS splitting keeps partial frames for the next chunk", () => {
   assert.equal(frames.length, 2);
   assert.equal(rest.length, 9);
 });
+
+test("fake backend: charges from its solar panel at midday only", async () => {
+  const { fakeCharge } = await import("../src/backend-fake.js");
+  const at = (h, m = 0) => new Date(2026, 9, 16, h, m).getTime();
+  assert.deepEqual(fakeCharge(at(9, 59)), { charging: false, chargingSource: null });
+  assert.deepEqual(fakeCharge(at(10)), { charging: true, chargingSource: "solar" });
+  assert.deepEqual(fakeCharge(at(15, 59)), { charging: true, chargingSource: "solar" });
+  assert.deepEqual(fakeCharge(at(16)), { charging: false, chargingSource: null });
+  assert.deepEqual(fakeCharge(at(2)), { charging: false, chargingSource: null });
+});

@@ -3,7 +3,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_POLICY, MESSAGES, POLICY_TABLE, browserClass, bufferSeconds, canSeekInChain, choosePolicy, currentEnvironment, dedupeChains, extendChain, findChainPart,
-  follows, governingKey, keyStepLookup, lastChain, makeChain, nextFetches, planEviction, reconcileChains, seekSeconds, timestampOffsetSeconds, unsupportedMessage,
+  follows, governingKey, heldRangeAt, keyStepLookup, lastChain, makeChain, nextFetches, planEviction, rangeAfterHole, rangeHolds, reconcileChains, seekSeconds,
+  timestampOffsetSeconds, unsupportedMessage,
 } from '../web/js/nvr/planner.js';
 
 const ORIGIN = 1_760_000_000_000;
@@ -285,6 +286,69 @@ describe('reconcileChains', () => {
     const chain = chainOf(0, 1);
     const ranges = [{ start: seconds(ORIGIN) + 0.004, end: seconds(ORIGIN + 4000) - 0.004 }];
     assert.equal(reconcileChains([chain], ranges, BASE).length, 1);
+  });
+
+  it('keeps the whole chain when its sound starts or ends a frame inside the picture (the Doorbell: 64 ms at 16 kHz AAC)', () => {
+    const chain = chainOf(0, 2);
+    const [kept] = reconcileChains([chain], [held(ORIGIN + 40, ORIGIN + 6000 - 64)], BASE);
+    assert.deepEqual([kept?.tailId, kept?.endMs], [`${FILE}.2`, ORIGIN + 6000], 'the part appended last is still the tail');
+    const late = chainOf(0, 1, { length: 640 });                                           // a short part (Patio's 640 ms) a frame short
+    assert.equal(reconcileChains([late], [held(ORIGIN, ORIGIN + 1280 - 64)], BASE)[0]?.tailId, `${FILE}.1`);
+  });
+
+  it('keeps a chain across a hole under the slack in what the video holds (the first picture of the next file starts late)', () => {
+    const chain = chainOf(0, 3);
+    const [kept] = reconcileChains([chain], [held(ORIGIN, ORIGIN + 4000), held(ORIGIN + 4100, ORIGIN + 8000)], BASE);
+    assert.equal(kept.tailId, `${FILE}.3`);
+  });
+
+  it('still drops a part that was removed, however short it is', () => {
+    const chain = chainOf(0, 3, { length: 300 });
+    const [kept] = reconcileChains([chain], [held(ORIGIN, ORIGIN + 600), held(ORIGIN + 900, ORIGIN + 1200)], BASE);
+    assert.deepEqual(kept.parts.map((p) => p.id), [`${FILE}.0`, `${FILE}.1`], 'part 2 is gone, so is everything after it');
+    assert.deepEqual(reconcileChains([chainOf(0, 1, { length: 300 })], [held(ORIGIN + 300, ORIGIN + 600)], BASE), [], 'the first part is gone');
+    const short = chainOf(0, 3, { length: 150 });                                           // parts of 150 ms, part 2 removed
+    const [rest] = reconcileChains([short], [held(ORIGIN, ORIGIN + 300), held(ORIGIN + 450, ORIGIN + 600)], BASE);
+    assert.deepEqual(rest.parts.map((p) => p.id), [`${FILE}.0`, `${FILE}.1`], 'a removed 150 ms part, its neighbours held right up to it');
+    assert.deepEqual(reconcileChains([chainOf(0, 1, { length: 150 })], [held(ORIGIN + 150, ORIGIN + 300)], BASE), [], 'a removed first part of 150 ms');
+  });
+
+  it('keeps a last part shorter than three times its sound\'s shortfall (a file break cut it to 150 ms)', () => {
+    const chain = chainOf(0, 3);
+    extendChain(chain, { ...part(4), start: ORIGIN + 8000, end: ORIGIN + 8150 });
+    const [kept] = reconcileChains([chain], [held(ORIGIN, ORIGIN + 8150 - 64)], BASE);
+    assert.equal(kept?.tailId, `${FILE}.4`, 'the part appended last is still the tail');
+  });
+});
+
+describe('what the video element holds', () => {
+  const seconds = (ms) => bufferSeconds(ms, BASE);
+  const held = (fromMs, toMs) => ({ start: seconds(fromMs), end: seconds(toMs) });
+
+  it('rangeHolds: a span is held with a quarter second of slack at the edges when the range reaches into it', () => {
+    const range = held(ORIGIN + 200, ORIGIN + 1800);
+    assert.equal(rangeHolds(range, seconds(ORIGIN), seconds(ORIGIN + 2000)), true);
+    assert.equal(rangeHolds(range, seconds(ORIGIN - 100), seconds(ORIGIN + 2000)), false);
+    assert.equal(rangeHolds(held(ORIGIN, ORIGIN + 150 - 64), seconds(ORIGIN), seconds(ORIGIN + 150)), true, 'a 150 ms span whose sound ends 64 ms early');
+    assert.equal(rangeHolds(held(ORIGIN + 40, ORIGIN + 150), seconds(ORIGIN), seconds(ORIGIN + 150)), true, 'a 150 ms span whose sound starts 40 ms late');
+    assert.equal(rangeHolds(held(ORIGIN - 2000, ORIGIN + 2), seconds(ORIGIN), seconds(ORIGIN + 150)), false, 'a range that ends where the span starts');
+    assert.equal(rangeHolds(held(ORIGIN + 148, ORIGIN + 2000), seconds(ORIGIN), seconds(ORIGIN + 150)), false, 'a range that starts where the span ends');
+  });
+
+  it('heldRangeAt finds the range a playhead stands in, its end included', () => {
+    const ranges = [held(ORIGIN, ORIGIN + 4000), held(ORIGIN + 4100, ORIGIN + 8000)];
+    assert.equal(heldRangeAt(ranges, seconds(ORIGIN + 4000)), ranges[0]);
+    assert.equal(heldRangeAt(ranges, seconds(ORIGIN + 4050)), null);
+    assert.equal(heldRangeAt(ranges, seconds(ORIGIN + 4100)), ranges[1]);
+  });
+
+  it('rangeAfterHole: the next range when the hole is short and the range long enough for a seek', () => {
+    const ranges = [held(ORIGIN, ORIGIN + 4000), held(ORIGIN + 4100, ORIGIN + 8000), held(ORIGIN + 9500, ORIGIN + 20_000)];
+    const options = { maxHoleSec: 1, minSec: 0.72 };
+    assert.equal(rangeAfterHole(ranges, seconds(ORIGIN + 3400), options), ranges[1]);
+    assert.equal(rangeAfterHole(ranges, seconds(ORIGIN + 7500), options), null, 'a hole of 1.5 s is a gap');
+    assert.equal(rangeAfterHole([held(ORIGIN, ORIGIN + 4000), held(ORIGIN + 4100, ORIGIN + 4500)], seconds(ORIGIN + 3400), options), null, 'too short to show a picture');
+    assert.equal(rangeAfterHole(ranges, seconds(ORIGIN + 4050), options), null, 'not in what is held');
   });
 });
 

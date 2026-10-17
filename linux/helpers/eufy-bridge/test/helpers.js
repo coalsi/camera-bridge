@@ -30,11 +30,11 @@ export function captureLog() {
   return { lines, restore: () => setSink(prev) };
 }
 
-export async function startApp({ backend, dir, hubOptions, pingMs, fake } = {}) {
+export async function startApp({ backend, dir, hubOptions, pingMs, fake, clock } = {}) {
   dir ??= tempDir();
   const state = new StateDir(join(dir, "state"));
   const ffmpeg = findFfmpeg();
-  backend ??= new FakeBackend({ state, ffmpeg, wakeMs: 200 });
+  backend ??= new FakeBackend({ state, ffmpeg, wakeMs: 200, clock });
   const bridge = new Bridge({ backend, state, ffmpeg, hubOptions });
   const server = createServer({ bridge, token: TOKEN, fake: fake ?? (backend instanceof FakeBackend ? backend : undefined), pingMs });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));

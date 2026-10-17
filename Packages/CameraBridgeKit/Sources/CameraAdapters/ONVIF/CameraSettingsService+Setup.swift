@@ -3,12 +3,15 @@ import Foundation
 
 // "Set up for Camera Bridge" (docs/superpowers/specs/2026-10-16-camera-setup-design.md): the steps that make a camera right for the bridge, each
 // read (its current value is also the backup), planned, applied, read back and restorable. This file has the shared types, the time zone
-// step and the clean-picture reading; +NTP.swift the time source, +Network.swift the camera's cloud and UPnP. The streams step is the
-// HomeKit optimizer's encoder changes (+Encoder.swift), planned by the engine.
+// step and the clean-picture reading; +NTP.swift the time source, +DNS.swift the internet guard's Watch, +Network.swift the camera's cloud
+// and UPnP, IPCamWeb/ the video password and the extra services of the IPCamera Web family. The streams step is the HomeKit optimizer's encoder changes (+Encoder.swift), planned
+// by the engine.
 
-/// One step of the setup, in the order the steps are applied (the clock first, the cloud last).
+/// One step of the setup, in the order the steps are applied (the clock first; Restore goes in reverse). A refused step stops the steps
+/// after it, so the steps not yet tried on many cameras come after UPnP off and Cloud off: the IPCamera Web family's video password and
+/// extra services, then `internetWatch` (the camera's DNS pointed at the bridge, Camera Bridge OS's internet guard, Watch), last.
 public enum CameraSetupStepID: String, Sendable, Codable, CaseIterable {
-    case timeZone, timeSource, cleanPicture, streams, upnp, cloud
+    case timeZone, timeSource, cleanPicture, streams, upnp, cloud, videoPassword, extraServices, internetWatch
 }
 
 /// One value a step changes, as a person reads it ("Main stream": "H.265, 20 fps, keyframe every 2.5 s" → "H.264, 20 fps, keyframe every 2 s").
@@ -30,6 +33,8 @@ public struct CameraSetupReading: Sendable, Equatable {
         case willChange
         case alreadyRight
         case notSupported(String)
+        /// The setup does not offer the step for this camera (the IPCamera Web family's steps on another camera), with why.
+        case notOffered(String)
     }
 
     public var state: State
@@ -44,6 +49,8 @@ public struct CameraSetupReading: Sendable, Equatable {
     }
 
     public static func notSupported(_ reason: String = "not supported by this camera") -> CameraSetupReading { .init(state: .notSupported(reason)) }
+
+    public static func notOffered(_ reason: String = "not offered for this camera") -> CameraSetupReading { .init(state: .notOffered(reason)) }
 }
 
 /// What applying or restoring a step did.
@@ -102,20 +109,45 @@ public struct CameraStreamsBackup: Sendable, Codable, Equatable {
     public var isEmpty: Bool { mainEncoder == nil && subEncoder == nil && mainSmartCodec == nil && subSmartCodec == nil }
 }
 
-/// A camera network feature's switch before the setup turned it off (Hikvision's UPnP, Hik-Connect).
+/// A camera network feature's switch before the setup turned it off (Hikvision's UPnP, Hik-Connect; the cloud of a camera that speaks the
+/// IP camera web API).
 public struct CameraFeatureBackup: Sendable, Codable, Equatable {
-    /// The ISAPI resource it was read from (the cloud's path varies between firmwares).
+    /// The ISAPI resource it was read from (the cloud's path varies between firmwares); the web API's read for the web API's cloud.
     public var path: String
     public var enabled: Bool
+    /// IP camera web API: the cloud's `Type` and `Authcode` as the camera had them, written back with the switch. The Authcode signs the
+    /// camera in to its maker's cloud: it is never encoded (the configuration goes to the page, its events and the Mac's backup file) and
+    /// never logged; the engine keeps it in the platform's secret store while the backup holds the cloud, and puts it back here to
+    /// restore it.
+    public var cloudType: String?
+    public var cloudAuthcode: String? = nil
 
-    public init(path: String, enabled: Bool) {
+    public init(path: String, enabled: Bool, cloudType: String? = nil, cloudAuthcode: String? = nil) {
         self.path = path
         self.enabled = enabled
+        self.cloudType = cloudType
+        self.cloudAuthcode = cloudAuthcode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, enabled, cloudType
     }
 }
 
-/// Everything the setup changed on a camera, as the camera had it before: one backup, one way back. Nothing secret is kept (no document
-/// with a verification code or a password; only the values the setup changes). Saved in the camera's configuration.
+/// The switches of a camera's own services before the setup changed them (the IPCamera Web family: `rtsp` and `onvif` `authorized` for the
+/// video password, `hik` and `meari` `on` for the extra services): service → attribute → value, as the camera had them. Only switches.
+public struct CameraServiceSwitchesBackup: Sendable, Codable, Equatable {
+    public var services: [String: [String: String]]
+
+    public init(services: [String: [String: String]]) {
+        self.services = services
+    }
+}
+
+/// Everything the setup changed on a camera, as the camera had it before: one backup, one way back. Only the values the setup changes are
+/// kept (no document with a verification code or a password); the one sign-in value, the IP camera web API cloud's Authcode
+/// (`CameraFeatureBackup.cloudAuthcode`, which turning that cloud back on needs), is not encoded with it. Saved in the camera's
+/// configuration.
 public struct CameraSetupBackup: Sendable, Codable, Equatable {
     public var version: Int
     public var created: Date
@@ -125,10 +157,15 @@ public struct CameraSetupBackup: Sendable, Codable, Equatable {
     public var streams: CameraStreamsBackup?
     public var upnp: CameraFeatureBackup?
     public var cloud: CameraFeatureBackup?
+    public var videoPassword: CameraServiceSwitchesBackup?
+    public var extraServices: CameraServiceSwitchesBackup?
+    /// The camera's DNS servers before "Watch its internet" pointed them at the bridge.
+    public var internetWatch: CameraDNSBackup?
 
     public init(version: Int, created: Date, timeZone: CameraTimeZoneBackup? = nil, timeSource: CameraTimeSourceBackup? = nil,
                 cleanPicture: CleanPictureBackup? = nil, streams: CameraStreamsBackup? = nil, upnp: CameraFeatureBackup? = nil,
-                cloud: CameraFeatureBackup? = nil) {
+                cloud: CameraFeatureBackup? = nil, videoPassword: CameraServiceSwitchesBackup? = nil, extraServices: CameraServiceSwitchesBackup? = nil,
+                internetWatch: CameraDNSBackup? = nil) {
         self.version = version
         self.created = created
         self.timeZone = timeZone
@@ -137,6 +174,9 @@ public struct CameraSetupBackup: Sendable, Codable, Equatable {
         self.streams = streams
         self.upnp = upnp
         self.cloud = cloud
+        self.videoPassword = videoPassword
+        self.extraServices = extraServices
+        self.internetWatch = internetWatch
     }
 
     /// Whether this backup holds the step's original value.
@@ -144,8 +184,11 @@ public struct CameraSetupBackup: Sendable, Codable, Equatable {
         switch step {
         case .timeZone: timeZone != nil
         case .timeSource: timeSource != nil
+        case .internetWatch: internetWatch != nil
         case .cleanPicture: cleanPicture != nil
         case .streams: streams.map { !$0.isEmpty } ?? false
+        case .videoPassword: videoPassword != nil
+        case .extraServices: extraServices != nil
         case .upnp: upnp != nil
         case .cloud: cloud != nil
         }
@@ -157,8 +200,11 @@ public struct CameraSetupBackup: Sendable, Codable, Equatable {
         switch step {
         case .timeZone: copy.timeZone = nil
         case .timeSource: copy.timeSource = nil
+        case .internetWatch: copy.internetWatch = nil
         case .cleanPicture: copy.cleanPicture = nil
         case .streams: copy.streams = nil
+        case .videoPassword: copy.videoPassword = nil
+        case .extraServices: copy.extraServices = nil
         case .upnp: copy.upnp = nil
         case .cloud: copy.cloud = nil
         }
@@ -236,6 +282,8 @@ extension CameraSettingsService {
             }
             return try await client.dateTimeSettings().timeZone == backup.value ? CameraSetupOutcome(succeeded: true, detail: "via ONVIF")
                 : .refused("the camera did not take its old time zone back")
+        case .ipcWebAPI:
+            return .refused("the time zone was not saved through the web API")
         }
     }
 
@@ -254,8 +302,15 @@ extension CameraSettingsService {
 // MARK: - Clean picture (reading)
 
 extension CameraSettingsService {
-    /// Which labels the camera draws itself now (for the preview; `cleanPicture()` turns them off and keeps the backup).
+    /// Which labels the camera draws itself now (for the preview; `cleanPicture()` turns them off and keeps the backup). An ONVIF camera
+    /// that speaks the IP camera web API is read there only (its ONVIF on-screen display answers cannot be trusted), and is not possible
+    /// now when that API cannot be asked.
     public func readCleanPicture() async throws -> CameraSetupReading {
+        switch try await ipcWeb() {
+        case .speaks(let client, _): return try await readIPCWebCleanPicture(client)
+        case .unavailable(let why): return .notSupported(why)
+        case .none: break
+        }
         var shown: [String] = []
         var supported = false
         if vendor == .hikvision {

@@ -8,7 +8,7 @@
 //   * it never removes the buffered range under the playhead (the unit that holds the keepAround time stays; see planEviction).
 // Buffer times are seconds on the page's time line: (epoch ms - the catalog's baseMs) / 1000.
 import { realTimers } from './clock.js';
-import { DEFAULT_POLICY, MESSAGES, planEviction, unsupportedMessage } from './planner.js';
+import { DEFAULT_POLICY, MESSAGES, planEviction, rangeHolds, unsupportedMessage } from './planner.js';
 
 export const BUDGET_BYTES = 16 * 1_048_576;      // at most this much held per tile
 const PRESENT_TIMEOUT_MS = 1500;                // a seek that shows no frame within this has failed
@@ -335,9 +335,10 @@ export class MseSurface {
 
   // MARK: Memory
 
-  #syncLedger(tolerance = 0.05) {
+  /** Forgets what the browser removed by itself. A part whose sound ends a frame before its picture is still held (rangeHolds), and removable. */
+  #syncLedger() {
     const ranges = this.held();
-    this.#ledger = this.#ledger.filter((entry) => ranges.some((r) => r.start <= entry.startSec + tolerance && r.end >= entry.endSec - tolerance));
+    this.#ledger = this.#ledger.filter((entry) => ranges.some((r) => rangeHolds(r, entry.startSec, entry.endSec)));
   }
 
   async #evict(keepAroundSec, budget) {

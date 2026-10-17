@@ -150,6 +150,7 @@ final class CountingBackend: BridgeBackend {
     func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.applyCameraSetup(cameraID: cameraID) }
     func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.restoreCameraSetup(cameraID: cameraID) }
     func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws { try await base.panTilt(cameraID: cameraID, pan: pan, tilt: tilt, zoom: zoom) }
+    func setNightVision(cameraID: UUID, mode: NightVisionMode?, light: Bool?) async throws { try await base.setNightVision(cameraID: cameraID, mode: mode, light: light) }
     func triggerTestMotion(cameraID: UUID) async { await base.triggerTestMotion(cameraID: cameraID) }
     func pause() async { await base.pause() }
     func resume() async { await base.resume() }

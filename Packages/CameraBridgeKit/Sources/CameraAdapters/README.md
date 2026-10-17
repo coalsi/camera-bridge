@@ -1,6 +1,6 @@
 # CameraAdapters
 
-Vendor drivers (Hikvision ISAPI, Reolink API, ONVIF, generic RTSP, demo), self-reconnecting event sources, talkback
+Vendor drivers (Hikvision ISAPI, Reolink API, ONVIF with the IP camera web API next to it, generic RTSP, demo), self-reconnecting event sources, talkback
 sinks, WS-Discovery, soft motion detection and the local webhook server. Portable: depends on RTSP, RTP, MediaCore,
 BridgeSupport only; HTTP through `AuthenticatingHTTPClient`, TCP through the injected `NetworkTransport`, XML through
 Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP sockets (`Darwin`/`Glibc`). Owner: W1-7.
@@ -189,7 +189,10 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
 
 `Tests/CameraAdaptersTests`: fixture-driven parsers and mappers (`Fixtures/{onvif,hikvision,reolink}`, synthetic, read
 via `#filePath`); loopback mock cameras (`MockHTTPServer` on `AppleNetworkTransport` + `HTTPRequestParser`, macOS
-only); RTSP through `FakeRTSPSession` (no real RTSP or LAN traffic; the live multicast probe is not unit-tested).
+only); RTSP through `FakeRTSPSession` (no real RTSP or LAN traffic; the live multicast probe is not unit-tested). The IP camera web API:
+`IPCWebTests` (DES and token vectors, the page check, the request's bytes, editing in place, night vision and its overlapping changes,
+the latch, the shared login pause) and `IPCWebSetupTests` against `FakeIPCWebCamera`. The internet guard's DNS: `CameraDNSTests` (two real
+cameras' ONVIF answers, then read, apply, read back, restore, refusals and IPv6 against `MockONVIFCamera` and `FakeSetupCamera`).
 
 ## References
 
@@ -200,19 +203,45 @@ published), and Scrypted's Hikvision, ONVIF and Reolink plugins (read for behavi
 
 The camera's side of "Set up for Camera Bridge" (design: `docs/superpowers/specs/2026-10-16-camera-setup-design.md`): every step is read
 (its value then is the backup), applied with a read-modify-write of the camera's own document, read back, and restorable.
-`CameraSetupStepID` (in apply order: `timeZone`, `timeSource`, `cleanPicture`, `streams`, `upnp`, `cloud`), `CameraSetupChange`,
-`CameraSetupReading` (`willChange`, `alreadyRight`, `notSupported`), `CameraSetupOutcome` (with `needsRestart` for ISAPI `statusCode` 7,
+`CameraSetupStepID` (in apply order: `timeZone`, `timeSource`, `internetWatch`, `cleanPicture`, `streams`, `videoPassword`, `extraServices`, `upnp`, `cloud`), `CameraSetupChange`,
+`CameraSetupReading` (`willChange`, `alreadyRight`, `notSupported`, `notOffered`), `CameraSetupOutcome` (with `needsRestart` for ISAPI `statusCode` 7,
 which is noted and never acted on), `CameraSetupBackup` (one backup: `CameraTimeZoneBackup`, `CameraTimeSourceBackup`, `CleanPictureBackup`,
-`CameraStreamsBackup`, `CameraFeatureBackup`; nothing secret, never a Hik-Connect verification code), `CameraNetworkFeature`, `CameraSetupText`
+`CameraStreamsBackup`, `CameraFeatureBackup`; never a Hik-Connect verification code; the IP camera web API cloud's Authcode, which turning
+that cloud back on needs, is carried but never encoded), `CameraNetworkFeature`, `CameraSetupText`
 (the values in a person's words). `CameraSettingsService.readTimeZone(posix:zoneName:)` / `applyTimeZone(posix:)` / `restoreTimeZone(_:)`
 (Hikvision ISAPI `/ISAPI/System/time` `timeZone` in Hikvision's own text, else ONVIF; Reolink its daylight-saving switch),
 `CameraSettingsService.readTimeSource(server:)` / `applyTimeSource(server:)` / `restoreTimeSource(_:)` (ISAPI mode NTP and
 `/ISAPI/System/time/ntpServers/1`; ONVIF `SetNTP` then `SetSystemDateAndTime` with NTP), `CameraSettingsService.readCleanPicture()`,
 `CameraSettingsService.readFeature(_:)` / `setFeature(_:enabled:path:)` (Hikvision UPnP and Hik-Connect: `/ISAPI/System/Network/capabilities`
 says whether the camera has them, the cloud's path is tried as `EZVIZ` then `Ezviz`). Streams are only ever H.264/H.265: `CameraSettingsService.isStreamCodec(_:)`; `fetchSnapshot()` picks the main and sub
-profiles among those whose `GetStreamUri` path matches the configured URLs (`CameraSettingsService.init(…subStreamURL:)`), else the largest
+profiles among those whose `GetStreamUri` address matches the configured URLs (`CameraSettingsService.init(…subStreamURL:)`; the same path and the same value for every query parameter both name, a missing Dahua `subtype` being 0, `sameStream`), else the largest
 and smallest such profiles, never a JPEG one; `CameraSetupReading.note` says when one of them is not offered. A `CameraSettingsService` keeps one ISAPI client for its
 life (a client per request can crash FoundationNetworking on Linux).
+
+## Additions beyond the contract: Internet guard, the camera's DNS (2026-10-17, docs/CONTRACT_CHANGES.md)
+
+Stage 1 (Watch) of the internet guard (design: `docs/superpowers/specs/2026-10-17-internet-guard-design.md`), the camera's side: its DNS
+servers pointed at the bridge, so the bridge sees every name it looks up. `CameraDNSBackup` (`method`, `fromDHCP`, `servers`, optional
+`searchDomains`), `CameraDNSReading` (`servers` in use, `fromDHCP`, `method`, `backup`, `pointsAt(_:)`: the camera asks that address and no
+other, an IPv6 address matching however it is written), `CameraSettingsService.readDNS()` (nil when the camera does not show its DNS
+servers; throws a login refusal), `CameraSettingsService.applyDNS(server:)` (that one address only, read back) and
+`CameraSettingsService.restoreDNS(_:)` (read back). Hikvision through ISAPI: `/ISAPI/System/Network/interfaces/1/ipAddress`, a
+read-modify-write of the whole document in which only the `ipAddress` inside `PrimaryDNS` and `SecondaryDNS` changes (both set to the
+bridge; the camera's own address, `addressingType` and gateway stay as they are; a missing `SecondaryDNS` is not added; IPv4 only;
+`statusCode` 7 noted, never acted on: the step is done, waiting for the camera's restart, and the security check reads the DNS again before
+the guard counts the camera as watched; a camera that shows no document after the write is a refusal). The ISAPI document is built from the ISAPI 2.0 schema's shape and is not yet checked on a real
+camera. Other cameras, and a Hikvision without that document, through ONVIF: `GetDNS` / `SetDNS` (`DNSManual` entries, IPv4 and IPv6; the
+search domains are written back as the camera had them), checked against two real cameras' answers (one on DHCP, one set by hand).
+Internal, read only until Seal: `ONVIFClient.defaultGateway()` (`GetNetworkDefaultGateway`) and `networkInterfaces()`
+(`GetNetworkInterfaces`: DHCP or fixed, the addresses with their prefix lengths; never the MAC address). The IP camera web API's own
+network settings (`getNetworkConfig`, whose answer also holds the camera's mail, FTP and Wi-Fi passwords) are not used.
+
+The setup step "Watch its internet" (`CameraSetupStepID.internetWatch`, the last step; the engine offers it only where the bridge has
+the guard: BridgeEngine's README): `CameraSettingsService.readInternetWatch(server:)` reads the DNS servers against the bridge's address for
+the preview (the change row "DNS": "8.8.8.8 and 1.1.1.1", "1.1.1.1 and 8.8.8.8 from the router (DHCP)", "from the router (DHCP)" or "none
+set" → "the bridge (192.168.77.2)"; already right when the camera asks that address and no other; not supported, "the camera does not show its
+DNS servers", when `readDNS()` is nil), and its value now is the backup, kept in `CameraSetupBackup.internetWatch`; the step applies with
+`applyDNS(server:)` and restores with `restoreDNS(_:)`.
 
 ## Additions beyond the contract: integrations beyond RTSP/ONVIF (2026-10-08, docs/CONTRACT_CHANGES.md; user docs: `docs/integrations/`)
 
@@ -264,3 +293,64 @@ Pan and tilt (2026-10-16): `PanTiltControl` (continuous `move(pan:tilt:)` in -1�
 Cam Pan v4 (`WyzeModels.pansAndTilts(_:)`) turns through `wyze-lake`'s loopback control server, one nudge per move.
 `PanTiltControl.capabilities()` (`PanTiltCapabilities`: pan/tilt, zoom) and `zoom(_:)`; ONVIF cameras with a PTZ profile get `ONVIFPanTilt` (steps:
 `ContinuousMove` for 0.4 s then `Stop`, never left turning).
+
+IP camera web API (2026-10-16, `IPCWeb/`, notes: `docs/integrations/ip-camera-web-api.md`): the own web API of a family of OEM cameras (an
+Anjvision platform sold under many brands, its sign-in page showing "IP Camera Web Login"), used next to ONVIF for what their ONVIF reports wrongly.
+`IPCWebClient` (one long-lived HTTP client, 10 s; every call `POST /<name>` with `Content-Type` exactly `application/x-www-form-urlencoded`
+and the envelope carrying the sign-in tokens; reads 200 with XML, writes 202), `IPCWebToken` (DES-ECB with the key "WebLogin" over the
+zero-padded ISO-8859-1 text, in hex; nil for a character above U+00FF: such a camera of the family is `IPCWebUnavailable.credentials`) over the portable,
+encryption-only `IPCWebDES` (FIPS 46-3), `IPCWebXML` (attributes read and replaced in the camera's own text, everything else kept),
+`IPCWebDevice` (the probe: the camera's sign-in script first, `GET /jsCore/rpcLogin.js` without credentials, which must hold the token
+key and the sign-in call
+(`IPCWebClient.showsItsPage()`: the tokens can be turned back into the password, so no other camera gets them); then
+`getSystemVersionInfo` and the feature flags of `getSystemControlString`), `IPCWebLatch` (per camera address: a non-2xx answer, a SOAP
+fault or `passwordError` / `passwordLock` stops every request to it, said once in the log, until the camera's next start in the bridge:
+the camera locks its account after a few wrong logins; it also remembers that the address showed the family's page). The client keeps
+`ONVIFLoginGuard` with ONVIF (one account): nothing is sent while the camera's logins are paused, and `passwordError` / HTTP 401 / 403
+pause them (`passwordLock`: the lockout pause). `IPCWebUnavailable` (`paused`, `noAnswer`, `credentials`): a camera of the family that cannot
+be asked now. `IPCWebNoAnswer` (`IPCWebClient.probe()`): the sign-in script got no answer (a transport error, a timeout, a 5xx), nothing
+kept; `device()` takes it as no web API (the setup), `NightVisionSelector` does not choose ONVIF on it (`unansweredTries` more tries once
+ONVIF answers) and never for a camera of the family (`IPCWebNightVision.isOfTheFamily`). `IPCWebNightVision` (IrcutMode 0/1/2 auto, 3 manual with `setIRCutManual_DayNight`, 6/7 manual on/off; the IR lights through
+`led_brightness_mode` / `led_brightness_value`; every write read back; one call at a time (`AsyncSerialLock`), since night vision and the
+lights rewrite the same element; a day/night command that fails after the switch to manual puts the old mode back once), chosen by
+`NightVisionSelector` in `ONVIFDriver.makeNightVision()` when the camera speaks the API, else `ONVIFNightVision`.
+`NightVisionControl.currentLight()` (a requirement with a default nil: the lamp as the camera says). `CameraConfigMethod.ipcWebAPI` (only
+for the clean picture), `CameraFeatureBackup.cloudType` / `cloudAuthcode` (never encoded: the engine keeps it in the secret store) and
+`CameraSettingsService.setFeature(_:enabled:path:saved:)`: on an ONVIF camera that speaks the API (`CameraSettingsService.ipcWeb()`,
+`IPCWebAccess`: `none`, `speaks`, `unavailable`), `readCleanPicture()`, `cleanPicture()` and `restorePicture(_:)` switch its overlay's
+`Enable`, and `readFeature(.cloud)` / `setFeature(.cloud, …)` its `P2PConfig` (the switch, with the kind and sign-in value read and given
+back; nothing else of the network settings, which hold the camera's other passwords, is kept or logged). While the API of a camera of
+the family cannot be asked, these steps say why and never use ONVIF's on-screen display.
+
+Battery (2026-10-16): `BatteryStatus` (`level` 0–100, `charging`, `source` `.solar` / `.cable` / nil; `BatteryStatus.lowLevel` 20,
+`BatteryStatus.pollInterval` 5 min) and `CameraDriver.batteryStatus()` (default nil; must never wake the camera). `EufyDriver` answers from
+`EufyBridge.battery(serial:)`: the helper's `GET /devices` (`battery`, `charging`, `chargingSource`: eufy's cloud, no wake-up), one list shared by
+every eufy camera for 30 s.
+
+## Additions beyond the contract: security readings and the IPCamera Web family (2026-10-17, docs/CONTRACT_CHANGES.md)
+
+What a camera says about its ways out, for the security levels (BridgeEngine's `CameraSecurity`): `RemoteAccessFeature` (`cloud`, `upnp`,
+`ddns`, `rtmp`, `unauthenticatedVideo`, `extraService`), `RemoteAccessState` (`on`, `off`, `absent`, `unknown`), `RemoteAccessFinding`
+(`feature`, `state`, `linked`, `service`, `canChange`; `RemoteAccessFinding.cloudUnknown`) and `CameraSettingsService.readRemoteAccess()`
+(read only; Hikvision: Hik-Connect, UPnP (absent only where `/ISAPI/System/Network/capabilities` says the camera has none; a document that
+can't be read is unknown) and `/ISAPI/System/Network/DDNS`; Reolink: `GetP2p`, `GetUpnp`, `GetDdns`, a refused command unknown; the IP camera
+web API: `P2PConfig` and `UPNPConfig`, RTMP unknown (`getMediaStreamConfig` is not among the calls checked by hand, and a call the camera
+lacks pauses its web API and night vision); the IPCamera Web family (an extra service on with `authorized` 0 is also video without a password,
+named); any other camera: its cloud unknown; a cloud's online or signed-in status (`registerStatus`, `LoginStatus`) is never read as linked to
+an account; a login refusal or a camera that stops answering ends the reading, the rest unknown, and a camera that stopped answering sets
+`CameraSettingsService.remoteAccessUnanswered`; the cloud and UPnP come from the setup steps' own readings: internal `featureLookup`).
+`RTSPAccessProbe.check(url:transport:timeout:)` (`RTSPAccessProbe.timeout` 5 s): one RTSP `DESCRIBE` without credentials, 200 with SDP on,
+401/403 off, anything else unknown; credentials in the address's user info are dropped, an address with credentials in its path or query
+(what `Redact.url` masks: XMEye `/user=admin&password=…`, `?pwd=…`) is unknown without connecting, and a challenge is never answered.
+
+The IPCamera Web family (`IPCamWeb/`, notes: `docs/integrations/ipcamera-web.md`): `IPCamWebClient` (the page check first, `GET /` titled
+"IPCamera Web" naming `js/script/land.js` and that script holding `auth.cgi?act=auth`, no credentials; the sign-in `GET /cgi/auth.cgi` with the
+RC4 (`IPCamWebRC4`, key "pwnsd") of the MD5 (`WyzeMD5`) of "username:password"; the session reused, one new sign-in on 531203; every value
+percent-encoded), `IPCamWebLatch` (a refused sign-in stops every request to the address until the camera's next start, and pauses
+`ONVIFLoginGuard`), `IPCamWebNoAnswer`, `IPCamWebCameraError` (532229: no such option), `IPCamWebUnavailable`, `IPCamWebAccess`, all internal.
+"Set up for Camera Bridge" gains `CameraSetupStepID.videoPassword` and `.extraServices` (`CameraSetupReading.State.notOffered(_:)` and
+`CameraSetupReading.notOffered(_:)` for other cameras: "not offered for this camera"), with `CameraSettingsService.readVideoPassword()` /
+`requireVideoPassword()` (`rtsp` and `onvif` `authorized` 1; offered only with a saved password), `readExtraServices()` /
+`turnOffExtraServices()` (`hik` and `meari` `on` 0) and `restoreServiceSwitches(_:)`, backed up in `CameraServiceSwitchesBackup`
+(`CameraSetupBackup.videoPassword`, `CameraSetupBackup.extraServices`); its Cloud off is `mobile` `on` 0. The cloud and UPnP steps of a camera
+Camera Bridge can't change say so and point to the router (`CameraNetworkFeature.cannotChange`).

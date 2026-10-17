@@ -5,6 +5,7 @@ CB_RUN=/run/camera-bridge
 CB_STATUS=$CB_RUN/status
 CB_DATA=/var/lib/camera-bridge          # the daemon's data (bind mount of /srv/camera-bridge)
 CB_SYSTEM=/srv/system                   # root-owned system state: flags, SSH keys
+CB_HOTSPOT_FLAG=$CB_RUN/hotspot-open    # while the setup hotspot is open (cb-wifi); the internet guard's DNS waits (cb-guard)
 
 # cb_esp: where the boot partition (ESP) is mounted. systemd-gpt-auto-generator picks /boot or /efi, so ask bootctl.
 cb_esp() { bootctl --print-esp-path 2>/dev/null; }

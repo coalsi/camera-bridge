@@ -171,22 +171,54 @@ export function lastChain(chains, lastAppendedId) {
   return null;
 }
 
+// MARK: What the video element holds
+
+const EDGE_SLACK_SEC = 0.25;          // the most a buffered range may miss of a span at either edge and still hold it (the surface's HOLD_BACK_SEC)
+const ROUNDING_SEC = 0.005;
+const AT_EDGE_SEC = 0.003;
+
 /**
- * Keeps only what the video element still holds. `heldRanges` are buffer seconds. A chain survives as the longest prefix of its parts that lies
- * inside one held range; a chain whose first part is gone is dropped (its later parts could not be decoded).
+ * True when `range` (buffer seconds) holds the span startSec..endSec. With sound a buffered range is where the picture and the sound both have
+ * data, and a part's sound can start or end up to a frame inside its picture (64 ms for 16 kHz AAC), so the edges get some slack: a quarter of
+ * a second, however short the span (a file break can leave a last part of 150 ms). The range must also reach into the span by more than
+ * rounding: a span that was removed leaves ranges that end where it starts or start where it ends, so it is never taken for held.
  */
-export function reconcileChains(chains, heldRanges, baseMs, { toleranceSec = 0.05 } = {}) {
+export function rangeHolds(range, startSec, endSec, { slackSec = EDGE_SLACK_SEC } = {}) {
+  const inside = Math.min(ROUNDING_SEC, (endSec - startSec) / 2);
+  return range.start <= Math.min(startSec + slackSec, endSec - inside) && range.end >= Math.max(endSec - slackSec, startSec + inside);
+}
+
+/** The held range (buffer seconds) that `sec` lies in, its ends included (a playhead stands at the very end of what it played), or null. */
+export function heldRangeAt(ranges, sec) {
+  return ranges.find((range) => range.start - AT_EDGE_SEC <= sec && sec <= range.end + AT_EDGE_SEC) ?? null;
+}
+
+/**
+ * A hole in what the video holds right after the range that `sec` lies in: the next held range, when it begins less than `maxHoleSec` after that
+ * range ends and is at least `minSec` long (a seek needs the decoders' hold-back after it). Null when there is none. Buffer seconds.
+ */
+export function rangeAfterHole(ranges, sec, { maxHoleSec, minSec }) {
+  const here = heldRangeAt(ranges, sec);
+  if (!here) return null;
+  let next = null;
+  for (const range of ranges) {
+    if (range.start > here.end + AT_EDGE_SEC && range.start - here.end < maxHoleSec && (!next || range.start < next.start)) next = range;
+  }
+  return next && next.end - next.start >= minSec ? next : null;
+}
+
+/**
+ * Keeps only what the video element still holds. `heldRanges` are buffer seconds. A chain survives as the longest prefix of its parts that are
+ * each held (see rangeHolds; consecutive parts of a chain that are held lie at most two slacks apart, as where the sound or the first picture of
+ * the next file starts a little late); a chain whose first part is gone is dropped (its later parts could not be decoded).
+ */
+export function reconcileChains(chains, heldRanges, baseMs, { slackSec = EDGE_SLACK_SEC } = {}) {
   const survivors = [];
+  const held = (part) => heldRanges.some((range) => rangeHolds(range, bufferSeconds(part.start, baseMs), bufferSeconds(part.end, baseMs), { slackSec }));
   for (const chain of chains) {
-    const first = chain.parts[0];
-    const range = heldRanges.find((r) => r.start <= bufferSeconds(first.start, baseMs) + toleranceSec && r.end >= bufferSeconds(first.end, baseMs) - toleranceSec);
-    if (!range) continue;
     let keep = 0;
-    while (keep < chain.parts.length) {
-      const part = chain.parts[keep];
-      if (range.start > bufferSeconds(part.start, baseMs) + toleranceSec || range.end < bufferSeconds(part.end, baseMs) - toleranceSec) break;
-      keep += 1;
-    }
+    while (keep < chain.parts.length && held(chain.parts[keep])) keep += 1;
+    if (keep === 0) continue;
     if (keep === chain.parts.length) { survivors.push(chain); continue; }
     const parts = chain.parts.slice(0, keep);
     survivors.push({ headId: chain.headId, tailId: parts[parts.length - 1].id, fileKey: chain.fileKey, parts, startMs: parts[0].start, endMs: parts[parts.length - 1].end });

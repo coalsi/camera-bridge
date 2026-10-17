@@ -179,6 +179,7 @@ extension CameraSettingsService {
             case .hikvisionISAPI: return try await hideViaISAPI()
             case .reolinkAPI: return try await hideViaReolink()
             case .onvifMinimal, .onvifFull: return try await hideViaONVIF()
+            case .ipcWebAPI: return .failed(.unsupported("the web API turns every label off together (Clean picture)"))
             }
         } catch is CancellationError {
             throw CancellationError()
@@ -346,6 +347,8 @@ extension CameraSettingsService {
         case .onvifMinimal, .onvifFull:
             guard let client = await client() else { return .unsupported("camera has no ONVIF service") }
             return try await restoreONVIF(backup.removedOSDs, client: client)
+        case .ipcWebAPI:
+            return .unsupported("the clock is not hidden through the web API")
         }
     }
 

@@ -21,6 +21,8 @@ const UUID = /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/;
 const FRAGMENT_ID = /^[0-9a-f]{12}\.(0|[1-9][0-9]{0,6})$/;
 const STATES = ['off', 'waiting', 'recording', 'paused'];
 const PAUSES = ['noFolder', 'folderMissing', 'diskFull', 'notWritable'];
+const NIGHT_MODES = ['auto', 'on', 'off'];
+const UNKNOWN_CAMERA = 'FFFFFFFF-0000-4000-8000-000000000000';
 const GIB = 1_073_741_824;
 const GB = 1_000_000_000;
 
@@ -177,6 +179,55 @@ export async function runConformance({ baseUrl, password, mutate = false, intrus
     }
   });
 
+  // Night vision (POST cameras/:id/night-vision): the shape of status.nightVision, and the refusals, which reach no camera (the body is
+  // checked before the camera; a camera without night vision is refused before anything is sent to it).
+  await check('cameras: status.nightVision, where a camera has it, offers modes of auto, on and off or a light, and says where they are', async () => {
+    for (const camera of cameras) {
+      const offer = camera.status?.nightVision;
+      if (offer === undefined || offer === null) continue;
+      ok(Array.isArray(offer.modes) && offer.modes.every((mode) => NIGHT_MODES.includes(mode)), `${camera.name}: modes ${show(offer.modes)}`);
+      same(new Set(offer.modes).size, offer.modes.length, `${camera.name}: a mode listed twice`);
+      same(typeof offer.light, 'boolean', `${camera.name}: light`);
+      ok(offer.modes.length > 0 || offer.light, `${camera.name}: night vision that offers neither a mode nor a light (the key should be left out)`);
+      ok(offer.mode === undefined || offer.mode === null || NIGHT_MODES.includes(offer.mode), `${camera.name}: mode ${show(offer.mode)}`);
+      ok(offer.lightOn === undefined || offer.lightOn === null || typeof offer.lightOn === 'boolean', `${camera.name}: lightOn ${show(offer.lightOn)}`);
+    }
+  });
+  await check('night vision: bad input is 400 invalid with the field, an unknown camera 404, a camera without it 409 no_night_vision', async () => {
+    const path = `cameras/${UNKNOWN_CAMERA}/night-vision`;
+    const bad = [['an unknown mode', { mode: 'dusk' }, 'mode'], ['a mode that is not text', { mode: 1 }, 'mode'], ['a light that is not true or false', { light: 'on' }, 'light'],
+      ['neither a mode nor a light', {}, 'mode']];
+    for (const [label, body, field] of bad) {
+      const response = await client.post(path, body);
+      same(response.status, 400, label);
+      same(response.json?.error, 'invalid', `${label}: error code`);
+      same(response.json?.field, field, `${label}: field`);
+    }
+    same((await client.post(path, { mode: 'auto' })).status, 404, 'an unknown camera');
+    same((await client.post('cameras/not-a-uuid/night-vision', { mode: 'auto' })).status, 404, 'a malformed camera id');
+    same((await client.post(path, { mode: 'auto' }, { auth: false })).status, 401, 'without the session cookie');
+    same((await client.post(path, { mode: 'auto' }, { csrf: false })).json?.error, 'csrf', 'without the CSRF token');
+    const without = cameras.find((camera) => !camera.status?.nightVision);
+    if (!without) return 'every camera has night vision, so none is refused for lacking it';
+    const refused = await client.post(`cameras/${without.id}/night-vision`, { mode: 'auto' });
+    same([refused.status, refused.json?.error], [409, 'no_night_vision'], `${without.name}, which has no night vision`);
+    ok(typeof refused.json?.message === 'string' && refused.json.message.length > 0, 'the 409 has no sentence');
+  });
+  // Pan and tilt (POST cameras/:id/pan-tilt): every camera says whether it turns and zooms; only refusals are sent, so nothing moves.
+  await check('pan and tilt: status.panTilt and status.zoom are true or false; a step beyond 1 is 400 invalid, an unknown camera 404', async () => {
+    for (const camera of cameras) {
+      same(typeof camera.status?.panTilt, 'boolean', `${camera.name}: panTilt`);
+      same(typeof camera.status?.zoom, 'boolean', `${camera.name}: zoom`);
+    }
+    const path = `cameras/${UNKNOWN_CAMERA}/pan-tilt`;
+    const far = await client.post(path, { pan: 2, tilt: 0 });
+    same([far.status, far.json?.error, far.json?.field], [400, 'invalid', 'pan'], 'a pan of 2');
+    same((await client.post(path, { pan: 0, tilt: 0 })).status, 404, 'an unknown camera');
+    same((await client.post('cameras/not-a-uuid/pan-tilt', { pan: 0, tilt: 0 })).status, 404, 'a malformed camera id');
+    same((await client.post(path, { pan: 0, tilt: 0 }, { auth: false })).status, 401, 'without the session cookie');
+    same((await client.post(path, { pan: 0, tilt: 0 }, { csrf: false })).json?.error, 'csrf', 'without the CSRF token');
+  });
+
   // -- D. R1 and R2: storage
   let storage = null;
   await check('R1 storage: every key, the formulas and the words', async () => {
@@ -252,6 +303,7 @@ export async function runConformance({ baseUrl, password, mutate = false, intrus
   const NVR_REQUESTS = [
     ['GET', 'nvr/storage'], ['GET', 'nvr/storage/locations'], ['PATCH', 'nvr/storage', { keepDays: 7 }], ['PATCH', `cameras/${sample}/nvr`, { enabled: true }],
     ['GET', 'nvr/cameras'], ['GET', `nvr/activity?cameras=${sample}&from=1760000000000&binMs=60000&bins=10`], ['GET', `nvr/cameras/${sample}/fragments?at=1760000000000`],
+    ['GET', `nvr/events?cameras=${sample}&from=1760000000000&to=1760003600000`],
     ['GET', `nvr/cameras/${sample}/fragments/0123456789ab.1`], ['GET', `nvr/cameras/${sample}/fragments/0123456789ab.1/init`], ['GET', `nvr/cameras/${sample}/keyframe?at=1760000000000`],
     ['POST', `cameras/${sample}/optimize`, { confirm: true }], ['POST', `cameras/${sample}/optimize/undo`, {}],
   ];
@@ -342,6 +394,55 @@ export async function runConformance({ baseUrl, password, mutate = false, intrus
       if (response.status === 503) return 'the archive is not available or not ready (503)';
       same(response.status, 200, label);
       same(Object.keys(response.json?.byCamera ?? {}).sort(), wanted.map((entry) => entry.toUpperCase()).sort(), `${label}: the cameras in byCamera (one entry per different camera, upper case)`);
+    }
+  });
+  await check('events: bad requests are 400 invalid with the field', async () => {
+    const id = camera?.id ?? sample;
+    const T = 1760000000000;
+    const cases = [
+      ['no cameras', `nvr/events?from=${T}&to=${T + 1000}`, 'cameras'],
+      ['a bad camera id', `nvr/events?cameras=nope&from=${T}&to=${T + 1000}`, 'cameras'],
+      ['17 different cameras', `nvr/events?cameras=${[id, ...otherIds(16)].join(',')}&from=${T}&to=${T + 1000}`, 'cameras'],
+      ['no from', `nvr/events?cameras=${id}&to=${T}`, 'from'],
+      ['no to', `nvr/events?cameras=${id}&from=${T}`, 'to'],
+      ['to not after from', `nvr/events?cameras=${id}&from=${T}&to=${T}`, 'to'],
+      ['more than 31 days', `nvr/events?cameras=${id}&from=${T}&to=${T + 31 * 86_400_000 + 1}`, 'to'],
+      ['limit 0', `nvr/events?cameras=${id}&from=${T}&to=${T + 1000}&limit=0`, 'limit'],
+      ['limit 1001', `nvr/events?cameras=${id}&from=${T}&to=${T + 1000}&limit=1001`, 'limit'],
+    ];
+    for (const [label, path, field] of cases) {
+      const response = await client.get(path);
+      if (response.status === 503) return 'the archive is not available or not ready (503)';
+      same(response.status, 400, label);
+      same(response.json?.error, 'invalid', `${label}: error code`);
+      same(response.json?.field, field, `${label}: field`);
+    }
+  });
+  await check('events: newest first, inside the range, at most limit, names and times only', async () => {
+    if (!camera) return 'no camera has footage';
+    const to = camera.newest;
+    const from = Math.max(camera.oldest, to - 86_400_000);
+    const response = await client.get(`nvr/events?cameras=${camera.id}&from=${from}&to=${to}&limit=5`);
+    if (response.status === 503) return 'the archive is not available or not ready (503)';
+    same(response.status, 200, 'GET nvr/events');
+    const body = response.json;
+    same(Object.keys(body).sort(), ['events', 'from', 'more', 'serverTime', 'to'], 'keys');
+    same([body.from, body.to], [from, to], 'from and to');
+    ok(typeof body.more === 'boolean' && isInt(body.serverTime), 'more or serverTime');
+    ok(Array.isArray(body.events) && body.events.length <= 5, 'at most limit events');
+    for (const event of body.events) {
+      same(Object.keys(event).sort(), ['cameraID', 'end', 'id', 'kind', 'recorded', 'start'], 'event keys');
+      same(event.cameraID, camera.id, 'cameraID (upper case)');
+      ok(typeof event.id === 'string' && event.id.length > 0 && typeof event.kind === 'string' && typeof event.recorded === 'boolean', 'id, kind or recorded');
+      ok(isInt(event.start) && event.start >= from && event.start < to, `start ${event.start} outside ${from} to ${to}`);
+      ok(event.end === null || (isInt(event.end) && event.end >= event.start), 'end');
+    }
+    ok(body.events.every((event, index) => index === 0 || body.events[index - 1].start >= event.start), 'newest first');
+    if (body.more) {
+      const oldest = body.events.at(-1).start;
+      const rest = await client.get(`nvr/events?cameras=${camera.id}&from=${from}&to=${oldest}&limit=1000`);
+      same(rest.status, 200, 'the next page');
+      ok(rest.json.events.every((event) => event.start < oldest), 'the next page is older');
     }
   });
   await check('R6 activity: bins are aligned, complete and in range', async () => {
@@ -681,6 +782,20 @@ export async function runConformance({ baseUrl, password, mutate = false, intrus
       same(response.status, 200, 'the same flags again');
       same([response.json.id, response.json.nvrEnabled, response.json.nvrRecordSound], [id, now.nvrEnabled, now.nvrRecordSound], 'the camera resource');
       ok(response.json.status?.nvr, 'the camera resource has no status.nvr');
+    });
+    await check('night vision: the mode a camera is in, again, is 204 and changes nothing', async () => {
+      const camera = cameras.find((candidate) => NIGHT_MODES.includes(candidate.status?.nightVision?.mode));
+      if (!camera) return 'no camera says which night vision mode it is in';
+      const before = camera.status.nightVision;
+      const response = await client.post(`cameras/${camera.id}/night-vision`, { mode: before.mode });
+      if (response.status === 422) {
+        same(response.json?.error, 'night_vision_failed', 'a 422 is night_vision_failed');
+        ok(typeof response.json?.message === 'string' && response.json.message.length > 0, 'the 422 has no sentence');
+        return `${camera.name} refused it: ${response.json.message}`;
+      }
+      same(response.status, 204, `${camera.name}: the same mode again`);
+      const after = (await client.get(`cameras/${camera.id}`)).json?.status?.nightVision;
+      same([after?.mode, after?.light, show(after?.modes)], [before.mode, before.light, show(before.modes)], `${camera.name}: night vision afterwards`);
     });
     await check('R11, R12 optimize: needs confirm, and an unknown camera is 404', async () => {
       const id = cameras[0]?.id ?? sample;

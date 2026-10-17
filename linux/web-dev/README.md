@@ -25,23 +25,23 @@ server then serves fixture video and a fake bridge to your whole network, so sto
 
 ## What is fake, and how
 
-Nine cameras with fixed ids (`0A1B2C3D-0000-4000-8000-00000000000N`) and documentation addresses (192.0.2.x). Footage is the clips repeated:
+Nine cameras with fixed ids (`0A1B2C3D-0000-4000-8000-00000000000N`) and documentation addresses (192.0.2.x). Five carry a `status.security` (`lib/camera-security.mjs`, the bridge's words), one per level and one watched camera that keeps trying to reach the internet, each with what the Internet guard saw (`guard`), checked three hours ago; the others have not been checked, so the key is absent. `POST cameras/:id/security/check` answers the level checked now, 429 with `Retry-After` within a minute, 409 for a camera turned off, and 422 for a camera without a level. The fake setup offers "Watch its internet" (DNS to 192.0.2.2). Footage is the clips repeated:
 fragment `n` of a 15-minute file is fragment `n % clip length` with its `tfdt` advanced, so a camera has three days of footage that
 decodes and seeks like the real thing (ids, anchors, keyframe flags, continuation fragments, `mime`, `prft` removed all follow T00 Part C).
 
 | Camera | Clip | What it is for |
 |---|---|---|
-| Front Door | gop2 (640x360, key every 2 s) | the plain case, no gaps |
-| Driveway | hd (1280x720, 4 Mbps) | big fragments, a 20-minute gap every day, files 300 ms apart |
-| Garage | longgop (key every 12 s) | continuation fragments, the keyframe note and caption, the fix |
-| Back Yard | ntsc (30000/1001 fps) | non-integer frame times, files that overlap by 0.4 ms, a 7-minute gap |
-| Side Gate | hevc (hvc1) | `isTypeSupported` false in some browsers |
-| Living Room | gop2 and res-b, alternating every 2 h | a different `mime` and size between files, a 45-minute gap |
+| Front Door | gop2 (640x360, key every 2 s) | the plain case, no gaps; security red (Hik-Connect linked, UPnP on) |
+| Driveway | hd (1280x720, 4 Mbps) | big fragments, a 20-minute gap every day, files 300 ms apart; night vision (Auto, Night, Day) and an IR lamp; pans, tilts and zooms (`POST cameras/:id/pan-tilt` answers 204 and moves nothing), so the Monitor shows the pad and the night vision buttons together; security yellow (cloud unknown, video without a password) |
+| Garage | longgop (key every 12 s) | continuation fragments, the keyframe note and caption, the fix; night vision Auto and Day only, no lamp; security green (DDNS unknown, not watched) |
+| Back Yard | ntsc (30000/1001 fps) | non-integer frame times, files that overlap by 0.4 ms, a 7-minute gap; security gold (everything off, watched and quiet) |
+| Side Gate | hevc (hvc1) | `isTypeSupported` false in some browsers; night vision whose every change fails (422 `night_vision_failed`) |
+| Living Room | gop2 and res-b, alternating every 2 h | a different `mime` and size between files, a 45-minute gap; security yellow from the Internet guard (watched, 47 lookups blocked today, four names, documentation domains) |
 | Porch | gop2 | Record sound on, files with `sound: true` |
 | Shed | quiet (320x180) | Record off, footage that ended 6 hours ago |
 | New Gate | gop2 | began 25 minutes ago: `typical` is null (under 30 minutes) |
 
-The waveform is a deterministic daily rhythm with bursts (non-key bytes per second per minute). The drive is 512 GB with 40 GB used by
+`GET nvr/events` answers a made-up event log: the schedule of each camera's `recentEvents` over the last seven days (8 to 62 s each, a doorbell ring none), `recorded` where the footage is (or, as the bridge says, for an event less than 2 minutes old of a camera that records), plus what `POST /__dev/event` sent. Its pages never split a millisecond (`eventPage`, as the bridge's), it answers 503 `archive_unavailable` in the `folderMissing` scenario and no events without a folder. The waveform is a deterministic daily rhythm with bursts (non-key bytes per second per minute). The drive is 512 GB with 40 GB used by
 other things; the floor is `max(8 GiB, 5%)`. Retention applies at once when a limit is changed (the janitor would take up to 60 s).
 
 ## Reading the picture
@@ -55,7 +55,8 @@ test of "the exact frame appears after a scrub" can tell which frame it got.
 ## Scenarios
 
 `--scenario NAME` at start, or while it runs: `curl -s -X POST http://127.0.0.1:8090/__dev/scenario -H 'Content-Type: application/json' -d '{"name":"diskFull"}'`
-(`/__dev/state` shows the state, `/__dev/reset`, `/__dev/clock {"offsetMs"}` and `/__dev/options {"latencyMs"...}` exist too; they answer this computer only).
+(`/__dev/state` shows the state, `/__dev/reset`, `/__dev/clock {"offsetMs"}`, `/__dev/options {"latencyMs"...}` and `/__dev/night-vision {"id", "fail": true}`
+(a camera's night vision changes fail with 422 until `"fail": false`; a sentence instead of `true` is the error) exist too; they answer this computer only).
 
 | Scenario | What the server does |
 |---|---|

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseEpochMs, resolveTileCount, pageCount, clampPage, pageSlice, gridPath, watchPath, chooseWaveformCameras,
+  parseEpochMs, resolveTileCount, chosenTileCount, pageCount, clampPage, pageSlice, pageRanges, gridPath, watchPath, chooseWaveformCameras,
 } from '../web/js/screens/nvr-model.js';
 
 const id = (n) => `00000000-0000-4000-8000-00000000000${n}`;
@@ -42,6 +42,24 @@ test('paging: 9 cameras at 4 a page are 3 pages of 4, 4 and 1; the page is clamp
   assert.equal(pageCount(0, 4), 1);
   assert.deepEqual(pageSlice([], 0, 4), []);
   assert.equal(pageCount(8, 4), 2);
+});
+
+test('a tile count counts as chosen only when the query or the stored value is one', () => {
+  assert.equal(chosenTileCount({}), null);
+  assert.equal(chosenTileCount({ query: '12' }), 12);
+  assert.equal(chosenTileCount({ query: 'abc', stored: '4' }), 4);
+  assert.equal(chosenTileCount({ query: null, stored: '17' }), null);
+});
+
+test('pages as ranges: fixed sizes, or the lengths the mosaic gives, the rest in fixed pages', () => {
+  assert.deepEqual(pageRanges(9, 4), [[0, 4], [4, 8], [8, 9]]);
+  assert.deepEqual(pageRanges(0, 4), [[0, 0]], 'an empty bridge has one empty page');
+  assert.deepEqual(pageRanges(9, 4, [3, 4, 2]), [[0, 3], [3, 7], [7, 9]]);
+  assert.deepEqual(pageRanges(9, 4, [5]), [[0, 5], [5, 9]], 'lengths that stop short: the rest in pages of perPage');
+  assert.deepEqual(pageRanges(5, 4, [3, 4, 2]), [[0, 3], [3, 5]], 'lengths past the end stop at the last camera');
+  assert.deepEqual(pageRanges(9, 4, [3, 0, 2]), [[0, 4], [4, 8], [8, 9]], 'a length that is not a whole number above 0: fixed pages');
+  assert.deepEqual(pageRanges(9, 4, 'x'), [[0, 4], [4, 8], [8, 9]]);
+  assert.deepEqual(pageRanges(3, 4, []), [[0, 3]]);
 });
 
 test('the grid and watch paths carry a time only when it is a real one', () => {

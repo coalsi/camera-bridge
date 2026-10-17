@@ -5,6 +5,8 @@ import Foundation
 struct ONVIFPTZNode: Sendable, Equatable {
     var continuousPanTilt: Bool
     var continuousZoom: Bool
+    /// `AuxiliaryCommands` the node lists (e.g. `tt:IRLamp|On`, `tt:Wiper|On`).
+    var auxiliaryCommands: [String] = []
 }
 
 /// ONVIF PTZ (ver20 PTZ service): the service address, the node's spaces, `ContinuousMove` and `Stop`. Velocities are in the generic
@@ -35,7 +37,8 @@ extension ONVIFClient {
         return response.children("PTZNode").map { node in
             let spaces = node.child("SupportedPTZSpaces")
             return ONVIFPTZNode(continuousPanTilt: spaces?.child("ContinuousPanTiltVelocitySpace") != nil,
-                                continuousZoom: spaces?.child("ContinuousZoomVelocitySpace") != nil)
+                                continuousZoom: spaces?.child("ContinuousZoomVelocitySpace") != nil,
+                                auxiliaryCommands: node.children("AuxiliaryCommands").map { $0.text.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
         }
     }
 
@@ -53,6 +56,12 @@ extension ONVIFClient {
         if let zoom { velocity += "<tt:Zoom x=\"\(number(zoom))\"/>" }
         return "<tptz:ContinuousMove xmlns:tptz=\"\(ptzNamespace)\"><tptz:ProfileToken>\(XMLTree.escape(profileToken))</tptz:ProfileToken>"
             + "<tptz:Velocity>\(velocity)</tptz:Velocity></tptz:ContinuousMove>"
+    }
+
+    /// The video source tokens (`GetVideoSources`), for the imaging service.
+    func videoSourceTokens() async throws -> [String] {
+        let envelope = try await call(await mediaServiceURL(), body: "<trt:GetVideoSources/>", action: "http://www.onvif.org/ver10/media/wsdl/GetVideoSources")
+        return envelope.firstDescendant("GetVideoSourcesResponse")?.children("VideoSources").compactMap { $0.attribute("token") } ?? []
     }
 
     /// `Stop` of pan/tilt and zoom.
@@ -97,7 +106,20 @@ actor ONVIFPanTilt: PanTiltControl {
         }
         known = capabilities
         log.info("ONVIF PTZ: \(capabilities.panTilt ? "pan and tilt" : "no pan and tilt")\(capabilities.zoom ? ", zoom" : "") (profile \(profile.token))")
+        await logNightVisionOptions()
         return capabilities
+    }
+
+    /// What the camera offers for its IR lights (read only, logged once): the PTZ node's auxiliary commands and the imaging IR-cut modes.
+    private func logNightVisionOptions() async {
+        let aux = ((try? await client.ptzNodes()) ?? []).flatMap(\.auxiliaryCommands)
+        var imaging = "unknown"
+        if let source = try? await client.videoSourceTokens().first {
+            let options = try? await client.imagingOptions(videoSourceToken: source)
+            let current = try? await client.imagingSettings(videoSourceToken: source)
+            imaging = "IR-cut modes \(options?.irCutFilterModes ?? []), now \(current?.irCutFilter ?? "?") (source \(source))"
+        }
+        log.info("ONVIF night vision: auxiliary commands \(aux.isEmpty ? "none" : aux.joined(separator: ", ")); \(imaging)")
     }
 
     func move(pan: Double, tilt: Double) async throws {

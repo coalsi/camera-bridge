@@ -1,6 +1,6 @@
 // The logic of the NVR grid page, without a DOM: which cameras are on the page, what each tile says, what the transport does, how a tile opens
 // the watch screen and how the page comes back. nvr.js builds the session, the cells and the DOM and hands them in; the tests hand in fakes.
-import { EPOCH_MIN_MS, chooseWaveformCameras, clampPage, gridPath, pageCount, pageSlice, tileState, tileSummary, watchPath, whenKnown } from './nvr-model.js';
+import { EPOCH_MIN_MS, chooseWaveformCameras, gridPath, pageRanges, tileState, tileSummary, watchPath, whenKnown } from './nvr-model.js';
 
 const IDLE = Object.freeze({ kind: 'idle', next: null, message: null });
 const TICK_MS = 250;            // the readout moves and the address is kept in step this often
@@ -17,6 +17,10 @@ function sameIds(a, b) {
  *   listCameras()              the cameras in list order (store.js cameraList)
  *   subscribeCameras(fn)       fn() when the camera list or a camera's status changed; returns an unsubscribe
  *   perPage, initialMs, initialPage, initialFocus, playable
+ *   paginate(cameras)          optional: the lengths of the pages in list order (the mosaic's), or null for pages of perPage; relayout() asks again.
+ *                              Until it first gives lengths, pages of perPage stand in, and the remembered page and camera (initialPage,
+ *                              initialFocus) wait for the real pages. Whenever the pages change (a new size, a camera added or removed, a
+ *                              picture's new shape), the page that holds the camera that led the page on screen shows.
  *   navigate(path), replaceHash(path)    app.js navigate, and history.replaceState for the address
  *   remember({ page, focusId, opened })  module memory of nvr.js, so coming back finds the same page and tile
  *   formatTime(ms), now()
@@ -25,7 +29,7 @@ function sameIds(a, b) {
  */
 export function createGridController(deps) {
   const {
-    session, catalog, listCameras, subscribeCameras, perPage, initialMs = null, initialPage = 0, initialFocus = null, playable = true,
+    session, catalog, listCameras, subscribeCameras, perPage, initialMs = null, initialPage = 0, initialFocus = null, playable = true, paginate = () => null,
     navigate, replaceHash, remember = () => {}, formatTime = String, now = () => Date.now(),
     setWaveformCameras = () => {}, setSnapshotIds = () => {}, pokeSnapshots = () => {},
     setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (t) => clearTimeout(t),
@@ -36,7 +40,10 @@ export function createGridController(deps) {
   const listeners = new Set();
   const cellWatchers = new Map();     // camera id -> unsubscribe from that cell's onChange
   const unsubscribers = [];
-  let page = clampPage(initialPage, listCameras().length, perPage);
+  let ranges = pageRanges(listCameras().length, perPage);   // the pages as [start, end) of the camera list (pageRanges)
+  let page = clampTo(initialPage);
+  // The remembered page and camera, kept until paginate first gives the real pages (the stand-in pages of perPage hold other cameras).
+  let pending = deps.paginate ? { page: initialPage, focus: initialFocus } : null;
   let slice = [];
   let started = false;                // something has been asked of a cell; before that nothing decodes
   let phase = 'connecting';           // 'connecting' | 'ready' | 'unreachable'
@@ -74,15 +81,52 @@ export function createGridController(deps) {
     }
   }
 
-  function applyPage() {
+  function clampTo(next) {
+    return Math.min(Math.max(0, Math.trunc(next) || 0), ranges.length - 1);
+  }
+
+  function sameRanges(a, b) {
+    return a.length === b.length && a.every(([start, end], i) => start === b[i][0] && end === b[i][1]);
+  }
+
+  /** The page of the camera at `index` in the list, or the page as it is. */
+  function pageHolding(index) {
+    const at = ranges.findIndex(([start, end]) => index >= start && index < end);
+    return at >= 0 ? at : page;
+  }
+
+  /** The pages again from paginate; `keepLead`: when they changed, the page that holds the camera that led the page on screen (the focused
+   *  one, else the first) shows. A page chosen by hand (setPage) keeps its number. */
+  function applyPage({ keepLead = true } = {}) {
     const cameras = listCameras();
-    page = clampPage(page, cameras.length, perPage);
-    const ids = pageSlice(cameras, page, perPage).map((camera) => camera.id);
+    const lengths = paginate(cameras);
+    const next = pageRanges(cameras.length, perPage, lengths);
+    let preferred = null;
+    if (pending && lengths) {
+      const at = cameras.findIndex((camera) => camera.id === pending.focus);
+      ranges = next;
+      page = at >= 0 ? pageHolding(at) : pending.page;
+      preferred = pending.focus;
+      pending = null;
+    } else if (keepLead && slice.length > 0 && !sameRanges(next, ranges)) {
+      const leadId = slice.includes(focusId) ? focusId : slice[0];
+      const at = cameras.findIndex((camera) => camera.id === leadId);
+      ranges = next;
+      if (at >= 0) page = pageHolding(at);
+    } else {
+      ranges = next;
+    }
+    page = clampTo(page);
+    const [start, end] = ranges[page];
+    const ids = cameras.slice(start, end).map((camera) => camera.id);
     if (sameIds(ids, slice)) return;
     slice = ids;
     session.setCameras(slice);
     setSnapshotIds(slice);
-    if (!slice.includes(focusId)) {
+    if (preferred !== null && slice.includes(preferred) && focusId !== preferred) {
+      focusId = preferred;
+      session.focus(focusId);
+    } else if (!slice.includes(focusId)) {
       focusId = focusId === null && slice.includes(initialFocus) ? initialFocus : (slice[0] ?? null);
       session.focus(focusId);
     }
@@ -164,10 +208,11 @@ export function createGridController(deps) {
     });
     const playLimit = tiles.filter((tile) => tile.player).length;
     const total = cameras.length;
+    const [start, end] = ranges[clampTo(page)];
     return {
       phase, playable, noCameras: total === 0,
-      page, pages: pageCount(total, perPage), perPage, total,
-      first: total === 0 ? 0 : page * perPage + 1, last: Math.min(total, page * perPage + perPage),
+      page, pages: ranges.length, perPage, total,
+      first: total === 0 ? 0 : start + 1, last: Math.min(total, end),
       tiles,
       playLimit, limited: playLimit < tiles.length,
       transport: {
@@ -221,6 +266,16 @@ export function createGridController(deps) {
       refreshWaveform();
       schedule();
     },
+    /**
+     * Plays every tile of the page from `ms` (an event of the list): the shared playhead moves there and the cells play, the timeline follows
+     * the playhead, and the address follows as it does after a drag. Within five seconds of now it is live. False when it cannot act.
+     */
+    playAt(ms) {
+      if (!canAct() || !Number.isFinite(ms)) return false;
+      session.play(ms);
+      schedule();
+      return true;
+    },
     seek(deltaMs) { if (canAct()) { session.seek(deltaMs); schedule(); } },
     retryTile() { if (canAct()) session.seek(0); },
     key(keyAction) {
@@ -232,7 +287,16 @@ export function createGridController(deps) {
 
     setPage(next) {
       if (destroyed) return;
-      page = clampPage(next, listCameras().length, perPage);
+      page = next;
+      applyPage({ keepLead: false });
+      schedule();
+    },
+    /**
+     * The pages again (paginate's answer changed: the wall's size, the mosaic's width, a picture's shape). The page that holds the focused
+     * (hovered) camera shows, else the one that holds the camera that led the page on screen, so the wall stays where it was.
+     */
+    relayout() {
+      if (destroyed) return;
       applyPage();
       schedule();
     },

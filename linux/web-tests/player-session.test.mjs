@@ -330,6 +330,19 @@ describe('gaps', () => {
     return ctx;
   }
 
+  it('the first play from live waits for every tile: one camera with nothing there answering at once is no jump', () => {
+    const { session, made, clock } = setup();
+    session.setCameras(['A', 'B', 'C']);
+    session.play(T);                                                  // the Monitor's events list: play the wall from an event
+    const started = made.get('A').last().epoch;
+    made.get('C').report({ kind: 'gap', next: null, playing: false }); // C recorded nothing then; A and B have not answered yet
+    assert.equal(session.mode, 'playing', 'not live');
+    assert.equal(made.get('A').last().epoch, started, 'no new desire');
+    made.get('A').report({ kind: 'recorded', playing: true });
+    made.get('B').report({ kind: 'recorded', playing: true });
+    assert.equal(clock.mode, 'playing');
+  });
+
   it('when every tile reached a gap the clock jumps to the earliest next recording', async () => {
     const { made, clock } = await playing();
     const before = made.get('A').last().epoch;
@@ -341,6 +354,46 @@ describe('gaps', () => {
     assert.deepEqual([jump.targetMs, jump.precision, jump.playing], [T + 60_000, 'exact', true]);
     assert.equal(made.get('B').last().epoch, jump.epoch);
     assert.equal(clock.position(), T + 60_000);
+  });
+
+  it('no jump back to a next recording the clock has reached: that tile plays on by itself', async () => {
+    const { made, clock, timers } = await playing();
+    const before = made.get('A').last().epoch;
+    made.get('A').report({ kind: 'gap', next: T + 1500, playing: false });
+    await timers.advance(1000);                                       // the clock passes A's next recording
+    made.get('B').report({ kind: 'gap', next: T + 60_000, playing: false });
+    assert.equal(made.get('A').last().epoch, before, 'no new desire');
+    assert.deepEqual([clock.mode, clock.position()], ['playing', T + 2000]);
+  });
+
+  it('a main tile with no recording at the start leaves the start to the others; it is cancelled only when no tile has one', () => {
+    const { session, made, clock } = setup();
+    session.setCameras(['A', 'B']);
+    session.play(T);
+    made.get('A').report({ kind: 'gap', next: T + 5000, playing: false });
+    assert.deepEqual([session.mode, clock.mode], ['playing', 'paused'], 'still waiting for the first frame');
+    made.get('B').report({ kind: 'recorded', playing: true });
+    assert.deepEqual([clock.mode, clock.position()], ['playing', T]);
+
+    const earlier = setup();                                          // the other tile played before the main tile answered
+    earlier.session.setCameras(['A', 'B']);
+    earlier.session.play(T);
+    earlier.made.get('B').report({ kind: 'recorded', playing: true });
+    assert.equal(earlier.clock.mode, 'paused', 'the main tile leads while it may still have video');
+    earlier.made.get('A').report({ kind: 'gap', next: T + 5000, playing: false });
+    assert.equal(earlier.clock.mode, 'playing');
+
+    const none = setup();
+    none.session.setCameras(['A', 'B']);
+    none.session.play(T);
+    none.made.get('A').report({ kind: 'gap', next: T + 5000, playing: false });
+    none.made.get('B').report({ kind: 'gap', next: T + 9000, playing: false });
+    assert.deepEqual([none.session.mode, none.clock.mode, none.clock.position()], ['paused', 'paused', T]);
+    const alone = setup();
+    alone.session.setCameras(['A']);
+    alone.session.play(T);
+    alone.made.get('A').report({ kind: 'gap', next: T + 5000, playing: false });
+    assert.deepEqual([alone.session.mode, alone.clock.position()], ['paused', T]);
   });
 
   it('when nothing follows it goes live', async () => {

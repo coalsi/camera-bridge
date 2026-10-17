@@ -1,0 +1,399 @@
+#!/bin/bash
+# cb-guard: the internet guard of Camera Bridge OS, level Watch (docs/superpowers/specs/2026-10-17-internet-guard-design.md). Run as root.
+#
+#   cb-guard status          print status/guard.json
+#   cb-guard set FILE        (the guard-set request) the cameras to watch, {"cameras": [{"address": "192.168.77.21", "level": "watch"}],
+#                            "timeZone": "Europe/Berlin"}: checked, kept in /srv/system/guard/cameras.json, then applied
+#   cb-guard check FILE      check such a list and print it as it would be kept; nothing changes
+#   cb-guard apply           fill the firewall sets guarded4/guarded6 from the kept list; while a camera is watched start the DNS
+#                            (camera-bridge-dns.service) and the collector's timer, else stop them (at boot: camera-bridge-guard.service)
+#   cb-guard collect         read the DNS query log, keep 7 days in /srv/system/guard/history.json, write status/guard.json
+#                            (camera-bridge-guard-collect.timer, every minute while a camera is watched); questions that never leave the
+#                            home network (its names, reverse lookups of its addresses, questions about the DNS server) are left out
+#   cb-guard config          print the DNS server's configuration
+#   cb-guard dns-prepare     (internal, camera-bridge-dns.service) write that configuration; refuses while the setup hotspot is open or the
+#                            firewall sets are missing
+#
+# The DNS answers every name "does not exist", so a watched camera cannot find its cloud, and logs each question. The firewall lets port 53
+# in only from the watched cameras (at most 50 questions a second from each) and from the setup hotspot's Wi-Fi (which NetworkManager
+# answers), so the box is never a resolver for the house. status/guard.json carries addresses, names, counts and times, nothing else; only
+# the daemon reads it (0640 root:camerabridge: a name can carry a camera's cloud id).
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export CB_TAG=cb-guard
+export LC_ALL=C
+
+# Tests only (linux/os/test-guard.sh): CB_GUARD_ROOT is a folder that stands in for /, CB_GUARD_NOW the time, CB_GUARD_DNS_SINCE when the
+# stand-in DNS started (epoch seconds; empty: it does not run); the firewall and systemd are left alone then.
+ROOT=${CB_GUARD_ROOT:-}
+CB_LIB=/usr/lib/camera-bridge/lib.sh
+[ -z "$ROOT" ] || CB_LIB=$(dirname "${BASH_SOURCE[0]}")/../lib/camera-bridge/lib.sh
+# shellcheck source=../lib/camera-bridge/lib.sh
+. "$CB_LIB"
+
+NOW=$(date +%s)
+[ -z "$ROOT" ] || NOW=${CB_GUARD_NOW:-$NOW}
+CB_STATUS=$ROOT$CB_STATUS
+STATE=$ROOT$CB_SYSTEM/guard                 # cameras.json, history.json (data partition)
+RUN=$ROOT$CB_RUN/guard                      # dnsmasq.conf, log/ (tmpfs)
+LOGDIR=$RUN/log                             # written by dnsmasq (user dnsmasq), which may put anything there
+QUERY_LOG=$LOGDIR/queries.log
+WORKDIR=$RUN/work                           # root only: the log is moved here and read where dnsmasq cannot change it
+WORK_LOG=$WORKDIR/queries.log
+HOTSPOT_FLAG=$ROOT$CB_HOTSPOT_FLAG
+DNS_UNIT=camera-bridge-dns.service
+TIMER=camera-bridge-guard-collect.timer
+MAX_CAMERAS=64
+KEEP_SECONDS=$((7 * 86400))
+NAMES_PER_HOUR=40                           # more different names in one hour are only counted
+MAX_HISTORY_BYTES=4000000
+MAX_STATUS_BYTES=900000                     # the daemon reads at most 1 MiB
+MAX_LOG_BYTES=16777216                      # read per collection; a camera flooding the DNS cannot fill the memory
+READ_SECONDS=120                            # reading the log never takes longer (the collector holds the lock meanwhile)
+
+require_root() { [ -n "$ROOT" ] || [ "$(id -u)" -eq 0 ] || cb_die "run as root"; }
+
+# --- the list of watched cameras ------------------------------------------------------------------------------------------
+
+# The address checks: private IPv4 (10/8, 172.16/12, 192.168/16, 169.254/16) and unique-local or link-local IPv6 (fc00::/7, fe80::/10), the
+# same ranges as the firewall's lan4/lan6. IPv6 is written as dnsmasq logs it (RFC 5952), so the log matches the list.
+# shellcheck disable=SC2016
+JQ_ADDRESS='
+def hexval: explode | reduce .[] as $c (0; . * 16 + (if $c >= 97 then $c - 87 else $c - 48 end));
+def hex4: if . == 0 then "0" else [recurse(if . >= 16 then (. / 16 | floor) else empty end) | . % 16] | reverse
+    | map("0123456789abcdef"[.:(. + 1)]) | add end;
+def v4: if test("^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}$") | not then null
+    else (split(".") | map(tonumber)) as $b
+    | if all($b[]; . <= 255) and ($b[0] == 10 or ($b[0] == 172 and $b[1] >= 16 and $b[1] <= 31) or ($b[0] == 192 and $b[1] == 168)
+          or ($b[0] == 169 and $b[1] == 254)) then $b | map(tostring) | join(".") else null end end;
+def groups6: if test("^[0-9a-f:]{2,39}$") | not then null
+    else split("::") as $p
+    | if ($p | length) > 2 then null
+      else ($p | map(if . == "" then [] else split(":") end)) as $q
+      | if any($q[][]; test("^[0-9a-f]{1,4}$") | not) then null
+        elif ($q | length) == 2 then (if ($q[0] + $q[1] | length) > 7 then null else $q[0] + [range(8 - ($q[0] + $q[1] | length)) | "0"] + $q[1] end)
+        elif ($q[0] | length) == 8 then $q[0]
+        else null end end end
+    | if . == null then null else map(hexval) end;
+def v6: groups6 as $g
+    | if $g == null then null
+      elif ($g[0] >= 64512 and $g[0] <= 65023) or ($g[0] >= 65152 and $g[0] <= 65215) then
+        ($g | map(hex4)) as $h
+        | (reduce range(0; 8) as $i ({bs: -1, bl: 0, cs: -1, cl: 0};
+             if $g[$i] == 0 then (if .cl == 0 then .cs = $i else . end) | .cl += 1 | (if .cl > .bl then .bs = .cs | .bl = .cl else . end)
+             else .cl = 0 end)) as $r
+        | if $r.bl >= 2 then ($h[0:$r.bs] | join(":")) + "::" + ($h[($r.bs + $r.bl):] | join(":")) else $h | join(":") end
+      else null end;
+def address: if type != "string" or length > 45 then null else ascii_downcase | if contains(":") then v6 elif contains(".") then v4 else null end end;
+def shown: tostring | .[0:45] | gsub("[^ -~]"; "?");
+'
+
+# normalize: a request body (or the kept list) as it is kept: {cameras: [{address, level}], timeZone}; {error} when it is refused. With
+# $kept (the kept list) a camera keeps its `since` (epoch seconds: when its address was put on the list); a request never sets one.
+# shellcheck disable=SC2016
+JQ_NORMALIZE="$JQ_ADDRESS"'
+def normalized:
+    if type != "object" then error("the request is not a JSON object")
+    elif (.cameras | type) != "array" then error("the request has no list of cameras")
+    elif (.cameras | length) > $max then error("at most \($max) cameras can be watched")
+    else
+      (.cameras | map(
+          if type != "object" then error("a camera is not a JSON object")
+          elif .level == null then error("a camera has no guard level")
+          elif .level != "watch" then error("unknown guard level \(.level | shown) (only watch)")
+          else (.address | address) as $a
+          | if $a == null then error("not an address on the local network: \(.address | shown)")
+            else {address: $a, level: "watch"}
+                 + (if $kept and (.since | type) == "number" and .since >= 0 and .since < 1e11 then {since: (.since | floor)} else {} end) end end)
+        | reduce .[] as $c ([]; if any(.[]; .address == $c.address) then . else . + [$c] end)) as $cameras
+      | {cameras: $cameras,
+         timeZone: ((.timeZone // "UTC") | if type == "string" and test("^[A-Za-z0-9_+-]{1,32}(/[A-Za-z0-9_+-]{1,32}){0,2}$") then . else "UTC" end)}
+    end;
+try normalized catch {error: tostring}
+'
+
+normalize() { # normalize FILE [kept]: prints the kept form, or dies with the reason
+    local out zone kept=false
+    [ "${2:-}" != kept ] || kept=true
+    out=$(jq -c --argjson max "$MAX_CAMERAS" --argjson kept "$kept" "$JQ_NORMALIZE" "$1" 2>/dev/null) || cb_die "the list of cameras is not JSON"
+    if jq -e 'has("error")' <<<"$out" >/dev/null; then cb_die "$(jq -r .error <<<"$out")"; fi
+    zone=$(jq -r .timeZone <<<"$out")
+    if [ ! -f "/usr/share/zoneinfo/$zone" ]; then out=$(jq -c '.timeZone = "UTC"' <<<"$out"); fi
+    printf '%s\n' "$out"
+}
+
+kept_list() { # the kept list, checked again; empty when there is none or it is damaged
+    if [ -s "$STATE/cameras.json" ] && (normalize "$STATE/cameras.json" kept) 2>/dev/null; then return 0; fi
+    echo '{"cameras":[],"timeZone":"UTC"}'
+}
+
+write_file() { # write_file PATH MODE [GROUP]: stdin to PATH, atomically (the group is left alone in tests)
+    local path=$1 mode=$2 group=${3:-} tmp
+    tmp=$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")
+    if cat >"$tmp" && chmod "$mode" "$tmp" && { [ -z "$group" ] || [ -n "$ROOT" ] || chgrp "$group" "$tmp"; }; then mv -f "$tmp" "$path"
+    else rm -f "$tmp"; return 1; fi
+}
+
+# --- firewall and services ------------------------------------------------------------------------------------------------
+
+sets_loaded() { nft list set inet camera_bridge guarded4 >/dev/null 2>&1 && nft list set inet camera_bridge guarded6 >/dev/null 2>&1; }
+
+hotspot_open() { [ -e "$HOTSPOT_FLAG" ] || ip -4 -o addr show 2>/dev/null | grep -q ' inet 10\.42\.0\.1/'; }
+
+dns_active() { if [ -n "$ROOT" ]; then [ -n "${CB_GUARD_DNS_SINCE:-}" ]; else systemctl is-active --quiet "$DNS_UNIT"; fi; }
+
+dns_since() { # when the DNS last started answering, in epoch seconds (empty when it does not run or systemd does not say)
+    local at
+    if [ -n "$ROOT" ]; then printf '%s\n' "${CB_GUARD_DNS_SINCE:-}"; return 0; fi
+    at=$(systemctl show --timestamp=unix --property=ActiveEnterTimestamp --value "$DNS_UNIT" 2>/dev/null || true)
+    case $at in @[0-9]*) printf '%s\n' "${at#@}" ;; *) echo "" ;; esac
+}
+
+fill_sets() { # fill_sets LIST: the firewall sets hold exactly the listed addresses (one nft transaction)
+    local list=$1 v4 v6
+    sets_loaded || { cb_log "the firewall is not loaded; the internet guard stays off"; return 1; }
+    v4=$(jq -r '[.cameras[].address | select(contains(":") | not)] | join(", ")' <<<"$list")
+    v6=$(jq -r '[.cameras[].address | select(contains(":"))] | join(", ")' <<<"$list")
+    {
+        echo "flush set inet camera_bridge guarded4"
+        echo "flush set inet camera_bridge guarded6"
+        [ -z "$v4" ] || echo "add element inet camera_bridge guarded4 { $v4 }"
+        [ -z "$v6" ] || echo "add element inet camera_bridge guarded6 { $v6 }"
+    } | nft -f -
+}
+
+dns_config() {
+    cat <<EOF
+# Camera Bridge OS internet guard (Watch): written by cb-guard each time camera-bridge-dns.service starts.
+# Only the watched cameras reach this server (the firewall's sets guarded4 and guarded6), and every name is answered "does not exist".
+port=53
+# The box's own network interfaces, wired and Wi-Fi, never loopback (systemd-resolved keeps 127.0.0.53). bind-dynamic follows a changed
+# address. While the setup hotspot is open this server does not run (NetworkManager's dnsmasq answers the phones there).
+interface=en*
+interface=eth*
+interface=wl*
+except-interface=lo
+bind-dynamic
+# Nothing is looked up anywhere: no upstream servers, no /etc/hosts, no cache, no version answer.
+no-resolv
+no-hosts
+no-poll
+cache-size=0
+no-ident
+# Every name does not exist (NXDOMAIN).
+address=/#/
+# Every question with the camera's address, for cb-guard collect. The service runs as dnsmasq already (user= keeps the log file's owner).
+log-queries
+log-async=25
+log-facility=$QUERY_LOG
+pid-file=
+user=
+EOF
+}
+
+cmd_dns_prepare() {
+    if hotspot_open; then cb_die "the setup hotspot is open; the DNS for watched cameras waits until it closes"; fi
+    sets_loaded || cb_die "the firewall is not loaded; the DNS for watched cameras stays off"
+    install -d -m 0755 "$RUN"
+    install -d -m 0750 -o dnsmasq -g root "$LOGDIR"
+    dns_config | write_file "$RUN/dnsmasq.conf" 0644
+}
+
+# --- collecting ---------------------------------------------------------------------------------------------------------
+
+# Lines of dnsmasq's query log ("Oct 17 17:46:01 dnsmasq[20]: query[A] p2p.example.com from 192.168.77.21"; the service runs with TZ=UTC and
+# the line has no year) as {a: address, n: name, t: epoch}, for the watched addresses only, aggregated per address, hour and name into the
+# kept history; hours older than 7 days and cameras no longer watched are dropped; at most NAMES_PER_HOUR names per camera and hour (the rest
+# is only counted) and MAX_HISTORY_BYTES in all (the oldest hours go first). Questions that never leave the home network are left out: a
+# single-label name, a name under .local, .lan, .home.arpa, .localdomain, .internal or .localhost, a reverse lookup of a local address
+# (10/8, 172.16/12, 192.168/16, 169.254/16, 127/8, fc00::/7, fe80::/10) and a question about the DNS server itself (version.bind and the like).
+# shellcheck disable=SC2016
+JQ_COLLECT='
+def local:
+    (split(".") | length) == 1
+    or test("(^|[.])(local|lan|home[.]arpa|localdomain|internal|localhost)$")
+    or test("(^|[.])(10|127|(1[6-9]|2[0-9]|3[01])[.]172|168[.]192|254[.]169)[.]in-addr[.]arpa$")
+    or test("(^|[.])([cd][.]f|[89ab][.]e[.]f)[.]ip6[.]arpa$")
+    or IN("version.bind", "hostname.bind", "id.server", "version.server");
+def months: {"Jan": 0, "Feb": 1, "Mar": 2, "Apr": 3, "May": 4, "Jun": 5, "Jul": 6, "Aug": 7, "Sep": 8, "Oct": 9, "Nov": 10, "Dec": 11};
+def when($year): [$year, months[.mon], (.day | tonumber), (.h | tonumber), (.mi | tonumber), (.s | tonumber), 0, 0] | mktime;
+def prune($keep; $watched):
+    .cameras |= (with_entries(select(.key as $k | $watched | index([$k])))
+                 | map_values(with_entries(select((.key | tonumber) + 3600 > $now - $keep))) | with_entries(select(.value | length > 0)));
+def cap($max):
+    if (tojson | length) <= $max or (.cameras | length) == 0 then .
+    else ([.cameras[] | keys[] | tonumber] | min | tostring) as $oldest
+    | .cameras |= (map_values(del(.[$oldest])) | with_entries(select(.value | length > 0))) | cap($max) end;
+($now | gmtime | .[0]) as $year
+| ($watched[0].cameras | map(.address)) as $addresses
+| [inputs
+   | capture("^(?<mon>[A-Z][a-z]{2}) +(?<day>[0-9]{1,2}) (?<h>[0-9]{2}):(?<mi>[0-9]{2}):(?<s>[0-9]{2}) dnsmasq\\[[0-9]+\\]: query\\[[A-Za-z0-9]+\\] (?<name>[^ ]{1,300}) from (?<a>[0-9a-f.:]{2,45})$")?
+   | select((.a as $a | $addresses | index([$a])) and months[.mon] != null)
+   | (.name | ascii_downcase) as $n | select($n | local | not)
+   | (when($year)) as $t | {a, n: $n, t: (if $t > $now + 86400 then when($year - 1) else $t end)}] as $lines
+| ($lines | group_by([.a, (.t / 3600 | floor), .n])
+   | map({a: .[0].a, h: ((.[0].t / 3600 | floor) * 3600 | tostring), n: .[0].n, c: length, f: (map(.t) | min), l: (map(.t) | max)})
+   | sort_by(-.c)) as $delta
+| (($history[0] // {}) | if (.cameras | type) == "object" then . else {cameras: {}} end) as $start
+| reduce $delta[] as $d ($start;
+    (.cameras[$d.a][$d.h] // {n: {}, o: 0}) as $b
+    | .cameras[$d.a][$d.h] = (if $b.n[$d.n] != null then $b | .n[$d.n] |= {c: (.c + $d.c), f: ([.f, $d.f] | min), l: ([.l, $d.l] | max)}
+                              elif ($b.n | length) < $perHour then $b | .n[$d.n] = {c: $d.c, f: $d.f, l: $d.l}
+                              else $b | .o += $d.c end))
+| .v = 1
+| prune($keep; $addresses)
+| cap($maxBytes)
+'
+
+# status/guard.json from the history: per watched camera since when it has been watched without a break (the later of its `since` and when
+# the DNS last started, while it runs), the lookups today (since local midnight in the kept time zone, to the hour) and in the last 24 hours
+# (to the hour), and the names of the last 7 days, most asked first.
+# shellcheck disable=SC2016
+JQ_STATUS='
+def total($from): [to_entries[] | select((.key | tonumber) >= $from) | .value | ([.n[].c] | add // 0) + .o] | add // 0;
+(($todayStart / 3600 | floor) * 3600) as $today
+| ((($now - 86400) / 3600 | floor) * 3600) as $day
+| $watched[0] as $list
+| ($history[0].cameras // {}) as $cameras
+| ($list.cameras | length) as $count
+| {state: "ok", message: (if $count == 0 then "No camera is watched" elif $count == 1 then "1 camera is watched" else "\($count) cameras are watched" end),
+   updatedAt: ($now | todate), available: true, running: $running, timeZone: $list.timeZone, todayStart: ($today | todate),
+   cameras: [$list.cameras[] | ($cameras[.address] // {}) as $hours
+     | {address, level, since: ([.since // $now, $dnsSince // 0] | max | todate), today: ($hours | total($today)), last24h: ($hours | total($day)),
+        names: ([$hours[] | .n | to_entries[]] | group_by(.key)
+                | map({name: .[0].key, count: (map(.value.c) | add), first: (map(.value.f) | min | todate), last: (map(.value.l) | max | todate)})
+                | sort_by([-.count, .name]) | .[:$top])}]}
+'
+
+today_start() { # today_start ZONE: local midnight as epoch seconds (UTC midnight when the zone has none that day)
+    local zone=$1 day
+    day=$(TZ=$zone date -d "@$NOW" +%Y-%m-%d)
+    TZ=$zone date -d "$day 00:00" +%s 2>/dev/null || TZ=$zone date -d "$day 01:00" +%s 2>/dev/null || echo $((NOW - NOW % 86400))
+}
+
+log_is_plain() { # log_is_plain PATH: a regular file (no link, FIFO or folder) that dnsmasq owns; in the root-only folder it cannot change now
+    [ ! -L "$1" ] && [ -f "$1" ] && { [ -n "$ROOT" ] || [ "$(stat -c %U -- "$1")" = dnsmasq ]; }
+}
+
+collect_locked() {
+    local list history kept zone start running since top status restarted=false
+    list=$(kept_list)
+    mkdir -p "$STATE" "$CB_STATUS"
+    chmod 0700 "$STATE"
+    install -d -m 0700 "$WORKDIR"
+    # Take the log away from dnsmasq (it opens a new one on SIGUSR2) into the root-only folder and read it whole; a piece left by an
+    # interrupted run is read first. Whatever dnsmasq put there that is not a plain file of its own is removed unread.
+    if [ ! -e "$WORK_LOG" ] && [ ! -L "$WORK_LOG" ] && { [ -e "$QUERY_LOG" ] || [ -L "$QUERY_LOG" ]; }; then
+        mv -f "$QUERY_LOG" "$WORK_LOG"
+        if [ -z "$ROOT" ] && dns_active; then
+            systemctl kill --kill-whom=main --signal=SIGUSR2 "$DNS_UNIT" 2>/dev/null || true
+            for _ in $(seq 20); do [ -e "$QUERY_LOG" ] && break; sleep 0.1; done
+        fi
+    fi
+    if { [ -e "$WORK_LOG" ] || [ -L "$WORK_LOG" ]; } && ! log_is_plain "$WORK_LOG"; then
+        cb_log "the DNS query log is not a plain file; it was removed unread"
+        rm -rf -- "$WORK_LOG"
+    fi
+    history="$STATE/history.json"
+    if ! jq -e 'type == "object"' "$history" >/dev/null 2>&1; then
+        echo '{"v": 1, "cameras": {}}' | write_file "$history" 0600
+        restarted=true
+    fi
+    if kept=$({ [ -f "$WORK_LOG" ] && timeout "$READ_SECONDS" tail -c "$MAX_LOG_BYTES" "$WORK_LOG" || true; } \
+                | jq -R -n -c --argjson now "$NOW" --argjson keep "$KEEP_SECONDS" --argjson perHour "$NAMES_PER_HOUR" \
+                     --argjson maxBytes "$MAX_HISTORY_BYTES" --argjson watched "[$list]" --slurpfile history "$history" "$JQ_COLLECT") \
+       && [ -n "$kept" ]; then
+        printf '%s\n' "$kept" | write_file "$history" 0600
+    else
+        cb_log "the internet guard's history could not be updated; it starts again"
+        echo '{"v": 1, "cameras": {}}' | write_file "$history" 0600
+        restarted=true
+    fi
+    rm -f "$WORK_LOG"
+    # A camera's watch begins again with the history (nothing it asked before is known), and a list kept by an older version begins now.
+    if [ "$restarted" = true ] || jq -e 'any(.cameras[]; .since == null)' <<<"$list" >/dev/null; then
+        list=$(jq -c --argjson now "$NOW" --argjson all "$restarted" '.cameras |= map(if $all or .since == null then .since = $now else . end)' <<<"$list")
+        printf '%s\n' "$list" | write_file "$STATE/cameras.json" 0600
+    fi
+
+    zone=$(jq -r .timeZone <<<"$list")
+    start=$(today_start "$zone")
+    running=false
+    since=null
+    if dns_active; then
+        running=true
+        since=$(dns_since)
+        [[ "$since" =~ ^[0-9]{1,11}$ ]] || since=null
+    fi
+    for top in 50 20 5; do
+        status=$(jq -c -n --argjson now "$NOW" --argjson todayStart "$start" --argjson running "$running" --argjson top "$top" \
+                    --argjson dnsSince "$since" --argjson watched "[$list]" --slurpfile history "$history" "$JQ_STATUS")
+        [ "${#status}" -le "$MAX_STATUS_BYTES" ] && break
+    done
+    printf '%s\n' "$status" | write_file "$CB_STATUS/guard.json" 0640 camerabridge
+}
+
+# --- commands -----------------------------------------------------------------------------------------------------------
+
+lock() {
+    mkdir -p "$RUN"
+    exec 8>"$RUN/.lock"
+    flock -w 60 8 || cb_die "another cb-guard is still running"
+}
+
+apply_locked() { # apply_locked strict|lenient: lenient (at boot) logs a missing firewall and goes on
+    local mode=$1 list count
+    list=$(kept_list)
+    count=$(jq '.cameras | length' <<<"$list")
+    if [ -n "$ROOT" ]; then collect_locked; return 0; fi
+    if ! fill_sets "$list"; then
+        systemctl stop "$DNS_UNIT" "$TIMER" 2>/dev/null || true
+        collect_locked
+        [ "$mode" = lenient ] && return 0
+        cb_die "the firewall is not loaded, so no camera can be watched"
+    fi
+    if [ "$count" -gt 0 ]; then
+        if hotspot_open; then
+            cb_log "the setup hotspot is open; the DNS for watched cameras starts when it closes"
+        elif ! { systemctl reset-failed "$DNS_UNIT" 2>/dev/null; systemctl start "$DNS_UNIT"; }; then
+            cb_log "the DNS for watched cameras did not start"
+        fi
+        systemctl start --no-block "$TIMER" || true
+    else
+        systemctl stop "$DNS_UNIT" "$TIMER" 2>/dev/null || true
+        rm -f "$RUN/dnsmasq.conf"
+    fi
+    collect_locked
+}
+
+cmd_set() {
+    local file=${1:?usage: cb-guard set FILE} list
+    [ -f "$file" ] || cb_die "no such file: $file"
+    list=$(normalize "$file")
+    lock
+    install -d -m 0700 "$STATE"
+    # A camera already on the list keeps when its watch began; one new to it (or put back) begins now.
+    list=$(jq -c --argjson now "$NOW" --argjson old "$(kept_list)" \
+              '.cameras |= map(.address as $a | .since = ([$old.cameras[] | select(.address == $a) | .since | numbers] | first // $now))' <<<"$list")
+    printf '%s\n' "$list" | write_file "$STATE/cameras.json" 0600
+    cb_log "watching $(jq '.cameras | length' <<<"$list") camera(s)"
+    apply_locked strict
+}
+
+main() {
+    local cmd=${1:-}
+    shift || true
+    case $cmd in
+        status)      cat "$CB_STATUS/guard.json" 2>/dev/null || echo '{"available": false}' ;;
+        set)         require_root; cmd_set "$@" ;;
+        check)       normalize "${1:?usage: cb-guard check FILE}" ;;
+        apply)       require_root; lock; apply_locked lenient ;;
+        collect)     require_root; lock; collect_locked ;;
+        config)      dns_config ;;
+        dns-prepare) require_root; cmd_dns_prepare ;;
+        ''|-h|--help|help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+        *) cb_die "unknown command: $cmd (try: cb-guard help)" ;;
+    esac
+}
+
+main "$@"

@@ -35,7 +35,8 @@ test("auth: missing or wrong token is 401 everywhere; right token passes", async
 
 test("fake sign-in: plain, captcha, code, wrong answers, sign-out, and restart keeps the session", async () => {
   const cap = captureLog();
-  const app = await startApp();
+  let now = new Date(2026, 9, 16, 9, 0).getTime(); // 09:00 local: on its battery
+  const app = await startApp({ clock: () => now });
   try {
     let r = await request(app.port, "POST", "/sign-in", { body: { email: "owner@example.com", password: "captcha", country: "US" } });
     assert.equal(r.json.state, "needsCaptcha");
@@ -63,10 +64,14 @@ test("fake sign-in: plain, captcha, code, wrong answers, sign-out, and restart k
     r = await request(app.port, "POST", "/verify", { body: { code: "123456" } });
     assert.equal(r.json.state, "signedIn");
 
-    const d = await request(app.port, "GET", "/devices");
+    let d = await request(app.port, "GET", "/devices");
     assert.deepEqual(d.json, {
-      devices: [{ serial: "T8134FAKE0000001", name: "Fake SoloCam", model: "T8134", type: 63, online: true, battery: 87, livestream: true, codec: "h264" }],
+      devices: [{ serial: "T8134FAKE0000001", name: "Fake SoloCam", model: "T8134", type: 63, online: true, battery: 87, charging: false, chargingSource: null, livestream: true, codec: "h264" }],
     });
+    now = new Date(2026, 9, 16, 12, 30).getTime(); // midday: charging from its solar panel
+    d = await request(app.port, "GET", "/devices");
+    assert.equal(d.json.devices[0].charging, true);
+    assert.equal(d.json.devices[0].chargingSource, "solar");
 
     const sess = join(app.dir, "state", "session.json");
     assert.equal(statSync(sess).mode & 0o777, 0o600);

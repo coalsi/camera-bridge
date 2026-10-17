@@ -119,5 +119,31 @@ import Testing
         #expect(await eventually(timeout: archiveStorePatience) { engine.nvrStorage?.pause == .noFolder })
         await engine.stop()
     }
+
+    @MainActor @Test(.timeLimit(.minutes(2))) func aCamerasEventsReachTheArchiveAndAreThereAfterARestart() async throws {
+        let data = try TemporaryDirectory(), recordings = try TemporaryDirectory()
+        defer { data.remove(); recordings.remove() }
+        let engine = try await Self.engine(directory: data, recordings: recordings.url, policy: Self.policy())
+        let camera = EngineFixture.demoCamera(name: "Porch")   // Record off: its events are kept all the same
+        try await engine.addCamera(camera, password: nil)
+        await engine.start()
+        #expect(await eventually(timeout: archiveStorePatience) { engine.archive.isReady })
+        let before = Date()
+        await engine.triggerTestMotion(cameraID: camera.id)
+        let range = before.addingTimeInterval(-60)..<Date().addingTimeInterval(60)
+        var page = ArchiveEventPage(events: [], isTruncated: false)
+        #expect(await eventually(timeout: archiveStorePatience) {
+            page = (try? await engine.archive.events(cameras: [camera.id], range: range, limit: 10)) ?? page
+            return !page.events.isEmpty
+        })
+        let event = try #require(page.events.first)
+        #expect(event.kind == "Motion" && event.camera == camera.id && !event.hadVideo && !event.recorded)
+        await engine.stop()
+        await engine.start()
+        #expect(await eventually(timeout: archiveStorePatience) { engine.archive.isReady })
+        let again = try await engine.archive.events(cameras: [camera.id], range: range, limit: 10)
+        #expect(again.events.first?.id == event.id, "kept on the drive")
+        await engine.stop()
+    }
 }
 #endif
