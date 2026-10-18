@@ -1,10 +1,11 @@
-# Wired Ethernet only (v1 has no Wi-Fi setup). DHCP on every Ethernet interface.
+# Wired Ethernet: DHCP on every Ethernet interface (Wi-Fi is NetworkManager's, set up by cb-wifi).
 [Match]
 Type=ether
 Kind=!*
 
 [Link]
-# systemd-networkd-wait-online waits at most 30 s for this (see the drop-in), so an unplugged cable never blocks boot.
+# What networkd calls online for this link (networkctl). The boot waits for any network, this one or Wi-Fi, at most 30 s
+# (camera-bridge-wait-online.service), so an unplugged cable never blocks it.
 RequiredForOnline=routable
 
 [Network]

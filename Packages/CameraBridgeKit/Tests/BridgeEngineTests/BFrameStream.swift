@@ -11,14 +11,37 @@ import VideoToolbox
 /// on the 90 kHz clock. Picture `i` shows a centre square of luma 16 + 4 × (i % 50) over a moving noise texture (the
 /// motion keeps VideoToolbox choosing B-frames); `index(of:)` reads the number back from a decoded picture.
 enum BFrameStream {
-    enum Failure: Error { case session(OSStatus), noPixelBuffer, missingFrames(Int) }
+    enum Failure: Error { case session(OSStatus), noPixelBuffer, missingFrames(Int), unexpectedKeyframes([Int]) }
 
     static let width = 640
     static let height = 360
     static let origin = Date(timeIntervalSinceReferenceDate: 800_000_000)
 
     /// `count` pictures at `fps`, IDRs at picture 0 and at `keyframes` (picture indices); no other keyframes.
-    static func encode(count: Int, fps: Int = 25, keyframes: Set<Int> = []) throws -> [EncodedVideoFrame] {
+    ///
+    /// VideoToolbox adds keyframes of its own while other encode sessions run (the hardware encoder is shared): about a third of 16
+    /// parallel encodes had one, none of 48 one at a time. So encodes here take turns, and a stream that still got a keyframe nobody
+    /// asked for (another test's encoder, another test process) is encoded again: tests rely on exactly these keyframes.
+    /// `exactKeyframes: false` (a stream that only feeds a transcoder, which makes its own keyframes) takes the first encode.
+    static func encode(count: Int, fps: Int = 25, keyframes: Set<Int> = [], exactKeyframes: Bool = true) throws -> [EncodedVideoFrame] {
+        turn.lock()
+        defer { turn.unlock() }
+        guard exactKeyframes else { return try encodeUnchecked(count: count, fps: fps, keyframes: keyframes) }
+        let wanted = keyframes.union([0]).filter { $0 < count }.sorted()
+        var found: [Int] = []
+        for _ in 0..<8 {
+            let frames = try encodeUnchecked(count: count, fps: fps, keyframes: keyframes)
+            found = frames.filter(\.isKeyframe).map { index(ofPTS: $0.pts, fps: fps) }.sorted()
+            if found == wanted { return frames }
+        }
+        throw Failure.unexpectedKeyframes(found)
+    }
+
+    /// One encode at a time in this process (see `encode`).
+    private static let turn = NSLock()
+
+    /// One encode with the keyframes VideoToolbox made, without taking a turn: for a test that needs other sessions encoding.
+    static func encodeUnchecked(count: Int, fps: Int = 25, keyframes: Set<Int> = []) throws -> [EncodedVideoFrame] {
         var sessionOut: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height), codecType: kCMVideoCodecType_H264,
                                                 encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,

@@ -20,6 +20,7 @@ More can be set in `/etc/camera-bridge/camerabridged.env` (read by the unit if p
 
 Process requirements of the unit:
 
+* It starts after `network-online.target`: `camera-bridge-wait-online.service` (`cb-wait-online`) waits for a default route or a global address (a camera network without a router counts) from Ethernet (systemd-networkd) or Wi-Fi (NetworkManager), at most 30 s, and never fails, so a box with no network yet still starts. Both managers' own wait-online units are masked (each sees only its own links). The daemon must still follow later network changes.
 * `Type=notify`: send `READY=1` (sd_notify) once the web port is listening.
 * `WatchdogSec=30`: send `WATCHDOG=1` at least every 15 s, or systemd kills and restarts the daemon. (If the daemon cannot do this, relax `WatchdogSec` in `units/camerabridged.service.in`.)
 * `GET http://127.0.0.1/api/v1/status` must answer with a JSON document without authentication: `camera-bridge-health.service` uses it to decide whether a boot is good (a new OS version that fails this three times is rolled back automatically).

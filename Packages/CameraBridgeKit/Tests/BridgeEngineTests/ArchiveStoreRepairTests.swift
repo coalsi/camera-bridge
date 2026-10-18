@@ -104,15 +104,21 @@ import Testing
         let handle = try FileHandle(forWritingTo: result.mp4)   // the drive stalled during the fifth fragment
         try handle.truncate(atOffset: result.index.fragments[4].offset + 700)
         try handle.close()
+        // The close wakes the janitor, which runs on its own task: its pass is over before the test makes the passes it is about by hand (the close is the
+        // only wake in this test, so it is one pass).
+        let passesBefore = harness.store.state.withLock { $0.retentionPasses }
         harness.store.recorderClosed(file, index: nil)
+        #expect(await eventually(timeout: archiveStorePatience) { harness.store.state.withLock { $0.retentionPasses } > passesBefore }, "the janitor's pass for the close is over")
         let none = await harness.ids()
         #expect(none.isEmpty)
-        // Just written: it may still be written to. Nothing happens.
-        harness.clock.set(Date())
+        // Just written: it may still be written to. Nothing happens. The time is the store's clock, an hour after the recording started: at the real time
+        // the recording would be a year past the 7 days it is kept, and a pass of the janitor would delete it as soon as the repair put it back.
+        let written = harness.clock.value
+        try FileManager.default.setAttributes([.modificationDate: written], ofItemAtPath: result.mp4.path(percentEncoded: false))
         await harness.store.repairQuiet(harness.run)
         #expect(harness.store.state.withLock { $0.repairQueue.count } == 1 && !Self.exists(result.sidecar))
         // 60 s without a write: repaired, back in the timeline with its four whole fragments.
-        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -61)], ofItemAtPath: result.mp4.path(percentEncoded: false))
+        harness.clock.set(written.addingTimeInterval(61))
         await harness.store.repairQuiet(harness.run)
         #expect(harness.store.state.withLock { $0.repairQueue.isEmpty })
         let ids = await harness.ids()
@@ -131,11 +137,15 @@ import Testing
         damaged.replaceSubrange(Int(result.index.fragments[3].offset) + 4..<Int(result.index.fragments[3].offset) + 8, with: Data("junk".utf8))
         try damaged.write(to: result.mp4)
         let fragment = try #require(await harness.store.fragment(camera: Self.camera, containing: ArchiveTime.date(ms: Self.start + 8_000)))
+        // The failed read quarantines the file, which wakes the janitor on its own task: its pass is over before the repair by hand.
+        let passesBefore = harness.store.state.withLock { $0.retentionPasses }
         await #expect(throws: ArchiveError.self) { try await harness.store.read(fragment, .fragment) }
+        #expect(await eventually(timeout: archiveStorePatience) { harness.store.state.withLock { $0.retentionPasses } > passesBefore }, "the janitor's pass for the quarantine is over")
         let gone = await harness.ids()
         #expect(gone.isEmpty && harness.store.state.withLock { $0.repairQueue.count } == 1)
-        harness.clock.set(Date())   // the file's modification time is real time
-        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)], ofItemAtPath: result.mp4.path(percentEncoded: false))
+        // Quiet for 2 minutes on the store's clock (at the real time the recording would be past the 7 days it is kept, and a pass of the
+        // janitor would delete it as soon as the repair put it back).
+        try FileManager.default.setAttributes([.modificationDate: harness.clock.value.addingTimeInterval(-120)], ofItemAtPath: result.mp4.path(percentEncoded: false))
         await harness.store.repairQuiet(harness.run)
         let back = await harness.ids()
         #expect(back.count == 3, "the three fragments before the damage")

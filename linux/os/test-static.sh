@@ -108,6 +108,23 @@ for u in "${units[@]}"; do
     if [ -z "$out" ]; then pass "systemd-analyze verify $u"; else bad "systemd-analyze verify $u"; sed 's/^/        /' <<<"$out"; fi
 done
 
+check "the boot waits for Ethernet or Wi-Fi with our unit; networkd's wait-online and pcrlock are masked (they left the box degraded)" bash -c '
+    p=mkosi.postinst.chroot
+    grep -q "^    camera-bridge-wait-online.service \\\\$" "$p" || { echo "camera-bridge-wait-online.service is not enabled"; exit 1; }
+    grep -q "^systemctl mask systemd-networkd-wait-online.service$" "$p" || { echo "systemd-networkd-wait-online is not masked"; exit 1; }
+    grep -q "^systemctl mask \$pcrlock_units" "$p" || { echo "the pcrlock units are not masked"; exit 1; }
+    units=$(sed -n "s/^pcrlock_units=\"\(.*\)\"$/\1/p" "$p")
+    for u in file-system firmware-code firmware-config machine-id make-policy secureboot-authority secureboot-policy; do
+        grep -qw "systemd-pcrlock-$u.service" <<<"$units" || { echo "not in pcrlock_units: systemd-pcrlock-$u"; exit 1; }
+    done
+    [ ! -e mkosi.extra/usr/lib/systemd/system/systemd-networkd-wait-online.service.d ] || { echo "a drop-in for the masked unit is left"; exit 1; }'
+check "cb-wait-online returns at once on a network and after its limit without one, never failing" bash -c '
+    s=$(date +%s); out=$(/usr/lib/camera-bridge/cb-wait-online 5 2>&1) || { echo "failed with a route: $out"; exit 1; }; [ $(($(date +%s) - s)) -le 1 ] && grep -q "on the network" <<<"$out" || { echo "with a route: $out"; exit 1; }
+    s=$(date +%s); out=$(unshare -n /usr/lib/camera-bridge/cb-wait-online 2 2>&1) || { echo "failed without a network: $out"; exit 1; }
+    t=$(($(date +%s) - s)); [ "$t" -ge 2 ] && [ "$t" -le 4 ] && grep -q "no network after 2 s" <<<"$out" || { echo "without a route after $t s: $out"; exit 1; }
+    s=$(date +%s); out=$(unshare -n bash -c "ip link set lo up && ip addr add 192.0.2.5/24 dev lo && /usr/lib/camera-bridge/cb-wait-online 5" 2>&1) || { echo "failed with an address: $out"; exit 1; }
+    [ $(($(date +%s) - s)) -le 1 ] && grep -q "on the network" <<<"$out" || { echo "a camera network without a router is not online: $out"; exit 1; }
+    ! /usr/lib/camera-bridge/cb-wait-online abc >/dev/null 2>&1 || { echo "accepted a bad limit"; exit 1; }'
 check "a factory reset finishes before SSH and the guard read their settings" bash -c 'u=/usr/lib/systemd/system/camera-bridge-factory-reset.service; for s in camera-bridge-ssh camera-bridge-credentials ssh camera-bridge-guard; do grep -Eq "^Before=.*\b$s\.service\b" "$u" || { echo "not Before=: $s.service"; exit 1; }; done'
 
 # --- the internet guard: its DNS configuration, its job, its units ------------------------------------------------------------

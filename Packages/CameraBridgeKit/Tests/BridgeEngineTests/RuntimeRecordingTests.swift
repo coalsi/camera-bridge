@@ -528,7 +528,8 @@ import Testing
 
     /// A 25 fps H.264 Main camera without B-frames (the B-frame stream through the transcoder), keyframes every second.
     static func pOnlyStream(count: Int) async throws -> [EncodedVideoFrame] {
-        let source = try BFrameStream.encode(count: count, fps: 25, keyframes: Set(stride(from: 25, to: count, by: 25)))
+        // (The transcoder makes its own keyframes, so a stray one in the source does not matter.)
+        let source = try BFrameStream.encode(count: count, fps: 25, keyframes: Set(stride(from: 25, to: count, by: 25)), exactKeyframes: false)
         let converter = try AppleMediaCodecs().makeVideoTranscoder(output: VideoEncoderSettings(width: 640, height: 360, fps: 25, bitrateKbps: 1500,
                                                                                                profile: .main, level: .level3_1,
                                                                                                keyframeInterval: .seconds(1), realtime: false))
@@ -716,7 +717,8 @@ import Testing
     /// A 25 fps 640×360 H.264 Main camera without B-frames whose keyframes come every `gop` seconds.
     static func longGOPStream(seconds: Int, gop: Int) async throws -> [EncodedVideoFrame] {
         let count = seconds * 25
-        let source = try BFrameStream.encode(count: count, fps: 25, keyframes: Set(stride(from: gop * 25, to: count, by: gop * 25)))
+        // (The transcoder makes its own keyframes, so a stray one in the source does not matter.)
+        let source = try BFrameStream.encode(count: count, fps: 25, keyframes: Set(stride(from: gop * 25, to: count, by: gop * 25)), exactKeyframes: false)
         let converter = try AppleMediaCodecs().makeVideoTranscoder(output: VideoEncoderSettings(width: 640, height: 360, fps: 25, bitrateKbps: 1500,
                                                                                                profile: .main, level: .level3_1,
                                                                                                keyframeInterval: .seconds(gop), realtime: false))

@@ -266,9 +266,13 @@ actor WyzePlugin {
     @discardableResult
     private func sync() async throws -> [WyzeDevice] {
         if let running { return try await running.value }
-        let task = Task { try await self.syncNow() }
+        // The sync lets go of `running` itself before it ends: cleared once its starter resumes, a caller in between (a refresh just
+        // after the sign-in's sync) would get the finished sync's answer instead of a new look.
+        let task = Task {
+            defer { running = nil }
+            return try await syncNow()
+        }
         running = task
-        defer { running = nil }
         return try await task.value
     }
 

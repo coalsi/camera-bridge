@@ -571,6 +571,13 @@ if selected system; then
         no "failed units:"; echo "$failed_units" | sed 's/^/        /'
         for u in $(echo "$failed_units" | awk '{print $1}'); do ssh_run "journalctl -u $u -n 12 --no-pager" | sed 's/^/          | /'; done
     fi
+    # network-online.target: our wait (Ethernet or Wi-Fi), not networkd's (it timed out and failed on every boot of a box on Wi-Fi);
+    # pcrlock is masked (it failed on a TPM it cannot use). Without a network the wait gives up after its limit and still succeeds.
+    ssh_has 'systemctl is-active camera-bridge-wait-online.service' '^active$' && ok "the boot waited for the network with camera-bridge-wait-online" || no "camera-bridge-wait-online did not run"
+    ssh_has '{ systemctl is-enabled systemd-networkd-wait-online.service; systemctl list-unit-files "systemd-pcrlock-*.service" --no-legend | awk "{print \$2}"; } 2>&1 | sort -u | tr "\n" " "' '^masked $' \
+        && ok "networkd's wait-online and every pcrlock unit are masked" || no "networkd's wait-online or a pcrlock unit is not masked"
+    ssh_has 's=$(date +%s); unshare -n /usr/lib/camera-bridge/cb-wait-online 2 >/dev/null 2>&1 && echo "ok $(($(date +%s) - s))"' '^ok [234]$' \
+        && ok "with no network the wait gives up after its limit and still succeeds" || no "the wait for the network fails or hangs with no network"
     ssh_has 'findmnt -no OPTIONS /' '(^|,)ro(,|$)' && ok "root file system is read-only" || no "root file system is not read-only"
     ssh_has 'findmnt -no FSTYPE /var' '^tmpfs$' && ok "/var is volatile (tmpfs)" || no "/var is not a tmpfs"
     ssh_run 'findmnt /srv && findmnt /var/lib/camera-bridge && findmnt /var/log/journal' >/dev/null && ok "data partition mounted at /srv and bound to /var/lib/camera-bridge and the journal" || no "data mounts missing"

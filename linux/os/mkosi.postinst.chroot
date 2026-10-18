@@ -25,7 +25,7 @@ chmod 0755 /srv
 systemctl enable \
     systemd-networkd.service \
     systemd-resolved.service \
-    systemd-networkd-wait-online.service \
+    camera-bridge-wait-online.service \
     avahi-daemon.service \
     chrony.service \
     nftables.service \
@@ -94,3 +94,14 @@ mkdir -p /usr/share/camera-bridge
 # NetworkManager only waits for Wi-Fi in the background: the boot never waits for it (Ethernet is systemd-networkd's).
 systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
 systemctl mask NetworkManager-wait-online.service
+# network-online.target is camera-bridge-wait-online's (Ethernet or Wi-Fi). networkd's own sees only Ethernet: on a box on Wi-Fi it
+# timed out on every boot (the daemon started 30 s late) and failed, so the box said "degraded".
+systemctl disable systemd-networkd-wait-online.service 2>/dev/null || true
+systemctl mask systemd-networkd-wait-online.service
+# Nothing is bound to the TPM (no encrypted credentials or disks). Debian enables systemd-pcrlock, whose policy step fails on TPMs
+# it cannot use (no AES-128-CFB, or without the tss2 libraries, which the image does not have) and left the box "degraded".
+pcrlock_units="systemd-pcrlock-file-system.service systemd-pcrlock-firmware-code.service systemd-pcrlock-firmware-config.service systemd-pcrlock-machine-id.service systemd-pcrlock-make-policy.service systemd-pcrlock-secureboot-authority.service systemd-pcrlock-secureboot-policy.service"
+# shellcheck disable=SC2086
+systemctl disable $pcrlock_units 2>/dev/null || true
+# shellcheck disable=SC2086
+systemctl mask $pcrlock_units >/dev/null

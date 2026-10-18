@@ -1,0 +1,30 @@
+#!/bin/bash
+# Waits until the box is on a network, Ethernet or Wi-Fi, for at most SECONDS (default 30): camera-bridge-wait-online.service,
+# what network-online.target waits for. Ethernet is systemd-networkd's and Wi-Fi is NetworkManager's, so neither one's own
+# wait-online can tell (networkd's timed out on every boot of a box on Wi-Fi, 30 s before the daemon could start, and failed).
+# On a network = a default route (IPv4 or IPv6) or a global address (networkd's "routable": a camera network without a router
+# counts too), from either of them. Never fails: a box with no network yet still starts (it opens the setup hotspot, and the daemon
+# follows network changes).
+#
+#   cb-wait-online [SECONDS]
+set -euo pipefail
+export CB_TAG=camera-bridge-wait-online
+# shellcheck source=lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+limit=${1:-30}
+case $limit in '' | *[!0-9]*) cb_die "usage: cb-wait-online [SECONDS]" ;; esac
+
+online() {
+    [ -n "$(ip -4 route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)$(ip -o addr show scope global -tentative 2>/dev/null)" ]
+}
+
+start=$SECONDS
+until online; do
+    if [ $((SECONDS - start)) -ge "$limit" ]; then
+        cb_log "no network after $limit s; starting without it (the bridge follows network changes)"
+        exit 0
+    fi
+    sleep 0.5
+done
+cb_log "on the network after $((SECONDS - start)) s"

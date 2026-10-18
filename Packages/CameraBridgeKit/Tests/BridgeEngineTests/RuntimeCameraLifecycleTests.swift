@@ -415,7 +415,9 @@ final class Gate: Sendable {
         await engine.systemDidWake()
         #expect(await fixture.waitFor { engine.recentLogs.contains { $0.message.contains("woke up") } })
         #expect(await fixture.until { await (runtime.ingestAttempts.main ?? 0) > attempts }, "the ingest connected again")
-        #expect(driver.sourcesMade.value == 2 && driver.sourcesStopped.value == 1, "the event channel restarted")
+        // The ingest connects again in its own task while the refresh goes on to the event channel: its old source's stop
+        // (bounded, it may talk to the camera) and the new source can come after the ingest's attempt.
+        #expect(await fixture.until { driver.sourcesMade.value == 2 && driver.sourcesStopped.value == 1 }, "the event channel restarted")
         #expect(await fixture.until { advertiser.count("Lobby") == 2 }, "advertised again")
         #expect(await fixture.waitFor { fixture.status(camera.id)?.connection == .online })
 

@@ -15,6 +15,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.110',
+    date: '2026-10-18',
+    title: 'Cameras start sooner after a restart',
+    items: [
+      'A box on Wi-Fi starts its cameras about 20 seconds sooner after a restart: it no longer waits out a network cable that is not plugged in. A camera network without a router counts as a network too.',
+      'The box no longer reports itself as degraded because of system services it does not use.',
+      'Wyze: Refresh on the Plugins page always looks at the cameras again. Right after signing in it could show the answer from a moment before (for example RTSP still on after you turned it off).',
+    ],
+  },
+  {
     version: '0.1.109',
     date: '2026-10-17',
     title: 'Security badges, the Internet guard, and a better Monitor',

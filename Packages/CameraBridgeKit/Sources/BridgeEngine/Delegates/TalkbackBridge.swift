@@ -27,9 +27,10 @@ actor TalkbackBridge {
     private let handoverIdle: Duration
     private let closeLimit: Duration
     private let log: Log
+    private let now: @Sendable () -> ContinuousClock.Instant
     private var sink: (any TalkbackSink)?
-    /// A sink's `open()` is in flight.
-    private var opening = false
+    /// A sink's `open()` is in flight (tests wait for a refused open to end).
+    private(set) var opening = false
     /// Bumped whenever a sink is opened or dropped: a send that failed on an older sink leaves the current one alone.
     private var sinkGeneration = 0
     private var transcoder: (converter: any AudioTranscoding, input: AudioFormat)?
@@ -44,14 +45,17 @@ actor TalkbackBridge {
     private var ended: [UUID] = []
     private(set) var framesSent = 0
 
+    /// `now`: the clock `retryDelay` and `handoverIdle` are counted on, replaced by tests.
     init(makeSink: @escaping @Sendable () -> (any TalkbackSink)?, codecs: any MediaCodecs, retryDelay: Duration = .seconds(5),
-         handoverIdle: Duration = .seconds(1), closeLimit: Duration = CameraRuntime.stopLimit, log: Log) {
+         handoverIdle: Duration = .seconds(1), closeLimit: Duration = CameraRuntime.stopLimit, log: Log,
+         now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         self.makeSink = makeSink
         self.codecs = codecs
         self.retryDelay = retryDelay
         self.handoverIdle = handoverIdle
         self.closeLimit = closeLimit
         self.log = log
+        self.now = now
     }
 
     var isOpen: Bool { sink != nil }
@@ -63,7 +67,7 @@ actor TalkbackBridge {
     /// camera times it out), and that packet and every one until the channel is open are dropped.
     func send(_ frame: EncodedAudioFrame, from session: UUID) async {
         guard !Task.isCancelled, !closed, !unsupported, !frame.data.isEmpty, !ended.contains(session) else { return }
-        let now = ContinuousClock.now
+        let now = self.now()
         users.insert(session)
         if opening { return }   // the sink is being opened: dropped, nothing changes hands, and no second open starts
         if let holder, holder.session != session, now - holder.lastSent < handoverIdle { return }   // another viewer talks
@@ -100,7 +104,7 @@ actor TalkbackBridge {
             self.sink = nil
             sinkGeneration &+= 1
             transcoder = nil
-            retryAt = .now + retryDelay
+            retryAt = self.now() + retryDelay
             await closeBounded(sink)
         }
     }
@@ -113,7 +117,7 @@ actor TalkbackBridge {
         } catch {
             opening = false
             log.warning("Talkback could not be opened (\(Redact.string(String(describing: error)))); retrying in \(MediaFit.seconds(retryDelay)) s")
-            retryAt = .now + retryDelay
+            retryAt = now() + retryDelay
             return
         }
         opening = false
@@ -123,7 +127,7 @@ actor TalkbackBridge {
         }
         sink = created
         sinkGeneration &+= 1
-        if let holder { self.holder = (holder.session, .now) }
+        if let holder { self.holder = (holder.session, now()) }
         log.info("Talkback opened (\(created.inputFormat.codec.rawValue) \(created.inputFormat.sampleRate) Hz)")
     }
 

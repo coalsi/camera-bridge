@@ -10,7 +10,8 @@ import Testing
 @Suite(.timeLimit(.minutes(1))) struct CodecsBFrameTranscoderTests {
     static let count = 50
     /// 50 pictures with B-frames, then an IDR (whose arrival releases every picture held before it).
-    static let source: [EncodedVideoFrame] = (try? BFrameStream.encode(count: count + 1, keyframes: [count])) ?? []
+    static let encoded = Result { try BFrameStream.encode(count: count + 1, keyframes: [count]) }
+    static var source: [EncodedVideoFrame] { (try? encoded.get()) ?? [] }
 
     /// Transcodes `input` (640×360 at `fps`) and returns the output with the picture number each output frame shows.
     private func transcode(_ input: [EncodedVideoFrame], fps: Int = 25) throws -> [(frame: EncodedVideoFrame, shown: Int)] {
@@ -34,7 +35,7 @@ import Testing
     }
 
     @Test func theFixtureReorders() throws {
-        let source = Self.source
+        let source = try Self.encoded.get()   // (an encode that failed says why here)
         try #require(source.count == Self.count + 1)
         #expect(BFrameStream.reorders(source))
         #expect(source.contains { $0.dts != nil })

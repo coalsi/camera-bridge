@@ -108,9 +108,10 @@ import TestSupport
         }
     }
 
-    static func bridge(_ camera: OneChannelCamera, retryDelay: Duration = .milliseconds(400), closeLimit: Duration = CameraRuntime.stopLimit)
-        -> TalkbackBridge {
-        TalkbackBridge(makeSink: { camera.makeSink() }, codecs: AppleMediaCodecs(), retryDelay: retryDelay, closeLimit: closeLimit, log: log)
+    /// `now`: the bridge's clock (the retry delay is counted on it).
+    static func bridge(_ camera: OneChannelCamera, retryDelay: Duration = .milliseconds(400), closeLimit: Duration = CameraRuntime.stopLimit,
+                       now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) -> TalkbackBridge {
+        TalkbackBridge(makeSink: { camera.makeSink() }, codecs: AppleMediaCodecs(), retryDelay: retryDelay, closeLimit: closeLimit, log: log, now: now)
     }
 
     /// Sends `packets` from `session`, one every `interval` (each session's return audio arrives in order, one at a time).
@@ -124,16 +125,27 @@ import TestSupport
 
     /// Review finding (W4 round 2): no test covered a refused open (a busy Hikvision channel); a mutant that reopened at
     /// every 20 ms return packet (about 50 open requests a second to the camera) passed every suite.
+    /// The bridge's clock moves only when the test says so: under the full suite's load a 20 ms sleep took up to a second,
+    /// and the "0.2 s" of packets meant for within the retry delay reached past it on the real clock (a rightful reopen).
     @Test(.timeLimit(.minutes(1))) func anOpenTheCameraRefusesIsRetriedOnlyAfterTheDelay() async throws {
         let camera = OneChannelCamera(failingOpens: 1)
-        let bridge = Self.bridge(camera)
+        let clock = Box(ContinuousClock.now)
+        let refused = clock.value
+        let bridge = Self.bridge(camera, now: { clock.value })
         let session = UUID()
         let packets = try RuntimeLiveStreamTests.opusSecond()
-        await Self.talk(bridge, session, packets.prefix(8))   // about 0.2 s: within the retry delay
+        await bridge.send(packets[0], from: session)   // the open the camera refuses
+        #expect(await eventually { await !bridge.opening }, "the refusal is counted from `refused`")
+        await Self.talk(bridge, session, packets[1..<8])   // within the retry delay: the bridge's clock stands still
         #expect(camera.opens.value == 1, "no second open before the retry delay")
         #expect(await !bridge.isOpen)
-        try await Task.sleep(for: .milliseconds(400))
-        await Self.talk(bridge, session, packets.dropFirst(8), every: .milliseconds(5))
+        clock.set(refused + .milliseconds(399))
+        await bridge.send(packets[8], from: session)
+        #expect(camera.sinksMade.value == 1, "no reopen a millisecond before the delay")
+        clock.set(refused + .milliseconds(400))
+        await bridge.send(packets[9], from: session)
+        #expect(await eventually { await bridge.isOpen }, "reopened once the delay is over")
+        await Self.talk(bridge, session, packets.dropFirst(10), every: .milliseconds(5))
         #expect(camera.opens.value == 2, "one reopen after the delay")
         #expect(await bridge.isOpen)
         #expect(camera.framesPlayed >= 20)
@@ -145,17 +157,27 @@ import TestSupport
     /// Review finding (W4 round 2): a channel that fails while sending (the camera dropped it) must be closed once and
     /// reopened after the delay; a mutant that gave up for the camera's lifetime (and left the failed sink open) passed
     /// every suite.
+    /// The bridge's clock moves only when the test says so (as for a refused open).
     @Test(.timeLimit(.minutes(1))) func aSinkThatFailsWhileSendingIsClosedAndReopenedAfterTheDelay() async throws {
         let camera = OneChannelCamera(failingSends: 1)
-        let bridge = Self.bridge(camera)
+        let clock = Box(ContinuousClock.now)
+        let dropped = clock.value
+        let bridge = Self.bridge(camera, now: { clock.value })
         let session = UUID()
         let packets = try RuntimeLiveStreamTests.opusSecond()
-        await Self.talk(bridge, session, packets.prefix(8))
+        await bridge.send(packets[0], from: session)
+        #expect(await eventually { await bridge.isOpen })
+        await Self.talk(bridge, session, packets[1..<8])   // the camera drops the channel at the first send, at `dropped`
         #expect(camera.opens.value == 1)
         #expect(camera.closes.value == 1, "the failed sink is closed")
         #expect(await !bridge.isOpen)
-        try await Task.sleep(for: .milliseconds(400))
-        await Self.talk(bridge, session, packets.dropFirst(8), every: .milliseconds(5))
+        clock.set(dropped + .milliseconds(399))
+        await bridge.send(packets[8], from: session)
+        #expect(camera.sinksMade.value == 1, "no new sink a millisecond before the delay")
+        clock.set(dropped + .milliseconds(400))
+        await bridge.send(packets[9], from: session)
+        #expect(await eventually { await bridge.isOpen }, "reopened once the delay is over")
+        await Self.talk(bridge, session, packets.dropFirst(10), every: .milliseconds(5))
         #expect(camera.opens.value == 2 && camera.sinksMade.value == 2, "a new sink after the delay")
         #expect(camera.closes.value == 1)
         #expect(await bridge.isOpen)
