@@ -739,10 +739,17 @@ if selected nvr; then
             echo "        $(tail -n 1 "$nvr_dir/conformance.txt" | cut -c1-200)"
             grep -A1 '^skip  admission' "$nvr_dir/conformance.txt" | cut -c1-200 | sed 's/^/        /' || true
             # A crash of the daemon is a finding of its own, never "a flaky test": it is said first, with the stack trace the journal kept.
+            # (It reads the whole boot: a crash during the recording phases above is reported here too.)
             crash=$(ssh_run 'journalctl -b --no-pager -u camerabridged | grep -E "Main process exited, code=(killed|dumped)"' 2>/dev/null || true)
             if [ -n "$crash" ]; then
-                no "the daemon crashed while conformance.mjs ran: $(echo "$crash" | tail -1 | sed 's/.*Main process exited, //')"
-                ssh_run 'journalctl -b --no-pager -t systemd-coredump | tail -60' 2>/dev/null | cut -c1-240 | sed 's/^/          | /' || true
+                no "the daemon crashed during the NVR tests: $(echo "$crash" | tail -1 | sed 's/.*Main process exited, //')"
+                # The Swift runtime's backtrace (SWIFT_BACKTRACE in the unit): the crashed thread comes first. The kernel's line gives the
+                # address of a trap (ud2 is SIGILL on x86-64) for addr2line against the daemon binary.
+                # (-B 6: a try! or fatalError prints its "Fatal error" line just before.)
+                ssh_run 'journalctl -b --no-pager -u camerabridged -o cat | grep -m1 -B 6 -A 60 "Program crashed"' 2>/dev/null | cut -c1-240 | sed 's/^/          | /' || true
+                # (The line starts with the crashing thread's name, which can be one of the daemon's own threads.)
+                ssh_run 'journalctl -b --no-pager -k -o cat | grep -E "traps: .* in camerabridged\[|camerabridged.*(invalid opcode|trap)"' 2>/dev/null | cut -c1-240 | sed 's/^/          | /' || true
+                ssh_run 'journalctl -b --no-pager -t systemd-coredump -o cat | head -20' 2>/dev/null | cut -c1-240 | sed 's/^/          | /' || true
             fi
             if [ "$conformance_status" -eq 0 ]; then
                 ok "conformance.mjs (T07) finds the box within the contract"

@@ -90,6 +90,7 @@ sed -e "s|@CB_DAEMON@|$CB_DAEMON|g" -e "s|@CB_WEB_ROOT@|$CB_WEB_ROOT|g" units/ca
 install -D -m 0755 stub/camerabridged-stub "$CB_DAEMON"
 check "rendered unit has no leftover @placeholders@" bash -c '! grep -n "@CB_" /usr/lib/systemd/system/camerabridged.service'
 check "paths.env and the unit agree" grep -q "ExecStart=$CB_DAEMON" /usr/lib/systemd/system/camerabridged.service
+check "a crash of the daemon prints its backtrace, never register or memory contents" bash -c 'l=$(grep "^Environment=SWIFT_BACKTRACE=" /usr/lib/systemd/system/camerabridged.service); for o in enable=yes swift-backtrace=/usr/libexec/swift/linux/swift-backtrace-static interactive=no registers=none; do grep -q "[=,]$o\(,\|$\)" <<<"$l" || { echo "missing $o"; exit 1; }; done; grep -q "swift-backtrace-static" build.sh && grep -q "/usr/libexec/swift/linux/swift-backtrace-static" build-image.sh'
 groupadd -r -g 931 camerabridge 2>/dev/null || true
 useradd -r -u 931 -g 931 -s /usr/sbin/nologin camerabridge 2>/dev/null || true
 groupadd -r -g 932 cbupdate 2>/dev/null || true

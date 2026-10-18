@@ -81,6 +81,27 @@ if [ "$stub" -eq 1 ]; then
     fi
 else
     install -D -m 0755 "$daemon" "$stage$CB_DAEMON"
+    # The Swift runtime's crash helper (build.sh puts it beside the daemon): a crash of the daemon prints where it was in the journal
+    # (SWIFT_BACKTRACE in the unit, registers=none so no memory contents are printed). Root-owned, the daemon's user can only run it.
+    # Apache-2.0: it is a program of its own (the runtime exception covers only what is built into camerabridged), so its licence ships too.
+    backtracer="$(dirname "$daemon")/swift-backtrace-static"
+    if [ -f "$backtracer" ]; then
+        [ -s "$backtracer.LICENSE" ] || die "no swift-backtrace-static.LICENSE beside the daemon (run build.sh)"
+        install -D -m 0755 -o root -g root "$backtracer" "$stage/usr/libexec/swift/linux/swift-backtrace-static"
+        {
+            echo "swift-backtrace-static, the Swift runtime's crash helper, https://www.swift.org"
+            [ ! -s "$backtracer.version" ] || cat "$backtracer.version"
+            echo "Installed unmodified from the swift.org toolchain at /usr/libexec/swift/linux/swift-backtrace-static."
+            echo "License: Apache-2.0 with the Runtime Library Exception (below)."
+            echo
+            cat "$backtracer.LICENSE"
+        } >"$work/swift-backtrace.copyright"
+        install -D -m 0644 "$work/swift-backtrace.copyright" "$stage/usr/share/doc/swift-backtrace/copyright"
+    elif [ "$release" -eq 1 ]; then
+        die "no swift-backtrace-static beside the daemon: a release prints a crash's backtrace (run build.sh)"
+    else
+        echo "    (no swift-backtrace-static beside the daemon: a crash will not print a backtrace)"
+    fi
 fi
 mkdir -p "$stage$CB_WEB_ROOT"
 if [ -n "$web" ]; then
@@ -242,6 +263,11 @@ cp "$docdir/SOURCE-OFFER.txt" "$out/SOURCE-OFFER.txt"
 for f in LICENSE NOTICE OS-LICENSES.md; do
     debugfs -R "stat /usr/share/doc/camera-bridge/$f" "$work/root.raw" >/dev/null 2>&1 || die "$f is missing from the image"
 done
+if [ "$stub" -eq 0 ] && [ -f "$(dirname "$daemon")/swift-backtrace-static" ]; then
+    debugfs -R "stat /usr/share/doc/swift-backtrace/copyright" "$work/root.raw" >/dev/null 2>&1 || die "the crash helper's licence is missing from the image"
+    st=$(debugfs -R "stat /usr/libexec/swift/linux/swift-backtrace-static" "$work/root.raw" 2>/dev/null)
+    if ! grep -Eq 'User: +0 +Group: +0' <<<"$st" || ! grep -Eq 'Mode: +0?0755' <<<"$st"; then die "the crash helper in the image is not root-owned 0755"; fi
+fi
 if [ -n "$helpers" ]; then
     image_files=("$CB_HELPERS_DIR/go2rtc" /usr/share/doc/go2rtc/copyright)
     image_programs=("$CB_HELPERS_DIR/go2rtc")

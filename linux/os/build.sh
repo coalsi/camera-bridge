@@ -99,7 +99,12 @@ EOF
                  mkdir -p /work/daemon-'"$arch"'
                  bin="$(swift build -c release --product camerabridged --static-swift-stdlib --build-system native --scratch-path /scratch --show-bin-path)/camerabridged"
                  strip --strip-debug "$bin"
-                 install -m 0755 "$bin" /work/daemon-'"$arch"'/camerabridged'
+                 install -m 0755 "$bin" /work/daemon-'"$arch"'/camerabridged
+                 # The Swift runtime prints a crash'"'"'s backtrace with this helper (from the same toolchain; the static one needs only libc,
+                 # libm, libgcc_s and libstdc++). build-image.sh installs it beside the daemon'"'"'s unit setting SWIFT_BACKTRACE.
+                 install -m 0755 /usr/libexec/swift/linux/swift-backtrace-static /work/daemon-'"$arch"'/swift-backtrace-static
+                 install -m 0644 /usr/share/swift/LICENSE.txt /work/daemon-'"$arch"'/swift-backtrace-static.LICENSE
+                 swift --version 2>/dev/null | sed -n 1p >/work/daemon-'"$arch"'/swift-backtrace-static.version'
     daemon_in_container=/work/daemon-$arch/camerabridged
 fi
 

@@ -29,6 +29,7 @@ export const RELEASE_NOTES = [
       'Set up for Camera Bridge checks the video the camera really sends (a camera that says H.264 but sends H.265 is fixed), turns off more cameras’ clouds, and can require a password for video on cameras that play it without one.',
       'The OS beta is one product now: About shows “Camera Bridge OS beta” with the build, and what changed by day.',
       'Fixed: after a factory reset, SSH could stay on until the next restart.',
+      'Fixed: the bridge could stop if writing to the system log failed. If it ever stops unexpectedly, the log now says where, for a bug report.',
     ],
   },
   {

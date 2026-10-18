@@ -155,6 +155,18 @@ import Glibc
         #expect(lines.value == ["<4>[x] loud\n"])
     }
 
+    /// The journal's connection can break (journald gone, EPIPE with SIGPIPE ignored, as the daemon runs). A line that cannot be written
+    /// is dropped; it must not stop the daemon (FileHandle.write(_:) trapped here).
+    @Test func aBrokenOutputDropsTheLineInsteadOfStoppingTheDaemon() throws {
+        // Ignored for good, as the daemon and FFmpegProcess leave it (restoring it could undo their ignore in a parallel test).
+        _ = signal(SIGPIPE, SIG_IGN)
+        let pipe = Pipe()
+        try pipe.fileHandleForReading.close()
+        Console.write("lost\n", to: pipe.fileHandleForWriting)
+        Console.write("lost too\n", to: pipe.fileHandleForWriting)
+        try? pipe.fileHandleForWriting.close()
+    }
+
     @Test func secretsAndNewlinesNeverReachTheJournal() {
         let lines = Box<[String]>([])
         let sink = sink(journal: true, lines: lines)

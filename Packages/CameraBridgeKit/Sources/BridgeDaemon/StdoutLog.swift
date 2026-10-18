@@ -16,9 +16,7 @@ public final class StdoutLogSink: LogSink, Sendable {
     public init(minimumLevel: LogLevel, journal: Bool, write: (@Sendable (String) -> Void)? = nil) {
         self.minimumLevel = minimumLevel
         self.journal = journal
-        self.write = write ?? { line in
-            FileHandle.standardOutput.write(Data(line.utf8))
-        }
+        self.write = write ?? { line in Console.write(line, to: .standardOutput) }
     }
 
     public func record(_ entry: LogEntry) {
@@ -52,10 +50,17 @@ public final class StdoutLogSink: LogSink, Sendable {
 /// A line the daemon writes itself, outside the engine's `Log` (before logging is set up, and fatal errors).
 enum Console {
     static func print(_ text: String) {
-        FileHandle.standardOutput.write(Data((text + "\n").utf8))
+        write(text + "\n", to: .standardOutput)
     }
 
     static func error(_ text: String) {
-        FileHandle.standardError.write(Data((text + "\n").utf8))
+        write(text + "\n", to: .standardError)
+    }
+
+    /// A line that cannot be written is dropped: logging never stops the daemon. (FileHandle.write(_:) is a hidden try!: a journal
+    /// connection that broke (EPIPE, SIGPIPE is ignored) or a full non-blocking stream would trap, and its "Fatal error" would go to the
+    /// same broken stream, leaving a silent SIGILL.)
+    static func write(_ text: String, to handle: FileHandle) {
+        try? handle.write(contentsOf: Data(text.utf8))
     }
 }

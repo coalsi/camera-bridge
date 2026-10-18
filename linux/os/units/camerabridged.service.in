@@ -36,6 +36,9 @@ Environment=CAMERABRIDGE_OS_REQUEST_DIR=/run/camera-bridge/requests
 Environment=CAMERABRIDGE_OS_STATUS_DIR=/run/camera-bridge/status
 Environment=HOME=/var/lib/camera-bridge
 Environment=TMPDIR=/tmp
+# A crash prints the Swift backtrace (function names) to the journal, with the runtime's own helper; nothing is written to disk.
+# registers=none: no register values or the memory they point at are printed (they could hold passwords or keys). images=none: shorter.
+Environment=SWIFT_BACKTRACE=enable=yes,swift-backtrace=/usr/libexec/swift/linux/swift-backtrace-static,interactive=no,color=no,output-to=stderr,threads=all,registers=none,images=none
 EnvironmentFile=-/etc/camera-bridge/camerabridged.env
 WorkingDirectory=/var/lib/camera-bridge
 
