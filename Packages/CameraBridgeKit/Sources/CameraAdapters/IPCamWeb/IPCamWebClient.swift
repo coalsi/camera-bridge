@@ -159,9 +159,10 @@ struct IPCamWebUnavailable: Error, Equatable, LocalizedError, CustomStringConver
 /// A client of one camera's IPCamera Web API. Every call is an HTTP `GET` without a body on the web port: the sign-in
 /// `/cgi/auth.cgi?act=auth&auth=123456&data=<xml>&guid=<ms>`, reads `/cgi/<name>.cgi?get=<what>&auth=<session>&guid=<ms>`, writes
 /// `…?set=<what>&auth=<session>&data=<xml>&guid=<ms>` (each value encoded as the camera's page's browser sends it: `percentEncoded`);
-/// answers are `<root>…</root>`. The sign-in value (`encrypted(username:password:)`) can be turned back into nothing better than the
-/// password's hash, but it is still the camera's login: it goes only to a camera whose page and sign-in script, loaded without it, are the
-/// family's (`showsItsPage()`), and never while the camera's logins are paused (`ONVIFLoginGuard`, shared with ONVIF: the same account).
+/// answers are `<root>…</root>`, and one without `<code>` is code 0, as the camera's page reads it (`hXmlVal`'s default). The sign-in
+/// value (`encrypted(username:password:)`) can be turned back into nothing better than the password's hash, but it is still the camera's
+/// login: it goes only to a camera whose page and sign-in script, loaded without it, are the family's (`showsItsPage()`), and never while
+/// the camera's logins are paused (`ONVIFLoginGuard`, shared with ONVIF: the same account).
 /// The session is kept and reused; a call answered 532227 (session not valid) signs in once more. A refused sign-in trips the address's
 /// `IPCamWebLatch` and stops this API only: the family's ONVIF and RTSP may ask no password at all, so ONVIF's logins go on. One HTTP
 /// client for the client's life; 10 s per request. Nothing the camera answers, no session and no sign-in value is ever logged: only the
@@ -311,6 +312,8 @@ actor IPCamWebClient {
 
     /// One call with the session (signing in first when there is none); a 532227 answer (the session is not valid) signs in once more and
     /// asks again. A write answered 532374 throws `CameraAdapterError.notPermitted` ("set mobile"), any other code `IPCamWebCameraError`.
+    /// An answer of the camera's without a code is done (code 0, as on the camera's page: its reads never carry one); one that is not the
+    /// camera's XML is `invalidResponse`.
     private func call(_ cgi: String, op: String, what: String, data: String?) async throws -> String {
         for attempt in 0..<2 {
             let current = try await validSession()
@@ -349,9 +352,12 @@ actor IPCamWebClient {
         return try await task.value
     }
 
-    /// Signs in: only to a camera of the family, never while its logins are paused or after it refused one. Answered 0, or 532379 (signed
-    /// in, but the camera calls the password insecure), with an `authid`: the session. Any other code is a refusal, as on the camera's page
-    /// ("Login Failed!"); an answer without a code is not the camera's (`invalidResponse`). Either stops this API only (`refused`).
+    /// Signs in: only to a camera of the family, never while its logins are paused or after it refused one. The code is read as the
+    /// camera's page reads it (`signInCode(in:)`): an answer of the camera's without `<code>` is 0 (most likely how the owner's camera
+    /// answered build 0.1.111's sign-in, which that build could not read and stopped the API for). Answered 0, or 532379 (signed in, but the camera calls the password
+    /// insecure), with an `authid`: the session; without one, `IPCamWebUnavailable.noSession` (nothing latched). Any other code is a
+    /// refusal, as on the camera's page ("Login Failed!"). An answer that is not the camera's XML (no `<root>`), or whose code is not a
+    /// number, is unreadable (`invalidResponse`), not a refused password. A refusal or an unreadable answer stops this API only (`refused`).
     private func newSession() async throws -> String {
         guard let credentials else { throw IPCamWebUnavailable.noCredentials }
         guard try await showsItsPage() else { throw CameraAdapterError.unsupported("the camera is not of the IPCamera Web family") }
@@ -359,9 +365,13 @@ actor IPCamWebClient {
         if let pause = ONVIFLoginGuard.shared.pause(hosts: loginKeys) { throw pause.error }   // the camera's lock, or Camera Bridge's own pause
         let data = "<?xml version='1.0'?><root><mode>1</mode><encrypt>\(Self.encrypted(username: credentials.username, password: credentials.password))</encrypt></root>"
         let answer = try await send("/cgi/auth.cgi", [("act", "auth"), ("auth", Self.signInAuth), ("data", data), ("guid", Self.millis())])
-        guard answer.contains("<root"), let code = Self.code(in: answer) else {
-            refused("answered Camera Bridge's sign-in without a code")
-            throw CameraAdapterError.invalidResponse("the sign-in's answer has no code")
+        guard answer.contains("<root") else {
+            refused("answered Camera Bridge's sign-in with something other than its XML")
+            throw CameraAdapterError.invalidResponse("the sign-in's answer is not the camera's")
+        }
+        guard let code = Self.signInCode(in: answer) else {
+            refused("answered Camera Bridge's sign-in with a code that is not a number")
+            throw CameraAdapterError.invalidResponse("the sign-in's code is not a number")
         }
         let insecure = code == IPCamWebCameraError.insecurePassword
         guard code == 0 || insecure else {
@@ -413,6 +423,13 @@ actor IPCamWebClient {
     /// The answer's `<code>`, nil when it has none.
     static func code(in answer: String) -> Int? {
         text("code", in: answer).flatMap { Int($0) }
+    }
+
+    /// The sign-in answer's code as the camera's page reads it (`land.js`: `hXmlVal({t:'code'})`, `common.js`): 0 when the answer has no
+    /// `<code>` or an empty one (`hXmlVal`'s default), else its number; nil when it is not a number (the page then says "Login Failed!").
+    static func signInCode(in answer: String) -> Int? {
+        guard let text = text("code", in: answer), !text.isEmpty else { return 0 }
+        return Int(text)
     }
 
     /// The trimmed text of the first `name` element of `answer`.

@@ -15,7 +15,8 @@ public enum CameraConfigMethod: String, Sendable, Codable, CaseIterable, Hashabl
     case onvifMinimal
     /// ONVIF `SetVideoEncoderConfiguration` with CameraBridge's complete request.
     case onvifFull
-    /// The IP camera web API (`IPCWebClient`): only the camera's own labels ("Clean picture") go this way, never the encoder or the clock.
+    /// The IP camera web API (`IPCWebClient`): only the camera's own labels ("Clean picture") and its DNS servers (a `CameraDNSBackup`'s or
+    /// `CameraDNSReading`'s method: its `LANConfig`) go this way, never the encoder or the clock.
     case ipcWebAPI
 
     /// Short name for results ("ONVIF minimal: InvalidArgVal; ISAPI: unsupported").

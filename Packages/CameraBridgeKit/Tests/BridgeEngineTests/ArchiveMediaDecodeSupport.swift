@@ -116,6 +116,30 @@ enum ArchiveMediaTools {
         return values
     }
 
+    /// Bytes 1 to 3 of the avcC ffprobe reads for the video stream of `file` (AVCProfileIndication, profile_compatibility, AVCLevelIndication): what
+    /// ffprobe 8.1 makes `mime_codec_string` from. Read from the extradata every ffprobe prints with `-show_data` (`00000000: 014d 0032 ...`, 16 bytes a
+    /// line, their hexadecimal in the 41 columns after the offset), so an ffprobe before 8.1, which prints no codec string, still says it. nil when the
+    /// extradata is not an avcC.
+    static func avcConfiguration(_ file: URL) throws -> (profile: UInt8, compatibility: UInt8, level: UInt8)? {
+        let result = try run(ffprobe, ["-v", "error", "-select_streams", "v:0", "-show_data", "-show_entries", "stream=extradata",
+                                       "-of", "default=noprint_wrappers=1:nokey=1", file.path])
+        try #require(result.status == 0, "ffprobe failed: \(result.errors)")
+        guard let line = result.text.split(separator: "\n").first(where: { $0.hasPrefix("00000000: ") }) else { return nil }
+        var digits = Substring(line.dropFirst(10).prefix(41).filter { $0 != " " })
+        var bytes: [UInt8] = []
+        while digits.count >= 2, let byte = UInt8(digits.prefix(2), radix: 16) {
+            bytes.append(byte)
+            digits = digits.dropFirst(2)
+        }
+        guard bytes.count >= 4, bytes[0] == 1 else { return nil }
+        return (bytes[1], bytes[2], bytes[3])
+    }
+
+    /// The profile_idc of the H.264 profile names ffprobe prints (libavcodec's; a constrained or intra profile has the profile_idc it constrains).
+    static let avcProfiles: [String: UInt8] = ["Constrained Baseline": 66, "Baseline": 66, "Main": 77, "Extended": 88, "High": 100, "High 10": 110,
+                                               "High 10 Intra": 110, "High 4:2:2": 122, "High 4:2:2 Intra": 122, "High 4:4:4 Predictive": 244,
+                                               "High 4:4:4 Intra": 244]
+
     /// The number of streams in `file`.
     static func streamCount(_ file: URL) throws -> Int {
         let result = try run(ffprobe, ["-v", "error", "-show_entries", "stream=index", "-of", "csv=p=0", file.path])

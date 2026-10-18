@@ -7,7 +7,9 @@ ONVIF reports wrongly. Code: `Packages/CameraBridgeKit/Sources/CameraAdapters/IP
 
 What their ONVIF gets wrong (checked by hand on a JM800S5, 2026-10-16): imaging IR-cut writes are ignored and always read back `AUTO`;
 the PTZ node lists a `tt:Lamp` auxiliary command and then refuses it (`ActionNotSupported`); the on-screen display read-back can say
-done when nothing changed. ONVIF's encoder and time/NTP settings do work, and the streams are RTSP `/stream0` and `/stream1` on port 554.
+done when nothing changed. Its DNS servers too (2026-10-18): the owner's took ONVIF's `SetDNS` for the internet guard and read it back as
+the bridge, and later `GetDNS` showed its original server again (`FromDHCP` false, `DNSManual` 1.1.1.1). ONVIF's encoder and time/NTP
+settings do work, and the streams are RTSP `/stream0` and `/stream1` on port 554.
 
 ## What Camera Bridge does with it
 
@@ -16,13 +18,15 @@ done when nothing changed. ONVIF's encoder and time/NTP settings do work, and th
 | Night vision (auto, on, off) and the IR lights | The camera's video settings (`Capture`), read back after every change |
 | Set up for Camera Bridge, **Clean picture** | The on-screen text switch (`Overlay Enable`); `0` takes the camera's title and clock off |
 | Set up for Camera Bridge, **Cloud off** | The maker's cloud switch (`P2PConfig Enable`), its kind and sign-in value kept for Restore |
+| Set up for Camera Bridge, **Watch its internet**, and the Internet guard's readings of the camera's DNS | The camera's own network settings (`LANConfig` `DNS1` and `DNS2`), read back after the change; only in Mode Static (below) |
 | Security check | Reads only: the cloud (`P2PConfig Enable`; whether it is linked to an account is not known: `LoginStatus` says whether it is signed in now, not whether it is bound) and UPnP (`UPNPConfig Enable`). RTMP stays unknown: `getMediaStreamConfig` is not among the calls checked by hand, and a call the camera lacks pauses its web API (and night vision) until the camera restarts in the bridge |
 | Apple Home **Night Vision** | On is the camera's own automatic mode, off is the day picture with the IR lights off; a change the camera does not take (or that the bridge cannot pass on yet) puts Home back as it was |
 
 Everything else (streams, time zone, time from the bridge) stays ONVIF. A camera that does not speak the API is used through ONVIF
-only. A camera of the family never gets ONVIF's night vision or on-screen display, whose answers these cameras get wrong: while its web
-API is paused, does not answer, or cannot take its username or password, night vision is not offered yet (it is asked again), and Clean
-picture and Cloud off say why and change nothing.
+only, and so is the DNS of one whose web API shows no `LANConfig`. A camera of the family never gets ONVIF's night vision, on-screen
+display or DNS, whose answers these cameras get wrong: while its web API is paused, does not answer, or cannot take its username or
+password, night vision is not offered yet (it is asked again), Clean picture, Cloud off and Watch its internet say why and change
+nothing, and the Internet guard's reading of its DNS is unreadable (it changes nothing).
 
 ## Which cameras are asked
 
@@ -73,7 +77,8 @@ tries, about a minute) does the camera get ONVIF's night vision. The setup takes
 | `setMediaVideoCaptureConfig` | `<Video>` + the `Capture` element as read, only the changed values replaced, + `</Video>` | 202 |
 | `setIRCutManual_DayNight` | `DayMode` or `NightMode` | 202; only takes effect while `IrcutMode` is 3, and has no read |
 | `setMediaVideoOverlayConfig` | the `Overlay` element as read, with `Enable` changed | 202 |
-| `getNetworkConfig` | empty | `<NetworkConfig>…<P2PConfig Enable="1" Type="…" Authcode="…"/>…</NetworkConfig>`; also holds e-mail, FTP and Wi-Fi passwords: never logged or kept whole |
+| `getNetworkConfig` | empty | `<NetworkConfig><LANConfig …/>…<P2PConfig Enable="1" Type="…" Authcode="…"/>…</NetworkConfig>`; also holds e-mail, FTP and Wi-Fi passwords: never logged or kept whole |
+| `setNetworkLANConfig` | the `LANConfig` element as read, with only `DNS1` and `DNS2` changed (the page sends `<LANConfig …/>` alone, no `NetworkConfig` around it) | 202; the camera may restart its network service |
 | `setNetworkP2PConfig` | `<NetworkConfig><P2PConfig Enable="0" Type="…" Authcode="…"/></NetworkConfig>` with the kind and sign-in value read (XML-escaped) | 202 |
 | `getNetworkStatus` | empty | `<NetworkStatus>…<CLOUD Enable="1" Type="…" LoginStatus="1" ID="…"/></NetworkStatus>` (`LoginStatus` 1: signed in to its cloud) |
 | `getMediaStreamConfig` | empty | the stream settings with `<StreamAccess … enable_rtmp="0" or "1" …/>`: not sent until it is confirmed on a real camera (a call the camera lacks pauses its web API, and night vision with it) |
@@ -113,5 +118,37 @@ IR lights write the same `Capture` element, so their changes run one at a time.
 - The cameras have a UPnP switch in `getNetworkConfig` but no known call to change it: the UPnP step says Camera Bridge can't change it yet
   and to block the camera's internet in the router (the security check reads the switch).
 
-Tests: `IPCWebTests`, `IPCWebSetupTests`, `RemoteAccessTests` (fake camera `FakeIPCWebCamera`) and `IPCWebSetupEngineTests`; nothing was
-tested against a real camera by the test suite.
+### DNS servers (the Internet guard's Watch, `LANConfig`)
+
+What the camera's own page does, read in its `networkConfig.js` (Network › Basic, the TCP/IP tab; the page names the fields Mode,
+Preferred DNS Server and Alternate DNS Server): it reads `getNetworkConfig` and takes the first `LANConfig`, whose attributes are
+`MacAddress`, `DHCP`, `dhcpOffTime`, `ALLNET`, `IPAddress`, `Netmask`, `Gateway`, `DNS1`, `DNS2`, `hostname` and `MTU` (the order the
+camera's settings export has; the owner's has exactly these). `DHCP` 0 is Mode Static, anything else DHCP. Confirm writes
+`setNetworkLANConfig` with all eleven, as typed, unescaped. In Mode DHCP the page disables the address, mask, gateway and both DNS fields
+and sends them as read: the page changes DNS servers only in Mode Static.
+
+- **Read** (the setup's preview, and the Internet guard's reading every 30 minutes and in the security check): the servers are `DNS1` and
+  `DNS2`, each once, an empty slot (`0.0.0.0`) none; from DHCP unless `DHCP` is 0. On DHCP the page shows the servers the camera has now
+  as it shows its leased address, so they are taken as the servers in use (if the router's DHCP hands out the bridge while the camera
+  shows others, it reads as not watched: the safe side). The backup keeps `DNS1` and `DNS2` as they are and `DHCP`, `DNS1`, `DNS2` as
+  text (`CameraDNSBackup.ipcWebAPI`), nothing else of the answer.
+- **Watch** (Mode Static only): `LANConfig` as the camera wrote it with `DNS1` and `DNS2` the bridge's address (IPv4) and every other
+  character as it was, sent only when it holds all eleven attributes, each once, and its `IPAddress` is the address Camera Bridge reaches
+  the camera at; anything else is refused rather than written ("not ones Camera Bridge can write back exactly"), because the call takes
+  the camera's address with it. A camera on DHCP is refused, and its mode never switched (that would fix its address): the step says
+  so and points at Network › Basic (TCP/IP), Mode Static; the preview does not offer the change. Already done when the camera asks the
+  bridge and no other (its router's DHCP may hand it out).
+- **Read back** through the same call, every 2 seconds for up to 30: the camera may restart its network service after the write, so a
+  request that gets no answer meanwhile (a dropped connection, a timeout), and a write it did not answer, are no refusal. A refusal (an
+  HTTP error, a SOAP fault) pauses the web API as any other does, and the step says so.
+- **Restore** writes the backup's `DNS1` and `DNS2` back the same way, read back, nothing written when the camera already has them. A
+  camera switched to DHCP since is refused (its page cannot take them). A backup saved through ONVIF by a build before 2026-10-18 (the
+  servers ONVIF showed) goes back through this API, one server in both slots, when the camera is in Mode Static, and through ONVIF as
+  that build wrote it when the camera is on DHCP (Watch never writes the page then) or the backup cannot be said in two slots.
+
+Not yet done on a real camera. The owner's settings export of 2026-10-16 shows it on DHCP (`DHCP` 1, `DNS1` 8.8.8.8, `DNS2` 1.1.1.1):
+while it is, its Watch is refused, saying where to set Mode Static.
+
+Tests: `IPCWebTests`, `IPCWebSetupTests`, `IPCWebDNSTests` (the DNS: exact `setNetworkLANConfig` bodies, the restart, Restore, DHCP,
+ONVIF beside it), `RemoteAccessTests` (fake camera `FakeIPCWebCamera`) and `IPCWebSetupEngineTests`; nothing was tested against a real
+camera by the test suite.

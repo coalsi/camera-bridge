@@ -21,6 +21,9 @@ enum MockResponse: Sendable {
     case stream(status: Int, headers: [(String, String)], writer: @Sendable (MockStreamWriter) async -> Void)
     /// Sends the head (Content-Length: 0), then hands every further received byte to `sink` (raw upload channel).
     case raw(status: Int, headers: [(String, String)], sink: @Sendable (Data) -> Void)
+    /// Closes the connection without answering (a camera that restarts its network service while a request is open): the client sees a
+    /// transport error, not a status.
+    case drop
 
     static func xml(_ text: String, status: Int = 200) -> MockResponse {
         .full(status: status, headers: [("Content-Type", "application/xml; charset=utf-8")], body: Data(text.utf8))
@@ -144,6 +147,8 @@ final class MockHTTPServer: Sendable {
                         guard let chunk = try? await connection.receive(maximumLength: 65_536) else { return }
                         sink(chunk)
                     }
+                case .drop:
+                    return
                 }
             }
         }

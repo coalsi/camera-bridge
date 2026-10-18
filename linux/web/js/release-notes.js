@@ -15,6 +15,15 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.112',
+    date: '2026-10-18',
+    title: 'IPCamera Web cameras sign in, and Jennov cameras keep their DNS',
+    items: [
+      'Cameras with an “IPCamera Web” page (such as the N801B) now sign in: they answer a successful sign-in without a code, which the last build took for an error.',
+      'Jennov and other cameras with the same web page: Watch its internet sets their DNS in the camera’s own network settings, because their ONVIF took the change and later dropped it. A camera that gets its address from DHCP is told how to set Mode Static on its page first (Network › Basic, TCP/IP).',
+    ],
+  },
+  {
     version: '0.1.111',
     date: '2026-10-18',
     title: 'The Internet guard on more cameras, and help for what can’t be changed',

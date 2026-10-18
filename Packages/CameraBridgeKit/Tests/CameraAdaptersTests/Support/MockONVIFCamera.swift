@@ -225,6 +225,9 @@ final class MockONVIFCamera: Sendable {
         }
         let camera = MockONVIFCamera(server: server, pullQueue: queue)
         holder.set(camera)
+        // A fake of the IP camera web API family that a test before ran at the same loopback port is forgotten: an ONVIF camera's DNS, clean
+        // picture and cloud ask that API's sign-in script first, and this camera has none.
+        IPCWebLatch.shared.reset(IPCWebLatch.key(camera.endpoint))
         return camera
     }
 

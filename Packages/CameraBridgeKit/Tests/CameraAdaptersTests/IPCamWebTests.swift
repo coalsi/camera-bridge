@@ -237,9 +237,25 @@ import Testing
         #expect(!IPCamWebLatch.shared.isTripped(IPCamWebLatch.key(camera.endpoint)))
     }
 
-    /// An answer without `<code>` is not the camera refusing the password: `invalidResponse`, and only this API stops (so the sign-in value
-    /// is not sent again with every read).
-    @Test func aSignInAnswerWithoutACodeIsNotAPasswordRefusal() async throws {
+    /// The camera's page reads the sign-in answer's code with `hXmlVal({t:'code'})`, whose default is 0 (`land.js`, `common.js`): an
+    /// answer of the camera's (`<root>…</root>`) without `<code>`, or with an empty one, signs in as 0 does. A code that is not a number is
+    /// unreadable (nil). The owner's camera ("Patio New", N801B) answered build 0.1.111's sign-in without a `<code>`, and the bridge stopped
+    /// the API for it.
+    @Test func theSignInsCodeIsReadAsTheCamerasPageReadsIt() {
+        #expect(IPCamWebClient.signInCode(in: #"<?xml version="1.0" encoding="UTF-8"?><root><authid>S</authid><level>0</level></root>"#) == 0)
+        #expect(IPCamWebClient.signInCode(in: "<root><code></code><authid>S</authid></root>") == 0)
+        #expect(IPCamWebClient.signInCode(in: "<root><code/><authid>S</authid></root>") == 0)
+        #expect(IPCamWebClient.signInCode(in: "<root><code>0</code><authid>S</authid></root>") == 0)
+        #expect(IPCamWebClient.signInCode(in: "<root><code>532379</code><authid>S</authid></root>") == 532379)
+        #expect(IPCamWebClient.signInCode(in: "<root><code> 531201 </code><error>user or password error</error></root>") == 531201)
+        #expect(IPCamWebClient.signInCode(in: "<root><codec>1</codec><authid>S</authid></root>") == 0, "another element is not the code")
+        #expect(IPCamWebClient.signInCode(in: "<root><code>failed</code></root>") == nil)
+    }
+
+    /// An answer of the camera's without `<code>` is signed in: its session serves every call, nothing is latched, and the log says nothing
+    /// about a code (build 0.1.111 logged "answered Camera Bridge's sign-in without a code" and stopped the API). A wrong password is still
+    /// refused with its code.
+    @Test func aSignInAnswerWithoutACodeSignsIn() async throws {
         let camera = try await FakeIPCamWebCamera.start()
         defer { camera.stop() }
         let capture = Capture()
@@ -247,13 +263,69 @@ import Testing
         defer { LogHub.removeSink(token) }
         camera.mode.set(.signInWithoutCode)
         let id = UUID(), web = client(camera, cameraID: id)
+        try await web.signIn()
+        #expect(try await web.read("mobile")?.contains(#"on="1""#) == true)
+        try await web.write("mobile", element: "<mobile on='0'></mobile>")
+        #expect(camera.signIns.count == 1 && camera.rejectedSignIns.value == 0)
+        let calls = camera.server.requests.filter { $0.path == "/cgi/network.cgi" }
+        #expect(calls.count == 2 && calls.allSatisfy { $0.query("auth") == "SESSION-1" }, "the session the sign-in gave")
+        #expect(camera.options.value["mobile"]?.contains(#"on="0""#) == true)
+        #expect(!IPCamWebLatch.shared.isTripped(IPCamWebLatch.key(camera.endpoint)) && !web.asksForStrongerPassword)
+        for words in ["code", "refused", "stops asking"] { #expect(!capture.text(of: id).contains(words), "nothing said about a code") }
+
+        let wrong = HTTPCredentials(username: "admin", password: "wrong")
+        await #expect(throws: CameraAdapterError.unauthorized) { try await client(camera, credentials: wrong, cameraID: id).signIn() }
+        #expect(capture.text(of: id).contains("code \(FakeIPCamWebCamera.wrongPasswordCode)"))
+    }
+
+    /// Signed in (code 0, or no code) without an `authid`: no session (`IPCamWebUnavailable.noSession`), and no call is made. Not a refusal:
+    /// nothing is latched.
+    @Test(arguments: [false, true])
+    func aSignInWithoutASessionGivesNone(withoutCode: Bool) async throws {
+        let camera = try await FakeIPCamWebCamera.start()
+        defer { camera.stop() }
+        if withoutCode { camera.mode.set(.signInWithoutCode) }
+        camera.signInGivesSession.set(false)
+        let web = client(camera)
+        await #expect(throws: IPCamWebUnavailable.noSession) { try await web.signIn() }
+        await #expect(throws: IPCamWebUnavailable.noSession) { _ = try await web.read("mobile") }
+        #expect(camera.signIns.count == 2 && camera.calls.value.isEmpty)
+        #expect(!IPCamWebLatch.shared.isTripped(IPCamWebLatch.key(camera.endpoint)))
+    }
+
+    /// An answer that is not the camera's XML (no `<root>`: a web page, as a server in front of the camera could answer) is not the camera
+    /// refusing the password: `invalidResponse`, and only this API stops (so the sign-in value is not sent again with every read). The log
+    /// says what came back, not that a code is missing.
+    @Test func aSignInAnswerThatIsNotTheCamerasXMLIsNotAPasswordRefusal() async throws {
+        let camera = try await FakeIPCamWebCamera.start()
+        defer { camera.stop() }
+        let capture = Capture()
+        let token = LogHub.addSink(capture)
+        defer { LogHub.removeSink(token) }
+        camera.mode.set(.signInAnsweredWithAPage)
+        let id = UUID(), web = client(camera, cameraID: id)
         let error = await #expect(throws: CameraAdapterError.self) { _ = try await web.read("mobile") }
         #expect(error.map { if case .invalidResponse = $0 { true } else { false } } == true)
         #expect(IPCamWebLatch.shared.isTripped(IPCamWebLatch.key(camera.endpoint)))
         #expect(IPCamWebClient.loginKeys(camera.endpoint).allSatisfy { ONVIFLoginGuard.shared.blockedUntil(host: $0) == nil })
-        #expect(capture.text(of: id).contains("without a code"))
+        #expect(capture.text(of: id).contains("other than its XML"))
+        #expect(!capture.text(of: id).contains("without a code") && !capture.text(of: id).contains("refused"))
         _ = try? await web.read("rtsp")
         #expect(camera.signIns.count == 1)
+    }
+
+    /// A call's answer without `<code>` is done, as on the camera's page: the family's reads never carry one, and a write answered
+    /// `<root></root>` is taken.
+    @Test func aCallAnsweredWithoutACodeIsDone() async throws {
+        let camera = try await FakeIPCamWebCamera.start()
+        defer { camera.stop() }
+        camera.writesWithoutCode.set(true)
+        let web = client(camera)
+        let read = try #require(try await web.read("rtsp"))
+        #expect(IPCamWebClient.text("code", in: read) == nil && read.contains(#"authorized="0""#), "a read answered without a code")
+        try await web.write("mobile", element: "<mobile on='0'></mobile>")
+        #expect(camera.writes("mobile").count == 1 && camera.options.value["mobile"]?.contains(#"on="0""#) == true)
+        #expect(camera.signIns.count == 1 && !IPCamWebLatch.shared.isTripped(IPCamWebLatch.key(camera.endpoint)))
     }
 
     // MARK: When a refused sign-in gets a new try

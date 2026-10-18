@@ -10,8 +10,9 @@ import TestSupport
 /// "username:password" (the camera's `md5-min.js` uppercases; the value is written here as computed by Python's hashlib and an RC4 written
 /// apart from Camera Bridge's, and OpenSSL's `rc4-40`, never by the code under test); reads `GET /cgi/network.cgi?get=<what>&auth=<authid>&guid=<ms>`
 /// and writes `…?set=<what>&auth=<authid>&data=<xml>&guid=<ms>`, answered `<root>…</root>`, with `<code>532229</code>` for an option it
-/// lacks and `532227` for a session it does not know (the codes of the camera's own page). A write stores the element it was sent (what the
-/// next read returns). Never a real camera; identifiers and secrets are made up.
+/// lacks and `532227` for a session it does not know (the codes of the camera's own page); its reads never carry a `<code>`, and its sign-in
+/// and writes can leave it out too (`Mode.signInWithoutCode`, `writesWithoutCode`: the page reads a missing code as 0). A write stores the
+/// element it was sent (what the next read returns). Never a real camera; identifiers and secrets are made up.
 final class FakeIPCamWebCamera: Sendable {
     static let username = "admin"
     static let password = "pa55word"
@@ -64,7 +65,11 @@ final class FakeIPCamWebCamera: Sendable {
         case notThisFamily
         /// Every request answers HTTP 503 (as while the camera starts).
         case starting
-        /// The sign-in is answered 200 with a web page, no `<code>` (as a server in front of the camera could).
+        /// The sign-in is answered 200 with a web page, not the camera's XML (as a server in front of the camera could).
+        case signInAnsweredWithAPage
+        /// The sign-in the fake takes is answered without `<code>`: `<root><authid>SESSION</authid><level>0</level></root>`. Most likely how
+        /// the owner's camera ("Patio New", N801B) answered build 0.1.111's sign-in; the camera's page reads a missing code as 0
+        /// (`hXmlVal`'s default): signed in.
         case signInWithoutCode
         /// The sign-in is answered HTTP 503 (the camera's web server is up, its API is not); the page and its script still answer.
         case signInUnanswered
@@ -77,6 +82,10 @@ final class FakeIPCamWebCamera: Sendable {
     let mode = Box(Mode.normal)
     /// The code of the sign-in answer to the right value: 0, 532379 (signed in, but the camera calls the password insecure), or a refusal.
     let signInCode = Box(0)
+    /// The sign-in's answer to the right value holds a session (`<authid>`); false: it has none.
+    let signInGivesSession = Box(true)
+    /// The writes it takes are answered `<root></root>`, without `<code>` (its reads never carry one).
+    let writesWithoutCode = Box(false)
     /// The next reads answer `532227` (the session is not valid) this many times.
     let expireSessions = Box(0)
     /// Every write is answered with this code instead (532374: the account has no privilege).
@@ -151,7 +160,7 @@ final class FakeIPCamWebCamera: Sendable {
 
     private func signIn(_ request: MockRequest) -> MockResponse {
         let expected = "<?xml version='1.0'?><root><mode>1</mode><encrypt>\(Self.encryptedValues[accepted.value] ?? "-")</encrypt></root>"
-        if mode.value == .signInWithoutCode {
+        if mode.value == .signInAnsweredWithAPage {
             return .full(status: 200, headers: [("Content-Type", "text/html")], body: Data("<html><body>Please wait</body></html>".utf8))
         }
         if mode.value == .signInUnanswered { return .status(503) }
@@ -161,9 +170,11 @@ final class FakeIPCamWebCamera: Sendable {
             return Self.error(Self.wrongPasswordCode, "user or password error")
         }
         guard signInCode.value == 0 || signInCode.value == 532379 else { return Self.error(signInCode.value, "user or password error") }
+        let code = mode.value == .signInWithoutCode ? "" : "<code>\(signInCode.value)</code>"
+        guard signInGivesSession.value else { return Self.answer(code + "<level>0</level>") }
         let session = "SESSION-\(sessions.value.count + 1)"
         sessions.update { $0.append(session) }
-        return Self.answer("<code>\(signInCode.value)</code><authid>\(session)</authid><level>0</level>")
+        return Self.answer(code + "<authid>\(session)</authid><level>0</level>")
     }
 
     private func network(_ request: MockRequest) -> MockResponse {
@@ -187,10 +198,11 @@ final class FakeIPCamWebCamera: Sendable {
             guard data.hasPrefix("<?xml version='1.0'?><root>"), data.hasSuffix("</root>"), let element = IPCWebXML.element(what, in: data) else {
                 return Self.error(531000, "bad data")
             }
-            guard mode.value != .ignoreWrites else { return Self.answer("<code>0</code>") }
+            let done = Self.answer(writesWithoutCode.value ? "" : "<code>0</code>")
+            guard mode.value != .ignoreWrites else { return done }
             guard what == "eth" else {
                 options.update { $0[what] = Self.merged(String(element), into: $0[what] ?? "") }
-                return Self.answer("<code>0</code>")
+                return done
             }
             // The interface is taken whole, its `dns` child with it (the page writes both), and the network service restarts.
             guard let dns = IPCWebXML.element("dns", in: String(element)).map({ String($0) }) else { return Self.error(531000, "bad data") }
@@ -198,7 +210,7 @@ final class FakeIPCamWebCamera: Sendable {
             ethWritten.value?(Dictionary(IPCWebXML.attributes(of: dns).map { ($0.name, String(dns[$0.value])) }, uniquingKeysWith: { $1 }))
             restarting.set(restartAfterEthWrite.value)
             if restartAfterEthWrite.value > 0 { sessions.update { $0.append("SESSION-FORGOTTEN") } }
-            return Self.answer("<code>0</code>")
+            return done
         default:
             return Self.error(531000, "bad request")
         }

@@ -8,7 +8,9 @@ import TestSupport
 /// a sign-in script at /jsCore/rpcLogin.js; every call a POST whose Content-Type must be exactly `application/x-www-form-urlencoded` (anything else
 /// reaches its ONVIF server: HTTP 500 and a SOAP fault), the sign-in tokens in the envelope's header, reads answered 200 with XML whose
 /// attributes run over several lines, writes 202 with nothing. A write stores the element it was sent as it was sent (what the next read returns), so a test sees exactly what the
-/// bridge wrote. Never a real camera; addresses and values are made up.
+/// bridge wrote. Its network settings' `LANConfig` is the one the JM800S5's settings export holds (the same attributes in the same order);
+/// a `setNetworkLANConfig` write can restart its network service (`restartAfterLANWrite`: requests dropped unanswered meanwhile). Never a
+/// real camera; addresses and values are made up (documentation addresses and MAC).
 final class FakeIPCWebCamera: Sendable {
     static let username = "admin"
     static let password = #"p@ss"w\d!"#
@@ -43,6 +45,24 @@ final class FakeIPCWebCamera: Sendable {
             + #"<TitleOverlay PosX="0" PosY="0" PosType="0" TitleType="0" TitleUtf8="43616d657261" Title="43616d657261" /></Overlay>"#
     }
 
+    /// `getNetworkConfig`'s `LANConfig`, attributes over several lines. `ip` is by default the address the fake is reached at (the camera's
+    /// own address, as its page shows it).
+    static func lan(dhcp: Int = 0, ip: String = "127.0.0.1", dns1: String = "8.8.8.8", dns2: String = "1.1.1.1") -> String {
+        """
+        <LANConfig MacAddress="00:00:5e:00:53:20"
+        DHCP="\(dhcp)"
+        dhcpOffTime="255"
+        ALLNET="0"
+        IPAddress="\(ip)"
+        Netmask="255.255.255.0"
+        Gateway="192.0.2.1"
+        DNS1="\(dns1)"
+        DNS2="\(dns2)"
+        hostname="TESTCAM"
+        MTU="1460" />
+        """
+    }
+
     static func p2p(enabled: Int = 1) -> String {
         #"<P2PConfig Enable="\#(enabled)" Type="10" Authcode="\#(XMLTree.escape(authcode))"/>"#
     }
@@ -51,6 +71,8 @@ final class FakeIPCWebCamera: Sendable {
         var capture = FakeIPCWebCamera.capture()
         var overlay = FakeIPCWebCamera.overlay()
         var p2p = FakeIPCWebCamera.p2p()
+        /// `getNetworkConfig`'s `LANConfig` (nil: the answer has none).
+        var lan: String? = FakeIPCWebCamera.lan()
         var features = FakeIPCWebCamera.features
         var firmware = FakeIPCWebCamera.firmware
         /// `getMediaStreamConfig`'s `StreamAccess` element (nil: the call is answered 404, as on a camera without it).
@@ -93,6 +115,13 @@ final class FakeIPCWebCamera: Sendable {
     let dayNightDelay = Box<Duration?>(nil)
     /// How long its sign-in script takes to load (longer than a client's timeout: the camera did not answer).
     let pageDelay = Box<Duration?>(nil)
+    /// After a `setNetworkLANConfig` write, the camera restarts its network service: this many requests are dropped unanswered.
+    let restartAfterLANWrite = Box(0)
+    /// A `setNetworkLANConfig` write is dropped unanswered (taken all the same): the camera restarted its network before it answered.
+    let dropLANWriteAnswer = Box(false)
+    /// The requests dropped while the network service restarted.
+    let dropped = Box(0)
+    private let restarting = Box(0)
 
     var endpoint: CameraEndpoint { CameraEndpoint(host: "127.0.0.1", httpPort: Int(server.port), onvifPort: Int(server.port)) }
     var credentials: HTTPCredentials { HTTPCredentials(username: Self.username, password: Self.password) }
@@ -137,6 +166,15 @@ final class FakeIPCWebCamera: Sendable {
 
     private func handle(_ request: MockRequest) async -> MockResponse {
         if mode.value == .starting { return .status(503) }
+        let inRestart = restarting.update { count -> Bool in
+            guard count > 0 else { return false }
+            count -= 1
+            return true
+        }
+        if inRestart {
+            dropped.update { $0 += 1 }
+            return .drop
+        }
         if request.method == "GET", request.path == IPCWebClient.signInScript {
             guard request.head.headers["Content-Type"] == nil, !request.bodyText.contains("passwd") else { return .status(400) }
             if let delay = pageDelay.value { try? await Task.sleep(for: delay) }
@@ -198,10 +236,14 @@ final class FakeIPCWebCamera: Sendable {
             return .status(202)
         case "getNetworkConfig":
             return .xml("""
-            <?xml version="1.0" encoding="UTF-8"?><NetworkConfig><LANConfig DHCP="1" IPAddress="192.0.2.20"/>\
+            <?xml version="1.0" encoding="UTF-8"?><NetworkConfig>\(current.lan ?? "")\
             <WIFIConfig Enable="0" SSID="test" Password="wifi-secret-value"/><UPNPConfig Enable="0"/>\(current.p2p)\
             <EmailConfig Password="mail-secret-value"/></NetworkConfig>
             """)
+        case "setNetworkLANConfig":
+            if !ignore, let lan = IPCWebXML.element("LANConfig", in: body) { state.update { $0.lan = String(lan) } }
+            restarting.set(restartAfterLANWrite.value)
+            return dropLANWriteAnswer.value ? .drop : .status(202)
         case "setNetworkP2PConfig":
             if !ignore, let p2p = IPCWebXML.element("P2PConfig", in: body) { state.update { $0.p2p = String(p2p) } }
             return .status(202)

@@ -7,17 +7,19 @@ import Testing
 @testable import BridgeEngine
 
 /// What a browser gets from `ArchiveMedia` must decode: the init segment and every segment, joined in order, are a file ffmpeg decodes without a
-/// message to exactly the pictures that went in, with the codec string ffprobe prints for it. Skipped without ffmpeg and ffprobe
-/// (`CB_FFMPEG`, `CB_FFPROBE`, or Homebrew and system locations).
+/// message to exactly the pictures that went in, with the codec string ffprobe 8.1 prints for it (made from the avcC by an older ffprobe). Skipped without
+/// ffmpeg and ffprobe (`CB_FFMPEG`, `CB_FFPROBE`, or Homebrew and system locations).
 ///
 /// With `CB_ARCHIVE_MEDIA_EXPORT=<an existing directory>` the files of every fixture are also written there, for the browser spike and the dev server
 /// (`<label>.stored.mp4` as the recorder writes it, `<label>.init.mp4`, `<label>.segment-NNN.m4s` as the routes serve them, `<label>.video-only.mp4` as a
 /// browser sees them joined, and `<label>.json` with the codec string and the counts). Fixtures made from the private capture are never exported.
 @Suite(.timeLimit(.minutes(5)), .enabled(if: ArchiveMediaTools.available, "ffmpeg and ffprobe not found; set CB_FFMPEG and CB_FFPROBE"))
 struct ArchiveMediaDecodeTests {
-    /// The init segment and the segments of `file` as the page appends them, written to `directory`; returns what ffprobe and ffmpeg say about it.
+    /// The init segment and the segments of `file` as the page appends them, written to `directory`; returns what ffprobe and ffmpeg say about it, and
+    /// ffprobe's codec string for it (nil for HEVC, which no ffprobe has one for).
     @discardableResult
-    private func verify(_ file: ArchiveMediaFile, label: String, in directory: TemporaryDirectory, rate: String? = nil) throws -> (video: ArchiveMedia.VideoInit, probe: [String: String]) {
+    private func verify(_ file: ArchiveMediaFile, label: String, in directory: TemporaryDirectory, rate: String? = nil)
+        throws -> (video: ArchiveMedia.VideoInit, probe: [String: String], codec: String?) {
         let video = try ArchiveMedia.videoInit(file.initSegment)
         let segments = try file.fragments.map(ArchiveMedia.videoSegment)
         let stripped = segments.reduce(into: video.data) { $0.append($1) }
@@ -30,14 +32,20 @@ struct ArchiveMediaDecodeTests {
         if let rate { #expect(probe["r_frame_rate"] == rate, "\(label): the frame rate") }
         #expect(try ArchiveMediaTools.decodeErrors(url) == "", "\(label): ffmpeg decodes without a message")
         #expect(try ArchiveMediaTools.streamCount(url) == 1, "\(label): one stream")
-        if let mime = probe["mime_codec_string"] {
-            #expect(video.mime == "video/mp4; codecs=\"\(mime)\"", "\(label): ffprobe's codec string")
-        } else if probe["codec_name"] == "h264" {
-            // An ffprobe before 8.1 prints no codec string. It does print the level as a decimal number: the last byte of avc1.PPCCLL in hexadecimal.
-            let level = try #require(Int(probe["level"] ?? ""), "\(label): ffprobe's level")
-            #expect(video.mime.hasSuffix((level < 16 ? "0" : "") + String(level, radix: 16) + "\""), "\(label): the level ffprobe reports")
+        var codec = probe["mime_codec_string"]
+        if probe["codec_name"] == "h264" {
+            // ffprobe 8.1 prints the codec string, made from bytes 1 to 3 of the avcC. One before 8.1 (7.1 on Camera Bridge OS, 8.0 in the Linux
+            // container) prints none, so it is made the same way from the avcC every ffprobe prints; with 8.1 the two must be the same.
+            let avcC = try #require(try ArchiveMediaTools.avcConfiguration(url), "\(label): ffprobe's extradata is an avcC")
+            let made = "avc1." + [avcC.profile, avcC.compatibility, avcC.level].map { ($0 < 16 ? "0" : "") + String($0, radix: 16) }.joined()
+            #expect(codec == nil || codec == made, "\(label): the codec string made as ffprobe 8.1 makes it")
+            codec = codec ?? made
+            // The profile and the level ffprobe decodes from the SPS, not from the avcC: the first byte, and the last as a decimal number.
+            #expect(ArchiveMediaTools.avcProfiles[probe["profile"] ?? ""] == avcC.profile && probe["level"] == "\(avcC.level)",
+                    "\(label): the profile and the level ffprobe decodes (\(probe["profile"] ?? "none"), \(probe["level"] ?? "none"))")
         }
-        return (video, probe)
+        if let codec { #expect(video.mime == "video/mp4; codecs=\"\(codec)\"", "\(label): ffprobe's codec string") }
+        return (video, probe, codec)
     }
 
     private func export(_ file: ArchiveMediaFile, video: ArchiveMedia.VideoInit, segments: [Data], label: String) throws {
@@ -96,7 +104,7 @@ struct ArchiveMediaDecodeTests {
         let original = directory.file("original.mp4")
         try file.bytes.write(to: original)
         #expect(try ArchiveMediaTools.streamCount(original) == 2, "the stored file has video and sound")
-        let (video, _) = try verify(file, label: "sound", in: directory, rate: "25/1")
+        let video = try verify(file, label: "sound", in: directory, rate: "25/1").video
         #expect(video.hadAudio)
         let silent = try ArchiveMediaFixtures.mux(frames, cutEvery: 62)
         #expect(try ArchiveMedia.videoInit(silent.initSegment).data == silent.initSegment, "a file without sound is served as it is")
@@ -110,7 +118,7 @@ struct ArchiveMediaDecodeTests {
             let source = try ArchiveMediaTools.encode(codec: .h264, size: size, rate: "25", frames: 50, gop: 25, in: directory)
             let frames = try #require(ArchiveMediaFixtures.h264Frames(annexB: source, ticks: 3_600))
             for (label, file) in try variants(frames, cutEvery: 62, soundSeconds: 3) {
-                let (video, _) = try verify(file, label: "sps-\(size)-\(label)", in: directory)
+                let video = try verify(file, label: "sps-\(size)-\(label)", in: directory).video
                 #expect(video.width == width && video.height == height)
                 if label == "video" { mimes.append(video.mime) }
             }
@@ -125,7 +133,7 @@ struct ArchiveMediaDecodeTests {
         let source = try ArchiveMediaTools.encode(codec: .hevc, size: "320x180", rate: "25", frames: 50, gop: 25, in: directory)
         let frames = try #require(ArchiveMediaFixtures.hevcFrames(annexB: source, ticks: 3_600))
         for (label, file) in try variants(frames, cutEvery: 62, soundSeconds: 3) {
-            let (video, probe) = try verify(file, label: "hevc-\(label)", in: directory, rate: "25/1")
+            let (video, probe, _) = try verify(file, label: "hevc-\(label)", in: directory, rate: "25/1")
             // ffprobe prints no codec string for HEVC, so the oracle is what it does print: Main profile (hvc1.1.6) and the level, as a decimal after L.
             #expect(probe["profile"] == "Main" && video.mime.hasPrefix("video/mp4; codecs=\"hvc1.1.6.L\(probe["level"] ?? "?")"), "\(video.mime)")
         }
@@ -139,8 +147,8 @@ struct ArchiveMediaDecodeTests {
         let frames = try #require(ArchiveMediaFixtures.h264Frames(annexB: capture, ticks: 4_500))
         #expect(frames.count == 208 && frames.filter(\.isKeyframe).count == 6)
         for (label, file) in try variants(frames, cutEvery: 50, soundSeconds: 11) {
-            let (video, probe) = try verify(file, label: "capture-\(label)", in: directory, rate: "20/1")
-            #expect(video.mime == "video/mp4; codecs=\"avc1.4d0032\"" && probe["mime_codec_string"] == "avc1.4d0032")
+            let (video, _, codec) = try verify(file, label: "capture-\(label)", in: directory, rate: "20/1")
+            #expect(video.mime == "video/mp4; codecs=\"avc1.4d0032\"" && codec == "avc1.4d0032")
             #expect(video.width == 2688 && video.height == 1520)
         }
     }

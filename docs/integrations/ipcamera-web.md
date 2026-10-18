@@ -10,7 +10,10 @@ Anjvision cameras): another family, another protocol.
 The protocol below was checked by hand with the owner signed in to the camera's page, and against the page's own scripts (`land.js`,
 `common.js`, `md5-min.js`, loaded without signing in; Oct 18, 2026). The bridge's use of it is tested against a fake camera
 (`FakeIPCamWebCamera`) only. Through build 0.1.110 the bridge encrypted the lowercase MD5 (see the sign-in below), so the owner's camera
-refused every sign-in; the corrected sign-in has not yet been seen on the real camera.
+refused every sign-in. Build 0.1.111 could not read a code from the answer to its corrected sign-in and stopped the API ("answered Camera
+Bridge's sign-in without a code": that one line stood for no `<root>`, no `<code>` and a code that is not a number). It was most likely
+`<root>` without `<code>`, which the camera's page reads as 0, signed in (see the codes below); later builds log the three apart
+("something other than its XML", "a code that is not a number"). Whether that answer held a session has not been seen yet.
 
 ## What Camera Bridge does with it
 
@@ -48,11 +51,13 @@ Only ONVIF cameras are checked this way, and only when the camera is not of the 
   `rc4-40`): `admin` / `pa55word` → MD5 `8C7796AA1C0C8A48B36C8C1C445B2040` →
   `677c8aa16a74b7d096b7838b121741ac44b2251695b1e2630e465d6403c211a3`; `admin` with an empty password → `1F7D50C56381BB05217922BDA930004C` →
   `6e798ad26672b5a491c78bf9681445a134b0246c9fc091647b4b5b1601c211d0`. A camera never matches the lowercase hash.
-- The answer codes are the page's (`land.js`, `common.js`):
+- The answer codes are the page's (`land.js`, `common.js`). The page reads an answer's code with `hXmlVal({t:'code'})`, whose default is 0:
+  an answer of the camera's (`<root>…</root>`) without `<code>` (or with an empty one) is code 0.
 
   | Code | At the sign-in | At a read or write |
   |---|---|---|
-  | 0 | signed in: `<authid>SESSION</authid>` is the session, reused for every call | done |
+  | 0 | signed in: `<authid>SESSION</authid>` is the session, reused for every call; without an `authid`, "the camera signed in without giving a session" (`IPCamWebUnavailable.noSession`; nothing is latched) | done |
+  | none (`<root>` without `<code>`) | 0, as the page reads it: signed in with its `authid` (else no session, as for 0). most likely how Patio New answered build 0.1.111's sign-in, which that build could not read and stopped the API for | 0: done (the reads never carry a code) |
   | 532379 | signed in, with a session, but the camera calls the password insecure (the page then asks for a new one: 9 to 16 characters with a letter, a digit and a symbol). Camera Bridge uses the session, says once in the camera's log that the camera asks for a stronger password, and keeps it for the address (`IPCamWebClient.asksForStrongerPassword`, for the security check) | — |
   | 532227 | a refusal | the session is not valid (the page goes back to its sign-in): Camera Bridge signs in once more and asks again, once |
   | 532374 | a refusal, said as "no privilege" by every step after it (the latch keeps the code): use an administrator account in the camera's settings. Those steps are changes the account may not make (owner decision, Oct 18): the setup goes on with the steps after them | "No Privilege": the account may not do this, said as such, with the same advice; the session still serves. At a write it is a change the account may not make (`CameraAdapterError.notPermitted`, "the account Camera Bridge uses may not change this; use an administrator account in the camera’s settings"): nothing is latched, and the setup goes on with the steps after it |
@@ -67,8 +72,9 @@ Only ONVIF cameras are checked this way, and only when the camera is not of the 
   keeps the credentials only as the SHA-256 of `username:password`, in memory. ONVIF's logins are not paused: the family's ONVIF and RTSP
   may ask no password at all (Patio New's don't), and pausing them stopped its events and snapshots for 2 minutes at every start. The other
   way round still holds: while ONVIF's logins are paused or locked (the same account), the web sign-in is not tried. A sign-in answer
-  without a `<code>` is not the camera's (an unreadable answer, not a refused password): it stops the API the same way, without the word
-  "refused".
+  that is not the camera's XML (no `<root>`, such as a web page from a server in front of it), or whose code is not a number, is
+  unreadable (`invalidResponse`), not a refused password: it stops the API the same way, without the word "refused". A call's answer that
+  is not the camera's XML is `invalidResponse` too.
 - Set up for Camera Bridge signs in before its steps read anything, so a refusal makes each of this API's steps say why, and the setup goes
   on with the steps that don't need it (a login refusal would end the setup). A sign-in the camera does not answer (a 5xx, a connection
   error, a timeout) is not a refusal: that step says "the camera’s web page did not answer Camera Bridge’s sign-in (HTTP 503)" without
@@ -133,5 +139,6 @@ with the cloud off, the open RTSP and ONVIF keep it yellow; with the video passw
 they are off too; gold needs the Internet guard as well (Camera Bridge OS).
 
 Tests: `IPCamWebTests` (RC4 and MD5 vectors computed outside Camera Bridge, the uppercase hash, the query as the page's browser sends it
-and the exact URLs, the page check, the sign-in, its answer codes and its session, the latch and when it gives the sign-in a new try, ONVIF
-left alone after a refusal, no secrets in the log), `IPCamWebSetupTests` and `RemoteAccessTests` against `FakeIPCamWebCamera`.
+and the exact URLs, the page check, the sign-in, its answer codes (a missing one is 0, as the page reads it) and its session, the latch
+and when it gives the sign-in a new try, ONVIF left alone after a refusal, no secrets in the log), `IPCamWebSetupTests` and
+`RemoteAccessTests` against `FakeIPCamWebCamera`.

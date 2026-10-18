@@ -239,7 +239,9 @@ the latch, the shared login pause) and `IPCWebSetupTests` against `FakeIPCWebCam
 cameras' ONVIF answers, then read, apply, read back, restore, refusals and IPv6 against `MockONVIFCamera` and `FakeSetupCamera`; cameras
 with two slots that keep one not sent, refuse one address twice or keep their second server whatever they are sent, `MockONVIFCamera.dnsSlots`)
 and `CameraDNSOwnAPITests` (the IPCamera Web family's `set=eth` byte for byte, its restart and Restore, against `FakeIPCamWebCamera` beside a
-`MockONVIFCamera`; Reolink's `SetLocalLink` against `MockONVIFCamera.otherAPI`). A change the account may not make: `ONVIFWriteNameTests`
+`MockONVIFCamera`; Reolink's `SetLocalLink` against `MockONVIFCamera.otherAPI`), and `IPCWebDNSTests` (the IP camera web API's
+`setNetworkLANConfig` byte for byte, its restart with dropped requests (`MockResponse.drop`), Restore, DHCP, a paused API, ONVIF beside it,
+against `FakeIPCWebCamera` and `MockONVIFCamera`). A change the account may not make: `ONVIFWriteNameTests`
 (which calls are writes and which prove the login) and `ONVIFWriteRefusalTests` (`MockONVIFCamera.refusedWrites` answers chosen writes with
 `NotAuthorized` or HTTP 401 while its reads answer: `.notPermitted`, no pause; a first refused call, a write after only calls anyone gets, a
 proof older than `loginProofWindow` and one ended by a refused login are refused logins).
@@ -318,7 +320,8 @@ at all (`onvifStaysTheWayForAChangeReolinksAPICannotMake`).
 
 Stage 1 (Watch) of the internet guard (design: `docs/superpowers/specs/2026-10-17-internet-guard-design.md`), the camera's side: every DNS
 server it asks pointed at the bridge, so the bridge sees every name it looks up. `CameraDNSBackup` (`method`, `fromDHCP`, `servers`, optional
-`searchDomains`, optional `ownAPI` since 2026-10-18: the DNS values of the camera's own API, below), `CameraDNSReading` (`servers` in use,
+`searchDomains`, optional `ownAPI` since 2026-10-18: the DNS values of the camera's own API, below; optional `ipcWebAPI` since 2026-10-18: the
+IP camera web API's `LANConfig` `DHCP`, `DNS1`, `DNS2`, below), `CameraDNSReading` (`servers` in use,
 `fromDHCP`, `method`, `backup`, `pointsAt(_:)`: the camera asks that address and no other, an IPv6 address matching however it is written;
 since 2026-10-18 wherever it has its servers from, the router's DHCP included (`fromDHCP` says so, and the Watch step's note that the
 router can change them), and a slot holding 0.0.0.0 or :: is an empty slot, not a server, in readings and in Restore's comparison;
@@ -337,8 +340,30 @@ IPv4 and IPv6; the search domains are written back as the camera had them), chec
 set by hand). `SetDNS` names the bridge alone first; a camera with fixed slots that took it but kept another server set by hand (the
 owner's "Patio New" kept 8.8.8.8 as its second) is then sent the bridge twice, then the bridge and an empty entry (an empty `IPv4Address`,
 for a camera that refuses one address twice), each read back. Restore writes the old servers (or DHCP), and empties a slot its write did
-not name when the camera kept the bridge there. Tapo, Dahua/Amcrest, Jennov and every other ONVIF camera go this way; a camera whose ONVIF
-refuses `SetDNS` is refused in its words, and one without `GetDNS` is not supported (router help).
+not name when the camera kept the bridge there. Tapo, Dahua/Amcrest and every other ONVIF camera go this way (one that speaks the IP camera
+web API, a Jennov, through that API instead: below); a camera whose ONVIF refuses `SetDNS` is refused in its words, and one without `GetDNS`
+is not supported (router help).
+
+- **The IP camera web API** (docs/integrations/ip-camera-web-api.md, 2026-10-18; `IPCWeb/IPCWebDNS.swift`): an ONVIF camera whose web API
+  speaks (`ipcWeb()` `.speaks`) is read, set and restored through its own network settings before and instead of ONVIF, because its ONVIF
+  reports DNS changes it does not keep (the owner's Jennov read `SetDNS` back as the bridge, then showed its original server again).
+  `readDNS()` reads `getNetworkConfig`'s `LANConfig` (`DNS1`, `DNS2`, each once, an empty slot none; from DHCP unless `DHCP` is 0; on DHCP
+  the slots as the page shows them are taken as the servers in use): `method` `.ipcWebAPI`, the backup's `servers` the two slots and its
+  `ipcWebAPI` the three values as text. `applyDNS(server:)` writes `setNetworkLANConfig` with `LANConfig` as the camera wrote it and only
+  `DNS1` and `DNS2` the bridge (IPv4), refused rather than written unless it holds every attribute the page writes (`MacAddress`, `DHCP`,
+  `dhcpOffTime`, `ALLNET`, `IPAddress`, `Netmask`, `Gateway`, `DNS1`, `DNS2`, `hostname`, `MTU`), each once, with `IPAddress` the address
+  Camera Bridge reaches the camera at (internal `ipcWebLANWrite(_:dns1:dns2:host:)`); a camera on DHCP is refused, its mode never switched
+  (the page sets DNS servers only in Mode Static: `ipcWebDHCPRefusal`, naming Network › Basic (TCP/IP), Mode Static), and the preview says
+  it is not supported. It is read back through the same call for up to 30 s (`DNSReadBackTiming`): a dropped connection or a timeout
+  meanwhile, and a write the camera did not answer, are no refusal; a refusal pauses the web API (`IPCWebClient.isPaused`) and says so.
+  `restoreDNS(_:)` writes the backup's `DNS1` and `DNS2` back the same way (nothing written when the camera has them; refused on a camera
+  switched to DHCP since); a backup an earlier build saved through ONVIF goes back through this API too, one server in both slots, in Mode
+  Static (internal `ipcWebDNS(restoring:)`), and through ONVIF on DHCP. ONVIF stays the way for a camera that does not speak the API or
+  shows no `LANConfig`; a camera of the family whose web API cannot be asked now (paused, no answer, credentials it cannot take) is never
+  read or written through ONVIF: `readDNS()` throws `IPCWebUnavailable` (the guard's reading is unreadable), and the step and Restore are
+  refused with why. Only `LANConfig` of the answer is looked at (it also holds the camera's Wi-Fi, e-mail and FTP passwords), nothing of it
+  is logged, and only `DHCP`, `DNS1` and `DNS2` are kept. Internal: `readIPCWebDNS()`, `applyIPCWebDNS`, `restoreIPCWebDNS`, `ipcWebLAN(_:)`,
+  `ipcWebReading(_:)`, `ipcWebWatchRefusal(_:)`. Built from the camera's own page script; not yet run against a real camera.
 
 Where ONVIF leaves a server that is not the bridge, or refuses, the IPCamera Web family's own API sets both of its slots, and a Reolink's
 always does (2026-10-18). Its write restarts the camera's network service, so it is read back for up to 30 s (`DNSReadBackTiming`): no
@@ -375,14 +400,14 @@ The backup keeps the own API's DNS values (`ownAPI`: the family's `ondhcp`, `dns
 Reolink's through `LocalLink`, above).
 Internal, read only until Seal: `ONVIFClient.defaultGateway()` (`GetNetworkDefaultGateway`) and `networkInterfaces()`
 (`GetNetworkInterfaces`: DHCP or fixed, the addresses with their prefix lengths; never the MAC address). The IP camera web API's own
-network settings (`getNetworkConfig`, whose answer also holds the camera's mail, FTP and Wi-Fi passwords) are not used: those cameras
-(Jennov) go through ONVIF.
+network settings are used for the DNS only (`LANConfig`, above).
 
 The setup step "Watch its internet" (`CameraSetupStepID.internetWatch`, the last step; the engine offers it only where the bridge has
 the guard: BridgeEngine's README): `CameraSettingsService.readInternetWatch(server:)` reads the DNS servers against the bridge's address for
 the preview (the change row "DNS": "8.8.8.8 and 1.1.1.1", "1.1.1.1 and 8.8.8.8 from the router (DHCP)", "from the router (DHCP)" or "none
 set" → "the bridge (192.168.77.2)"; already right when the camera asks that address and no other; not supported, "the camera does not show its
-DNS servers", when `readDNS()` is nil), and its value now is the backup (with the own API's DNS values), kept in
+DNS servers", when `readDNS()` is nil; not supported with why for a camera that speaks the IP camera web API when that API cannot be asked
+now, or when the camera is on DHCP there), and its value now is the backup (with the own API's DNS values), kept in
 `CameraSetupBackup.internetWatch`; the step applies with `applyDNS(server:)` and restores with `restoreDNS(_:)`.
 
 ## Additions beyond the contract: integrations beyond RTSP/ONVIF (2026-10-08, docs/CONTRACT_CHANGES.md; user docs: `docs/integrations/`)
@@ -457,12 +482,14 @@ ONVIF answers) and never for a camera of the family (`IPCWebNightVision.isOfTheF
 lights rewrite the same element; a day/night command that fails after the switch to manual puts the old mode back once), chosen by
 `NightVisionSelector` in `ONVIFDriver.makeNightVision()` when the camera speaks the API, else `ONVIFNightVision`.
 `NightVisionControl.currentLight()` (a requirement with a default nil: the lamp as the camera says). `CameraConfigMethod.ipcWebAPI` (only
-for the clean picture), `CameraFeatureBackup.cloudType` / `cloudAuthcode` (never encoded: the engine keeps it in the secret store) and
-`CameraSettingsService.setFeature(_:enabled:path:saved:)`: on an ONVIF camera that speaks the API (`CameraSettingsService.ipcWeb()`,
+for the clean picture, and since 2026-10-18 the DNS servers: "Internet guard, the camera's DNS"), `CameraFeatureBackup.cloudType` /
+`cloudAuthcode` (never encoded: the engine keeps it in the secret store) and `CameraSettingsService.setFeature(_:enabled:path:saved:)`: on
+an ONVIF camera that speaks the API (`CameraSettingsService.ipcWeb()`,
 `IPCWebAccess`: `none`, `speaks`, `unavailable`), `readCleanPicture()`, `cleanPicture()` and `restorePicture(_:)` switch its overlay's
 `Enable`, and `readFeature(.cloud)` / `setFeature(.cloud, …)` its `P2PConfig` (the switch, with the kind and sign-in value read and given
-back; nothing else of the network settings, which hold the camera's other passwords, is kept or logged). While the API of a camera of
-the family cannot be asked, these steps say why and never use ONVIF's on-screen display.
+back; nothing else of the network settings, which hold the camera's other passwords, is kept or logged; its `LANConfig` is the DNS
+step's). While the API of a camera of the family cannot be asked, these steps say why and never use ONVIF's on-screen display (nor its
+DNS).
 
 Battery (2026-10-16): `BatteryStatus` (`level` 0–100, `charging`, `source` `.solar` / `.cable` / nil; `BatteryStatus.lowLevel` 20,
 `BatteryStatus.pollInterval` 5 min) and `CameraDriver.batteryStatus()` (default nil; must never wake the camera). `EufyDriver` answers from
@@ -489,9 +516,12 @@ an account; a login refusal or a camera that stops answering ends the reading, t
 The IPCamera Web family (`IPCamWeb/`, notes: `docs/integrations/ipcamera-web.md`): `IPCamWebClient` (the page check first, `GET /` titled
 "IPCamera Web" naming `js/script/land.js` and that script holding `auth.cgi?act=auth`, no credentials; the sign-in `GET /cgi/auth.cgi` with the
 RC4 (`IPCamWebRC4`, key "pwnsd") of the UPPERCASE hex MD5 (`WyzeMD5`) of "username:password", as the page's `md5-min.js` has it; answered 0,
-or 532379 (signed in, the password called insecure: logged once, `asksForStrongerPassword`), with an `authid`; any other code a refusal, its
-code logged; no `<code>` `invalidResponse`; the session reused, one new sign-in on 532227; 532374 "no privilege" said as such, and at a
-write `CameraAdapterError.notPermitted` (a change the account may not make: the setup's other steps still run); each query
+or 532379 (signed in, the password called insecure: logged once, `asksForStrongerPassword`), with an `authid` (without one
+`IPCamWebUnavailable.noSession`, nothing latched); any other code a refusal, its code logged; an answer of the camera's (`<root>`) without
+`<code>` is 0, as the page's `hXmlVal` reads it (`signInCode(in:)`; most likely how Patio New answered build 0.1.111's sign-in, which that build
+could not read), at the sign-in and at every call; a sign-in answer that is not the camera's XML, or whose code is not a number,
+`invalidResponse` (latched, not a refused password), and a call's answer that is not the camera's XML `invalidResponse`, not latched; the session reused, one new sign-in on 532227; 532374 "no privilege" said as such, and
+at a write `CameraAdapterError.notPermitted` (a change the account may not make: the setup's other steps still run); each query
 value encoded as the page's browser sends it, `=` `/` `?` `:` raw), `IPCamWebLatch` (a refused sign-in stops every request to the address,
 keeping the camera's code: `refusal(_:)` is `IPCamWebUnavailable.noPrivilege` after 532374, which every step then names, typed as a change
 the account may not make (`notPermitted`), else `.paused`;

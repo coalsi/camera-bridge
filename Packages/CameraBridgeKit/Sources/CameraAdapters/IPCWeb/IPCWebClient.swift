@@ -7,7 +7,7 @@ import Synchronization
 
 // The IP camera web API (docs/integrations/ip-camera-web-api.md): the camera's own web page's API, found on a family of OEM cameras (an
 // Anjvision platform sold under many brands, whose sign-in page is titled "IP Camera Web Login"). Camera Bridge uses it next to ONVIF for what
-// these cameras' ONVIF reports wrongly: night vision, the IR lights, the on-screen text and the maker's cloud.
+// these cameras' ONVIF reports wrongly: night vision, the IR lights, the on-screen text, the maker's cloud and the DNS servers.
 
 /// What the IP camera web API's probe found.
 struct IPCWebDevice: Sendable, Equatable {
@@ -142,6 +142,10 @@ actor IPCWebClient {
 
     /// The address served the family's sign-in script during this run (`IPCWebLatch.isFamily`).
     nonisolated var isFamily: Bool { latch.isFamily(key) }
+
+    /// The bridge stopped using the camera's web API after it refused a request (`IPCWebLatch.isTripped`): nothing more is sent. A call
+    /// that failed without tripping it got no answer (a transport error or a timeout, as while the camera restarts its network).
+    nonisolated var isPaused: Bool { latch.isTripped(key) }
 
     /// `probe()`, with a web server that did not answer taken as no web API (the setup's steps then go through ONVIF, as for any other
     /// camera); nothing is kept, so the next call asks again.

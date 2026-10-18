@@ -5,7 +5,7 @@ import Foundation
 /// reports wrongly: its own labels (the `Overlay` element of the video settings; `Enable` 0 takes both its title and its clock off the
 /// picture) and its maker's cloud (`P2PConfig` of the network settings). Each is a read-modify-write of the element as the camera wrote
 /// it, read back after. The network settings also hold the camera's other passwords (e-mail, FTP, Wi-Fi): only the `P2PConfig` element
-/// is looked at, nothing of the answer is logged or kept.
+/// is looked at here (and `LANConfig` for the DNS servers, `IPCWebDNS.swift`), nothing of the answer is logged or kept.
 extension CameraSettingsService {
     static let ipcVideoRead = "getMediaVideoConfig"
     static let ipcOverlayWrite = "setMediaVideoOverlayConfig"
@@ -111,8 +111,8 @@ enum IPCWebAccess: Sendable {
     /// Not an ONVIF camera of the family (or credentials the API cannot take): the steps work as for any other camera.
     case none
     case speaks(IPCWebClient, IPCWebDevice)
-    /// A camera of the family whose web API cannot be asked now (paused after a refusal, or no answer), with why: its clean picture and
-    /// cloud steps are not possible now, and never go through ONVIF (whose answers these cameras get wrong).
+    /// A camera of the family whose web API cannot be asked now (paused after a refusal, or no answer), with why: its clean picture, cloud
+    /// and DNS steps are not possible now (its DNS reading is unreadable), and never go through ONVIF (whose answers these cameras get wrong).
     case unavailable(String)
 
     var isNone: Bool { if case .none = self { true } else { false } }
