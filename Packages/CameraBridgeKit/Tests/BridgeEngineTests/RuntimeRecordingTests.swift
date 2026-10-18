@@ -476,16 +476,21 @@ import Testing
                                        timing: RecordingTiming(fragmentPacing: .zero), log: Self.log)
         await handler.updateRecordingConfiguration(RecordingFixtures.configuration(prebufferMs: 0, fragmentMs: 4000))
         let stream = try await handler.recordingStream(streamID: 12)
-        let reader = Task { await collect(stream) }
+        // The recorder lets at most 8 packets wait for a reader that falls behind, then ends the stream; with no pacing between the
+        // fragments, the frames go in step with the reader. (All at once, a reader starved under heavy load let 11 pile up.)
+        let received = Box(0)
+        let reader = Task { await collect(stream, progress: received) }
         #expect(await eventually { await hub.subscriberCount == 1 })
         // 25 fps until 6 s, then 12.5 fps; keyframes every 50 frames (0, 2, 4, 6, 10, 14 s); the camera drops at 14.48 s.
         for index in 0..<256 {
             await hub.ingest(frame(index < 150 ? Double(index) / 25 : 6 + Double(index - 150) / 12.5, key: index % 50 == 0))
         }
+        #expect(await eventually { received.value == 5 }, "the initialization segment and the fragments up to 14 s")
         // It reconnects with a new timeline: 12.5 fps, 4 s GOPs, which the recording continues at 14.48 s (keyframes at
         // 14.48, 18.48, 22.48, 26.48 s); then 25 fps (keyframe at 28.48 s), then 12.5 fps again until 30.48 s.
         await hub.discontinuity()
         for index in 0...150 { await hub.ingest(frame(100 + Double(index) / 12.5, key: index % 50 == 0)) }
+        #expect(await eventually { received.value == 9 }, "the fragments up to 26.48 s")
         for index in 1...50 { await hub.ingest(frame(112 + Double(index) / 25, key: index == 50)) }
         for index in 1...25 { await hub.ingest(frame(114 + Double(index) / 12.5, key: false)) }
         // New parameter sets: the open fragment goes out and the stream ends. As one fragment it would be 4.08 s long.

@@ -1,4 +1,5 @@
 import BridgeEngine
+import BridgeSupport
 import BridgeWeb
 import Foundation
 import Testing
@@ -25,17 +26,22 @@ import TestSupport
 
     // MARK: guard-set
 
-    @Test func theListGoesToTheHelperWithCanonicalAddressesAndTheTimeZone() async throws {
+    /// "Today" is counted in the bridge's time zone (its settings, `BridgeTime`), not the process's: Patio New's guard.json said "GMT", the
+    /// box's own, while the bridge is set to America/Phoenix.
+    @Test func theListGoesToTheHelperWithCanonicalAddressesAndTheBridgesTimeZone() async throws {
         let rig = try Rig()
         defer { rig.finish() }
-        try await rig.system.setGuardedCameras([GuardedCamera(address: "192.168.77.21", level: .watch),
-                                                GuardedCamera(address: "FD00:0:0:0:0:0:0:21", level: .watch),
-                                                GuardedCamera(address: " 192.168.77.21 ", level: .watch)])
+        let bridge = try #require(TimeZone(identifier: TimeZone.current.identifier == "Pacific/Chatham" ? "America/Phoenix" : "Pacific/Chatham"))
+        try await BridgeTime.$taskZone.withValue(bridge) {
+            try await rig.system.setGuardedCameras([GuardedCamera(address: "192.168.77.21", level: .watch),
+                                                    GuardedCamera(address: "FD00:0:0:0:0:0:0:21", level: .watch),
+                                                    GuardedCamera(address: " 192.168.77.21 ", level: .watch)])
+            try await rig.system.setGuardedCameras([])
+        }
         let body = try #require(rig.helper?.bodies("guard-set").first)
         #expect(body == ["cameras": [["address": "192.168.77.21", "level": "watch"], ["address": "fd00::21", "level": "watch"]],
-                         "timeZone": TimeZone.current.identifier] as NSDictionary, "each camera once, in the form the system logs it")
-        try await rig.system.setGuardedCameras([])
-        #expect(rig.helper?.bodies("guard-set").last == ["cameras": [], "timeZone": TimeZone.current.identifier] as NSDictionary, "an empty list turns it off")
+                         "timeZone": bridge.identifier] as NSDictionary, "each camera once, in the form the system logs it")
+        #expect(rig.helper?.bodies("guard-set").last == ["cameras": [], "timeZone": bridge.identifier] as NSDictionary, "an empty list turns it off")
         #expect(rig.helper?.refused.withLock { $0.isEmpty } == true)
     }
 

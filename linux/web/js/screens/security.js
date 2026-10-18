@@ -4,14 +4,16 @@
 // needs the Internet guard of Camera Bridge OS, so on a bridge without it green is the best. Shown as a badge (a shield in the level's colour
 // with its own mark, and the level's word) on the Cameras page with a legend under the table, beside the camera's name, as a dot beside each
 // name on the Monitor, and as the camera page's Security card: the findings in plain words, "Check again" (POST cameras/:id/security/check,
-// at most once a minute), "Fix with Set up for Camera Bridge" for what the setup can change, and the Internet guard (Watch: what it blocked
-// today and in 24 hours) with the router help. Colour is never alone: the level's word is always shown or read out. Nothing here checks a
-// camera by itself.
+// at most once a minute), "Fix with Set up for Camera Bridge" for what the setup can change, "Change it by hand" (manual-help.js) under what
+// it can't, and the Internet guard (Watch: what it blocked today and in 24 hours; how to point the camera's DNS at Camera Bridge by hand while
+// it is not watched) with the router help. Colour is never alone: the level's word is always shown or read out. Nothing here checks a camera
+// by itself.
 import { api } from '../api.js';
 import { h, replace, svg } from '../dom.js';
 import { timeAgo } from '../format.js';
 import { putCamera, store } from '../store.js';
 import { inlineError } from './common.js';
+import { MANUAL_TEXT, manualHelpBlock, manualHelpView } from './manual-help.js';
 
 /** The levels, worst first (the bridge's order). */
 export const SECURITY_LEVELS = ['red', 'yellow', 'green', 'gold'];
@@ -84,13 +86,18 @@ const count = (value) => (Number.isFinite(value) && value > 0 ? Math.floor(value
 /** The guard's part of the view: on a bridge without it (`guard` null) nothing is watched. Names newest first, one never seen last at the end. */
 function guardView(guard, finding) {
   const sentence = typeof finding?.sentence === 'string' && finding.sentence ? finding.sentence : null;
-  if (!guard || typeof guard !== 'object') return { onBridge: false, watched: false, today: 0, last24h: 0, names: [], sentence: sentence ?? GUARD_TEXT.notOnThisBridge, running: false };
+  const manual = manualHelpView(finding?.manualHelp);
+  if (!guard || typeof guard !== 'object') {
+    return { onBridge: false, watched: false, today: 0, last24h: 0, names: [], sentence: sentence ?? GUARD_TEXT.notOnThisBridge, running: false, manual: null };
+  }
   const names = (Array.isArray(guard.names) ? guard.names : [])
     .filter((entry) => entry && typeof entry.name === 'string' && entry.name)
     .map((entry, index) => ({ name: entry.name, count: count(entry.count), last: Number.isFinite(Date.parse(entry.last)) ? Date.parse(entry.last) : null, index }))
     .sort((a, b) => (b.last ?? -Infinity) - (a.last ?? -Infinity) || a.index - b.index)
     .map(({ index, ...entry }) => entry);
-  return { onBridge: true, watched: guard.watched === true, today: count(guard.today), last24h: count(guard.last24h), names, sentence, running: finding?.state !== 'unknown' };
+  const watched = guard.watched === true;
+  return { onBridge: true, watched, today: count(guard.today), last24h: count(guard.last24h), names, sentence, running: finding?.state !== 'unknown',
+    manual: watched ? null : manual };
 }
 
 /**
@@ -98,9 +105,11 @@ function guardView(guard, finding) {
  * does not know, else
  *   level      'red' | 'yellow' | 'green' | 'gold', and its `word`
  *   summary    the bridge's sentence for the level; checkedAt in ms (null when unreadable)
- *   findings   the camera's, worst first as the bridge sent them, without the guard's: { feature, state, level, sentence, canChange, fixable }
- *              (fixable: Set up for Camera Bridge can change it and it is not right yet); `fixable` lists those
- *   guard      { onBridge, watched, today, last24h, names: [{ name, count, last }] newest first, sentence (the guard's finding), running }
+ *   findings   the camera's, worst first as the bridge sent them, without the guard's: { feature, state, level, sentence, canChange, fixable,
+ *              manual } (fixable: Set up for Camera Bridge can change it and it is not right yet; manual: the bridge's "Change it by hand",
+ *              manual-help.js, or null); `fixable` lists those
+ *   guard      { onBridge, watched, today, last24h, names: [{ name, count, last }] newest first, sentence (the guard's finding), running,
+ *              manual (how to point its DNS at Camera Bridge by hand while it is not watched, or null) }
  */
 export function securityView(camera) {
   const security = camera?.status?.security;
@@ -109,7 +118,8 @@ export function securityView(camera) {
   const findings = all.filter((entry) => entry.feature !== 'internetGuard').map((entry) => {
     const level = SECURITY_LEVELS.includes(entry.level) ? entry.level : null;
     const canChange = entry.canChange === true;
-    return { feature: entry.feature, state: entry.state, level, sentence: entry.sentence, canChange, fixable: canChange && level !== null && level !== 'gold' };
+    return { feature: entry.feature, state: entry.state, level, sentence: entry.sentence, canChange, fixable: canChange && level !== null && level !== 'gold',
+      manual: manualHelpView(entry.manualHelp) };
   });
   const checked = Date.parse(security.checkedAt);
   return {
@@ -266,12 +276,14 @@ function when(ms, now) {
   return h('time', { datetime: new Date(ms).toISOString(), title: new Date(ms).toLocaleString() }, timeAgo(ms, now));
 }
 
-function findingItem(entry, canSetUp) {
+/** A finding of the card; `help(key, view)` draws its "Change it by hand" (open as the person left it). */
+function findingItem(entry, canSetUp, help = (_key, view) => manualHelpBlock(view)) {
   const word = entry.level ? SECURITY_TEXT.levels[entry.level] : null;
   return h('li', { class: 'sec-finding' },
     h('span', { class: 'sec-mark', dataset: entry.level ? { level: entry.level } : null, 'aria-hidden': 'true' }, entry.level ? shield(entry.level) : null),
     h('div', null, word ? h('span', { class: 'sr-only' }, `${word}: `) : null, h('span', null, entry.sentence),
-      entry.fixable && canSetUp ? h('span', { class: 'sec-can-change' }, SECURITY_TEXT.canChange) : null));
+      entry.fixable && canSetUp ? h('span', { class: 'sec-can-change' }, SECURITY_TEXT.canChange) : null,
+      help(`${entry.feature}|${entry.sentence}`, entry.manual)));
 }
 
 function nameItem(entry, now) {
@@ -297,6 +309,9 @@ export function createSecurityCard(camera, {
   let announced = '';         // "Checked: Local only." once a check on demand finished
   let drawn = '';
   let destroyed = false;
+  const openHelp = new Set();   // the "Change it by hand" disclosures the person opened: the card draws again every minute and on each new status
+  const help = (key, view, options = {}) => manualHelpBlock(view, { ...options, open: openHelp.has(key),
+    onToggle: (open) => { if (open) openHelp.add(key); else openHelp.delete(key); } });
   const setUp = canSetUp && typeof openSetup === 'function';
   const cloudOnly = needsMakersCloud(camera);
 
@@ -315,8 +330,9 @@ export function createSecurityCard(camera, {
   const watchRow = h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', onclick: () => openSetup?.() }, `${GUARD_TEXT.watchWithSetup}…`),
     h('span', { class: 'small muted' }, GUARD_TEXT.watchWithSetupDesc));
   const names = h('div', { class: 'sec-names' });
+  const guardHelp = h('div', { class: 'sec-guard-help' });   // "Point its DNS at Camera Bridge yourself", after the setup's button
   const guard = h('div', { class: 'sec-guard' },
-    h('div', { class: 'row spread' }, h('h3', { class: 'section-title' }, GUARD_TEXT.name), guardPill), guardText, watchRow, names);
+    h('div', { class: 'row spread' }, h('h3', { class: 'section-title' }, GUARD_TEXT.name), guardPill), guardText, watchRow, guardHelp, names);
   const el = h('div', { class: 'card sec-card' },
     h('div', { class: 'row spread' }, h('h2', null, SECURITY_TEXT.title), badge),
     summary, h('div', { class: 'row sec-checked' }, checked, checkButton, state), problemHost, findings, fixRow, guard,
@@ -327,6 +343,7 @@ export function createSecurityCard(camera, {
     guardPill.hidden = !g;
     watchRow.hidden = true;
     replace(names);
+    replace(guardHelp);
     if (!g) { replace(guardText, h('p', { class: 'small muted' }, SECURITY_TEXT.notChecked)); return; }
     const line = (text) => h('p', { class: 'small' }, text);
     if (!g.onBridge) {
@@ -341,6 +358,7 @@ export function createSecurityCard(camera, {
       replace(guardText, g.sentence ? line(g.sentence) : null, cloudOnly ? line(GUARD_TEXT.cloudOnly)
         : [line(GUARD_TEXT.whatWatchDoes), setUp ? null : line(GUARD_TEXT.cantWatch)]);
       watchRow.hidden = !setUp;
+      if (!cloudOnly) replace(guardHelp, help('internetGuard', g.manual, { summary: MANUAL_TEXT.watchSummary }));
       return;
     }
     guardPill.className = `pill ${g.running ? 'live' : 'warning'}`;
@@ -370,7 +388,7 @@ export function createSecurityCard(camera, {
     el.setAttribute('aria-busy', String(busy));
     state.textContent = busy ? SECURITY_TEXT.checking : announced;
     replace(problemHost, problem ? inlineError(problem) : null);
-    replace(findings, (view?.findings ?? []).map((entry) => findingItem(entry, setUp)));
+    replace(findings, (view?.findings ?? []).map((entry) => findingItem(entry, setUp, help)));
     findings.hidden = !view?.findings.length;
     fixRow.hidden = !(setUp && view?.fixable.length);
     drawGuard(view, at);

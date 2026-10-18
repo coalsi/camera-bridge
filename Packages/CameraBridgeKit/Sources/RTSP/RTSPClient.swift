@@ -21,8 +21,9 @@ import RTP
 /// disconnect or stall; dropping or cancelling it closes the session. `close()` sends TEARDOWN. A client is
 /// single-use: create a new one to reconnect (`RTSPMediaSource` does); a second `play()` is rejected.
 ///
-/// Credentials never appear in request lines or logs; user info in `configuration.url` is stripped (and used as
-/// credentials when `configuration.credentials` is nil).
+/// Credentials never appear in logs, and the login never in request lines: user info in `configuration.url` is stripped
+/// (and used as credentials when `configuration.credentials` is nil). Query credentials the camera takes in its stream URL
+/// (`configuration.streamCredentials`) are in the request lines only; log lines name `configuration.url`, which has none.
 public actor RTSPClient {
     static let backchannelRequire = "www.onvif.org/ver20/backchannel"
 
@@ -85,9 +86,9 @@ public actor RTSPClient {
         self.configuration = configuration
         self.transport = transport
         log = Log(category: "rtsp", cameraID: configuration.cameraID)
-        requestURL = RTSPURL.requestString(for: configuration.url)
+        requestURL = RTSPURL.requestString(for: configuration.streamCredentials.connectionURL(for: configuration.url))
         credentials = configuration.credentials ?? RTSPURL.embeddedCredentials(in: configuration.url)
-        aggregateURL = RTSPURL.requestString(for: configuration.url)
+        aggregateURL = requestURL
         self.videoFrameTimeout = videoFrameTimeout ?? max(configuration.timeout * 3, .seconds(30))
         self.downgradeGuard = downgradeGuard
         let url = configuration.url

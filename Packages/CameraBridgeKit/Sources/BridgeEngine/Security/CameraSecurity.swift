@@ -65,18 +65,20 @@ public enum CameraSecurityFeature: String, Sendable, Codable, CaseIterable {
 /// What the Internet guard (Camera Bridge OS: the camera's DNS pointed at the box) saw of one camera, for its level. The guard fills it in;
 /// nil where there is no guard (the Mac app), and then green is the best level.
 public struct GuardEvidence: Sendable, Codable, Equatable {
-    /// The guard watches this camera: its Watch is done here (`listed`), the box watches its address, and the camera's DNS, read at its last
-    /// check, asks the bridge's address now (`asksBridge`).
+    /// The guard watches this camera: it is on the guard's list here (`listed`), the box watches its address, and the camera's DNS, as last
+    /// read, asks the bridge's address now (`asksBridge`).
     public var watched: Bool
-    /// Its Watch is done here: the box is asked to watch its address.
+    /// It is on the guard's list here (its Watch done, or its DNS read pointing at the bridge): the box is asked to watch its address.
     public var listed: Bool
-    /// The camera's DNS servers, read at its last check, are the bridge's address now; false: they are others (a DHCP renewal, a factory reset,
-    /// the bridge at a new address); nil: not read.
+    /// The camera's DNS servers, as last read, are the bridge's address now; false: they are others (a DHCP renewal, a factory reset, the
+    /// bridge at a new address); nil: not read.
     public var asksBridge: Bool?
     /// How long the box has watched it without a break; nil when it does not say. Gold needs a full day.
     public var watchedFor: TimeInterval?
     /// Its Watch was taken "after the camera restarts" (ISAPI `statusCode` 7): a camera whose DNS is not the bridge yet waits for that.
     public var waitsForRestart: Bool
+    /// The camera's DNS servers, as last read, come from its router (DHCP): the router can change them when it renews the camera's address.
+    public var dnsFromRouter: Bool
     /// The camera's lookups of outside names in the last 24 hours (blocked).
     public var outsideLookups24h: Int
     /// The newest names it looked up, newest first.
@@ -88,14 +90,15 @@ public struct GuardEvidence: Sendable, Codable, Equatable {
     /// The names it asked for in the last 7 days, most asked first.
     public var names: [GuardReport.Lookup]
 
-    /// `listed` defaults to `watched`, `asksBridge` to true for a watched camera.
+    /// `listed` defaults to `watched`, `asksBridge` to true for a watched camera, `dnsFromRouter` to false.
     public init(watched: Bool, outsideLookups24h: Int, lastLookupNames: [String], available: Bool, today: Int = 0, names: [GuardReport.Lookup] = [],
-                listed: Bool? = nil, asksBridge: Bool? = nil, watchedFor: TimeInterval? = nil, waitsForRestart: Bool = false) {
+                listed: Bool? = nil, asksBridge: Bool? = nil, watchedFor: TimeInterval? = nil, waitsForRestart: Bool = false, dnsFromRouter: Bool = false) {
         self.watched = watched
         self.listed = listed ?? watched
         self.asksBridge = asksBridge ?? (watched ? true : nil)
         self.watchedFor = watchedFor
         self.waitsForRestart = waitsForRestart
+        self.dnsFromRouter = dnsFromRouter
         self.outsideLookups24h = outsideLookups24h
         self.lastLookupNames = lastLookupNames
         self.available = available
@@ -119,9 +122,11 @@ public struct CameraSecurityFinding: Sendable, Codable, Equatable {
     public var linked: Bool?
     /// The service's name ("Hik-Connect", "Meari service (port 10000)").
     public var service: String?
+    /// "Change it by hand" where the setup can't change it (CameraManualHelp.swift); filled in for the web page, never by `assess`.
+    public var manualHelp: CameraManualHelp?
 
     public init(feature: CameraSecurityFeature, state: RemoteAccessState, level: CameraSecurityLevel, sentence: String, canChange: Bool,
-                linked: Bool? = nil, service: String? = nil) {
+                linked: Bool? = nil, service: String? = nil, manualHelp: CameraManualHelp? = nil) {
         self.feature = feature
         self.state = state
         self.level = level
@@ -129,6 +134,7 @@ public struct CameraSecurityFinding: Sendable, Codable, Equatable {
         self.canChange = canChange
         self.linked = linked
         self.service = service
+        self.manualHelp = manualHelp
     }
 }
 
@@ -267,9 +273,13 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
         }
     }
 
+    /// A watch on DNS servers the camera's router gives (DHCP) can end when the router renews the camera's address.
+    static let dnsFromRouterNote = "Its DNS servers come from your router, which can change them when it renews the camera’s address."
+
     /// What the guard saw: without it, while it does not watch the camera, or before a full day of watching, green is the best; watched and
-    /// still looking up internet names, yellow; watched for a day without a lookup, gold. A camera whose Watch is not done gets the "doesn't
-    /// watch" sentence whatever the box's state (a box watching no camera has its DNS off).
+    /// still looking up internet names, yellow; watched for a day without a lookup, gold. A camera not on the guard's list gets the "doesn't
+    /// watch" sentence whatever the box's state (a box watching no camera has its DNS off). A watch on DNS the router gives says so
+    /// (`dnsFromRouterNote`).
     static func guardFinding(_ evidence: GuardEvidence?) -> CameraSecurityFinding {
         func make(_ state: RemoteAccessState, _ level: CameraSecurityLevel, _ sentence: String) -> CameraSecurityFinding {
             CameraSecurityFinding(feature: .internetGuard, state: state, level: level, sentence: sentence, canChange: false)
@@ -284,11 +294,12 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
         guard evidence.available else {
             return make(.unknown, .green, "The \(name) isn’t running, so Camera Bridge can’t confirm that nothing gets out.")
         }
+        let note = evidence.watched && evidence.dnsFromRouter ? " " + dnsFromRouterNote : ""
         if evidence.outsideLookups24h > 0 {
             let count = evidence.outsideLookups24h
             let names = evidence.lastLookupNames.prefix(3)
             return make(.on, .yellow, "The \(name) blocked \(count == 1 ? "1 lookup of an internet name" : "\(count) lookups of internet names") in the last "
-                        + "24 hours" + (names.isEmpty ? "" : " (\(names.joined(separator: ", ")))") + ", but the camera may have another way out.")
+                        + "24 hours" + (names.isEmpty ? "" : " (\(names.joined(separator: ", ")))") + ", but the camera may have another way out." + note)
         }
         switch evidence.asksBridge {
         case false? where evidence.waitsForRestart:
@@ -305,9 +316,9 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
         guard let watchedFor = evidence.watchedFor, watchedFor >= GuardEvidence.quietDay else {
             let hours = Int((evidence.watchedFor ?? 0) / 3600)
             let time = hours < 1 ? "less than an hour" : hours == 1 ? "1 hour" : "\(hours) hours"
-            return make(.on, .green, "The \(name) has watched it for \(time) and seen no internet lookups yet. It takes a full day to confirm.")
+            return make(.on, .green, "The \(name) has watched it for \(time) and seen no internet lookups yet. It takes a full day to confirm." + note)
         }
-        return make(.on, .gold, "The \(name) has watched it for the last 24 hours and saw it make no internet lookups.")
+        return make(.on, .gold, "The \(name) has watched it for the last 24 hours and saw it make no internet lookups." + note)
     }
 
     private static func capitalized(_ text: String) -> String {

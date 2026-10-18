@@ -66,7 +66,7 @@ struct AmcrestAPI: Sendable {
 
     private func get(_ path: String, query: [URLQueryItem]) async throws -> (Data, HTTPURLResponse) {
         let key = Self.loginKey(endpoint)
-        if hasCredentials, let until = ONVIFLoginGuard.shared.blockedUntil(host: key) { throw CameraAdapterError.lockedOut(until: until) }
+        if hasCredentials, let pause = ONVIFLoginGuard.shared.pause(host: key) { throw pause.error }
         guard let url = endpoint.httpURL(path: path, query: query) else { throw CameraAdapterError.invalidResponse("invalid camera address") }
         do {
             return try await CameraHTTP.send(http, CameraHTTP.request(url))

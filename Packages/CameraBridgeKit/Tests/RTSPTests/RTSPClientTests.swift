@@ -264,6 +264,42 @@ final class WallClockOffsets: Sendable {
         await server.stop()
         #expect(server.requests.allSatisfy { !$0.uri.contains("@") && !$0.uri.contains("admin") })
     }
+
+    /// A camera that takes credentials in its stream URL's query: `configuration.url` is the address as `config.json` keeps it (without
+    /// them), `streamCredentials` the URL with them from the secret store. They go into the request line, never into a log line.
+    @Test func storedQueryCredentialsGoIntoTheRequestLineOnly() async throws {
+        let hash = "c0ffee00c0ffee00c0ffee00c0ffee00"
+        let query = "user=admin&password=Q-S3cret-55&hash=\(hash)"
+        let server = try await makeServer { $0.credentials = credentials; $0.requiredQuery = query }
+        let lines = LogLines()
+        let token = LogHub.addSink(lines)
+        defer { LogHub.removeSink(token) }
+
+        let withoutThem = makeClient(server, credentials: credentials)
+        await #expect(throws: (any Error).self, "the camera refuses its address without the query") { try await withoutThem.connect() }
+        await withoutThem.close()
+
+        var configuration = RTSPConfiguration(url: server.url, credentials: credentials, timeout: .seconds(5))
+        configuration.streamCredentials = StreamURLCredentials(main: try #require(URL(string: "\(server.url.absoluteString)?\(query)")))
+        let client = RTSPClient(configuration: configuration, transport: PlatformNetworkTransport())
+        _ = try await client.connect()
+        let collected = await collect(try await client.play(), timeout: .seconds(5)) { videoFrameCount($0) >= 2 }
+        await client.close()
+        await server.stop()
+        #expect(collected.video.count >= 2)
+        let describes = server.requests.filter { $0.method == "DESCRIBE" }
+        #expect(describes.last?.uri == "\(server.url.absoluteString)?\(query)")
+        let logged = lines.all.joined(separator: "\n")
+        #expect(logged.contains("Connected to \(server.url.absoluteString)"), "the address is logged without the query")
+        #expect(!logged.contains(hash) && !logged.contains("Q-S3cret-55"))
+    }
+}
+
+/// Every message logged while it is registered (from any test running meanwhile: only the absence of a secret is checked).
+private final class LogLines: LogSink {
+    private let lines = Mutex<[String]>([])
+    var all: [String] { lines.withLock { $0 } }
+    func record(_ entry: LogEntry) { lines.withLock { $0.append(entry.message) } }
 }
 
 @Suite(.timeLimit(.minutes(1))) struct RTSPClientKeepaliveTests {

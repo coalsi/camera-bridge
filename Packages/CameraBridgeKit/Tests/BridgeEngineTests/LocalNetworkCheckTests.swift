@@ -11,6 +11,7 @@ import Testing
 final class ScriptedConnectTransport: NetworkTransport {
     private let answers: Box<[TransportError?]>
     private let rest: Box<TransportError?>
+    private let holds = Box<[Int: Gate]>([:])
     let attempts = Box(0)
 
     init(_ script: [TransportError?], then rest: TransportError?) {
@@ -21,12 +22,19 @@ final class ScriptedConnectTransport: NetworkTransport {
     /// From now on, connections that are not scripted answer with `answer`.
     func answerFromNowOn(_ answer: TransportError?) { rest.set(answer) }
 
+    /// Attempt `number` (from 1) answers only once `gate` opens (it counts in `attempts` at once).
+    func hold(attempt number: Int, until gate: Gate) { holds.update { $0[number] = gate } }
+
     func listen(port: UInt16, loopbackOnly: Bool) async throws -> any TCPListener {
         throw TransportError.failed("not used")
     }
 
     func connect(host: String, port: UInt16, timeout: Duration) async throws -> any TCPConnection {
-        attempts.update { $0 += 1 }
+        let attempt = attempts.update { count -> Int in
+            count += 1
+            return count
+        }
+        await holds.value[attempt]?.wait()
         let scripted = answers.update { answers -> TransportError?? in answers.isEmpty ? .none : .some(answers.removeFirst()) }
         if let failure = scripted ?? rest.value { throw failure }
         return FakeConnection(remoteAddress: host)
@@ -67,12 +75,17 @@ final class ScriptedConnectTransport: NetworkTransport {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let transport = ScriptedConnectTransport([], then: .localNetworkDenied)
+        // The second attempt answers when the test says so: the check is still within its answer wait while the test looks. (A poll
+        // every 5 ms woke up after the 400 ms wait had run out under heavy load, and saw the denial that had rightly counted by then.)
+        let secondAnswer = Gate()
+        transport.hold(attempt: 2, until: secondAnswer)
         let engine = engine(transport, directory: directory)
         let start = ContinuousClock.now
         let checking = Task { await engine.checkLocalNetworkAccess(host: "192.0.2.1", answerWait: .milliseconds(400)) }
         let retrying = await Self.attempts(transport, atLeast: 2)
         #expect(retrying)
         #expect(engine.localNetworkAccess == .unknown, "no banner while the person may still be reading the alert")
+        secondAnswer.open()
         #expect(await checking.value == .denied)
         #expect(ContinuousClock.now - start >= .milliseconds(380))
         #expect(engine.localNetworkAccess == .denied)

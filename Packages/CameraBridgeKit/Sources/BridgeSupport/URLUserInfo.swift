@@ -7,7 +7,8 @@ extension URL {
     /// `rtsp://@host`, is user info) is returned unchanged, as is one `URLComponents` cannot rebuild.
     ///
     /// Only user info is removed: credentials some cameras take in the path or query (`/user=admin&password=…`) stay,
-    /// since the camera needs them; `Redact.url` masks those for logs.
+    /// since the camera needs them; `Redact.url` masks those for logs. A stream URL that is saved loses its query and path credentials
+    /// too (`removingStreamCredentials`; they go to the secret store, `StreamURLCredentials`).
     public var removingUserInfo: URL {
         guard var components = URLComponents(url: self, resolvingAgainstBaseURL: false),
               components.user != nil || components.password != nil else { return self }

@@ -35,8 +35,8 @@ extension CameraSettingsService {
         if error is ISAPIRefusal || error is IPCamWebCameraError { return true }
         guard let error = error as? CameraAdapterError else { return false }
         switch error {
-        case .httpStatus, .invalidResponse, .soapFault, .apiError, .unsupported: return true
-        case .unauthorized, .lockedOut: return false
+        case .httpStatus, .invalidResponse, .soapFault, .apiError, .unsupported, .notPermitted: return true
+        case .unauthorized, .lockedOut, .loginsPaused: return false
         }
     }
 
@@ -98,17 +98,28 @@ extension CameraSettingsService {
 
     // MARK: Reolink
 
+    /// Through the run's API session (`reolink()`). Only each switch (`enable`) is read: `GetP2p` also answers the camera's `uid`, `GetDdns` the
+    /// DDNS account. The UID and UPnP can be changed by "Set up for Camera Bridge" (`SetP2p`, `SetUpnp`) unless `GetAbility` says this account
+    /// may not, or the camera has no such switch.
     private func reolinkRemoteAccess() async throws -> [RemoteAccessFinding] {
-        let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-        defer { Task { await api.logout() } }
+        let api = reolink()
         var stopped = false
         var states: [RemoteAccessState] = []
         for (command, key) in [("GetP2p", "P2p"), ("GetUpnp", "Upnp"), ("GetDdns", "Ddns")] {
             let value = try await attempt(&stopped) { try await api.command(command)[key]?.object?["enable"]?.int }
             states.append((value ?? nil).map { $0 != 0 ? .on : .off } ?? .unknown)
         }
-        return [RemoteAccessFinding(feature: .cloud, state: states[0], service: Self.reolinkP2PName),
-                RemoteAccessFinding(feature: .upnp, state: states[1]),
+        var changeable: [Bool] = []
+        for (state, module) in [(states[0], "p2p"), (states[1], "upnp")] {
+            guard state == .on || state == .off, !stopped else {
+                changeable.append(false)
+                continue
+            }
+            let ability = try await attempt(&stopped) { try await reolinkAbility(module) } ?? nil
+            changeable.append(!stopped && (ability.map { $0.exists && $0.writable } ?? true))
+        }
+        return [RemoteAccessFinding(feature: .cloud, state: states[0], service: Self.reolinkP2PName, canChange: changeable[0]),
+                RemoteAccessFinding(feature: .upnp, state: states[1], canChange: changeable[1]),
                 RemoteAccessFinding(feature: .ddns, state: states[2])]
     }
 

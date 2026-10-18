@@ -86,4 +86,5 @@ test('the fake setup has “Watch its internet” last, after the cloud, as the 
   assert.equal(applied.steps.find((step) => step.id === 'internetWatch').status, 'done');
   const read = (await server.api.get(`cameras/${id}`)).json;
   assert.equal(read.setupState.steps.find((step) => step.id === 'internetWatch').status, 'done');
+  assert.equal(read.internetWatched, true, 'the camera says the guard watches it, as the bridge’s camera resource does');
 });

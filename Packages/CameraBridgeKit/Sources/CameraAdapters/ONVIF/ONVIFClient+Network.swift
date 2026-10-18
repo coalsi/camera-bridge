@@ -69,12 +69,15 @@ extension ONVIFClient {
     }
 
     /// `SetDNS`: each server as an IPv4 or IPv6 address (`DNSManual`), with the search domains (the camera may clear them when they are left
-    /// out). Throws `.unsupported` for a server that is not an address, before anything is sent.
+    /// out). An empty server is an entry with an empty `IPv4Address` (the schema's `xs:token` allows it): a camera with fixed slots empties
+    /// that slot instead of keeping its server. Throws `.unsupported` for a server that is not an address, before anything is sent.
     func setDNS(fromDHCP: Bool, servers: [String], searchDomains: [String] = []) async throws {
         var body = "<tds:SetDNS><tds:FromDHCP>\(fromDHCP)</tds:FromDHCP>"
         for domain in searchDomains { body += "<tds:SearchDomain>\(XMLTree.escape(domain))</tds:SearchDomain>" }
         for server in servers {
-            if Self.isIPv4(server) {
+            if server.isEmpty {
+                body += "<tds:DNSManual><tt:Type>IPv4</tt:Type><tt:IPv4Address></tt:IPv4Address></tds:DNSManual>"
+            } else if Self.isIPv4(server) {
                 body += "<tds:DNSManual><tt:Type>IPv4</tt:Type><tt:IPv4Address>\(server)</tt:IPv4Address></tds:DNSManual>"
             } else if Self.isIPv6(server) {
                 body += "<tds:DNSManual><tt:Type>IPv6</tt:Type><tt:IPv6Address>\(server)</tt:IPv6Address></tds:DNSManual>"

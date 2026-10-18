@@ -75,6 +75,9 @@ import Testing
         } catch {
             Issue.record("wrong error \(error)")
         }
+        // 423: the DoorBird blocked the address (its own lock); 401: a refused login (Camera Bridge's own pause).
+        #expect(ONVIFLoginGuard.shared.pause(host: "doorbird-test-423:80")?.cause == .cameraLocked)
+        #expect(ONVIFLoginGuard.shared.pause(host: "doorbird-test-401:80")?.cause == .refused)
         for status in [401, 423] { ONVIFLoginGuard.shared.clear(host: "doorbird-test-\(status):80") }
     }
 }
@@ -188,12 +191,14 @@ final class MockDoorBird: Sendable {
         let bad = driver(device)
         await #expect(throws: CameraAdapterError.unauthorized) { try await bad.probe() }
         let attempts = device.loginAttempts.value
-        await #expect(throws: CameraAdapterError.self) { try await bad.probe() }
-        await #expect(throws: CameraAdapterError.self) { _ = try await bad.snapshot() }
+        let paused: @Sendable (any Error) -> Bool = { if case CameraAdapterError.loginsPaused = $0 { true } else { false } }
+        await #expect { try await bad.probe() } throws: { paused($0) }
+        await #expect { _ = try await bad.snapshot() } throws: { paused($0) }
         let source = try #require(bad.makeEventSource())
         let recorder = Recorder(source.events())
-        #expect(await recorder.wait { $0.contains(.authenticationFailed) })
+        try await Task.sleep(for: .milliseconds(200))
         await source.stop()
+        #expect(!recorder.values.contains(.authenticationFailed), "the event stream sent no login, so it reports no refusal of its own")
         #expect(device.loginAttempts.value == attempts && device.monitorConnections.value == 0)
     }
 

@@ -20,8 +20,9 @@ function all(root, match) {
 }
 const tag = (root, name) => all(root, (node) => node.localName === name);
 
+/** A camera as the bridge sends it: `internetWatched` is the engine's verdict (false unless a test says it watches the camera). */
 const camera = (steps = [], overrides = {}) => ({
-  id: 'x', name: 'Patio', vendor: 'onvif', manufacturer: 'Hikvision', endpoint: { host: '192.168.77.21' },
+  id: 'x', name: 'Patio', vendor: 'onvif', manufacturer: 'Hikvision', endpoint: { host: '192.168.77.21' }, internetWatched: false,
   setupState: steps.length ? { version: 1, applied: '2026-10-17T10:00:00Z', steps: steps.map(([id, status]) => ({ id, status })) } : null, ...overrides,
 });
 
@@ -52,11 +53,36 @@ test('the address in the steps is the camera’s own only: none for a camera beh
 });
 
 test('removing a watched camera says Camera Bridge gives it its DNS back first, and what to do when the camera doesn’t answer', () => {
-  const watched = camera([['internetWatch', 'done']], { setupBackup: { version: 1, internetWatch: { method: 'onvifMinimal', fromDHCP: true, servers: [] } } });
+  const watched = camera([['internetWatch', 'done']], { setupBackup: { version: 1, internetWatch: { method: 'onvifMinimal', fromDHCP: true, servers: [] } },
+    internetWatched: true });
   assert.match(setup.removalNote(watched), /gives the camera its own DNS servers back first/);
   assert.match(setup.removalNote(watched), /change its DNS on the camera/);
   assert.equal(setup.removalNote(camera([['internetWatch', 'restored']])), '', 'nothing to give back');
   assert.equal(setup.removalNote(camera()), '');
+});
+
+test('a camera whose Watch was refused or not run still gets its DNS servers back, without being said to point at Camera Bridge', () => {
+  const setupBackup = { version: 1, internetWatch: { method: 'onvifMinimal', fromDHCP: true, servers: [] } };
+  for (const status of ['refused', 'notRun']) {
+    const note = setup.removalNote(camera([['internetWatch', status]], { setupBackup }));
+    assert.match(note, /Camera Bridge gives the camera the DNS servers it had before “Watch its internet” back first/, status);
+    assert.match(note, /check its DNS on the camera/, status);
+    assert.doesNotMatch(note, /points at Camera Bridge/, status);
+  }
+  const rerun = camera([['internetWatch', 'notSupported']], { setupBackup, internetWatched: true });   // a later run that could not read the step
+  assert.match(setup.removalNote(rerun), /^Its DNS points at Camera Bridge/);
+});
+
+test('whether the camera is watched is the bridge’s verdict, never worked out from its setup record', () => {
+  // Pointed at the bridge by hand (or by its router): no setup record, watched all the same.
+  const byHand = camera([], { internetWatched: true, dnsWatch: { server: '192.168.77.2' } });
+  assert.match(setup.localOnlyCard(byHand).textContent, /The Internet guard watches its internet lookups\./);
+  // Its record says done, but a reading since found it asking other servers: not watched.
+  const changedBack = camera([['internetWatch', 'done']], { internetWatched: false, setupBackup: { version: 1, internetWatch: { method: 'onvifMinimal', fromDHCP: true, servers: [] } } });
+  assert.doesNotMatch(setup.localOnlyCard(changedBack).textContent, /watches its internet lookups/);
+  assert.doesNotMatch(setup.removalNote(changedBack), /points at Camera Bridge/);
+  const noVerdict = camera([['internetWatch', 'done']], { internetWatched: undefined });
+  assert.doesNotMatch(setup.localOnlyCard(noVerdict).textContent, /watches its internet lookups/, 'a camera without the verdict is not said to be watched');
 });
 
 test('each common router has its own steps to reserve the address and block the internet, and the words say menus differ', () => {
@@ -82,7 +108,7 @@ test('what the setup turned off and the Internet guard’s Watch are named, and 
   const cloud = setup.localOnlyCard(camera([['cloud', 'done'], ['upnp', 'alreadyRight']]));
   assert.match(cloud.textContent, /The setup turned off its cloud \(Hik-Connect\) and UPnP on this camera\./);
   assert.match(cloud.textContent, /A factory reset undoes this/);
-  const watched = setup.localOnlyCard(camera([['internetWatch', 'done'], ['cloud', 'refused']]));
+  const watched = setup.localOnlyCard(camera([['internetWatch', 'done'], ['cloud', 'refused']], { internetWatched: true }));
   assert.match(watched.textContent, /The Internet guard watches its internet lookups\./);
   assert.ok(!/turned off/.test(tag(watched, 'p')[0].textContent), 'a refused step is not called done');
   const restored = setup.localOnlyCard(camera([['internetWatch', 'restored']]));

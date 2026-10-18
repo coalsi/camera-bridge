@@ -8,9 +8,9 @@ import Testing
 @Suite struct InternetGuardEvidenceTests {
     static let now = Date(timeIntervalSince1970: 1_792_224_000)   // 2026-10-17T08:00:00Z
 
-    private func camera(state: [CameraSetupState.Record]?, backup: Bool) -> CameraConfiguration {
+    private func camera(state: [CameraSetupState.Record]?, backup: Bool, watched: String? = nil) -> CameraConfiguration {
         var camera = CameraConfiguration(name: "Gate", kind: .camera, vendor: .hikvision, endpoint: CameraEndpoint(host: "192.168.77.21"), username: "admin")
-        camera.setupState = state.map { CameraSetupState(started: Self.now, applied: Self.now, steps: $0) }
+        camera.setupState = state.map { CameraSetupState(started: Self.now, applied: Self.now, steps: $0, watchedServer: watched) }
         if backup {
             camera.setupBackup = CameraSetupBackup(version: 1, created: Self.now,
                                                    internetWatch: CameraDNSBackup(method: .onvifMinimal, fromDHCP: true, servers: []))
@@ -18,22 +18,154 @@ import Testing
         return camera
     }
 
-    /// The box watches a camera whose DNS may point at it: while the setup keeps its DNS servers to give back, or its last record of the
-    /// step says done or already right. A later run whose read of the step failed for a moment does not drop it.
-    @Test func theBoxWatchesACameraWhileItsDNSMayPointAtTheBridge() {
+    /// The box watches a camera whose step's last result left its DNS pointing at the bridge (`watchedServer`, kept while a later run
+    /// takes the step again), or, for a record saved before that field, whose last record of the step says done or already right. The DNS
+    /// servers kept to give back are no proof: they are saved before the step runs and kept when the camera refuses it.
+    @Test func theBoxWatchesACameraWhoseStepLeftItsDNSAtTheBridge() {
         #expect(!BridgeEngine.internetWatchDone(camera(state: nil, backup: false)))
-        #expect(BridgeEngine.internetWatchDone(camera(state: nil, backup: true)), "a run under way that has not reached the step yet")
-        #expect(BridgeEngine.internetWatchDone(camera(state: [], backup: true)))
-        #expect(BridgeEngine.internetWatchDone(camera(state: [.init(id: .internetWatch, status: .done)], backup: true)))
+        #expect(!BridgeEngine.internetWatchDone(camera(state: nil, backup: true)))
+        #expect(!BridgeEngine.internetWatchDone(camera(state: [], backup: true)), "a first run that has not reached the step yet")
+        #expect(BridgeEngine.internetWatchDone(camera(state: [], backup: true, watched: "192.168.77.2")), "a later run that has not reached it yet")
+        #expect(BridgeEngine.internetWatchDone(camera(state: [.init(id: .internetWatch, status: .notSupported)], backup: true, watched: "192.168.77.2")),
+                "a later run that could not read it")
+        #expect(BridgeEngine.internetWatchDone(camera(state: [.init(id: .internetWatch, status: .done)], backup: true)), "an older build's record")
         #expect(BridgeEngine.internetWatchDone(camera(state: [.init(id: .internetWatch, status: .alreadyRight)], backup: false)),
                 "the camera already asked the bridge")
-        for status in [CameraSetupStepStatus.notRun, .refused, .notOffered, .notSupported, .willChange] {
-            #expect(BridgeEngine.internetWatchDone(camera(state: [.init(id: .internetWatch, status: status)], backup: true)),
-                    "\(status): its DNS servers are still kept to give back")
+        for status in [CameraSetupStepStatus.notRun, .refused, .notOffered, .notSupported, .willChange, .restored] {
+            #expect(!BridgeEngine.internetWatchDone(camera(state: [.init(id: .internetWatch, status: status)], backup: true)),
+                    "\(status): the DNS servers kept to give back are no watch")
             #expect(!BridgeEngine.internetWatchDone(camera(state: [.init(id: .internetWatch, status: status)], backup: false)), "\(status)")
         }
-        #expect(!BridgeEngine.internetWatchDone(camera(state: [.init(id: .internetWatch, status: .restored)], backup: false)), "given back")
         #expect(!BridgeEngine.internetWatchDone(camera(state: [.init(id: .cloud, status: .done)], backup: false)))
+    }
+
+    /// A reading of the camera's DNS servers decides its watch whoever set them (owner decision, 2026-10-18): one that points only at the
+    /// bridge watches the camera, also one never set up (without growing a setup record), and one that asks other servers ends the watch,
+    /// also one the setup or an older build made (the setup's record of what it did stays). A reading older than the setup's last run, one
+    /// that asks the bridge and another server, and a camera still asking its old servers while its Watch waits for its restart change
+    /// nothing; a reading-made watch read against a setup record that is gone (Restore cleared it) is none.
+    @Test func aReadingDecidesTheWatchWhoeverSetTheDNS() throws {
+        let bridge = "192.168.77.2", later = Self.now.addingTimeInterval(60)
+        func reading(_ servers: [String], method: CameraConfigMethod = .onvifMinimal) -> CameraDNSReading {
+            CameraDNSReading(servers: servers, fromDHCP: false, method: method, backup: CameraDNSBackup(method: method, fromDHCP: false, servers: servers))
+        }
+
+        // Never set up: the owner pointed it at the bridge on the camera, then changed it back.
+        let plain = camera(state: nil, backup: false)
+        let joined = try #require(BridgeEngine.watchAfterReading(plain, reading([bridge, bridge]), server: bridge, takenAt: later))
+        #expect(joined.dnsWatch == CameraDNSWatch(server: bridge) && joined.setupState == nil && BridgeEngine.internetWatchDone(joined))
+        #expect(BridgeEngine.watchAfterReading(joined, reading([bridge]), server: bridge, takenAt: later) == nil, "nothing changes")
+        let left = try #require(BridgeEngine.watchAfterReading(joined, reading(["192.168.77.1"]), server: bridge, takenAt: later))
+        #expect(left.dnsWatch == nil && !BridgeEngine.internetWatchDone(left))
+        #expect(BridgeEngine.watchAfterReading(plain, reading([bridge, "8.8.8.8"]), server: bridge, takenAt: later) == nil,
+                "a camera that also asks another server is not watched")
+        #expect(BridgeEngine.watchAfterReading(plain, reading([]), server: bridge, takenAt: later) == nil)
+
+        // Set up: Watch done, then changed back on the camera, then pointed at the bridge again.
+        let done = camera(state: [.init(id: .internetWatch, status: .done)], backup: true, watched: bridge)
+        let gone = try #require(BridgeEngine.watchAfterReading(done, reading(["8.8.8.8"]), server: bridge, takenAt: later))
+        #expect(gone.setupState?.watchedServer == nil && gone.dnsWatch == CameraDNSWatch(server: nil, setupStarted: Self.now))
+        #expect(!BridgeEngine.internetWatchDone(gone))
+        #expect(gone.setupState?.steps == done.setupState?.steps && gone.setupBackup == done.setupBackup, "the setup's record and backup stay")
+        let back = try #require(BridgeEngine.watchAfterReading(gone, reading([bridge]), server: bridge, takenAt: later))
+        #expect(back.setupState?.watchedServer == bridge && back.dnsWatch == nil && BridgeEngine.internetWatchDone(back))
+        #expect(BridgeEngine.watchAfterReading(done, reading(["8.8.8.8"]), server: bridge, takenAt: Self.now.addingTimeInterval(-60)) == nil,
+                "a reading taken before the setup's last run: the run's result is newer")
+
+        // A refused step, but the owner then pointed the camera at the bridge: watched.
+        let refused = camera(state: [.init(id: .internetWatch, status: .refused)], backup: true)
+        let pointed = try #require(BridgeEngine.watchAfterReading(refused, reading([bridge]), server: bridge, takenAt: later))
+        #expect(pointed.setupState?.watchedServer == bridge && BridgeEngine.internetWatchDone(pointed))
+
+        // An older build's record (done, no watchedServer): its watch ends at a reading of other servers too.
+        let older = camera(state: [.init(id: .internetWatch, status: .done)], backup: true)
+        #expect(BridgeEngine.internetWatchDone(older))
+        let olderGone = try #require(BridgeEngine.watchAfterReading(older, reading(["8.8.8.8"]), server: bridge, takenAt: later))
+        #expect(!BridgeEngine.internetWatchDone(olderGone))
+
+        // ISAPI's "after the camera restarts": while it still asks the servers it had, it waits; other servers end the watch.
+        var waiting = camera(state: [.init(id: .internetWatch, status: .done, needsRestart: true)], backup: false, watched: bridge)
+        waiting.setupBackup = CameraSetupBackup(version: 1, created: Self.now,
+                                                internetWatch: CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: ["8.8.8.8", "1.1.1.1"]))
+        #expect(BridgeEngine.watchAfterReading(waiting, reading(["8.8.8.8", "1.1.1.1"], method: .hikvisionISAPI), server: bridge, takenAt: later) == nil)
+        let moved = try #require(BridgeEngine.watchAfterReading(waiting, reading(["9.9.9.9", "1.1.1.1"], method: .hikvisionISAPI), server: bridge,
+                                                                takenAt: later))
+        #expect(!BridgeEngine.internetWatchDone(moved))
+
+        // Restore cleared the setup's record: a watch read against it is none, one read with no record still is.
+        var restored = camera(state: nil, backup: false)
+        restored.dnsWatch = CameraDNSWatch(server: nil, setupStarted: Self.now)
+        #expect(!BridgeEngine.internetWatchDone(restored))
+        restored.dnsWatch = CameraDNSWatch(server: bridge, setupStarted: Self.now)
+        #expect(!BridgeEngine.internetWatchDone(restored), "read against a setup record that is gone")
+        restored.dnsWatch = CameraDNSWatch(server: bridge)
+        #expect(BridgeEngine.internetWatchDone(restored))
+    }
+
+    /// A reading that does not know which servers the camera asks (a Reolink on automatic DNS whose ONVIF did not say which DHCP gives) decides
+    /// no watch: an unreadable read changes nothing (owner decision), whether the setup or a reading made the watch, and whether or not there
+    /// is one. One that knows DHCP gives no server is a reading of no servers: it ends a watch.
+    @Test func aReadingWhoseServersAreUnknownDecidesNoWatch() throws {
+        let bridge = "192.168.77.2", later = Self.now.addingTimeInterval(60)
+        let unknown = CameraDNSReading(servers: [], fromDHCP: true, method: .reolinkAPI,
+                                       backup: CameraDNSBackup(method: .reolinkAPI, fromDHCP: true, servers: ["", ""]), serversUnknown: true)
+        #expect(!unknown.pointsAt(bridge))
+        var byReading = camera(state: nil, backup: false)
+        byReading.dnsWatch = CameraDNSWatch(server: bridge)
+        let bySetup = camera(state: [.init(id: .internetWatch, status: .done)], backup: true, watched: bridge)
+        for watched in [byReading, bySetup, camera(state: nil, backup: false)] {
+            #expect(BridgeEngine.watchAfterReading(watched, unknown, server: bridge, takenAt: later) == nil)
+        }
+        var none = unknown
+        none.serversUnknown = false
+        #expect(try #require(BridgeEngine.watchAfterReading(byReading, none, server: bridge, takenAt: later)).dnsWatch == nil)
+        #expect(try #require(BridgeEngine.watchAfterReading(bySetup, none, server: bridge, takenAt: later)).setupState?.watchedServer == nil)
+    }
+
+    /// A watch a reading made before the camera had a setup record gives way to the record's once a reading with the record finds the bridge
+    /// (it would otherwise outlive a Restore that clears the record); and a reading counts only while the camera's setup is what it was when
+    /// the read began (`setupChanged`: a setup run or a restore saved meanwhile).
+    @Test func aReadingCountsOnlyForTheSetupItWasReadAgainst() throws {
+        let bridge = "192.168.77.2", later = Self.now.addingTimeInterval(60)
+        let toBridge = CameraDNSReading(servers: [bridge], fromDHCP: false, method: .onvifMinimal,
+                                        backup: CameraDNSBackup(method: .onvifMinimal, fromDHCP: false, servers: [bridge]))
+        var both = camera(state: [.init(id: .internetWatch, status: .done)], backup: true, watched: bridge)
+        both.dnsWatch = CameraDNSWatch(server: bridge)   // read before the setup ran
+        let updated = try #require(BridgeEngine.watchAfterReading(both, toBridge, server: bridge, takenAt: later))
+        #expect(updated.dnsWatch == nil && updated.setupState?.watchedServer == bridge)
+        var restored = updated
+        restored.setupState = nil
+        restored.setupBackup = nil
+        #expect(!BridgeEngine.internetWatchDone(restored), "a full Restore leaves no watch behind")
+
+        let before = camera(state: [], backup: true)
+        var run = before
+        run.setupState?.steps = [.init(id: .internetWatch, status: .done)]
+        run.setupState?.watchedServer = bridge
+        #expect(BridgeEngine.setupChanged(since: before, run), "a run saved a step")
+        var restore = before
+        restore.setupBackup = nil
+        restore.setupState = nil
+        #expect(BridgeEngine.setupChanged(since: before, restore), "a restore cleared them")
+        var other = before
+        other.name = "Gate 2"
+        other.dnsWatch = CameraDNSWatch(server: bridge)
+        #expect(!BridgeEngine.setupChanged(since: before, other), "another edit, or the guard's own watch, is no setup change")
+    }
+
+    /// The watch a reading made is kept with the camera (config.json), read leniently: an odd value loses only the watch.
+    @Test func aReadingsWatchIsStoredWithTheCamera() throws {
+        var camera = camera(state: nil, backup: false)
+        camera.dnsWatch = CameraDNSWatch(server: "192.168.77.2")
+        let read = try JSONDecoder().decode(CameraConfiguration.self, from: JSONEncoder().encode(camera))
+        #expect(read.dnsWatch == CameraDNSWatch(server: "192.168.77.2") && read == camera)
+        var object = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(camera)) as? [String: Any])
+        object["dnsWatch"] = "odd"
+        let odd = try JSONDecoder().decode(CameraConfiguration.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(odd.dnsWatch == nil && odd.name == "Gate")
+        object["dnsWatch"] = nil
+        #expect(try JSONDecoder().decode(CameraConfiguration.self, from: JSONSerialization.data(withJSONObject: object)).dnsWatch == nil,
+                "a camera saved before the field has none")
     }
 
     @Test func theGuardTakesOnlyLocalIPv4Addresses() {
@@ -97,9 +229,30 @@ import Testing
                                                  fresh: true, now: Self.now)
         #expect(waiting.waitsForRestart && !waiting.watched)
 
+        let router = BridgeEngine.guardEvidence(address: "192.168.77.21", listed: true, asksBridge: true, dnsFromRouter: true, report: report([entry]),
+                                                fresh: true, now: Self.now)
+        #expect(router.watched && router.dnsFromRouter, "DNS the router gives, pointing only at the bridge, is watched")
+        #expect(!watched.dnsFromRouter)
+
         for (report, fresh) in [(report([entry]), false), (report([entry], running: false), true), (report([entry], available: false), true), (nil, true)] {
             #expect(!BridgeEngine.guardEvidence(address: "192.168.77.21", listed: true, asksBridge: true, report: report, fresh: fresh, now: Self.now).available)
         }
+    }
+
+    /// A camera watched on DNS its router gives (DHCP) says that the router can change it.
+    @Test func aWatchOnTheRoutersDNSSaysTheRouterCanChangeIt() {
+        let note = "Its DNS servers come from your router, which can change them when it renews the camera’s address."
+        for watchedFor: TimeInterval in [3600, 172_800] {
+            let evidence = GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, watchedFor: watchedFor, dnsFromRouter: true)
+            let finding = CameraSecurity.guardFinding(evidence)
+            #expect(finding.sentence.hasSuffix(" " + note), "\(watchedFor)")
+            let own = CameraSecurity.guardFinding(GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, watchedFor: watchedFor))
+            #expect(!own.sentence.contains("router") && finding.level == own.level, "\(watchedFor): the same level, with the note")
+        }
+        let trying = GuardEvidence(watched: true, outsideLookups24h: 2, lastLookupNames: [], available: true, watchedFor: 3600, dnsFromRouter: true)
+        #expect(CameraSecurity.guardFinding(trying).sentence.hasSuffix(" " + note))
+        let notWatched = GuardEvidence(watched: false, outsideLookups24h: 0, lastLookupNames: [], available: true, listed: false, dnsFromRouter: true)
+        #expect(!CameraSecurity.guardFinding(notWatched).sentence.contains("router"), "only a watch it rests on")
     }
 
     @Test func namesThatLookLikeACamerasIDAreNotShown() {

@@ -19,10 +19,11 @@ enum BFrameStream {
 
     /// `count` pictures at `fps`, IDRs at picture 0 and at `keyframes` (picture indices); no other keyframes.
     ///
-    /// VideoToolbox adds keyframes of its own while other encode sessions run (the hardware encoder is shared): about a third of 16
-    /// parallel encodes had one, none of 48 one at a time. So encodes here take turns, and a stream that still got a keyframe nobody
-    /// asked for (another test's encoder, another test process) is encoded again: tests rely on exactly these keyframes.
-    /// `exactKeyframes: false` (a stream that only feeds a transcoder, which makes its own keyframes) takes the first encode.
+    /// VideoToolbox's hardware H.264 encoder adds keyframes of its own while other sessions use it, and every process on the Mac shares
+    /// it: about a third of 16 parallel encodes had one, and with six test processes transcoding at once every one of 8 encodes could
+    /// (bFrameCameraIsRecordedInDisplayOrder: 32 of 48 runs). The stream comes from the software encoder, which no other session
+    /// shares; encodes still take turns, and one that got a keyframe nobody asked for is encoded again: tests rely on exactly these
+    /// keyframes. `exactKeyframes: false` (a stream that only feeds a transcoder, which makes its own keyframes) takes the first encode.
     static func encode(count: Int, fps: Int = 25, keyframes: Set<Int> = [], exactKeyframes: Bool = true) throws -> [EncodedVideoFrame] {
         turn.lock()
         defer { turn.unlock() }
@@ -41,10 +42,12 @@ enum BFrameStream {
     private static let turn = NSLock()
 
     /// One encode with the keyframes VideoToolbox made, without taking a turn: for a test that needs other sessions encoding.
-    static func encodeUnchecked(count: Int, fps: Int = 25, keyframes: Set<Int> = []) throws -> [EncodedVideoFrame] {
+    /// `hardware`: on the shared hardware encoder (as the bridge's own transcoders) rather than the software one.
+    static func encodeUnchecked(count: Int, fps: Int = 25, keyframes: Set<Int> = [], hardware: Bool = false) throws -> [EncodedVideoFrame] {
         var sessionOut: VTCompressionSession?
+        let specification = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: hardware ? kCFBooleanTrue : kCFBooleanFalse] as CFDictionary
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height), codecType: kCMVideoCodecType_H264,
-                                                encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                                encoderSpecification: specification, imageBufferAttributes: nil, compressedDataAllocator: nil,
                                                 outputCallback: nil, refcon: nil, compressionSessionOut: &sessionOut)
         guard status == noErr, let session = sessionOut else { throw Failure.session(status) }
         defer { VTCompressionSessionInvalidate(session) }

@@ -18,16 +18,43 @@ public enum CameraAdapterError: Error, Equatable, Sendable {
     case apiError(command: String, code: Int)
     /// The camera does not offer the feature (e.g. no audio backchannel).
     case unsupported(String)
-    /// The camera locked logins after too many wrong passwords (Hikvision: 30 minutes). CameraBridge won't try
-    /// again before `until`, since every attempt restarts the camera's lock.
+    /// The camera itself locked its logins after too many wrong passwords (Hikvision's "locked" answer: 30 minutes; the IP camera web
+    /// API's `passwordLock`; DoorBird's HTTP 423). Camera Bridge won't try again before `until`, since every attempt restarts the lock.
     case lockedOut(until: Date)
+    /// Camera Bridge's own pause after the camera refused a login (on this API or another of the camera's: one account): no login is
+    /// sent before `until` (2 minutes, `ONVIFLoginGuard`), so the wrong password is not tried again and again until the camera locks
+    /// the account. The camera has locked nothing, and this call sent nothing.
+    case loginsPaused(until: Date)
+    /// The camera refused a change to the account Camera Bridge uses, which it had just signed in and read with: the account may not make
+    /// it (it is not an administrator, or the camera's ONVIF user may not write). Not a wrong password, so no login is paused. The value
+    /// names the refused operation for the log ("SetNTP").
+    case notPermitted(String)
 
-    /// Wrong credentials, or a camera that has locked logins: either way, back off rather than retry soon.
+    /// What a step or a settings change says when the camera refused the account the change (`.notPermitted`).
+    public static let notPermittedReason = "the account Camera Bridge uses may not change this; use an administrator account in the camera’s settings"
+
+    /// Wrong credentials, a camera that has locked logins or Camera Bridge's pause after a refused one: either way, back off rather than
+    /// retry soon. A change the account may not make (`.notPermitted`) is not one: its login works.
     public var isLoginRefusal: Bool {
         switch self {
-        case .unauthorized, .lockedOut: true
+        case .unauthorized, .lockedOut, .loginsPaused: true
         default: false
         }
+    }
+
+    /// Whether `error` says the account Camera Bridge uses may not make a change: `.notPermitted`, or the IPCamera Web family's API that
+    /// stopped because the account has no privilege for it (532374 at the sign-in, `IPCamWebUnavailable.noPrivilege`). Set up for Camera
+    /// Bridge carries it typed (`CameraSetupOutcome.notPermitted`): no wrong password, and the steps after it still run.
+    public static func isNotPermitted(_ error: any Error) -> Bool {
+        if case CameraAdapterError.notPermitted = error { return true }
+        return (error as? IPCamWebUnavailable)?.notPermitted == true
+    }
+
+    /// How a refused settings change quotes `error`: a change the account may not make in words (`notPermittedReason`), anything else as it
+    /// came (the camera's answer, "soapFault(\"ter:InvalidArgVal\")"), redacted.
+    static func refusalWords(_ error: any Error) -> String {
+        if case CameraAdapterError.notPermitted = error { return notPermittedReason }
+        return Redact.string(String(describing: error))
     }
 }
 

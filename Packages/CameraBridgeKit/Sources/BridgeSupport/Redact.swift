@@ -2,8 +2,8 @@ import Foundation
 
 /// Removes secrets from strings before they are logged or shown in UI.
 public enum Redact {
-    /// A parameter is secret when its lowercased name ends with one of these (`user_password`, `adminPwd`, …).
-    static let secretSuffixes = ["password", "passwd", "pwd", "pass", "pw", "token", "secret", "apikey", "api_key"]
+    /// A parameter is secret when its lowercased name ends with one of these (`user_password`, `adminPwd`, a password `hash`, …).
+    static let secretSuffixes = ["password", "passwd", "pwd", "pass", "pw", "token", "secret", "apikey", "api_key", "hash"]
     /// … or equals one of these.
     static let secretNames: Set<String> = ["auth", "authorization", "session", "sessionid"]
 
@@ -12,7 +12,8 @@ public enum Redact {
         return secretNames.contains(lower) || secretSuffixes.contains { lower.hasSuffix($0) }
     }
 
-    /// Strips `user:password@` and masks password-like query items (`name=***`; names are compared percent-decoded),
+    /// Strips `user:password@` and masks password-like query items (`name=***`; names are compared percent-decoded), the user names a
+    /// stream URL's query carries next to them included (`user=***`: `StreamURLCredentials.isCredential`),
     /// plus secret assignments nested inside other values (`?x=a?password=…`), in the fragment, and in the path, where
     /// some cameras take credentials (Xiongmai/XMEye `/user=admin&password=…`, `/snapshot.cgi;pwd=…`; a path value ends
     /// at the next `/` too). Scheme, host and the rest of the path are kept. The query is rewritten as text rather than
@@ -32,7 +33,7 @@ public enum Redact {
         }
         let afterMark = text.index(after: queryStart)
         let masked = text[afterMark..<queryEnd].split(separator: "&", omittingEmptySubsequences: false).map { segment in
-            guard let equals = segment.firstIndex(of: "="), isSecret(URLQuery.percentDecode(segment[..<equals])) else {
+            guard let equals = segment.firstIndex(of: "="), StreamURLCredentials.isCredential(URLQuery.percentDecode(segment[..<equals])) else {
                 return String(segment)
             }
             return "\(segment[..<equals])=***"

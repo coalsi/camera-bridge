@@ -74,7 +74,9 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
     public var vendor: CameraVendor
     public var endpoint: CameraEndpoint
     public var username: String
-    /// No credentials (`ConfigurationStore` strips user info before saving).
+    /// No credentials: no user info (`ConfigurationStore` strips it before saving), none in the query (`?user=…&password=…`, `hash=`)
+    /// and none in the path (XMEye `/user=…&password=…`): the engine keeps those in the secret store
+    /// (`CredentialStore.storeStreamCredentials(of:)`).
     public var mainStreamURL: URL?
     public var subStreamURL: URL?
     public var motionSource: MotionSource
@@ -116,6 +118,11 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
     public var setupBackup: CameraSetupBackup?
     /// The setup's record: its version, when it ran, and what each step did (an unfinished record: the bridge stopped during a run).
     public var setupState: CameraSetupState?
+    /// What the Internet guard's reads of the camera's DNS servers decided where the setup's record does not say it (Camera Bridge OS,
+    /// `BridgeEngine.internetWatchDone`): a camera whose DNS reads as pointing only at the bridge is watched whoever set it, with no setup
+    /// run, and one whose DNS reads as asking other servers is not, whatever the setup's record says. Engine-owned like `setupState`;
+    /// nothing secret in it.
+    public var dnsWatch: CameraDNSWatch?
     /// How the camera reaches its service, for a camera behind a cloud account or a console (`CameraVendor.go2rtc`,
     /// `.unifi`): the service and plain facts about the camera. Nothing secret; the service's token, key or source address is the
     /// camera's Keychain "password". nil for every other camera.
@@ -163,6 +170,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         self.cleanPictureBackup = nil
         self.setupBackup = nil
         self.setupState = nil
+        self.dnsWatch = nil
         self.integration = nil
         self.nvrEnabled = false
         self.nvrRecordSound = false
@@ -173,7 +181,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         case sensors, audioEnabled, twoWayAudio, hapPort, isEnabled, manufacturer, model, serialNumber, firmware, capabilities
         case liveStreamMode, liveQualityMode, liveMaxBitrateOverride, recordingStreamMode, recordingQualityMode
         case preferredConfigMethod, timestampOverlay, hiddenCameraClock, cleanPictureBackup, integration, nvrEnabled, nvrRecordSound
-        case setupBackup, setupState
+        case setupBackup, setupState, dnsWatch
     }
 
     public init(from decoder: any Decoder) throws {
@@ -217,6 +225,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         cleanPictureBackup = value(.cleanPictureBackup, default: nil)
         setupBackup = value(.setupBackup, default: nil)
         setupState = value(.setupState, default: nil)
+        dnsWatch = value(.dnsWatch, default: nil)
         integration = value(.integration, default: nil)
         nvrEnabled = value(.nvrEnabled, default: nvrEnabled)
         nvrRecordSound = value(.nvrRecordSound, default: nvrRecordSound)
@@ -225,7 +234,8 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         }
     }
 
-    /// This configuration with user info (`user:password@`) removed from the stream URLs.
+    /// This configuration with user info (`user:password@`) removed from the stream URLs. Query credentials stay: only
+    /// `CredentialStore.storeStreamCredentials(of:)` removes them, once the secret store has them.
     public var withoutStreamCredentials: CameraConfiguration {
         var copy = self
         copy.mainStreamURL = mainStreamURL?.removingUserInfo
@@ -254,8 +264,11 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
     public var nvrKeepDays: Int
     /// All recordings together are kept under this many decimal gigabytes (1e9 bytes), oldest first (`nvrMaxSizeGBRange`).
     public var nvrMaxSizeGB: Int
-    /// The bridge's time zone (an IANA identifier, "America/Phoenix"): the time the timestamp overlay draws and cameras are set to. nil: the system's
-    /// (on Camera Bridge OS that is UTC, so the web page sets it from the browser that signs in first).
+    /// The bridge's time zone (an IANA identifier, "America/Phoenix"); nil: the system's (on Camera Bridge OS that is UTC, so the web page sets
+    /// it from the browser that signs in first). From launch it is the zone of every clock time Camera Bridge words for people ("waits until
+    /// 9:19 AM") and of the internet guard's "today" (`BridgeTime`, set when the configuration loads and when this changes), and cameras are
+    /// set to it. The process's own zone, which the timestamp overlay draws, becomes it only when the settings are saved, until the next
+    /// launch; the recorder names its folders in the zone the process started with.
     public var timeZone: String?
     /// The plugins' own settings by plugin id ("wyze"): switched on, the account shown, the last sync. Secrets are not here: they are in the
     /// platform `SecretStore` (`BridgeEngine.pluginSecret(id:)`).

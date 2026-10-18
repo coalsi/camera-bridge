@@ -214,6 +214,54 @@ import Testing
         #expect(policy.delay(connected: false, lasted: .zero, error: CameraAdapterError.lockedOut(until: now.addingTimeInterval(1_800)), now: now) == .seconds(1_801),
                 "a camera's own lockout is waited out in full")
         #expect(policy.delay(connected: false, lasted: .zero, error: CameraAdapterError.unauthorized, now: now) == .seconds(600))
+        #expect(policy.delay(connected: false, lasted: .zero, error: CameraAdapterError.loginsPaused(until: now.addingTimeInterval(36)), now: now) == .seconds(37),
+                "Camera Bridge's own pause is waited out the same way")
+    }
+
+    /// Patio New: a refused web sign-in paused the camera's logins, and the log said "the camera rejected the username or password (event
+    /// channel)" though the event channel sent no login (ONVIF on that camera takes any password). An event channel that meets Camera Bridge's
+    /// pause waits for it and says so; only the camera's own lock reads as refused credentials.
+    @Test func cameraBridgesOwnLoginPauseIsNotReportedAsRejectedCredentials() async {
+        let log = EventChannelBackoffTests.RecordingLog()
+        let attempts = Box(0)
+        let refusals = Box(0)
+        var policy = Self.fastPolicy
+        policy.marginAfterLoginPause = .milliseconds(10)
+        let loop = Task {
+            await ReconnectLoop.run(label: "ONVIF 192.0.2.222", policy: policy, log: log) { _ in
+                switch attempts.update({ $0 += 1; return $0 }) {
+                case 1: throw CameraAdapterError.loginsPaused(until: Date().addingTimeInterval(0.05))
+                case 2: throw CameraAdapterError.lockedOut(until: Date().addingTimeInterval(0.05))
+                default: try await Task.sleep(for: .seconds(30))
+                }
+            } afterAttempt: { _ in
+            } onUnauthorized: {
+                refusals.update { $0 += 1 }
+            }
+        }
+        #expect(await eventually { attempts.value >= 3 })
+        loop.cancel()
+        await loop.value
+        let lines = log.lines.value.map(\.1)
+        #expect(refusals.value == 1, "the camera's own lock only: \(lines)")
+        #expect(lines.contains { $0.contains("ONVIF 192.0.2.222: waits for Camera Bridge's login pause") }, "\(lines)")
+        #expect(lines.contains { $0.contains("ONVIF 192.0.2.222: the camera locked its logins after too many wrong passwords") }, "\(lines)")
+        #expect(!lines.contains { $0.contains("rejected") }, "\(lines)")
+    }
+
+    @Test func cameraBridgesOwnLoginPauseEmitsNoAuthenticationFailure() async {
+        let attempts = Box(0)
+        var policy = Self.fastPolicy
+        policy.marginAfterLoginPause = .milliseconds(10)
+        let source = SupervisedEventSource(label: "test", policy: policy) { context in
+            if attempts.update({ $0 += 1; return $0 }) == 1 { throw CameraAdapterError.loginsPaused(until: Date().addingTimeInterval(0.05)) }
+            context.connected()
+            try await Task.sleep(for: .seconds(30))
+        }
+        let recorder = Recorder(source.events())
+        #expect(await recorder.wait { $0.contains(.eventChannel(connected: true)) })
+        await source.stop()
+        #expect(!recorder.values.contains(.authenticationFailed), "\(recorder.values)")
     }
 
     /// The video signed in with the same credentials: the wait after a refused event login ends at once, but only once per streak of refusals

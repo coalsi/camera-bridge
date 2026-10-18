@@ -2,7 +2,8 @@
 
 Portable utilities shared by every CameraBridgeKit module, plus the platform service protocols. Imports only
 Foundation (+ FoundationNetworking / os under `#if canImport`), Synchronization and swift-crypto `Crypto`
-(MD5/SHA-256 for HTTP Digest; SHA-1 for the ONVIF WS-UsernameToken digest through `Hashes`).
+(MD5/SHA-256 for HTTP Digest; SHA-1 for the ONVIF WS-UsernameToken digest and SHA-256 for other modules, through
+`Hashes`).
 
 ## Public entry points
 
@@ -10,13 +11,19 @@ Foundation (+ FoundationNetworking / os under `#if canImport`), Synchronization 
   `LogHub` (`addSink` → `LogSinkToken`, `removeSink`, `removeAllSinks`, `minimumLevel`), `LogSink`, `LogEntry`, `LogLevel`.
 - `Redact.url` / `Redact.string` — strip `user:pass@` (up to the last `@` before `/` or a line break, so passwords
   containing `@` or spaces do not leak), mask parameters (also nested, `x=a?password=…`) and JSON members whose
-  name ends in password/passwd/pwd/pass/pw/token/secret/apikey. `Redact.url` masks them in the path too
+  name ends in password/passwd/pwd/pass/pw/token/secret/apikey/hash. `Redact.url` masks a query's user names too
+  (`user`, `username`, …: `StreamURLCredentials.isCredential`), and secret names in the path
   (Xiongmai/XMEye `/user=admin&password=…`, `/snapshot.cgi;pwd=…`; a path value ends at the next `/`), W4 review.
   `Redact.string` is linear in its input (W4 review round 4: the user-info regex backtracked, quadratic on camera text —
   hours for 1 MiB of letters; an internal scan, `maskUserInfo`, finds the same matches).
 - `URL.removingUserInfo` — the URL without `user:password@`: the one copy (drivers' StreamInfo URLs,
   `CameraConfiguration.withoutStreamCredentials`, RTSP request lines, the app's wizard and connection editor,
   `Redact.url`). Credentials in the path or query stay (the camera needs them); `Redact.url` masks those for logs.
+- `StreamURLCredentials` (`main`, `sub`, `none`, `isEmpty`, `connectionURL(for:)`, `isCredential(_:)`) and
+  `URL.removingStreamCredentials` / `URL.hasStreamCredentials` — the credentials a camera takes in its stream URL's query
+  (`?user=…&password=…`, a password `hash=`, a `token=`) or path (XMEye `/user=admin&password=…`, joined by `&`, `;` or `_`):
+  saved URLs are without them (user info removed too), the secret store keeps the URLs with them, and only an RTSP request
+  line gets them back (`RTSPConfiguration.streamCredentials`).
 - Diagnostics: `DiagnosticsLog` (a `LogSink`: every entry redacted by `Redact.string`, 20 000 in a memory ring and 5 × 2 MB
   rotating files `diagnostics.log`, `.1.log` … in a 0700 directory, written on a background queue), `DiagnosticsCenter`
   (`shared`; `install(directory:)` registers the log with `LogHub` at debug level; `begin(kind:id:cameraID:)` →
@@ -66,8 +73,9 @@ user-info stripping, of `Duration` → seconds conversions, of URL-error sanitiz
 BridgeEngine's runtime, CameraAdapters' `withTimeout`, `AuthenticatingHTTPClient.data(for:)`), `AsyncSerialLock`
 (`withLock`, `withLockUnlessCancelled`, `waiterCount`, `isLocked`; HAPCamera's stream services and controller,
 BridgeEngine's lifecycle operations), `Duration.timeInterval` (`Backoff.swift`; every module but FMP4, whose dependency
-graph has no BridgeSupport), `Hashes.sha1` (`Hashes.swift`, swift-crypto: CameraAdapters' ONVIF PasswordDigest, which
-replaced a hand-written SHA-1, W4 review), `URLFreeErrors` (`URLFreeErrors.swift`: `sanitized(_:request:timedOut:passing:)`
+graph has no BridgeSupport), `Hashes.sha1` and `Hashes.sha256` (`Hashes.swift`, swift-crypto: CameraAdapters' ONVIF
+PasswordDigest, which replaced a hand-written SHA-1, W4 review, and its IPCamera Web latch's in-memory fingerprint of
+refused credentials), `URLFreeErrors` (`URLFreeErrors.swift`: `sanitized(_:request:timedOut:passing:)`
 throws `AuthenticatingHTTPClient`'s URLSession errors without their failing URL — RTSP's HTTP-FLV source with
 `RTSPError.timeout`, CameraAdapters' `CameraHTTP` with the defaults; `describe(_:)` summarises them for the log —
 BridgeEngine's snapshot logs; `failingURLStringKey`; review round 2, replacing a copy in each of those modules),
@@ -78,7 +86,11 @@ SETUP-transport errors, CameraAdapters' ONVIF SOAP faults; W4 review round 4), `
 `RTSPMediaSource` / `HTTPFLVMediaSource` (through the package `AuthenticatingHTTPClient.init(…downgradeGuard:)`), CameraAdapters' Hikvision talkback upload; W4 review round 4),
 `HTTPRequestParser.init(maxBodySize:maxHeadSize:maxHeaderCount:)` and `HTTPRequestParser.pendingHead` (`HTTPMessage.swift`:
 CameraAdapters' webhook limits heads to 8 KiB / 64 header lines and refuses a wrong token before reading a body, W4
-review round 4).
+review round 4), `BridgeTime` (`BridgeTime.swift`, 2026-10-18, docs/CONTRACT_CHANGES.md: the bridge's time zone, `BridgeSettings.timeZone`,
+which BridgeEngine sets with `use(_:)` when its configuration loads and when the setting changes, the process's when none is chosen; it is
+not the process's zone, which the engine leaves as it is at launch. `clock(_:in:locale:)` ("9:19 AM") for the clock times BridgeEngine's
+`readableReason` and CameraAdapters' `HomeKitReadinessAdvisor` word for people, `zone` for the internet guard's "today" (BridgeDaemon),
+`zone(named:)`, and `taskZone`, a task-local zone for one task: tests, which run side by side in one process).
 
 ## Invariants
 
@@ -145,3 +157,9 @@ clipping of a helper's output) let portable modules run a bundled program (go2rt
 `AuthenticatingHTTPClient.stream(for:)` keeps a `multipart/x-mixed-replace` response open across its parts (a line break marks where one ended).
 
 A first response that is a plain `URLResponse` (the first part of such a stream) no longer fails with `notHTTPResponse`.
+
+## Additions beyond the contract: credentials in stream URLs (2026-10-18, docs/CONTRACT_CHANGES.md)
+
+`StreamURLCredentials` (`StreamURLCredentials.swift`: `main`, `sub`, `none`, `isEmpty`, `connectionURL(for:)`, `isCredential(_:)`),
+`URL.removingStreamCredentials`, `URL.hasStreamCredentials`. `Redact` masks names ending in `hash`, and `Redact.url` a query's user
+names (`user`, `username`, `usr`, `loginuse`, `loginpas`) as well.

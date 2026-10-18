@@ -91,4 +91,9 @@ enum JSONValue: Sendable, Equatable, Codable {
         if case .object(let object) = self { return object }
         return nil
     }
+
+    var array: [JSONValue]? {
+        if case .array(let array) = self { return array }
+        return nil
+    }
 }

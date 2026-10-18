@@ -75,10 +75,10 @@ struct EngineTuning: Sendable {
     /// Replaces a camera's readings (`CameraSettingsService.readRemoteAccess()`) in a security check (tests); nil from it: the camera did not
     /// answer.
     var securityReading: (@Sendable (_ camera: CameraConfiguration, _ credentials: HTTPCredentials?) async -> [RemoteAccessFinding]?)?
-    /// Replaces the read of a watched camera's DNS servers (`CameraSettingsService.readDNS()`) in a security check (tests); nil from it: not
-    /// readable.
-    var securityDNS: (@Sendable (_ camera: CameraConfiguration, _ credentials: HTTPCredentials?) async -> CameraDNSReading?)?
-    /// Removing a camera whose Watch is done gives it its own DNS servers back first (tests turn it off: `EngineTuning.testing`).
+    /// Replaces the read of a camera's DNS servers (`CameraSettingsService.readDNS()`) in a security check and in the guard's own reads
+    /// (tests); nil from it: not readable; what it throws, the read's error (a login pause, a refused login).
+    var securityDNS: (@Sendable (_ camera: CameraConfiguration, _ credentials: HTTPCredentials?) async throws -> CameraDNSReading?)?
+    /// Removing a camera whose DNS servers the setup kept gives them back first (tests turn it off: `EngineTuning.testing`).
     var restoresWatchOnRemoval = true
     /// Replaces the RTSP check (`RTSPAccessProbe`) of a camera's stream address (tests).
     var rtspAccessProbe: (@Sendable (_ url: URL) async -> RemoteAccessState)?
@@ -96,6 +96,14 @@ struct EngineTuning: Sendable {
     var guardReportStaleAfter: Duration = .seconds(600)
     /// The day's notice changes its figures at most this often.
     var guardNoticeRefresh: Duration = .seconds(3600)
+    /// The guard's own reads of the cameras' DNS servers (BridgeEngine+InternetGuard.swift; while `securityChecks` is on): every camera
+    /// the guard can watch is read once each `guardDNSInterval`, one after the other; `guardDNSReconnectDelay` after a camera comes back
+    /// online; `guardDNSPauseMargin` after a login pause a read met ends; those two no sooner than `guardDNSSpacing` after the camera's last
+    /// read.
+    var guardDNSInterval: Duration = .seconds(1800)
+    var guardDNSReconnectDelay: Duration = .seconds(120)
+    var guardDNSPauseMargin: Duration = .seconds(5)
+    var guardDNSSpacing: Duration = .seconds(300)
     /// Replaces `CameraDrivers.detect` in `probeCamera` (tests).
     var detectVendor: (@Sendable (_ endpoint: CameraEndpoint, _ credentials: HTTPCredentials?) async -> VendorDetection?)?
     /// Replaces `CameraDrivers.onvifPort` in `probeCamera` (tests).

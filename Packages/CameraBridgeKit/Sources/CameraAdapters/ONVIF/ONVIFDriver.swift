@@ -161,11 +161,12 @@ final class ONVIFDriver: CameraDriver, Sendable {
     /// Night vision through the IP camera web API when the camera speaks it (its ONVIF does not keep IR-cut changes), else through the
     /// imaging service's IR-cut filter, and a lamp through the PTZ node's auxiliary commands, when the camera has them
     /// (`NightVisionSelector` asks once, in its first `capabilities()`). Made once per camera start (`CameraRuntime`): that is when a web
-    /// API that refused a request earlier gets one new try (`IPCWebLatch`).
+    /// API that refused a request earlier gets one new try (`IPCWebLatch`), and the IPCamera Web family's refused sign-in one only with
+    /// other credentials, or 30 minutes after the refusal (`IPCamWebLatch.cameraStarted`).
     func makeNightVision() -> (any NightVisionControl)? {
         guard let onvif = sharedClient.map({ ONVIFNightVision(client: $0, log: Log(category: "onvif-night", cameraID: cameraID)) }) else { return nil }
         IPCWebLatch.shared.reset(IPCWebLatch.key(endpoint))
-        IPCamWebLatch.shared.reset(IPCamWebLatch.key(endpoint))   // and the IPCamera Web family's sign-in gets one new try
+        IPCamWebLatch.shared.cameraStarted(IPCamWebLatch.key(endpoint), credentials: credentials)
         let client = IPCWebClient(endpoint: endpoint, credentials: credentials, cameraID: cameraID)
         let web = IPCWebNightVision(client: client, log: Log(category: "ipc-web-night", cameraID: cameraID))
         return NightVisionSelector(web: web, onvif: onvif)

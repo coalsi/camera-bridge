@@ -107,4 +107,76 @@ import Testing
         #expect(try secrets.read(account: HAPStorage.account(for: camera)) == nil, "and the HAP identity")
         #expect(try credentials.password(for: camera) == "a", "only what could not be deleted stays")
     }
+
+    // MARK: Credentials in the stream URLs' query
+
+    static let streamPassword = "S3cretPW-7781"
+    static let streamHash = "c0ffee00c0ffee00c0ffee00c0ffee00"
+
+    static func cameraWithQueryCredentials() -> CameraConfiguration {
+        var camera = CameraConfiguration(name: "Garden PTZ", kind: .camera, vendor: .onvif, endpoint: CameraEndpoint(host: "192.0.2.41"),
+                                         username: "admin")
+        camera.mainStreamURL = URL(string: "rtsp://192.0.2.41:554/stream0?user=admin&password=\(streamPassword)&channel=1")
+        camera.subStreamURL = URL(string: "rtsp://192.0.2.41:554/stream1?hash=\(streamHash)")
+        return camera
+    }
+
+    @Test func queryCredentialsOfTheStreamURLsMoveToTheSecretStore() throws {
+        let secrets = InMemorySecretStore()
+        let store = CredentialStore(secrets: secrets)
+        let camera = Self.cameraWithQueryCredentials()
+        let saved = try store.storeStreamCredentials(of: camera)
+        #expect(saved.mainStreamURL?.absoluteString == "rtsp://192.0.2.41:554/stream0?channel=1")
+        #expect(saved.subStreamURL?.absoluteString == "rtsp://192.0.2.41:554/stream1")
+        #expect(CredentialStore.streamURLsAccount(for: camera.id) == "camera.\(camera.id.uuidString).stream-urls")
+        let stored = StreamURLCredentials(main: camera.mainStreamURL, sub: camera.subStreamURL)
+        #expect(try store.streamCredentials(for: saved) == stored)
+        #expect(try store.credentials(for: saved) == HTTPCredentials(username: "admin", password: ""), "the login is not changed by them")
+
+        // Saved again with the same addresses (an edit that left them alone): they stay.
+        #expect(try store.storeStreamCredentials(of: saved) == saved)
+        #expect(try store.streamCredentials(for: saved) == stored)
+
+        // A changed address loses its own; the other stream keeps its.
+        var moved = saved
+        moved.mainStreamURL = URL(string: "rtsp://192.0.2.41:554/stream0?channel=2")
+        #expect(try store.storeStreamCredentials(of: moved) == moved)
+        #expect(try store.streamCredentials(for: moved) == StreamURLCredentials(main: nil, sub: camera.subStreamURL))
+        #expect(try store.streamCredentials(for: saved).main == nil, "never given to the old address again")
+
+        // New credentials typed into an address replace the stored ones; none left deletes the item.
+        var typed = moved
+        typed.mainStreamURL = URL(string: "rtsp://192.0.2.41:554/stream0?channel=2&pwd=new")
+        let retyped = try store.storeStreamCredentials(of: typed)
+        #expect(retyped.mainStreamURL?.absoluteString == "rtsp://192.0.2.41:554/stream0?channel=2")
+        #expect(try store.streamCredentials(for: retyped).main == typed.mainStreamURL)
+        var plain = retyped
+        plain.mainStreamURL = nil
+        plain.subStreamURL = nil
+        _ = try store.storeStreamCredentials(of: plain)
+        #expect(try secrets.read(account: CredentialStore.streamURLsAccount(for: camera.id)) == nil)
+    }
+
+    @Test func aCameraWithoutQueryCredentialsTouchesNothing() throws {
+        let secrets = InMemorySecretStore()
+        let store = CredentialStore(secrets: secrets)
+        var camera = CameraConfiguration(name: "Porch", kind: .camera, vendor: .rtsp, endpoint: CameraEndpoint(host: "192.0.2.42"), username: "")
+        camera.mainStreamURL = URL(string: "rtsp://viewer:pw@192.0.2.42/live?channel=1")
+        let saved = try store.storeStreamCredentials(of: camera)
+        #expect(saved.mainStreamURL?.absoluteString == "rtsp://192.0.2.42/live?channel=1", "user info goes, as before")
+        #expect(try store.streamCredentials(for: saved) == .none)
+        #expect(try secrets.read(account: CredentialStore.streamURLsAccount(for: camera.id)) == nil)
+        #expect(try store.credentials(for: saved) == nil, "still no login for an open stream")
+    }
+
+    @Test func forgettingACameraDeletesItsStreamCredentials() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let secrets = InMemorySecretStore()
+        let credentials = CredentialStore(secrets: secrets)
+        let camera = try credentials.storeStreamCredentials(of: Self.cameraWithQueryCredentials())
+        #expect(try credentials.streamCredentials(for: camera).isEmpty == false)
+        try credentials.forgetCamera(camera.id, dataDirectory: directory.url)
+        #expect(try secrets.read(account: CredentialStore.streamURLsAccount(for: camera.id)) == nil)
+    }
 }

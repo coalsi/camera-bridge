@@ -62,18 +62,22 @@ enum StreamSources {
         return components.url
     }
 
-    static func rtsp(url: URL, credentials: HTTPCredentials?, displayName: String, cameraID: UUID, transport: any NetworkTransport)
-        -> IngestSupervisor.Source {
+    static func rtsp(url: URL, credentials: HTTPCredentials?, streamCredentials: StreamURLCredentials = .none, displayName: String, cameraID: UUID,
+                     transport: any NetworkTransport) -> IngestSupervisor.Source {
         IngestSupervisor.Source(label: "RTSP") {
-            RTSPMediaSource(configuration: rtspConfiguration(url: url, credentials: credentials, cameraID: cameraID), displayName: displayName,
-                            transport: transport)
+            RTSPMediaSource(configuration: rtspConfiguration(url: url, credentials: credentials, cameraID: cameraID,
+                                                             streamCredentials: streamCredentials),
+                            displayName: displayName, transport: transport)
         }
     }
 
-    /// A camera's RTSP session: its log lines carry the camera's ID (they show in the camera's own log).
-    static func rtspConfiguration(url: URL, credentials: HTTPCredentials?, cameraID: UUID) -> RTSPConfiguration {
+    /// A camera's RTSP session: its log lines carry the camera's ID (they show in the camera's own log). `streamCredentials`: the query
+    /// credentials of the camera's stream URLs (from the secret store; `url` is saved without them), for the request lines only.
+    static func rtspConfiguration(url: URL, credentials: HTTPCredentials?, cameraID: UUID, streamCredentials: StreamURLCredentials = .none)
+        -> RTSPConfiguration {
         var configuration = RTSPConfiguration(url: url, credentials: credentials)
         configuration.cameraID = cameraID
+        configuration.streamCredentials = streamCredentials
         return configuration
     }
 

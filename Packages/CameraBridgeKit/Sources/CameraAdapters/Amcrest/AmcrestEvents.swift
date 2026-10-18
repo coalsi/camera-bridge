@@ -214,7 +214,7 @@ enum AmcrestEvents {
                         context: EventSessionContext) async throws {
         // A rejected login pauses every login to this camera (`ONVIFLoginGuard`): a camera locks the account after a few failures.
         let loginKey = AmcrestAPI.loginKey(endpoint)
-        if credentials != nil, let until = ONVIFLoginGuard.shared.blockedUntil(host: loginKey) { throw CameraAdapterError.lockedOut(until: until) }
+        if credentials != nil, let pause = ONVIFLoginGuard.shared.pause(host: loginKey) { throw pause.error }
         let stream = try await AmcrestAPI.eventStream(endpoint: endpoint, credentials: credentials, heartbeat: timing.heartbeat,
                                                       readTimeout: timing.idleTimeout + .seconds(30), transport: transport)
         defer { stream.close() }

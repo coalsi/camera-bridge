@@ -34,28 +34,35 @@ public enum CameraDrivers {
     ///
     /// `integration` and `go2rtc`: for the cameras that sit behind a service (`CameraVendor.go2rtc`): the facts saved about the
     /// service and the helper that turns its source into RTSP. The service's secret travels as the camera's `credentials` password.
+    ///
+    /// `streamCredentials`: the credentials in the query or path of the camera's stream URLs, from the secret store (`mainStreamURL` and
+    /// `subStreamURL` are saved without them). The driver's RTSP sessions (probes, backchannel, talkback) send them in their request
+    /// lines; nothing else sees them.
     public static func make(vendor: CameraVendor, endpoint: CameraEndpoint, credentials: HTTPCredentials?,
                             mainStreamURL: URL?, subStreamURL: URL?, transport: any NetworkTransport, cameraID: UUID?,
                             reachability: CameraReachability? = nil, integration: IntegrationSettings? = nil,
-                            go2rtc: (any Go2RTCStreamProviding)? = nil, helpers: (any HelperLaunching)? = nil) -> any CameraDriver {
-        switch vendor {
+                            go2rtc: (any Go2RTCStreamProviding)? = nil, helpers: (any HelperLaunching)? = nil,
+                            streamCredentials: StreamURLCredentials = .none) -> any CameraDriver {
+        let rtspFactory = RTSPProbing.factory(transport: transport, streamCredentials: streamCredentials)
+        return switch vendor {
         case .hikvision:
             HikvisionDriver(endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, transport: transport,
                             cameraID: cameraID)
         case .reolink:
             ReolinkDriver(endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, transport: transport,
-                          cameraID: cameraID, reachability: reachability)
+                          rtspFactory: rtspFactory, cameraID: cameraID, reachability: reachability)
         case .onvif:
             ONVIFDriver(endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, transport: transport,
-                        cameraID: cameraID)
+                        rtspFactory: rtspFactory, cameraID: cameraID)
         case .rtsp:
             GenericRTSPDriver(endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL,
-                              transport: transport, cameraID: cameraID)
+                              rtspFactory: rtspFactory, cameraID: cameraID)
         case .amcrest:
             AmcrestDriver(endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, transport: transport,
-                          cameraID: cameraID)
+                          rtspFactory: rtspFactory, cameraID: cameraID)
         case .doorbird:
-            DoorBirdDriver(endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, transport: transport, cameraID: cameraID)
+            DoorBirdDriver(endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, transport: transport, rtspFactory: rtspFactory,
+                           cameraID: cameraID)
         case .unifi:
             UnifiProtectDriver(endpoint: endpoint, credentials: credentials, settings: integration, provider: go2rtc,
                                rtspFactory: RTSPProbing.factory(transport: transport), cameraID: cameraID)

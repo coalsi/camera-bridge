@@ -155,6 +155,7 @@ extension PreviewFixtures {
         var snapshot = CameraSettingsSnapshot(supportsONVIF: false, webPageURL: URL(string: "http://\(endpoint.host):\(endpoint.httpPort)/"))
         snapshot.onvifLoginRejected = true
         snapshot.onvifLoginPausedUntil = Date().addingTimeInterval(25 * 60)
+        snapshot.onvifLoginLockedByCamera = true
         return snapshot
     }
 }

@@ -46,6 +46,12 @@ public final class RTSPTestServer: Sendable {
 
     public struct Configuration: Sendable {
         public var path: String = "/stream"
+        /// DESCRIBE answers 404 unless its URI has exactly this query (a camera that takes its credentials in the stream URL's
+        /// query). nil: any query.
+        public var requiredQuery: String?
+        /// DESCRIBE answers 404 unless its URI has exactly this path (a camera that takes its credentials in the path, XMEye
+        /// `/user=admin&password=…`). nil: any path.
+        public var requiredPath: String?
         public var credentials: HTTPCredentials?
         public var authentication: Authentication = .digest
         public var realm = "CameraBridge Test"

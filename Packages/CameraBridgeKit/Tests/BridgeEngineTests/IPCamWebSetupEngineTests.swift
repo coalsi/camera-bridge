@@ -11,10 +11,11 @@ import Testing
 /// Extra services off and Cloud off are previewed, applied, saved in the one backup and put back exactly by "Restore original settings".
 @MainActor @Suite(.timeLimit(.minutes(1))) struct IPCamWebSetupEngineTests {
     /// The family's page and API as the owner's camera answers them (identifiers made up). Its sign-in takes only the values of "admin" /
-    /// "pa55" and of "admin" without a password, written here as computed by Python's hashlib and an RC4 written apart from Camera Bridge's.
+    /// "pa55" and of "admin" without a password: RC4 under "pwnsd" of the UPPERCASE MD5 hex of "username:password", written here as computed
+    /// by Python's hashlib and an RC4 written apart from Camera Bridge's (OpenSSL's `rc4-40` agrees).
     final class FakeCamera: Sendable {
-        static let encrypted = "395ddea66327c3f0c49185ac1a6044f167e4716294c0e1105c11091707c344f6"
-        static let encryptedWithoutPassword = "6e598af2667295a491c78bf9483445a134b0246c9fc0b1445b4b5b1601c211f0"
+        static let encrypted = "197dfea66307c3d0e4b1858c1a6044d147c4516294c0e1107c31291707c364d6"
+        static let encryptedWithoutPassword = "6e798ad26672b5a491c78bf9681445a134b0246c9fc091647b4b5b1601c211d0"
         static let options: [String: String] = [
             "mobile": #"<mobile on="1" sendalarm="1" cuid="TESTCUID000002"/>"#,
             "rtsp": #"<rtsp port="554" rtspsport="322" authorized="0" mtu="1400"/>"#,
@@ -26,6 +27,8 @@ import Testing
         let port: UInt16
         let options = Box(FakeCamera.options)
         let writes = Box<[String]>([])
+        /// The options whose writes are answered 532374 ("No Privilege": the account may not change them).
+        let refusedWrites = Box<Set<String>>([])
         private let listener: any TCPListener
         private let task = Mutex<Task<Void, Never>?>(nil)
 
@@ -75,13 +78,14 @@ import Testing
                 }
                 return root("<code>0</code><authid>S1</authid>")
             case "/cgi/network.cgi":
-                guard query("auth") == "S1" else { return root("<code>531203</code><error>session timeout</error>") }
+                guard query("auth") == "S1" else { return root("<code>532227</code><error>auth failed</error>") }
                 if let what = query("get") {
                     guard let element = options.value[what] else { return root("<code>532229</code><error>no option</error>") }
                     return root(element)
                 }
                 guard let what = query("set"), let stored = options.value[what], let data = query("data"),
                       let element = IPCWebXML.element(what, in: data) else { return root("<code>531000</code>") }
+                if refusedWrites.value.contains(what) { return root("<code>532374</code><error>No Privilege</error>") }
                 writes.update { $0.append(what) }
                 let written = String(element)
                 let values = Dictionary(IPCWebXML.attributes(of: written).map { ($0.name, String(written[$0.value])) }, uniquingKeysWith: { $1 })
@@ -134,6 +138,26 @@ import Testing
         #expect(restored.steps.map(\.id) == [.cloud, .videoPassword, .extraServices] && restored.steps.allSatisfy { $0.status == .restored })
         #expect(camera.options.value == FakeCamera.options, "every value as the camera had it")
         #expect(stored(fixture, configuration.id)?.setupBackup == nil)
+    }
+
+    /// A step whose write the camera answers 532374 ("No Privilege") once it signed Camera Bridge in is a change the account may not make
+    /// (owner decision, 2026-10-18): it says to use an administrator account and stops nothing, so the steps after it still run.
+    @Test func aWriteRefusedForWantOfPrivilegeStopsNoOtherStep() async throws {
+        let fixture = try await EngineFixture()
+        let camera = try await FakeCamera()
+        defer { camera.stop(); fixture.directory.remove() }
+        camera.refusedWrites.set(["mobile"])   // Cloud off, the step before Video password and Extra services off
+        var configuration = CameraConfiguration(name: "Patio", kind: .camera, vendor: .onvif, endpoint: camera.endpoint, username: "admin")
+        configuration.isEnabled = false
+        try await fixture.engine.addCamera(configuration, password: "pa55")
+
+        let report = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        let steps = Dictionary(uniqueKeysWithValues: report.steps.map { ($0.id, $0) })
+        #expect(steps[.cloud]?.status == .refused && steps[.cloud]?.detail == CameraAdapterError.notPermittedReason)
+        #expect(report.stoppedAt == nil, "a change the account may not make stops nothing")
+        #expect(steps[.videoPassword]?.status == .done && steps[.extraServices]?.status == .done)
+        #expect(camera.writes.value.sorted() == ["hik", "meari", "onvif", "rtsp"])
+        #expect(camera.options.value["mobile"] == FakeCamera.options["mobile"])
     }
 
     @Test func withoutASavedPasswordTheVideoPasswordIsNotOffered() async throws {

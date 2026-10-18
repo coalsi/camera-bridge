@@ -170,6 +170,10 @@ actor IngestSupervisor {
 
     private func launch() {
         guard loop == nil else { return }
+        // A `start()` while a `stop()` (or a `reconnect()`) is still closing the old connection finds that connection's state: the new
+        // run is not online, nor delivering on the old connection's last frame (an on-demand wake would hand out an empty hub), until it
+        // delivers itself. Online never comes with a wait after rejected credentials, which the run reports as offline.
+        if state == .online { setState(.connecting) }
         loop = Task { [weak self] in await self?.run() }
     }
 

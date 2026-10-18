@@ -327,7 +327,9 @@ import Testing
         defer { camera.stop(); camera.clearLoginPause() }
         ONVIFLoginGuard.shared.recordRejection(host: "127.0.0.1:\(camera.server.port)")   // as ONVIF does after a wrong password
         let client = IPCWebClient(endpoint: camera.endpoint, credentials: camera.credentials, latch: IPCWebLatch())
-        await #expect(throws: CameraAdapterError.self) { try await client.device() }
+        await #expect { try await client.device() } throws: { error in
+            if case CameraAdapterError.loginsPaused = error { true } else { false }   // Camera Bridge's pause, not the camera's lock
+        }
         #expect(camera.apiRequests.isEmpty, "no login while the camera's logins are paused")
     }
 

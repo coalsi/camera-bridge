@@ -35,7 +35,7 @@ enum DoorBirdEvents {
     static func session(endpoint: CameraEndpoint, credentials: HTTPCredentials?, transport: any NetworkTransport, timing: DoorBirdEventTiming,
                         context: EventSessionContext) async throws {
         let key = DoorBirdAPI.loginKey(endpoint)
-        if credentials != nil, let until = ONVIFLoginGuard.shared.blockedUntil(host: key) { throw CameraAdapterError.lockedOut(until: until) }
+        if credentials != nil, let pause = ONVIFLoginGuard.shared.pause(host: key) { throw pause.error }
         let stream = try await DoorBirdAPI.monitor(endpoint: endpoint, credentials: credentials, readTimeout: timing.maximumSession + .seconds(30),
                                                    transport: transport)
         defer { stream.close() }

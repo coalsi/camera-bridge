@@ -7,8 +7,8 @@ import Synchronization
 ///
 /// - never within `spacing` of the previous one to the same camera (a live view asks at most every few seconds; a second
 ///   ask is dropped without sending anything);
-/// - never again once the camera answered that it does not know the call (the next call would only be another request that
-///   fails, and some firmware counts those);
+/// - never again once the camera answered that it does not know the call, or that the account may not make it
+///   (`CameraAdapterError.notPermitted`; the next call would only be another request that fails, and some firmware counts those);
 /// - never while ONVIF logins to that camera are paused (`ONVIFLoginGuard`: after a rejected login or a lockout), and a
 ///   rejected login of its own pauses them, so nothing retries a wrong password;
 /// - one request at a time per camera address, with the camera's other HTTP requests (`CameraHTTPGates`).
@@ -71,7 +71,7 @@ extension CameraDriver {
     /// `loginHost` is the key `ONVIFLoginGuard` uses for this camera ("host:port" of the API address).
     func guardedKeyframeRequest(endpoint: CameraEndpoint, key: String, loginHost: String, guardian: CameraKeyframeGuard,
                                 send: @escaping @Sendable () async throws -> Void) async throws {
-        if let until = ONVIFLoginGuard.shared.blockedUntil(host: loginHost) { throw CameraAdapterError.lockedOut(until: until) }
+        if let pause = ONVIFLoginGuard.shared.pause(host: loginHost) { throw pause.error }
         switch guardian.permit(key: key) {
         case .allowed: break
         case .tooSoon: return
@@ -89,6 +89,10 @@ extension CameraDriver {
             case .soapFault(let fault) where fault.lowercased().contains("notsupported") || fault.lowercased().contains("actionnotsupported"):
                 guardian.markUnsupported(key: key)
                 throw CameraAdapterError.unsupported("this camera has no keyframe request (\(fault))")
+            case .notPermitted:
+                // The camera signed the account in but refuses it the request: asking again at every spacing would only be refused.
+                guardian.markUnsupported(key: key)
+                throw CameraAdapterError.unsupported("the account Camera Bridge uses may not ask this camera for a keyframe")
             default:
                 break
             }

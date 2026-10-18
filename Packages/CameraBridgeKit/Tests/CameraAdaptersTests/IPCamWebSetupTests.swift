@@ -136,7 +136,7 @@ import Testing
         let camera = try await FakeIPCamWebCamera.start()
         defer { camera.stop() }
         _ = try await IPCamWebClient(endpoint: camera.endpoint, credentials: nil).showsItsPage()
-        IPCamWebLatch.shared.trip(IPCamWebLatch.key(camera.endpoint))
+        IPCamWebLatch.shared.trip(IPCamWebLatch.key(camera.endpoint), credentials: camera.credentials)
         let service = service(camera)
         let paused = IPCamWebUnavailable.paused.reason
         #expect(try await service.readVideoPassword().0.state == .notSupported(paused))
@@ -144,6 +144,79 @@ import Testing
         #expect(try await service.readFeature(.cloud).0.state == .notSupported(paused))
         #expect(try await service.setFeature(.cloud, enabled: false) == CameraSetupOutcome(succeeded: false, detail: paused))
         #expect(camera.signIns.isEmpty)
+    }
+
+    /// A sign-in the camera refuses now makes every step of this API say why, as one it refused before does: the setup goes on with the
+    /// steps that don't need this API (a login refusal would end it, though this one stops only this API), and nothing more is sent.
+    @Test func aSignInRefusedNowMakesEveryStepSayWhy() async throws {
+        let camera = try await FakeIPCamWebCamera.start()
+        defer { camera.stop() }
+        let service = service(camera, credentials: HTTPCredentials(username: "admin", password: "wrong"))
+        let paused = IPCamWebUnavailable.paused.reason
+        #expect(try await service.readVideoPassword().0.state == .notSupported(paused))
+        #expect(try await service.readExtraServices().0.state == .notSupported(paused))
+        #expect(try await service.readFeature(.cloud).0.state == .notSupported(paused))
+        #expect(try await service.readFeature(.upnp).0.state == .notSupported(paused))
+        #expect(try await service.setFeature(.cloud, enabled: false) == CameraSetupOutcome(succeeded: false, detail: paused))
+        #expect(try await service.turnOffExtraServices() == CameraSetupOutcome(succeeded: false, detail: paused))
+        #expect(camera.signIns.count == 1 && camera.calls.value.isEmpty)
+        #expect(IPCamWebClient.loginKeys(camera.endpoint).allSatisfy { ONVIFLoginGuard.shared.blockedUntil(host: $0) == nil }, "ONVIF's logins go on")
+    }
+
+    /// A sign-in the camera refuses for want of privilege (532374: the account may not use the web page) is said as such by every step, now
+    /// and in the next run, instead of the general "did not take Camera Bridge's sign-in".
+    @Test func aSignInRefusedForWantOfPrivilegeSaysSo() async throws {
+        let camera = try await FakeIPCamWebCamera.start()
+        defer { camera.stop() }
+        camera.signInCode.set(IPCamWebCameraError.noPrivilege)
+        let why = IPCamWebUnavailable.noPrivilege.reason
+        #expect(why.contains("no privilege") && why.contains("administrator account") && why != IPCamWebUnavailable.paused.reason)
+        let service = service(camera)
+        #expect(try await service.readVideoPassword().0.state == .notSupported(why))
+        #expect(try await service.readExtraServices().0.state == .notSupported(why))
+        // A change the account may not make, typed (owner decision, 2026-10-18): the setup goes on with the steps after it.
+        let notPermitted = CameraSetupOutcome(succeeded: false, detail: why, notPermitted: true)
+        #expect(try await service.setFeature(.cloud, enabled: false) == notPermitted)
+        #expect(try await service.requireVideoPassword() == notPermitted)
+        #expect(try await service.turnOffExtraServices() == notPermitted)
+        #expect(try await self.service(camera).readFeature(.cloud).0.state == .notSupported(why), "the next run too")
+        #expect(camera.signIns.count == 1 && camera.calls.value.isEmpty)
+    }
+
+    /// A write the camera answers 532374 ("No Privilege") once it signed Camera Bridge in is a change the account may not make
+    /// (`CameraAdapterError.notPermitted`): each step says to use an administrator account, typed (`notPermitted`), so the setup goes on with
+    /// the steps after it (owner decision, 2026-10-18); nothing is latched, and the session still serves. A refused sign-in is not one: it
+    /// stays the camera's general refusal.
+    @Test func aWriteRefusedForWantOfPrivilegeIsAChangeTheAccountMayNotMake() async throws {
+        let camera = try await FakeIPCamWebCamera.start()
+        defer { camera.stop() }
+        camera.writeCode.set(IPCamWebCameraError.noPrivilege)
+        let service = service(camera)
+        #expect(try await service.setFeature(.cloud, enabled: false) == .notPermittedRefusal)
+        #expect(try await service.requireVideoPassword() == .notPermittedRefusal)
+        #expect(try await service.turnOffExtraServices() == .notPermittedRefusal)
+        #expect(try await service.restoreServiceSwitches(CameraServiceSwitchesBackup(services: ["hik": ["on": "0"]])) == .notPermittedRefusal)
+        #expect(camera.signIns.count == 1 && !IPCamWebLatch.shared.isTripped(IPCamWebLatch.key(camera.endpoint)))
+        #expect(camera.options.value == FakeIPCamWebCamera.options, "nothing changed")
+    }
+
+    /// A sign-in that is not answered (HTTP 503, as while the camera's API starts; no refusal, so nothing is latched) is sent once by each
+    /// step that needs it, which then says so: the step's own call does not sign in again at once.
+    @Test func aSignInWithoutAnAnswerIsSentOncePerStep() async throws {
+        let camera = try await FakeIPCamWebCamera.start()
+        defer { camera.stop() }
+        camera.mode.set(.signInUnanswered)
+        let service = service(camera)
+        let why = "the camera’s web page did not answer Camera Bridge’s sign-in (HTTP 503)"
+        #expect(try await service.readVideoPassword().0.state == .notSupported(why))
+        #expect(camera.signIns.count == 1)
+        #expect(try await service.readExtraServices().0.state == .notSupported(why))
+        #expect(camera.signIns.count == 2)
+        #expect(try await service.turnOffExtraServices() == CameraSetupOutcome(succeeded: false, detail: why))
+        #expect(camera.signIns.count == 3 && camera.calls.value.isEmpty)
+        #expect(!IPCamWebLatch.shared.isTripped(IPCamWebLatch.key(camera.endpoint)), "no refusal: the next step asks again")
+        camera.mode.set(.normal)
+        #expect(try await service.readExtraServices().0.state == .willChange)
     }
 }
 #endif

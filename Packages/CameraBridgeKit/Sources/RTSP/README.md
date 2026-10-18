@@ -56,9 +56,11 @@ HTTP-FLV through `AuthenticatingHTTPClient.stream(for:)`. Owner: W1-5 (also `Tes
 - Backchannel: `Require: www.onvif.org/ver20/backchannel` on DESCRIBE/SETUP/PLAY (DESCRIBE retried without it on
   551); the `sendonly` audio section is set up (without the `Require`, `sendonly` audio is the camera's own audio); G.711 in ≤ 1024-byte packets, AAC as RFC 3640 AAC-hbr; RTP
   timestamps advance by samples sent; the SSRC from the SETUP `Transport` is used when given.
-- Credentials never appear in request lines or logs (`Redact.url`, which also masks `password=`/`pwd=` in a
-  path; request lines use BridgeSupport's `URL.removingUserInfo`); `user:pass@` in the URL is stripped and used as
-  credentials when none are configured. HTTP-FLV requests the URL as given (Reolink puts `user`/`password` in it)
+- Credentials never appear in logs (`Redact.url`, which also masks `password=`/`pwd=` in a path), nor the login in
+  request lines (BridgeSupport's `URL.removingUserInfo`); `user:pass@` in the URL is stripped and used as
+  credentials when none are configured. Query credentials of a stream URL, which `config.json` keeps the URL without,
+  come from `RTSPConfiguration.streamCredentials` (the secret store's) into the request lines only; log lines name
+  `configuration.url`. HTTP-FLV requests the URL as given (Reolink puts `user`/`password` in it)
   and maps URLSession errors to `RTSPError.timeout` / `TransportError` values without the URL (BridgeSupport's
   `URLFreeErrors.sanitized`, with RTSP's timeout error and request name); `stop()` (or a newer
   `samples()`) while `samples()` connects cancels it with `TransportError.closed`.
@@ -66,15 +68,17 @@ HTTP-FLV through `AuthenticatingHTTPClient.stream(for:)`. Owner: W1-5 (also `Tes
 ## Additions beyond the contract
 
 `RTSPConfiguration.backchannelOnly`; `RTSPConfiguration.cameraID` (tags the client's log lines, depacketizers
-included, with the camera); `RTSPTrack.init`; `RTSPSessionInfo.init`; `RTSPMediaSource.sessionInfo`;
+included, with the camera); `RTSPConfiguration.streamCredentials` (2026-10-18: the stream URLs with their query credentials, for
+the request lines); `RTSPTrack.init`; `RTSPSessionInfo.init`; `RTSPMediaSource.sessionInfo`;
 `HTTPFLVMediaSource.init(url:credentials:displayName:timeout:cameraID:)` (`cameraID` likewise, default nil); `SDPSession.attributes`, `.control`,
 `init(media:attributes:)`; `SDPMedia.proto`, `.control`, `attributeValues(_:)`, `rtpmap(for:)`, `fmtp(for:)`;
 `SDPRTPMap`. Not supported: MP4A-LATM, Opus/L16 ingest, UDP transport, MJPEG video (`unsupportedCodec`).
 
 ## Test support (TestSupport, W1-5)
 
-`RTSPTestServer` (loopback, own parser/packetizers/MD5; Digest/Basic, audio + ONVIF backchannel recording, sender
-reports with clock offset, faults: drop every Nth FU fragment, stall, close after N s, session-timeout enforcement),
+`RTSPTestServer` (loopback, own parser/packetizers/MD5; Digest/Basic, `requiredQuery` / `requiredPath` (DESCRIBE answers 404
+without them), audio + ONVIF backchannel recording, sender reports with clock offset, faults: drop every Nth FU fragment, stall,
+close after N s, session-timeout enforcement),
 `SyntheticNALSource` (paced frames that carry their index), `ReplayMediaSource`, `TestDigest`.
 
 ## References

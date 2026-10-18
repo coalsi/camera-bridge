@@ -101,6 +101,8 @@ enum ErrorText {
             return String(localized: "Check the camera’s address and that it is on your network. The log in Settings has the details.")
         case CameraAdapterError.httpStatus, CameraAdapterError.invalidResponse, is HTTPClientError:
             return String(localized: "Check the camera type and ports.")
+        case CameraAdapterError.loginsPaused:
+            return String(localized: "Check the camera’s username and password in Camera Bridge.")
         case RTSPError.notFound:
             return String(localized: "Check the stream URL.")
         case RTSPError.unsupportedCodec:

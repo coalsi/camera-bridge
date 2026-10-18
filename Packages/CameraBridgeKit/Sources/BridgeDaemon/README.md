@@ -9,7 +9,7 @@ libsystemd), a journald-friendly log sink (`StdoutLogSink`), the operating syste
 
 ## Additions beyond the contract
 
-The internet guard, Watch (2026-10-17, docs/CONTRACT_CHANGES.md): `RequestFileSystemControl.setGuardedCameras(_:)` writes the `guard-set` request (`{"cameras": [{"address", "level": "watch"}], "timeZone"}`: each address checked and canonical, private IPv4 or unique-local/link-local IPv6, at most 64, the bridge's time zone for "today") and waits for the job, which counts as done only when `status/guard.json` then lists exactly those
+The internet guard, Watch (2026-10-17, docs/CONTRACT_CHANGES.md): `RequestFileSystemControl.setGuardedCameras(_:)` writes the `guard-set` request (`{"cameras": [{"address", "level": "watch"}], "timeZone"}`: each address checked and canonical, private IPv4 or unique-local/link-local IPv6, at most 64, the bridge's time zone for "today": `BridgeTime`, its settings' zone, not the process's UTC) and waits for the job, which counts as done only when `status/guard.json` then lists exactly those
 cameras (else "The system couldn’t change the internet guard. It still watches another list.", and the engine sends it again);
 `RequestFileSystemControl.guardReport()` reads `status/guard.json` (up to 1 MiB, `GuardReport.unavailable` without one). On Camera Bridge OS (the image has `camera-bridge-dns.service`, the request folders exist, not `--dev`) the daemon gives the engine `BridgeEnvironment.hasInternetGuard`, `setGuardedCameras` and `guardReport` through them. Internal: `RequestFileSystemControl.guardedAddress(_:)`, `Daemon.offersInternetGuard(development:systemAvailable:unitDirectory:)`, `Daemon.withInternetGuard(_:system:)`.
 

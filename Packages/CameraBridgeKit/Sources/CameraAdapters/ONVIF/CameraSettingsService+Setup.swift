@@ -8,8 +8,10 @@ import Foundation
 // by the engine.
 
 /// One step of the setup, in the order the steps are applied (the clock first; Restore goes in reverse). A refused step stops the steps
-/// after it, so the steps not yet tried on many cameras come after UPnP off and Cloud off: the IPCamera Web family's video password and
-/// extra services, then `internetWatch` (the camera's DNS pointed at the bridge, Camera Bridge OS's internet guard, Watch), last.
+/// after it that would change something (the engine's rule: "Watch its internet" still runs unless the camera stopped answering or refused
+/// its login, and a change the account may not make, `CameraSetupOutcome.notPermitted`, stops nothing), so the steps not yet tried on many
+/// cameras come after UPnP off and Cloud off: the IPCamera Web family's video password and extra services, then `internetWatch` (the
+/// camera's DNS pointed at the bridge, Camera Bridge OS's internet guard, Watch), last.
 public enum CameraSetupStepID: String, Sendable, Codable, CaseIterable {
     case timeZone, timeSource, cleanPicture, streams, upnp, cloud, videoPassword, extraServices, internetWatch
 }
@@ -60,29 +62,54 @@ public struct CameraSetupOutcome: Sendable, Equatable {
     public var needsRestart: Bool
     /// "via ISAPI", or the camera's words when it refused.
     public var detail: String
+    /// The camera refused the change to the account Camera Bridge uses (`CameraAdapterError.notPermitted`, or Reolink's `GetAbility` said so
+    /// before anything was sent, or the IPCamera Web family answered 532374 "No Privilege" at the write or at the sign-in): it is no wrong
+    /// password, and Set up for Camera Bridge goes on with the steps after it. `detail` is then `CameraAdapterError.notPermittedReason`, or
+    /// the family's own words for a sign-in refused so (`IPCamWebUnavailable.noPrivilege`, which says to use an administrator account too),
+    /// after ONVIF's for "Watch its internet".
+    public var notPermitted: Bool
 
-    public init(succeeded: Bool, needsRestart: Bool = false, detail: String) {
+    public init(succeeded: Bool, needsRestart: Bool = false, detail: String, notPermitted: Bool = false) {
         self.succeeded = succeeded
         self.needsRestart = needsRestart
         self.detail = detail
+        self.notPermitted = notPermitted
     }
 
     static func refused(_ words: String) -> CameraSetupOutcome { .init(succeeded: false, detail: words) }
+
+    /// The camera's refusal of a change, quoted (`CameraAdapterError.refusalWords`): a change the account may not make in those words, with
+    /// `notPermitted` set; an IPCamera Web family's API that cannot be asked in its reason, with `notPermitted` set when the account has no
+    /// privilege for it (`IPCamWebUnavailable.noPrivilege`).
+    static func refused(_ error: any Error) -> CameraSetupOutcome {
+        if case CameraAdapterError.notPermitted = error { return notPermittedRefusal }
+        if let unavailable = error as? IPCamWebUnavailable {
+            return CameraSetupOutcome(succeeded: false, detail: unavailable.reason, notPermitted: unavailable.notPermitted)
+        }
+        return .refused(CameraAdapterError.refusalWords(error))
+    }
+
+    /// A change the account Camera Bridge uses may not make.
+    static let notPermittedRefusal = CameraSetupOutcome(succeeded: false, detail: CameraAdapterError.notPermittedReason, notPermitted: true)
 }
 
 /// The camera's time zone before the setup changed it.
 public struct CameraTimeZoneBackup: Sendable, Codable, Equatable {
     /// `.hikvisionISAPI` (the `timeZone` of `/ISAPI/System/time`), `.onvifMinimal` (ONVIF's POSIX `TZ` and daylight saving) or `.reolinkAPI`
-    /// (Reolink's daylight-saving switch: `value` is "1" or "0").
+    /// (Reolink's daylight-saving switch: `value` is "1" or "0"; `reolinkTime` the rest).
     public var method: CameraConfigMethod
     public var value: String
     /// ONVIF: its daylight-saving flag.
     public var daylightSavings: Bool?
+    /// Reolink: `Time.timeZone` (as "timeZone", in the camera's own sign) and every number of `Dst` ("Dst.enable", "Dst.startMon", …) as the
+    /// camera had them, written back by Restore. nil in a backup saved before 2026-10-18, which puts back only the switch.
+    public var reolinkTime: [String: Int]?
 
-    public init(method: CameraConfigMethod, value: String, daylightSavings: Bool? = nil) {
+    public init(method: CameraConfigMethod, value: String, daylightSavings: Bool? = nil, reolinkTime: [String: Int]? = nil) {
         self.method = method
         self.value = value
         self.daylightSavings = daylightSavings
+        self.reolinkTime = reolinkTime
     }
 }
 
@@ -218,8 +245,9 @@ public struct CameraSetupBackup: Sendable, Codable, Equatable {
 
 extension CameraSettingsService {
     /// The camera's time zone against `posix` (the bridge's, as a POSIX TZ string): Hikvision through ISAPI's `/ISAPI/System/time` (ONVIF
-    /// when ISAPI has no clock document), Reolink its daylight-saving switch (its own API: Reolink refuses ONVIF's clock to its ONVIF
-    /// user), other cameras ONVIF. `zoneName` names the bridge's zone for a person. The backup is the camera's value now.
+    /// when ISAPI has no clock document), Reolink through its own API (`Time.timeZone` and the `Dst` rule, `ReolinkTimeZone`: Reolink refuses
+    /// ONVIF's clock to its ONVIF user), other cameras ONVIF. `zoneName` names the bridge's zone for a person. The backup is the camera's
+    /// value now.
     public func readTimeZone(posix: String, zoneName: String) async throws -> (CameraSetupReading, CameraTimeZoneBackup?) {
         let target = "\(zoneName) (\(CameraSetupText.zone(posix)))"
         if vendor == .hikvision, let document = try await isapi().document(HikvisionISAPI.timePath),
@@ -228,18 +256,7 @@ extension CameraSettingsService {
             if HikvisionTimeZone.same(current, wanted) { return (CameraSetupReading(state: .alreadyRight), backup) }
             return (CameraSetupReading(state: .willChange, changes: [.init(label: "Time zone", now: CameraSetupText.zone(current), after: target)]), backup)
         }
-        if vendor == .reolink {
-            let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-            defer { Task { await api.logout() } }
-            guard let enable = try await api.command("GetTime")["Dst"]?.object?["enable"]?.int else {
-                return (.notSupported("the camera reports no daylight saving"), nil)
-            }
-            let wanted = PosixTimeZone.hasDaylightSaving(posix)
-            let backup = CameraTimeZoneBackup(method: .reolinkAPI, value: enable != 0 ? "1" : "0")
-            if (enable != 0) == wanted { return (CameraSetupReading(state: .alreadyRight), backup) }
-            let words = { (on: Bool) in on ? "daylight saving on" : "daylight saving off" }
-            return (CameraSetupReading(state: .willChange, changes: [.init(label: "Time zone", now: words(enable != 0), after: "\(words(wanted)), as \(zoneName)")]), backup)
-        }
+        if vendor == .reolink { return try await readReolinkTimeZone(posix: posix, zoneName: zoneName, target: target) }
         guard let client = await client() else { return (.notSupported("the camera has no ONVIF device service"), nil) }
         let settings = try await client.dateTimeSettings()
         guard let current = settings.timeZone else { return (.notSupported("the camera reports no time zone"), nil) }
@@ -254,8 +271,8 @@ extension CameraSettingsService {
            HikvisionISAPI.elementText("timeZone", in: document) != nil, let wanted = HikvisionTimeZone.isapi(fromPosix: posix) {
             return try await writeISAPITimeZone(wanted, document: document)
         }
-        if let failure = try await setCameraTimeZone(posix: posix) { return .refused(failure) }
-        guard vendor != .reolink else { return CameraSetupOutcome(succeeded: true, detail: "via Reolink API") }
+        if vendor == .reolink { return try await applyReolinkTimeZone(posix: posix) }
+        if let refusal = try await cameraTimeZoneRefusal(posix: posix) { return refusal }
         guard let client = await client(), let now = try? await client.dateTimeSettings().timeZone else {
             return CameraSetupOutcome(succeeded: true, detail: "via ONVIF")
         }
@@ -270,15 +287,14 @@ extension CameraSettingsService {
             guard let document = try await isapi().document(HikvisionISAPI.timePath) else { return .refused("the camera no longer shows its clock settings") }
             return try await writeISAPITimeZone(backup.value, document: document)
         case .reolinkAPI:
-            if let failure = try await setReolinkDaylightSaving(backup.value == "1") { return .refused(failure) }
-            return CameraSetupOutcome(succeeded: true, detail: "via Reolink API")
+            return try await restoreReolinkTimeZone(backup)
         case .onvifMinimal, .onvifFull:
             guard let client = await client() else { return .refused("the camera has no ONVIF device service") }
             var settings = try await client.dateTimeSettings()
             settings.timeZone = backup.value
             settings.daylightSavings = backup.daylightSavings ?? settings.daylightSavings
             do { try await client.setDateTime(settings) } catch let error as CameraAdapterError where !error.isLoginRefusal {
-                return .refused(Redact.string(String(describing: error)))
+                return .refused(error)
             }
             return try await client.dateTimeSettings().timeZone == backup.value ? CameraSetupOutcome(succeeded: true, detail: "via ONVIF")
                 : .refused("the camera did not take its old time zone back")
@@ -320,9 +336,7 @@ extension CameraSettingsService {
                 shown = Self.shownOverlays(tree)
             }
         } else if vendor == .reolink {
-            let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-            defer { Task { await api.logout() } }
-            if let osd = try? await api.command("GetOsd", param: .object(["channel": .number(Double(reolinkChannel))]))["Osd"]?.object {
+            if let osd = try? await reolink().command("GetOsd", param: .object(["channel": .number(Double(reolinkChannel))]))["Osd"]?.object {
                 supported = true
                 if osd["osdTime"]?.object?["enable"]?.int == 1 { shown.append("date and time") }
                 if osd["osdChannel"]?.object?["enable"]?.int == 1 { shown.append("camera name") }

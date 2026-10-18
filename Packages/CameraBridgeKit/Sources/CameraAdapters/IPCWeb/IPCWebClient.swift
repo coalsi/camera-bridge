@@ -158,7 +158,7 @@ actor IPCWebClient {
     /// (another web server, or a camera of the family that does not answer the API). Throws `IPCWebNoAnswer` when the web server did not
     /// answer its sign-in script (asked again next time); for a camera of the family that cannot be asked now, `IPCWebUnavailable` (paused
     /// after a refusal, no answer: asked again next time; or credentials that cannot be sent), and the camera's login refusal
-    /// (`CameraAdapterError.unauthorized` / `.lockedOut`) and `CancellationError` as they are.
+    /// (`CameraAdapterError.unauthorized` / `.lockedOut` / `.loginsPaused`) and `CancellationError` as they are.
     func probe() async throws -> IPCWebDevice? {
         if let probed { return probed }
         guard try await showsItsPage() else {
@@ -246,9 +246,7 @@ actor IPCWebClient {
             throw CameraAdapterError.unsupported("Camera Bridge stopped using the camera's web API after it refused a request")
         }
         // Paused logins (a rejected or locked login, through this API or ONVIF) are not tried: every attempt can extend the lock.
-        if hasCredentials, let until = loginKeys.compactMap({ ONVIFLoginGuard.shared.blockedUntil(host: $0) }).max() {
-            throw CameraAdapterError.lockedOut(until: until)
-        }
+        if hasCredentials, let pause = ONVIFLoginGuard.shared.pause(hosts: loginKeys) { throw pause.error }
         guard let url = endpoint.httpURL(path: "/" + name) else { throw CameraAdapterError.invalidResponse("invalid camera address") }
         let text = Self.envelope(user: tokens.user, password: tokens.password, body: body)
         var request = URLRequest(url: url)

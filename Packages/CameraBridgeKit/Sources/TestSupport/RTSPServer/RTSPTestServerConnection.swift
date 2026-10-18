@@ -109,6 +109,12 @@ final class RTSPTestServerConnection: Sendable {
             if configuration.supportsGetParameter { methods.append("GET_PARAMETER") }
             return (response(200, "OK", cseq: cseq, headers: [("Public", methods.joined(separator: ", "))]), false)
         case "DESCRIBE":
+            if let query = configuration.requiredQuery, URLComponents(string: uri)?.percentEncodedQuery != query {
+                return (response(404, "Not Found", cseq: cseq), false)
+            }
+            if let path = configuration.requiredPath, URLComponents(string: uri)?.percentEncodedPath != path {
+                return (response(404, "Not Found", cseq: cseq), false)
+            }
             if wantsBackchannel, configuration.backchannel == nil {
                 return (response(551, "Option not supported", cseq: cseq, headers: [("Unsupported", Self.backchannelRequire)]), false)
             }

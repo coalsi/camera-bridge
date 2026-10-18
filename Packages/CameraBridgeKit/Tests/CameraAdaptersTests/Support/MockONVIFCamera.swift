@@ -30,6 +30,20 @@ final class MockONVIFCamera: Sendable {
     let renewFaultReason = Box("renew failed")
     /// Every authenticated call answers `NotAuthorized` while set (the camera's ONVIF user has another password).
     let rejectCredentials = Box(false)
+    /// How the device refuses the account Camera Bridge uses a change it signed in for (the Reolink doorbell's ONVIF user and `SetNTP`).
+    enum WriteRefusal: Sendable {
+        /// A SOAP fault with the `ter:NotAuthorized` subcode, as for a wrong password.
+        case notAuthorizedFault
+        /// HTTP 401 without a body.
+        case http401
+    }
+    /// The actions (body element names) refused that way, though the login is right; their reads still answer.
+    let refusedWrites = Box<[String: WriteRefusal]>([:])
+    /// Authenticated calls are answered whatever credentials they carry while set (an ONVIF that asks no password, as the IPCamera Web
+    /// family's can).
+    let openONVIF = Box(false)
+    /// Asked first for every request; an answer it gives is the device's (another API on the same port, such as Reolink's `/api.cgi`).
+    let otherAPI = Box<(@Sendable (MockRequest) -> MockResponse?)?>(nil)
     /// Stream addresses `GetStreamUri` answers per profile token, instead of the default Reolink-like paths (a Dahua/Amcrest camera's
     /// differ only in their query: `/cam/realmonitor?channel=1&subtype=0` and `…subtype=1`).
     let streamURIs = Box<[String: String]>([:])
@@ -90,12 +104,27 @@ final class MockONVIFCamera: Sendable {
         var manualServers: [String] = []
     }
     let dns = Box(DNS())
+    /// How the device keeps the `DNSManual` entries `SetDNS` sends.
+    enum DNSSlots: Sendable, Equatable {
+        /// As sent: they replace every server set by hand (cameras A and B, a Jennov).
+        case asSent
+        /// Two slots, as the IPCamera Web family's page has them ("Patio New"): each entry sent fills its slot (an empty one empties it), a
+        /// slot not sent keeps its server, and the servers set by hand are not shown while the camera takes them from DHCP.
+        case two
+        /// `two`, but a request that names one address twice is refused.
+        case twoRefusingDuplicates
+        /// `two`, but the second slot keeps its server whatever is sent.
+        case twoKeepingSecond
+    }
+    let dnsSlots = Box(DNSSlots.asSent)
     /// `SetDNS` answers a fault while set (a camera whose ONVIF user may not change its network).
     let refuseDNSChanges = Box(false)
     /// `SetDNS` answers success and changes nothing while set.
     let ignoreDNSChanges = Box(false)
     /// The device has no `GetDNS` (answers `ActionNotSupported`).
     let noDNS = Box(false)
+    /// How `GetDNS` shows a slot set by hand that is empty: left out (nil, by default), or as this address ("0.0.0.0", as ISAPI shows one).
+    let emptySlotShownAs = Box<String?>(nil)
     /// Raw bodies of successive `SetDNS` requests.
     let setDNSBodies = Box<[String]>([])
     /// The `GetNetworkDefaultGateway` and `GetNetworkInterfaces` answers: camera A's (addresses changed to documentation ones, its MAC to
@@ -232,6 +261,7 @@ final class MockONVIFCamera: Sendable {
     }
 
     private func handle(_ request: MockRequest, clockOffset: TimeInterval) async -> MockResponse {
+        if let other = otherAPI.value, let answer = other(request) { return answer }
         if request.method == "GET", request.path == "/cgi-bin/api.cgi" {
             guard isDigestAuthorization(request.head.headers["Authorization"]) else { return .digestChallenge() }
             return .full(status: 200, headers: [("Content-Type", "image/jpeg")], body: Self.jpeg)
@@ -254,7 +284,12 @@ final class MockONVIFCamera: Sendable {
             </tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse>
             """)
         }
-        guard !rejectCredentials.value, authorized(envelope) else { return fault("NotAuthorized", "Sender not Authorized") }
+        guard !rejectCredentials.value, openONVIF.value || authorized(envelope) else { return fault("NotAuthorized", "Sender not Authorized") }
+        switch refusedWrites.value[action] {
+        case .notAuthorizedFault: return fault("NotAuthorized", "Sender not Authorized")
+        case .http401: return .status(401)
+        case nil: break
+        }
         switch action {
         case "GetDeviceInformation": return .soap(template("GetDeviceInformationResponse.xml"))
         case "GetCapabilities": return .soap(template("GetCapabilitiesResponse.xml"))
@@ -365,7 +400,9 @@ final class MockONVIFCamera: Sendable {
             let state = dns.value
             let search = state.searchDomains.map { "<tt:SearchDomain>\($0)</tt:SearchDomain>" }.joined()
             let fromDHCP = state.fromDHCP ? state.dhcpServers.map { Self.addressEntry("DNSFromDHCP", $0) }.joined() : ""
-            let manual = state.manualServers.map { Self.addressEntry("DNSManual", $0) }.joined()
+            let slots = emptySlotShownAs.value.map { zero in state.manualServers.map { $0.isEmpty ? zero : $0 } } ?? state.manualServers.filter { !$0.isEmpty }
+            let shown = dnsSlots.value != .asSent && state.fromDHCP ? [] : slots
+            let manual = shown.map { Self.addressEntry("DNSManual", $0) }.joined()
             return self.envelope("<tds:GetDNSResponse><tds:DNSInformation><tt:FromDHCP>\(state.fromDHCP)</tt:FromDHCP>\(search)\(fromDHCP)\(manual)"
                 + "</tds:DNSInformation></tds:GetDNSResponse>")
         case "SetDNS":
@@ -377,10 +414,16 @@ final class MockONVIFCamera: Sendable {
             let search = (set?.children("SearchDomain") ?? []).map(\.text)
             // IPv6 addresses kept in lower case, as cameras echo them.
             let servers = (set?.children("DNSManual") ?? []).compactMap { $0.string("IPv4Address") ?? $0.string("IPv6Address")?.lowercased() }
+            let slots = dnsSlots.value
+            let named = servers.filter { !$0.isEmpty }
+            if slots == .twoRefusingDuplicates, Set(named).count < named.count { return fault("InvalidArgVal", "a DNS server is named twice") }
             dns.update { state in
                 state.fromDHCP = fromDHCP
                 state.searchDomains = search
-                state.manualServers = servers
+                guard slots != .asSent else { state.manualServers = servers; return }
+                var kept = Array((state.manualServers + ["", ""]).prefix(2))
+                for (index, server) in servers.prefix(2).enumerated() where !(slots == .twoKeepingSecond && index == 1) { kept[index] = server }
+                state.manualServers = kept
             }
             return self.envelope("<tds:SetDNSResponse/>")
         case "GetNetworkDefaultGateway": return self.envelope(Self.gatewayAnswer)

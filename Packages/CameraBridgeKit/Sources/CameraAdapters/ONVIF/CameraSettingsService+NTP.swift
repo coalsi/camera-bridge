@@ -3,11 +3,12 @@ import Foundation
 
 /// Where the camera took its time from before the setup pointed it at the bridge.
 public struct CameraTimeSourceBackup: Sendable, Codable, Equatable {
-    /// `.hikvisionISAPI` or `.onvifMinimal`.
+    /// `.hikvisionISAPI`, `.reolinkAPI` or `.onvifMinimal`.
     public var method: CameraConfigMethod
-    /// ISAPI `timeMode` ("NTP", "manual") or ONVIF `DateTimeType` ("NTP", "Manual").
+    /// ISAPI `timeMode` ("NTP", "manual"), ONVIF `DateTimeType` ("NTP", "Manual"), or Reolink's `Ntp.enable` ("NTP" for 1, "manual" for 0).
     public var mode: String
     /// ISAPI: the time server's `addressingFormatType`, `hostName`, `ipAddress` and `portNo` as the camera had them (nil: absent).
+    /// Reolink: `hostName` and `port` are `Ntp.server` and `Ntp.port`.
     public var addressing: String?
     public var hostName: String?
     public var ipAddress: String?
@@ -15,9 +16,11 @@ public struct CameraTimeSourceBackup: Sendable, Codable, Equatable {
     /// ONVIF: servers from DHCP, and the manual ones.
     public var fromDHCP: Bool?
     public var servers: [String]
+    /// Reolink: `Ntp.interval`, minutes between synchronizations (nil: not read, or another camera).
+    public var interval: Int?
 
     public init(method: CameraConfigMethod, mode: String, addressing: String? = nil, hostName: String? = nil, ipAddress: String? = nil,
-                port: String? = nil, fromDHCP: Bool? = nil, servers: [String] = []) {
+                port: String? = nil, fromDHCP: Bool? = nil, servers: [String] = [], interval: Int? = nil) {
         self.method = method
         self.mode = mode
         self.addressing = addressing
@@ -26,14 +29,18 @@ public struct CameraTimeSourceBackup: Sendable, Codable, Equatable {
         self.port = port
         self.fromDHCP = fromDHCP
         self.servers = servers
+        self.interval = interval
     }
 }
 
 /// "Time from the box": the camera's clock set by NTP from the bridge's address (Camera Bridge OS serves time to the local network), so
 /// every camera and the bridge agree without the internet. Hikvision through ISAPI (`/ISAPI/System/time` mode NTP and
-/// `/ISAPI/System/time/ntpServers/1`), other cameras through ONVIF (`SetNTP`, then `SetSystemDateAndTime` with NTP).
+/// `/ISAPI/System/time/ntpServers/1`), Reolink through its own API only (`GetNtp` / `SetNtp`, CameraSettingsService+Reolink.swift: Reolink
+/// refuses ONVIF's writes to its ONVIF user; a backup an earlier build saved through ONVIF is put back that way too), other cameras through
+/// ONVIF (`SetNTP`, then `SetSystemDateAndTime` with NTP).
 extension CameraSettingsService {
     public func readTimeSource(server: String) async throws -> (CameraSetupReading, CameraTimeSourceBackup?) {
+        if vendor == .reolink { return try await readReolinkTimeSource(server: server) }
         let after = "NTP from the bridge (\(server))"
         if vendor == .hikvision, let (time, ntp) = try await isapiTimeDocuments() {
             let backup = Self.isapiTimeBackup(time: time, ntp: ntp)
@@ -56,6 +63,7 @@ extension CameraSettingsService {
 
     /// Points the camera's clock at `server` (an IPv4 address) by NTP, then reads it back.
     public func applyTimeSource(server: String) async throws -> CameraSetupOutcome {
+        if vendor == .reolink { return try await applyReolinkTimeSource(server: server) }
         if vendor == .hikvision, let (time, ntp) = try await isapiTimeDocuments() {
             var current = Self.isapiTimeBackup(time: time, ntp: ntp)
             current.addressing = "ipaddress"
@@ -73,7 +81,7 @@ extension CameraSettingsService {
                 try await client.setDateTime(settings)
             }
         } catch let error as CameraAdapterError where !error.isLoginRefusal {
-            return .refused(Redact.string(String(describing: error)))
+            return .refused(error)
         }
         let ntp = try await client.ntp(), settings = try await client.dateTimeSettings()
         guard ntp.servers == [server], !ntp.fromDHCP, settings.type.caseInsensitiveCompare("NTP") == .orderedSame else {
@@ -82,15 +90,20 @@ extension CameraSettingsService {
         return CameraSetupOutcome(succeeded: true, detail: "via ONVIF")
     }
 
-    /// Puts the camera's time source back as the backup has it.
-    public func restoreTimeSource(_ backup: CameraTimeSourceBackup) async throws -> CameraSetupOutcome {
+    /// Puts the camera's time source back as the backup has it. `bridge`: the bridge's address the setup gave the camera as its time server
+    /// (a Reolink's older backup that names no server is refused only while the camera still asks it).
+    public func restoreTimeSource(_ backup: CameraTimeSourceBackup, bridge: String? = nil) async throws -> CameraSetupOutcome {
         switch backup.method {
         case .hikvisionISAPI:
             return try await writeISAPITimeSource(backup, verify: { now in
                 now.mode.caseInsensitiveCompare(backup.mode) == .orderedSame && (backup.addressing == nil || now.addressing == backup.addressing)
                     && (backup.hostName == nil || now.hostName == backup.hostName) && (backup.ipAddress == nil || now.ipAddress == backup.ipAddress)
             })
+        case .reolinkAPI:
+            return try await restoreReolinkTimeSource(backup)
         default:
+            // A Reolink's backup an earlier build saved through ONVIF goes back through its own API, as the run's change did.
+            if vendor == .reolink, let outcome = try await restoreReolinkTimeSourceFromONVIF(backup, bridge: bridge) { return outcome }
             guard let client = await client() else { return .refused("the camera has no ONVIF device service") }
             do {
                 try await client.setNTP(ONVIFNTPSettings(fromDHCP: backup.fromDHCP ?? false, servers: backup.servers))
@@ -100,7 +113,7 @@ extension CameraSettingsService {
                     try await client.setDateTime(settings)
                 }
             } catch let error as CameraAdapterError where !error.isLoginRefusal {
-                return .refused(Redact.string(String(describing: error)))
+                return .refused(error)
             }
             let ntp = try await client.ntp()
             return ntp.servers == backup.servers ? CameraSetupOutcome(succeeded: true, detail: "via ONVIF") : .refused("the camera kept the bridge as its time server")

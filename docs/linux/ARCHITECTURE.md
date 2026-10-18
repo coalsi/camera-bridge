@@ -57,7 +57,8 @@ POST   /api/v1/auth/login             open: {password} -> {csrfToken, bridgeName
 POST   /api/v1/auth/logout
 POST   /api/v1/auth/password          {current, new}; signs every other browser out
 GET    /api/v1/camera-types           the Mac app's Camera Type page: groups, types, setup steps, what you get, which inputs
-GET    /api/v1/cameras                {cameras: [camera]}; a camera is its CameraConfiguration JSON plus `status` (live state), vendorName, kindName, address
+GET    /api/v1/cameras                {cameras: [camera]}; a camera is its CameraConfiguration JSON plus `status` (live state), vendorName, kindName, address,
+                                      motionSourceName and internetWatched (the Internet guard watches it: the engine's verdict, always there)
 POST   /api/v1/cameras                add: {type, host, httpPort, rtspPort, onvifPort, useHTTPS, username, password, mainStreamURL, subStreamURL, source,
                                       apiKey, unifiCameraID, nestSession, nestDeviceID, name, kind, motionSource, motionSensitivity, motionHoldSeconds,
                                       sensors, audioEnabled, twoWayAudio}; checks the camera again, then adds it (201)

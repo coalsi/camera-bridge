@@ -1,8 +1,9 @@
 import Foundation
 
 /// RC4 (the stream cipher, key scheduling then the keystream XORed in), only for the IPCamera Web family's sign-in: its page sends the MD5 of
-/// "username:password" encrypted with RC4 under the key "pwnsd" (`IPCamWebClient.encrypted(username:password:)`). The protocol fixes it; it
-/// protects nothing (the key is in the camera's own page) and is not used for anything else. Portable: no CryptoKit or CommonCrypto.
+/// "username:password" in uppercase hex, encrypted with RC4 under the key "pwnsd" (`IPCamWebClient.encrypted(username:password:)`). The
+/// protocol fixes it; it protects nothing (the key is in the camera's own page) and is not used for anything else. Portable: no CryptoKit
+/// or CommonCrypto.
 enum IPCamWebRC4 {
     /// `bytes` encrypted (or decrypted: the same operation) under `key`. An empty key gives the bytes back unchanged.
     static func apply(key: [UInt8], to bytes: [UInt8]) -> [UInt8] {

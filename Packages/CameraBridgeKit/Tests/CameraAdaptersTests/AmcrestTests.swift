@@ -288,13 +288,16 @@ final class MockAmcrestCamera: Sendable {
         await #expect(throws: CameraAdapterError.unauthorized) { try await bad.probe() }
         let attempts = camera.loginAttempts.value
         #expect(attempts >= 1)
-        // Every later call, the event stream's included, refuses without sending anything: a camera locks the account after a few.
-        await #expect(throws: CameraAdapterError.self) { try await bad.probe() }
-        await #expect(throws: CameraAdapterError.self) { _ = try await bad.snapshot() }
+        // Every later call, the event stream's included, refuses without sending anything: a camera locks the account after a few. It is
+        // Camera Bridge's own pause, not a lock of the camera's.
+        let paused: @Sendable (any Error) -> Bool = { if case CameraAdapterError.loginsPaused = $0 { true } else { false } }
+        await #expect { try await bad.probe() } throws: { paused($0) }
+        await #expect { _ = try await bad.snapshot() } throws: { paused($0) }
         let source = try #require(bad.makeEventSource())
         let recorder = Recorder(source.events())
-        #expect(await recorder.wait { $0.contains(.authenticationFailed) })
+        try await Task.sleep(for: .milliseconds(200))
         await source.stop()
+        #expect(!recorder.values.contains(.authenticationFailed), "the event stream sent no login, so it reports no refusal of its own")
         #expect(camera.loginAttempts.value == attempts)
         #expect(camera.eventConnections.value == 0)
     }

@@ -52,6 +52,58 @@ final class MockReolinkCamera: Sendable {
     let legacy: Bool
     let leaseTime: Int
 
+    // MARK: Errors, as the HTTP API v8 error table has them
+
+    /// What the next logins answer, in order (`rspCode`, `detail`); an empty queue: the usual check of the user name and password.
+    let loginErrors = Box<[(code: Int, detail: String)]>([])
+    /// What the next calls of a command answer instead of its value, in order (`code` 1 with `error.rspCode`).
+    let errorQueue = Box<[String: [Int]]>([:])
+    /// A `Set…` answered `code` 0 with this `value.rspCode` (and the detail "set config failed") instead of 200.
+    let setRspCodes = Box<[String: Int]>([:])
+    /// Every command's request body as sent, parsed (Login's password included: tests never print it), in order.
+    let bodies = Box<[(cmd: String, body: JSONValue)]>([])
+
+    // MARK: Settings (each `Get…` answers what the camera keeps, each `Set…` changes it)
+
+    /// `GetAbility` permits and versions that differ from the fixture's (module → permit, ver). Device-wide modules `ntp`, `time`, `upnp`,
+    /// `p2p`, `localLink`, `ddns`, and the channel's `enc` and `osd`, are permit 6 (read and write), version 1 unless set here; a module set
+    /// to nil is left out of the answer.
+    let abilities = Box<[String: (permit: Int, ver: Int)?]>([:])
+    /// `GetNtp`'s `Ntp`.
+    let ntp = Box(#"{"enable":1,"interval":1440,"port":123,"server":"pool.ntp.org"}"#)
+    let upnp = Box(#"{"enable":1}"#)
+    /// The camera's UID (made up): Reolink's cloud knows the camera by it. Never logged, kept or sent back.
+    static let uid = "95270000TESTUID0"
+    let p2p = Box(#"{"enable":1,"uid":"\#(MockReolinkCamera.uid)"}"#)
+    /// `GetLocalLink`'s `LocalLink` as the owner's Wi-Fi doorbell would have it (documentation addresses, a documentation MAC).
+    static let localLink = #"{"activeLink":"Wi-Fi","dns":{"auto":1,"dns1":"192.168.77.1","dns2":"192.168.77.1"},"mac":"00:00:5e:00:53:31","#
+        + #""static":{"gateway":"192.168.77.1","ip":"192.168.77.31","mask":"255.255.255.0"},"type":"DHCP"}"#
+    let localLink = Box(MockReolinkCamera.localLink)
+    /// After a `SetLocalLink` it takes, the camera restarts its network: this many requests answer HTTP 503, and its session is gone.
+    let restartAfterLinkWrite = Box(0)
+    /// `GetTime`: `Time.timeZone` as the camera keeps it, whether it counts it east of UTC (the guide's range, -46800…43200, says west, as
+    /// POSIX does), and `Dst` (the US rule, off). `Time`'s clock is the real time in that zone (daylight saving added while `dstNow`).
+    let timeZone = Box(25200)
+    let timeZoneCountsEast = Box(false)
+    static let dst = #"{"enable":0,"endHour":2,"endMin":0,"endMon":11,"endSec":0,"endWeek":1,"endWeekday":0,"offset":1,"startHour":2,"#
+        + #""startMin":0,"startMon":3,"startSec":0,"startWeek":2,"startWeekday":0}"#
+    let dst = Box(MockReolinkCamera.dst)
+    let dstNow = Box(false)
+    /// `GetEnc`'s `Enc` (`SetEnc` changes it) and, with action 1, the `range` (the sizes, frame rates and bit rates the camera takes).
+    let enc = Box(MockReolinkCamera.doorbellEnc)
+    let encRange = Box(MockReolinkCamera.doorbellRange)
+    /// The doorbell's `Enc`, from `Fixtures/reolink/GetEnc.json`.
+    static let doorbellEnc: String = {
+        guard let value = try? JSONValue.parse(try fixture("reolink/GetEnc.json"))[0]?["value"]?["Enc"],
+              let data = try? JSONEncoder().encode(value) else { return "{}" }
+        return String(decoding: data, as: UTF8.self)
+    }()
+    static let doorbellRange = #"[{"audio":"boolean","chnBit":1,"mainStream":{"bitRate":[1024,1536,2048,3072,4096,5120,6144],"#
+        + #""default":{"bitRate":3072,"frameRate":15,"gop":2},"frameRate":[20,18,16,15,12,10,8,6,4,2],"gop":{"max":4,"min":1},"height":1920,"#
+        + #""profile":["Base","Main","High"],"size":"2560*1920","vType":"h264","width":2560},"subStream":{"bitRate":[64,128,160,192,256,384,512],"#
+        + #""default":{"bitRate":256,"frameRate":15,"gop":4},"frameRate":[15,10,7,4],"gop":{"max":4,"min":1},"height":480,"#
+        + #""profile":["Base","Main","High"],"size":"640*480","vType":"h264","width":640}}]"#
+
     var endpoint: CameraEndpoint { CameraEndpoint(host: "127.0.0.1", httpPort: Int(server.port)) }
 
     private init(server: MockHTTPServer, legacy: Bool, leaseTime: Int) {
@@ -95,10 +147,12 @@ final class MockReolinkCamera: Sendable {
         }) {
             return .status(503)
         }
+        if let parsed = try? JSONValue.parse(request.body) { bodies.update { $0.append((cmd, parsed)) } }
         if cmd == "Login" {
             if loginDelay.value > .zero { try? await Task.sleep(for: loginDelay.value) }
             if sessionLimit.value { return error("Login", -5, "max session") }
             if frequentLogins.value { return error("Login", -105, "Frequent logins, please try again later!") }
+            if let answer = loginErrors.update({ $0.isEmpty ? nil : $0.removeFirst() }) { return error("Login", answer.code, answer.detail) }
             guard let body = try? JSONValue.parse(request.body), body[0]?["cmd"]?.string == "Login",
                   let user = body[0]?["param"]?["User"], user["userName"]?.string == "admin", user["password"]?.string == "secret" else {
                 return error("Login", -7, "login failed")
@@ -125,11 +179,23 @@ final class MockReolinkCamera: Sendable {
         }
         guard request.path == "/api.cgi", request.method == "POST",
               let body = try? JSONValue.parse(request.body), body[0]?["cmd"]?.string == cmd else { return error(cmd, -4, "param error") }
+        if let code = errorQueue.update({ queue -> Int? in
+            guard var codes = queue[cmd], !codes.isEmpty else { return nil }
+            let code = codes.removeFirst()
+            queue[cmd] = codes
+            return code
+        }) {
+            return error(cmd, code, "error \(code)")
+        }
+        if let code = setRspCodes.value[cmd] { return value(cmd, #"{"detail":"set config failed","rspCode":\#(code)}"#) }
+        if let answer = settingsAnswer(cmd, body: body) { return answer }
         let s = state.value
         switch cmd {
         case "GetDevInfo": return .json((try? fixtureText("reolink/GetDevInfo-doorbell.json")) ?? "")
-        case "GetAbility": return .json((try? fixtureText("reolink/GetAbility.json")) ?? "")
-        case "GetEnc": return .json((try? fixtureText("reolink/GetEnc.json")) ?? "")
+        case "GetAbility": return .json(abilityAnswer())
+        case "GetEnc":
+            guard body[0]?["action"]?.int == 1 else { return value(cmd, #"{"Enc":\#(enc.value)}"#) }
+            return .json(#"[{"cmd":"GetEnc","code":0,"initial":{"Enc":\#(enc.value)},"range":{"Enc":\#(encRange.value)},"value":{"Enc":\#(enc.value)}}]"#)
         case "GetOsd":
             guard let osd = osd.value else { return error(cmd, -9, "not support") }
             return value(cmd, #"{"Osd":\#(osd)}"#)
@@ -159,6 +225,116 @@ final class MockReolinkCamera: Sendable {
             "vehicle":{"alarm_state":\(s.vehicle),"support":1}}
             """)
         default: return error(cmd, -9, "not support")
+        }
+    }
+
+    /// `Set…` commands sent, with their `param` as sent.
+    var sets: [(cmd: String, param: JSONValue)] {
+        bodies.value.filter { $0.cmd.hasPrefix("Set") }.map { ($0.cmd, $0.body[0]?["param"] ?? .null) }
+    }
+
+    private static func text(_ value: JSONValue) -> String {
+        (try? JSONEncoder().encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "null"
+    }
+
+    private static func object(_ text: String) -> [String: JSONValue] {
+        (try? JSONValue.parse(Data(text.utf8)))?.object ?? [:]
+    }
+
+    /// The fixture's `GetAbility` with the settings modules (and `abilities`' overrides) added.
+    private func abilityAnswer() -> String {
+        guard var root = try? JSONValue.parse(try fixture("reolink/GetAbility.json")).array?.first?.object,
+              var value = root["value"]?.object, var ability = value["Ability"]?.object,
+              var channels = ability["abilityChn"]?.array, var channel = channels.first?.object else { return "[]" }
+        func entry(_ permit: Int, _ ver: Int) -> JSONValue { .object(["permit": .number(Double(permit)), "ver": .number(Double(ver))]) }
+        let overrides = abilities.value
+        for module in ["ntp", "time", "upnp", "p2p", "localLink", "ddns"] {
+            switch overrides[module] {
+            case .some(.some(let set)): ability[module] = entry(set.permit, set.ver)
+            case .some(.none): ability[module] = nil
+            case .none: ability[module] = entry(6, 1)
+            }
+        }
+        for module in ["enc", "osd"] {
+            switch overrides[module] {
+            case .some(.some(let set)): channel[module] = entry(set.permit, set.ver)
+            case .some(.none): channel[module] = nil
+            case .none: channel[module] = entry(6, 1)
+            }
+        }
+        channels[0] = .object(channel)
+        ability["abilityChn"] = .array(channels)
+        value["Ability"] = .object(ability)
+        root["value"] = .object(value)
+        return Self.text(.array([.object(root)]))
+    }
+
+    /// The settings commands; nil for any other.
+    private func settingsAnswer(_ cmd: String, body: JSONValue) -> MockResponse? {
+        let param = body[0]?["param"]
+        func answer(_ key: String, _ stored: String) -> MockResponse { value(cmd, #"{"\#(key)":\#(stored)}"#) }
+        /// `stored` with the keys of `sent` written over it (as the camera keeps a partial `Set…`).
+        func merged(_ stored: String, _ sent: JSONValue?) -> String {
+            var object = Self.object(stored)
+            for (key, item) in sent?.object ?? [:] { object[key] = item }
+            return Self.text(.object(object))
+        }
+        let ok = value(cmd, #"{"rspCode":200}"#)
+        switch cmd {
+        case "GetNtp": return answer("Ntp", ntp.value)
+        case "SetNtp": ntp.set(merged(ntp.value, param?["Ntp"])); return ok
+        case "GetUpnp": return answer("Upnp", upnp.value)
+        case "SetUpnp": upnp.set(merged(upnp.value, param?["Upnp"])); return ok
+        case "GetP2p": return answer("P2p", p2p.value)
+        case "SetP2p": p2p.set(merged(p2p.value, param?["P2p"])); return ok
+        case "GetLocalLink": return answer("LocalLink", localLink.value)
+        case "SetLocalLink":
+            guard let sent = param?["LocalLink"] else { return error(cmd, -4, "param error") }
+            localLink.set(Self.text(sent))
+            if restartAfterLinkWrite.value > 0 {
+                failingRequests.set(restartAfterLinkWrite.value)
+                validToken.set(nil)
+            }
+            return ok
+        case "GetTime":
+            let raw = timeZone.value
+            var east = timeZoneCountsEast.value ? raw : -raw
+            if dstNow.value { east += (Self.object(dst.value)["offset"]?.int ?? 1) * 3600 }
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "UTC")!
+            let local = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: Date().addingTimeInterval(TimeInterval(east)))
+            let time = #"{"day":\#(local.day ?? 1),"hour":\#(local.hour ?? 0),"hourFmt":0,"min":\#(local.minute ?? 0),"mon":\#(local.month ?? 1),"#
+                + #""sec":\#(local.second ?? 0),"timeFmt":"MM/DD/YYYY","timeZone":\#(raw),"year":\#(local.year ?? 2026)}"#
+            return value(cmd, #"{"Dst":\#(dst.value),"Time":\#(time)}"#)
+        case "SetTime":
+            if let sent = param?["Dst"] { dst.set(merged(dst.value, sent)) }
+            if let zone = param?["Time"]?["timeZone"]?.int { timeZone.set(zone) }
+            return ok
+        case "SetEnc":
+            guard let sent = param?["Enc"]?.object else { return error(cmd, -4, "param error") }
+            var stored = Self.object(enc.value)
+            let ranges = (try? JSONValue.parse(Data(encRange.value.utf8)))?.array ?? []
+            for key in ["mainStream", "subStream"] {
+                guard let stream = sent[key]?.object, var kept = stored[key]?.object else { continue }
+                let size = stream["size"]?.string ?? kept["size"]?.string
+                guard let range = ranges.compactMap({ $0[key]?.object }).first(where: { $0["size"]?.string == size }) else {
+                    return error(cmd, -13, "set config failed")
+                }
+                // A value the camera does not offer is refused, as `-13` "set config failed".
+                for (field, list) in [("bitRate", "bitRate"), ("frameRate", "frameRate")] {
+                    if let wanted = stream[field], range[list]?.array?.contains(wanted) == false { return error(cmd, -13, "set config failed") }
+                }
+                if let gop = stream["gop"]?.int, let low = range["gop"]?["min"]?.int, let high = range["gop"]?["max"]?.int, !(low...high).contains(gop) {
+                    return error(cmd, -13, "set config failed")
+                }
+                for field in ["size", "frameRate", "bitRate", "gop", "profile"] { if let item = stream[field] { kept[field] = item } }
+                for field in ["width", "height", "vType"] { kept[field] = range[field] }
+                stored[key] = .object(kept)
+            }
+            enc.set(Self.text(.object(stored)))
+            return ok
+        default:
+            return nil
         }
     }
 }
@@ -259,6 +435,112 @@ final class MockReolinkCamera: Sendable {
         clock.set(clock.value.addingTimeInterval(2))
         _ = try await api.command("GetDevInfo")
         #expect(camera.commands.value.filter { $0 == "Login" }.count == 2)
+    }
+
+    private func loginsSent(_ camera: MockReolinkCamera) -> Int { camera.commands.value.filter { $0 == "Login" }.count }
+
+    /// The HTTP API v8 error table (§4.1), as reolink_aio reads it too: -501 "the user does not exist" and -502 "password err" are wrong
+    /// credentials, as is an answer whose detail says "password wrong"; -503 "login deny" and -506 "login locked" are the camera's own lock
+    /// (no login is sent before it ends, 30 minutes); -500 and -507 (too many addresses, too many logins) pause logins like -5 and -105.
+    @Test func loginAnswersAreReadAsTheV8ErrorTableSays() async throws {
+        let camera = try await MockReolinkCamera.start()
+        defer { camera.stop() }
+        let clock = Box(Date(timeIntervalSince1970: 1_800_000_000))
+        func api() -> ReolinkAPI { ReolinkAPI(endpoint: camera.endpoint, credentials: credentials, sessionLimitCooldown: 300, now: { clock.value }) }
+
+        for answer in [(-501, "The user does not exist"), (-502, "Password err"), (-1, "password wrong")] {
+            camera.loginErrors.set([answer])
+            await #expect(throws: CameraAdapterError.unauthorized, "\(answer)") { _ = try await api().command("GetDevInfo") }
+        }
+        for code in [-503, -506] {
+            camera.loginErrors.set([(code, code == -503 ? "Login deny" : "Login locked")])
+            let locked = api()
+            let before = loginsSent(camera)
+            let lockedOut = CameraAdapterError.lockedOut(until: clock.value.addingTimeInterval(30 * 60))
+            await #expect(throws: lockedOut, "\(code)") { _ = try await locked.command("GetDevInfo") }
+            await #expect(throws: lockedOut, "no login while the camera's lock lasts") { _ = try await locked.snapshot() }
+            #expect(loginsSent(camera) == before + 1)
+        }
+        for code in [-500, -507] {
+            camera.loginErrors.set([(code, "reach the upper limit")])
+            let paused = api()
+            let before = loginsSent(camera)
+            await #expect(throws: CameraAdapterError.apiError(command: "Login", code: code)) { _ = try await paused.command("GetDevInfo") }
+            await #expect(throws: CameraAdapterError.apiError(command: "Login", code: code)) { _ = try await paused.command("GetDevInfo") }
+            #expect(loginsSent(camera) == before + 1, "no second login during the pause")
+            clock.set(clock.value.addingTimeInterval(301))
+            _ = try await paused.command("GetDevInfo")
+        }
+    }
+
+    /// A setting answered `code` 0 with a `value.rspCode` other than 200 did not take (the guide's success is `rspCode` 200; reolink_aio's
+    /// `send_setting` checks it): an API error, not a success.
+    @Test func aSettingAnsweredWithAnotherResponseCodeIsRefused() async throws {
+        let camera = try await MockReolinkCamera.start()
+        defer { camera.stop() }
+        camera.setRspCodes.set(["SetUpnp": -13])
+        let api = ReolinkAPI(endpoint: camera.endpoint, credentials: credentials)
+        await #expect(throws: CameraAdapterError.apiError(command: "SetUpnp", code: -13)) {
+            _ = try await api.command("SetUpnp", param: .object(["Upnp": .object(["enable": .number(0)])]))
+        }
+        _ = try await api.command("GetDevInfo")   // a value without `rspCode` is a value
+    }
+
+    /// A refusal keeps the camera's own detail (cut to a short line, control characters removed), so a step can say it.
+    @Test func aRefusalKeepsTheCamerasDetail() async throws {
+        let camera = try await MockReolinkCamera.start()
+        defer { camera.stop() }
+        camera.setRspCodes.set(["SetUpnp": -4])
+        let api = ReolinkAPI(endpoint: camera.endpoint, credentials: credentials)
+        #expect(try await api.answer("SetUpnp", param: .object(["Upnp": .object(["enable": .number(0)])]))
+                == .refused(code: -4, detail: "set config failed"))
+        camera.errorQueue.set(["GetUpnp": [-9]])
+        #expect(try await api.answer("GetUpnp") == .refused(code: -9, detail: "error -9"))
+        guard case .value(let value, let element) = try await api.answer("GetEnc", param: .object(["channel": .number(0)]), action: 1) else {
+            Issue.record("GetEnc did not answer")
+            return
+        }
+        #expect(value["Enc"]?["mainStream"]?["size"] == .string("2560*1920") && element["range"]?["Enc"]?.array?.count == 1)
+    }
+
+    /// -12, -13 and -17 (the camera did not get the command: a Wi-Fi or battery camera waking up) are asked once more after a short wait, as
+    /// reolink_aio does; a second such answer is the camera's, and other codes are not asked again.
+    @Test func aCommandTheCameraDidNotGetIsAskedOnceMore() async throws {
+        let camera = try await MockReolinkCamera.start()
+        defer { camera.stop() }
+        let api = ReolinkAPI(endpoint: camera.endpoint, credentials: credentials, transientRetryDelay: .milliseconds(10))
+        func sent() -> Int { camera.commands.value.filter { $0 == "GetDevInfo" }.count }
+        camera.errorQueue.set(["GetDevInfo": [-13]])
+        _ = try await api.command("GetDevInfo")
+        #expect(sent() == 2)
+        camera.errorQueue.set(["GetDevInfo": [-17, -12]])
+        await #expect(throws: CameraAdapterError.apiError(command: "GetDevInfo", code: -12)) { _ = try await api.command("GetDevInfo") }
+        #expect(sent() == 4, "once more, not again and again")
+        camera.errorQueue.set(["GetDevInfo": [-4]])
+        await #expect(throws: CameraAdapterError.apiError(command: "GetDevInfo", code: -4)) { _ = try await api.command("GetDevInfo") }
+        #expect(sent() == 5, "a parameter error is the camera's answer")
+    }
+
+    /// A setting refused with a credential code once the session's login worked is a change this account may not make (a camera answers so
+    /// to an account that is not an administrator), not a wrong password: `.notPermitted`, and no new login. A read refused so is a wrong
+    /// password, as before.
+    @Test func aSettingRefusedForTheAccountIsNotAWrongPassword() async throws {
+        let camera = try await MockReolinkCamera.start()
+        defer { camera.stop() }
+        let api = ReolinkAPI(endpoint: camera.endpoint, credentials: credentials)
+        camera.errorQueue.set(["SetOsd": [-27]])
+        await #expect(throws: CameraAdapterError.notPermitted("SetOsd")) { _ = try await api.command("SetOsd", param: .object(["Osd": .object([:])])) }
+        #expect(CameraAdapterError.notPermitted("SetOsd").isLoginRefusal == false)
+        camera.errorQueue.set(["GetOsd": [-27]])
+        await #expect(throws: CameraAdapterError.unauthorized) { _ = try await api.command("GetOsd", param: .object(["channel": .number(0)])) }
+        #expect(loginsSent(camera) == 1)
+    }
+
+    /// Review finding (round two audit): the encoder's frame rate is `frameRate` (GetEnc, SetEnc); `frame` is no field of Reolink's.
+    @Test func theEncoderFrameRateIsFrameRate() {
+        let values = CameraSettingsService.reolinkValues(["frameRate": .number(25), "gop": .number(2), "vType": .string("h264")])
+        #expect(values.frameRate == 25 && values.govLength == 50 && values.codec == "H264")
+        #expect(CameraSettingsService.reolinkValues(["frame": .number(25)]).frameRate == nil)
     }
 
     /// Review finding (W4 round 4): the Add Camera wizard and the Connection sheet probe through a throwaway driver

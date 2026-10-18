@@ -114,6 +114,23 @@ import Testing
         #expect(snapshot.deviceInfo == nil)
     }
 
+    /// The settings page words a pause by whose it is (`HomeKitReadinessAdvisor`): the snapshot says whether the camera locked its logins.
+    @Test func pausedLoginsSayWhetherTheCameraLockedThem() async throws {
+        let camera = try await MockONVIFCamera.start()
+        let host = "127.0.0.1:\(camera.server.port)"
+        defer { camera.stop(); ONVIFLoginGuard.shared.clear(host: host) }
+        let service = CameraSettingsService(endpoint: camera.endpoint, credentials: credentials)
+
+        ONVIFLoginGuard.shared.recordRejection(host: host)
+        let refused = try await service.fetchSnapshot()
+        #expect(!refused.supportsONVIF && refused.onvifLoginPausedUntil != nil)
+        #expect(refused.onvifLoginLockedByCamera == false, "Camera Bridge's own pause after a refused login")
+
+        let until = ONVIFLoginGuard.shared.recordLockout(host: host)
+        let locked = try await service.fetchSnapshot()
+        #expect(locked.onvifLoginPausedUntil == until && locked.onvifLoginLockedByCamera == true)
+    }
+
     @Test func noONVIFServiceStillOffersTheWebPage() async throws {
         // An endpoint nothing answers on (closed port): the service can't build a device service URL that
         // resolves to anything useful, but `webPageURL` is still derived from the endpoint alone.

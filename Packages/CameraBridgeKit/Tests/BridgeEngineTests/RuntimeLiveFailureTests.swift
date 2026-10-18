@@ -27,6 +27,9 @@ final class ScriptedTranscoder: VideoTranscoding {
     let calls = Box(0)
     let softwareRequests = Box(0)
     let invalidations = Box(0)
+    /// Whether frames (to transcode or catch up) came before the first `preferSoftwareDecoding()`; nil until it is asked.
+    let framesBeforeSoftware = Box<Bool?>(nil)
+    private let hadFrames = Box(false)
 
     init(real: any VideoTranscoding, script: Script) {
         self.real = real
@@ -34,12 +37,16 @@ final class ScriptedTranscoder: VideoTranscoding {
     }
 
     func transcode(_ frame: EncodedVideoFrame) async throws -> [EncodedVideoFrame] {
+        hadFrames.set(true)
         let call = calls.value + 1
         calls.set(call)
         return try await script.transcode(call, frame, real)
     }
 
-    func catchUp(_ frames: [EncodedVideoFrame]) async throws -> [EncodedVideoFrame] { try await script.catchUp(frames, real) }
+    func catchUp(_ frames: [EncodedVideoFrame]) async throws -> [EncodedVideoFrame] {
+        hadFrames.set(true)
+        return try await script.catchUp(frames, real)
+    }
     func requestKeyframe() { real.requestKeyframe() }
     func updateBitrate(kbps: Int) { real.updateBitrate(kbps: kbps) }
     func invalidate() {
@@ -48,6 +55,7 @@ final class ScriptedTranscoder: VideoTranscoding {
     }
     var diagnostics: TranscoderDiagnostics { real.diagnostics }
     func preferSoftwareDecoding() {
+        if framesBeforeSoftware.value == nil { framesBeforeSoftware.set(hadFrames.value) }
         softwareRequests.update { $0 += 1 }
         real.preferSoftwareDecoding()
     }
@@ -221,7 +229,13 @@ final class LiveLogCapture: LogSink {
                                             wallClock: Date()))
         }
         let codecs = ScriptedCodecs { _, _, _ in throw ScriptedCodecs.Injected() }
-        let run = try await Self.run(source: PacedFrameSource(frames: frames, fps: 15), codecs: codecs, video: RuntimeLiveStreamTests.video(1280, 720), waitUntilReady: false)
+        // The health check's ladder at its own timing (no picture after 4 s, end at 12 s); only the pauses between the creation attempts
+        // are short. On the fast ladder the first frame came late under load, and its 2 s start limit ended the stream ("no picture was
+        // produced in 2.0 s") before the fourth attempt had failed.
+        var timing = LiveStreamTiming.standard
+        timing.creationBackoff = Self.fast.creationBackoff
+        let run = try await Self.run(source: PacedFrameSource(frames: frames, fps: 15), codecs: codecs, video: RuntimeLiveStreamTests.video(1280, 720),
+                                     timing: timing, waitUntilReady: false)
         #expect(await eventually(timeout: .seconds(8)) { run.ended.sessions.value.contains(run.sessionID) }, "the stream ends: \(run.lines)")
         let pipeline = await run.setup.handler.pipeline(run.sessionID)
         #expect(pipeline?.endedByPipelineReason?.contains("could not be built after 4 attempts") == true, "\(pipeline?.endedByPipelineReason ?? "no reason")")
@@ -297,11 +311,17 @@ final class LiveLogCapture: LogSink {
             }, catchUp: { frames, real in try await real.catchUp(frames) }, invalidate: { $0.invalidate() })
             return ScriptedTranscoder(real: try real(), script: script)
         }
+        // The health check's ladder at its own timing (no picture after 4 s, not the fast 0.6 s): it is not what this test is about, and
+        // when making the first transcoder took longer than 0.6 s (under load) it rebuilt the video path before a keyframe had failed, and
+        // the second transcoder was made without a software decoder.
         let run = try await Self.run(source: syntheticSource(width: 640, height: 360, fps: 15, gop: .milliseconds(60), audio: nil), codecs: codecs,
-                                     video: RuntimeLiveStreamTests.video(320, 240, fps: 15, bitrate: 200))
+                                     video: RuntimeLiveStreamTests.video(320, 240, fps: 15, bitrate: 200), timing: .standard)
         #expect(await eventually(timeout: .seconds(8)) { codecs.made.value.count >= 2 })
         let second = codecs.made.value[1]
-        #expect(second.softwareRequests.value >= 1, "the transcoder made after a keyframe failure decodes in software")
+        // The pipeline asks for the software decoder once the transcoder is made, after it shows up in `made` (making it runs off the
+        // cooperative threads): under load the test looked in between and saw no request yet. It is asked before it has a frame.
+        #expect(await eventually { second.softwareRequests.value >= 1 }, "the transcoder made after a keyframe failure decodes in software")
+        #expect(second.framesBeforeSoftware.value == false, "asked before its first frame")
         #expect(await eventually(timeout: .seconds(8)) { await run.receiver.statistics.videoFrames >= 10 }, "and the stream carries on")
         #expect(run.ended.sessions.value.isEmpty)
         await run.finish()
@@ -501,6 +521,9 @@ final class LiveLogCapture: LogSink {
         #expect(run.lines.filter { $0.hasPrefix("info") && $0.contains("self-check passed") }.count == 1, "later passes are debug lines")
         #expect(run.ended.sessions.value.isEmpty)
         let pipeline = try #require(await run.setup.handler.pipeline(run.sessionID))
+        // The health check gives its verdict at its own tick (once a second), which under load came after the self-check's pass
+        // ("starting": no tick had seen video go out yet). Its first verdict on this healthy stream is "ok".
+        #expect(await eventually(timeout: .seconds(5)) { pipeline.healthSummary != "starting" }, "the health check looked at the stream")
         #expect(pipeline.healthSummary == "ok")
         await run.finish()
     }

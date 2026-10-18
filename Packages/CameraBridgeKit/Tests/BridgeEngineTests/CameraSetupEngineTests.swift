@@ -34,6 +34,15 @@ import Testing
         let port: UInt16
         let documents = Box(FakeHikvision.originals)
         let refusePUT = Box<Set<String>>([])
+        /// PUTs answered 401: the camera refuses the login for that change (its reads take it).
+        let refuseLoginPUT = Box<Set<String>>([])
+        /// PUTs never answered: the connection closes, as when the camera stops answering.
+        let dropPUT = Box<Set<String>>([])
+        /// A PUT to this path waits until `release` is set before it is answered (to hold a setup run or a restore at that change); `held`
+        /// counts the PUTs that waited.
+        let holdPUT = Box<String?>(nil)
+        let release = Box(false)
+        let held = Box(0)
         let puts = Box<[String]>([])
         private let listener: any TCPListener
         private let task = Mutex<Task<Void, Never>?>(nil)
@@ -62,6 +71,14 @@ import Testing
             while true {
                 guard let data = try? await connection.receive(maximumLength: 65_536), let requests = try? parser.feed(data) else { return }
                 for (head, body) in requests {
+                    if head.method == "PUT", dropPUT.value.contains(head.path) {
+                        puts.update { $0.append(head.path) }
+                        return
+                    }
+                    if head.method == "PUT", head.path == holdPUT.value {
+                        held.update { $0 += 1 }
+                        while !release.value { try? await Task.sleep(for: .milliseconds(10)) }
+                    }
                     let (status, text) = answer(head.method, head.path, String(decoding: body, as: UTF8.self))
                     let wire = HTTPSerializer.response(status: status, headers: HTTPHeaders([("Content-Type", "application/xml")]), body: Data(text.utf8))
                     guard (try? await connection.send(wire)) != nil else { return }
@@ -77,6 +94,7 @@ import Testing
             case "PUT":
                 puts.update { $0.append(path) }
                 guard documents.value[path] != nil else { return (404, Self.status(4, "Invalid Operation", "notSupport")) }
+                if refuseLoginPUT.value.contains(path) { return (401, "") }
                 if refusePUT.value.contains(path) { return (403, Self.status(4, "Invalid Operation", "notSupport")) }
                 documents.update { $0[path] = body }
                 return (200, Self.status(1, "OK", "ok"))
@@ -256,6 +274,54 @@ import Testing
         #expect(merged.cloud == nil, "nothing to keep for a step that changes nothing")
         #expect(merged.streams?.mainEncoder == original, "Optimize's undo holds the camera's own settings")
         #expect(merged.cleanPicture == clean && merged.created == created)
+    }
+
+    /// A Reolink time-zone backup from a build before 2026-10-18 kept only the daylight-saving switch (`value`, no `reolinkTime`), which is
+    /// all that build changed: the camera's offset and rule are still its own. The run now writes the offset and the whole rule, so the old
+    /// backup gets the camera's `timeZone` and `Dst` as read now, with the old switch as `Dst.enable`: Restore puts the camera's own back.
+    @Test func anOldReolinkTimeZoneBackupGetsTheZoneAndRuleTheCameraHasNow() {
+        let created = Date(timeIntervalSince1970: 1_000)
+        let now: [String: Int] = ["timeZone": 28_800, "Dst.enable": 0, "Dst.startMon": 3, "Dst.startWeek": 2, "Dst.startWeekday": 0, "Dst.startHour": 2,
+                                  "Dst.endMon": 11, "Dst.endWeek": 1, "Dst.endWeekday": 0, "Dst.endHour": 2, "Dst.offset": 1]
+        let fresh = CameraSetupBackup(version: 1, created: Date(), timeZone: CameraTimeZoneBackup(method: .reolinkAPI, value: "0", reolinkTime: now))
+        let readings: [CameraSetupStepID: CameraSetupReading] = [.timeZone: .init(state: .willChange)]
+        let old = CameraSetupBackup(version: 1, created: created, timeZone: CameraTimeZoneBackup(method: .reolinkAPI, value: "1"))
+
+        let merged = BridgeEngine.mergedSetupBackup(existing: old, fresh: fresh, readings: readings, cleanPicture: nil, optimization: nil)
+        var expected = now
+        expected["Dst.enable"] = 1   // the switch as the old build found it
+        #expect(merged.timeZone == CameraTimeZoneBackup(method: .reolinkAPI, value: "1", reolinkTime: expected))
+        #expect(merged.created == created)
+
+        let kept = CameraSetupBackup(version: 1, created: created, timeZone: CameraTimeZoneBackup(method: .reolinkAPI, value: "1", reolinkTime: ["timeZone": 0]))
+        #expect(BridgeEngine.mergedSetupBackup(existing: kept, fresh: fresh, readings: readings, cleanPicture: nil, optimization: nil).timeZone
+                == kept.timeZone, "a backup with the zone keeps its own")
+        let onvif = CameraSetupBackup(version: 1, created: created, timeZone: CameraTimeZoneBackup(method: .onvifMinimal, value: "PST8PDT", daylightSavings: true))
+        #expect(BridgeEngine.mergedSetupBackup(existing: onvif, fresh: fresh, readings: readings, cleanPicture: nil, optimization: nil).timeZone
+                == onvif.timeZone, "another way's backup is left as it is")
+    }
+
+    /// A Reolink time-source backup an earlier build saved through ONVIF that names no server (the camera took it from DHCP, as ONVIF read
+    /// it) gets the camera's own server, port and interval as `GetNtp` reads them now, when the run changes them (so they are not the
+    /// bridge's): Restore can then put them back. One that names a server keeps its own.
+    @Test func anONVIFTimeSourceBackupWithoutAServerGetsTheCamerasOwn() {
+        let created = Date(timeIntervalSince1970: 1_000)
+        let fresh = CameraSetupBackup(version: 1, created: Date(),
+                                      timeSource: CameraTimeSourceBackup(method: .reolinkAPI, mode: "NTP", hostName: "time.example", port: "124", interval: 60))
+        let readings: [CameraSetupStepID: CameraSetupReading] = [.timeSource: .init(state: .willChange)]
+        let fromDHCP = CameraSetupBackup(version: 1, created: created,
+                                         timeSource: CameraTimeSourceBackup(method: .onvifMinimal, mode: "NTP", fromDHCP: true, servers: []))
+        let merged = BridgeEngine.mergedSetupBackup(existing: fromDHCP, fresh: fresh, readings: readings, cleanPicture: nil, optimization: nil)
+        #expect(merged.timeSource == CameraTimeSourceBackup(method: .onvifMinimal, mode: "NTP", hostName: "time.example", port: "124", fromDHCP: true,
+                                                            servers: [], interval: 60))
+
+        let alreadyRight: [CameraSetupStepID: CameraSetupReading] = [.timeSource: .init(state: .alreadyRight)]
+        #expect(BridgeEngine.mergedSetupBackup(existing: fromDHCP, fresh: fresh, readings: alreadyRight, cleanPicture: nil, optimization: nil).timeSource
+                == fromDHCP.timeSource, "a camera that asks the bridge now: its server is the bridge's")
+        let named = CameraSetupBackup(version: 1, created: created,
+                                      timeSource: CameraTimeSourceBackup(method: .onvifMinimal, mode: "NTP", fromDHCP: false, servers: ["pool.ntp.org"]))
+        #expect(BridgeEngine.mergedSetupBackup(existing: named, fresh: fresh, readings: readings, cleanPicture: nil, optimization: nil).timeSource
+                == named.timeSource)
     }
 }
 #endif

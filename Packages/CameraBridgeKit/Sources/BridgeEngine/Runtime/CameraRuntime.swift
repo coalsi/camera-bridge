@@ -114,6 +114,8 @@ actor CameraRuntime {
     nonisolated let id: UUID
     nonisolated let configuration: CameraConfiguration
     private let credentials: HTTPCredentials?
+    /// The credentials in the camera's stream URLs, from the secret store: its RTSP sessions send them, nothing else sees them.
+    private let streamCredentials: StreamURLCredentials
     private let dependencies: Dependencies
     private let log: Log
     private let store: FileHAPStore
@@ -227,10 +229,12 @@ actor CameraRuntime {
     /// Asks the driver for the battery (`startBatteryPolling`).
     private var batteryTask: Task<Void, Never>?
 
-    init(configuration: CameraConfiguration, credentials: HTTPCredentials?, dependencies: Dependencies) {
+    init(configuration: CameraConfiguration, credentials: HTTPCredentials?, streamCredentials: StreamURLCredentials = .none,
+         dependencies: Dependencies) {
         id = configuration.id
         self.configuration = configuration
         self.credentials = credentials
+        self.streamCredentials = streamCredentials
         self.dependencies = dependencies
         log = Log(category: "Camera", cameraID: configuration.id)
         motionSensitivity = configuration.motionSensitivity
@@ -253,7 +257,7 @@ actor CameraRuntime {
                                         mainStreamURL: configuration.mainStreamURL, subStreamURL: configuration.subStreamURL,
                                         transport: environment.platform.transport, cameraID: configuration.id, reachability: reachability,
                                         integration: configuration.integration, go2rtc: dependencies.go2rtc,
-                                        helpers: environment.platform.helpers)
+                                        helpers: environment.platform.helpers, streamCredentials: streamCredentials)
         }
         onDemand = driver.streamsOnDemand
         panTiltControl = driver.makePanTilt()
@@ -1001,8 +1005,12 @@ actor CameraRuntime {
         rtspAddresses = urls
         let transport = dependencies.environment.platform.transport
         let name = configuration.name
-        let mainSource = StreamSources.rtsp(url: main, credentials: credentials, displayName: name, cameraID: id, transport: transport)
-        let subSource = urls.sub.map { StreamSources.rtsp(url: $0, credentials: credentials, displayName: name, cameraID: id, transport: transport) }
+        let stored = streamCredentials
+        let mainSource = StreamSources.rtsp(url: main, credentials: credentials, streamCredentials: stored, displayName: name, cameraID: id,
+                                            transport: transport)
+        let subSource = urls.sub.map {
+            StreamSources.rtsp(url: $0, credentials: credentials, streamCredentials: stored, displayName: name, cameraID: id, transport: transport)
+        }
         await makeIngest(main: mainSource, sub: subSource,
                          fallback: (StreamSources.reolinkFLV(camera: configuration, credentials: credentials, main: true, displayName: name),
                                     StreamSources.reolinkFLV(camera: configuration, credentials: credentials, main: false, displayName: name)),

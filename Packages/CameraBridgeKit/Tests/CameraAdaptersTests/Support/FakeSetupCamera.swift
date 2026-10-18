@@ -137,6 +137,8 @@ final class FakeSetupCamera: Sendable {
     let ignorePUT = Box<Set<String>>([])
     /// Paths whose document is gone after a `PUT` (the answer is OK).
     let vanishAfterPUT = Box<Set<String>>([])
+    /// An address document `PUT` takes its `PrimaryDNS` only, its `SecondaryDNS` stays as it was (the answer is OK).
+    let keepSecondaryDNS = Box(false)
     /// Every `PUT`, in order: path and body.
     let puts = Box<[(path: String, body: String)]>([])
 
@@ -189,7 +191,12 @@ final class FakeSetupCamera: Sendable {
             puts.update { $0.append((path, request.bodyText)) }
             guard documents.value[path] != nil else { return .xml(Self.status(4, "Invalid Operation", sub: "notSupport"), status: 404) }
             if refusePUT.value.contains(path) { return .xml(Self.status(6, "Invalid Content", sub: "badParameters"), status: 400) }
-            if !ignorePUT.value.contains(path) { documents.update { $0[path] = request.bodyText } }
+            if path == HikvisionISAPI.ipAddressPath, keepSecondaryDNS.value, let old = documents.value[path].flatMap(HikvisionISAPI.dnsServers(in:)),
+               let sent = HikvisionISAPI.dnsServers(in: request.bodyText), let secondary = old.slots.dropFirst().first {
+                documents.update { $0[path] = Self.ipAddress(addressing: old.addressingType ?? "dynamic", primaryDNS: sent.slots[0], secondaryDNS: secondary) }
+            } else if !ignorePUT.value.contains(path) {
+                documents.update { $0[path] = request.bodyText }
+            }
             if vanishAfterPUT.value.contains(path) { documents.update { $0[path] = nil } }
             if rebootRequired.value.contains(path) { return .xml(Self.status(7, "Reboot Required", sub: "rebootRequired")) }
             return .xml(Self.status(1, "OK", sub: "ok"))

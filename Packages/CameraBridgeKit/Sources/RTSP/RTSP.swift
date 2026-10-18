@@ -19,6 +19,9 @@ public struct RTSPConfiguration: Sendable {
     /// The camera this session belongs to: the client's log lines carry it (`LogEntry.cameraID`), so they show in the
     /// camera's own log. nil: untagged (probes before a camera exists).
     public var cameraID: UUID?
+    /// The camera's stream URLs with the credentials it takes in their query or path, from the secret store: when `url` is one of them without
+    /// its credentials, the request lines name that one (`StreamURLCredentials.connectionURL(for:)`). Log lines keep `url`.
+    public var streamCredentials = StreamURLCredentials.none
 
     public init(url: URL, credentials: HTTPCredentials?, requestBackchannel: Bool = false, timeout: Duration = .seconds(10),
                 userAgent: String = "CameraBridge/1.0") {

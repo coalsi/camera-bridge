@@ -21,6 +21,8 @@ import PlatformApple
         let apiCalls = Box(0)
         let resizes = Box<[(Int?, Int?)]>([])
         let keyframeJPEGs = Box(0)
+        /// Camera API calls given up on (cancelled during their delay).
+        let apiAbandoned = Box(0)
         let apiAnswer: Box<Result<Data?, TransportError>>
         let apiDelay: Box<Duration>
         let clock = Box(ContinuousClock.now)
@@ -33,7 +35,12 @@ import PlatformApple
         func provider(hub: MediaHub = MediaHub(), api: Bool = true, timing: SnapshotProvider.Timing = SnapshotProvider.Timing()) -> SnapshotProvider {
             let answer: SnapshotProvider.CameraSnapshot = { @Sendable [self] in
                 apiCalls.update { $0 += 1 }
-                try await Task.sleep(for: apiDelay.value)
+                do {
+                    try await Task.sleep(for: apiDelay.value)
+                } catch {
+                    apiAbandoned.update { $0 += 1 }
+                    throw error
+                }
                 return try apiAnswer.value.get()
             }
             let camera: SnapshotProvider.CameraSnapshot? = api ? answer : nil
@@ -147,9 +154,12 @@ import PlatformApple
         timing.cameraAPITimeout = .milliseconds(200)
         timing.budget = .seconds(2)
         let provider = fixture.provider(hub: hub, timing: timing)
-        let started = ContinuousClock.now
+        // The keyframe within the 2 s budget (past it the request would fail: nothing older stands in), and the camera's 30 s call given
+        // up on: its own 200 ms limit cut it. (The time measured here was the check once; under heavy load timers fire seconds late, and it
+        // measured that, not the provider.)
         #expect(try await provider.snapshot(SnapshotRequest(width: 320, height: 180, reason: .event)) == Data([0xFF, 0xD8, 0x4B]))
-        #expect(ContinuousClock.now - started < .seconds(2))
+        #expect(await eventually { fixture.apiAbandoned.value == 1 }, "the camera's answer was not waited for")
+        #expect(fixture.apiCalls.value == 1 && fixture.keyframeJPEGs.value == 1)
     }
 
     @Test(.timeLimit(.minutes(1))) func noPictureFailsWithinTheBudgetAndAKeyframeArrivingInTimeIsUsed() async throws {
@@ -157,9 +167,10 @@ import PlatformApple
         var timing = SnapshotProvider.Timing()
         timing.budget = .milliseconds(500)
         let empty = fixture.provider(hub: MediaHub(), api: false, timing: timing)
-        let started = ContinuousClock.now
-        await #expect(throws: DeadlineExceeded.self) { _ = try await empty.snapshot(SnapshotRequest(width: 320, height: 180, reason: .event)) }
-        #expect(ContinuousClock.now - started < .seconds(2))
+        // The request's own 500 ms budget is what ends the wait for a picture that never comes. (The time measured here was the check
+        // once; under heavy load timers fire seconds late, and it measured that, not the provider.)
+        let failure = await #expect(throws: DeadlineExceeded.self) { _ = try await empty.snapshot(SnapshotRequest(width: 320, height: 180, reason: .event)) }
+        #expect(failure?.limit == .milliseconds(500))
 
         let hub = MediaHub()
         timing.budget = .seconds(5)

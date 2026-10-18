@@ -86,6 +86,14 @@ import Testing
 
     private func stored(_ fixture: EngineFixture, _ id: UUID) -> CameraConfiguration? { fixture.engine.configurations.first { $0.id == id } }
 
+    /// Every list the engine asked for has reached the box (none is being sent).
+    private func settled(_ fixture: EngineFixture) async -> Bool { await fixture.waitFor { fixture.engine.internetGuard.sync == nil } }
+
+    /// Whether any list the box was sent names the camera.
+    private func everListed(_ box: FakeGuard, _ address: String = cameraAddress) -> Bool {
+        box.lists.value.contains { list in list.contains { $0.address == address } }
+    }
+
     /// A camera at `host` whose Watch is done, as a finished setup leaves it.
     private func watchedCamera(_ fixture: EngineFixture, host: String, name: String) async throws -> CameraConfiguration {
         var camera = CameraConfiguration(name: name, kind: .camera, vendor: .hikvision, endpoint: CameraEndpoint(host: host), username: "admin")
@@ -147,6 +155,7 @@ import Testing
         let saved = try #require(stored(fixture, configuration.id))
         #expect(saved.setupBackup?.internetWatch == CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: ["8.8.8.8", "1.1.1.1"]))
         #expect(saved.setupState?.steps.first { $0.id == .internetWatch }?.status == .done)
+        #expect(saved.setupState?.watchedServer == Self.bridgeAddress, "the address its DNS was read back pointing at")
         #expect(BridgeEngine.internetWatchDone(saved))
         let watched = [GuardedCamera(address: Self.cameraAddress, level: .watch)]
         #expect(await fixture.waitFor { box.last == watched }, "the box watches it once the step is done")
@@ -160,6 +169,95 @@ import Testing
         #expect(camera.documents.value[Self.ipAddressPath] == Self.ipAddress(), "the camera's own servers are back")
         #expect(await fixture.waitFor { box.last == [] }, "and the box no longer watches it")
         #expect(stored(fixture, configuration.id).map(BridgeEngine.internetWatchDone) == false)
+    }
+
+    /// The box's `since` lasts only while the camera is on its list: a run that takes the step again never drops a watched camera, also
+    /// while it saves its first records, nor when it cannot read the camera's DNS this time.
+    @Test func aWatchedCameraStaysListedThroughARerun() async throws {
+        let box = FakeGuard()
+        let fixture = try await fixture(guarded: box)
+        defer { fixture.directory.remove() }
+        let (camera, configuration) = try await setupCamera(fixture)
+        defer { camera.stop() }
+        _ = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        let watched = [GuardedCamera(address: Self.cameraAddress, level: .watch)]
+        #expect(await fixture.waitFor { box.last == watched })
+        #expect(await settled(fixture))
+        let before = box.lists.value.count
+
+        let again = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        #expect(again.steps.first { $0.id == .internetWatch }?.status == .alreadyRight)
+        camera.documents.update { $0[Self.ipAddressPath] = nil }   // the camera does not show its DNS servers this time
+        let unread = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        #expect(unread.steps.first { $0.id == .internetWatch }?.status == .notSupported)
+        #expect(await settled(fixture))
+        #expect(box.lists.value.dropFirst(before).allSatisfy { $0 == watched }, "never a list without it")
+        #expect(box.last == watched)
+        #expect(stored(fixture, configuration.id)?.setupState?.watchedServer == Self.bridgeAddress, "a step it could not read keeps the watch")
+    }
+
+    /// A camera set up by a build before the watch had its own record: its record of the step says done or already right, and it stays
+    /// watched (the box's `since` with it). A refused or not-run record with the DNS servers kept to give back is no longer a watch.
+    @Test func aCameraSavedByAnOlderBuildIsWatchedByItsRecord() async throws {
+        let box = FakeGuard()
+        let fixture = try await fixture(guarded: box)
+        defer { fixture.directory.remove() }
+        let backup = CameraSetupBackup(version: 1, created: Self.now, internetWatch: CameraDNSBackup(method: .onvifMinimal, fromDHCP: true, servers: []))
+        func older(_ status: String) throws -> CameraSetupState {
+            let json = #"{"version":1,"started":814032990,"applied":814032991,"steps":[{"id":"cloud","status":"done","needsRestart":false},"#
+                + #"{"id":"internetWatch","status":"\#(status)","detail":"via ONVIF","needsRestart":false}]}"#
+            return try JSONDecoder().decode(CameraSetupState.self, from: Data(json.utf8))
+        }
+        var ids: [String: UUID] = [:]
+        for (host, status) in [("192.168.77.21", "done"), ("192.168.77.22", "alreadyRight"), ("192.168.77.23", "refused"), ("192.168.77.24", "notRun")] {
+            var camera = CameraConfiguration(name: status, kind: .camera, vendor: .onvif, endpoint: CameraEndpoint(host: host), username: "admin")
+            camera.isEnabled = false
+            try await fixture.engine.addCamera(camera, password: "pa55")
+            let state = try older(status)
+            #expect(state.watchedServer == nil)
+            await fixture.engine.changeConfiguration(camera.id) { configuration in
+                configuration.setupBackup = backup
+                configuration.setupState = state
+            }
+            ids[status] = camera.id
+        }
+        let watched = [GuardedCamera(address: "192.168.77.21", level: .watch), GuardedCamera(address: "192.168.77.22", level: .watch)]
+        #expect(await fixture.waitFor { box.last == watched })
+        #expect(await settled(fixture))
+        #expect(!everListed(box, "192.168.77.23") && !everListed(box, "192.168.77.24"), "the kept servers are not a watch")
+        #expect(stored(fixture, try #require(ids["refused"]))?.setupBackup?.internetWatch == backup.internetWatch, "kept for Restore and removal")
+    }
+
+    /// A camera an older build watched (its record of the step done, no `watchedServer`) stays on the box's list while a setup run takes the
+    /// step again: the run carries the watch over from its first save (the box's `since` lasts only while the camera is listed), and its
+    /// step's result gives the camera its `watchedServer`.
+    @Test func aCameraSavedByAnOlderBuildStaysListedThroughARerun() async throws {
+        let box = FakeGuard()
+        let fixture = try await fixture(guarded: box)
+        defer { fixture.directory.remove() }
+        let (camera, configuration) = try await setupCamera(fixture)
+        defer { camera.stop() }
+        camera.documents.update { $0[Self.ipAddressPath] = Self.ipAddress(primary: Self.bridgeAddress, secondary: Self.bridgeAddress) }
+        let json = #"{"version":1,"started":814032990,"applied":814032991,"steps":[{"id":"cloud","status":"done","needsRestart":false},"#
+            + #"{"id":"internetWatch","status":"done","detail":"via ISAPI","needsRestart":false}]}"#
+        let state = try JSONDecoder().decode(CameraSetupState.self, from: Data(json.utf8))
+        #expect(state.watchedServer == nil)
+        await fixture.engine.changeConfiguration(configuration.id) { configuration in
+            configuration.setupBackup = CameraSetupBackup(version: 1, created: Self.now,
+                                                          internetWatch: CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: ["8.8.8.8", "1.1.1.1"]))
+            configuration.setupState = state
+        }
+        let watched = [GuardedCamera(address: Self.cameraAddress, level: .watch)]
+        #expect(await fixture.waitFor { box.last == watched })
+        #expect(await settled(fixture))
+        let before = box.lists.value.count
+
+        let report = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        #expect(report.steps.first { $0.id == .internetWatch }?.status == .alreadyRight)
+        #expect(await settled(fixture))
+        #expect(box.lists.value.dropFirst(before).allSatisfy { $0 == watched }, "never a list without it")
+        #expect(box.last == watched)
+        #expect(stored(fixture, configuration.id)?.setupState?.watchedServer == Self.bridgeAddress)
     }
 
     @Test func aPartialRestoreThatGaveTheDNSBackStopsTheWatch() async throws {
@@ -176,10 +274,12 @@ import Testing
         #expect(restored.canRestore && restored.steps.first { $0.id == .upnp }?.status == .refused)
         let saved = try #require(stored(fixture, configuration.id))
         #expect(saved.setupBackup?.internetWatch == nil && saved.setupState?.steps.first { $0.id == .internetWatch }?.status == .restored)
+        #expect(saved.setupState?.watchedServer == nil, "its DNS is its own again")
         #expect(await fixture.waitFor { box.last == [] })
     }
 
-    /// Watch has not been tried on many cameras yet: a camera that refuses it still gets every other step (Watch comes last).
+    /// Watch has not been tried on many cameras yet: a camera that refuses it still gets every other step (Watch comes last). It is never
+    /// on the box's list: its DNS servers are kept to give back (saved before the step ran), but its DNS does not point at the bridge.
     @Test func aRefusedWatchStopsNoOtherStep() async throws {
         let box = FakeGuard()
         let fixture = try await fixture(guarded: box)
@@ -193,6 +293,75 @@ import Testing
         for id in [CameraSetupStepID.upnp, .cloud] { #expect(report.steps.first { $0.id == id }?.status == .done, "\(id)") }
         #expect(!report.steps.contains { $0.status == .notRun })
         #expect(CameraSetupStepID.allCases.last == .internetWatch, "and Restore puts the camera's DNS back first")
+
+        let saved = try #require(stored(fixture, configuration.id))
+        #expect(saved.setupBackup?.internetWatch?.servers == ["8.8.8.8", "1.1.1.1"], "kept for Restore and for its removal")
+        #expect(saved.setupState?.watchedServer == nil && !BridgeEngine.internetWatchDone(saved))
+        #expect(await settled(fixture))
+        #expect(!everListed(box), "no list the box got names it")
+    }
+
+    /// A camera that refused an earlier step's login for the API the DNS step uses (ISAPI here) is not asked again: Watch does not run
+    /// (another refused login counts towards the camera's lock), says why, and the camera is not listed.
+    @Test func aRefusedLoginOnTheSameAPILeavesTheWatchNotRunAndUnlisted() async throws {
+        for path in ["/ISAPI/System/Network/UPnP", "/ISAPI/System/Video/inputs/channels/1/overlays"] {
+            let box = FakeGuard()
+            let fixture = try await fixture(guarded: box)
+            defer { fixture.directory.remove() }
+            let (camera, configuration) = try await setupCamera(fixture)
+            defer { camera.stop() }
+            camera.refuseLoginPUT.update { $0.insert(path) }
+            let report = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+            let stopped = try #require(report.stoppedAt, "\(path)")
+            #expect(report.steps.first { $0.id == stopped }?.detail == "the camera refused the login", "\(path)")
+            let watch = try #require(report.steps.first { $0.id == .internetWatch })
+            #expect(watch.status == .notRun, "\(path)")
+            #expect(watch.detail == "the camera refused the login at “\(BridgeEngine.cameraSetupTitle(stopped))”, so Camera Bridge did not try it: "
+                    + "another refused login can lock the camera’s logins", "\(path)")
+            #expect(!camera.puts.value.contains(Self.ipAddressPath), "\(path): the DNS is not written")
+            let saved = try #require(stored(fixture, configuration.id))
+            #expect(saved.setupState?.watchedServer == nil && !BridgeEngine.internetWatchDone(saved), "\(path)")
+            #expect(await settled(fixture))
+            #expect(!everListed(box), "\(path): no list the box got names it")
+        }
+    }
+
+    /// A camera that stopped answering at an earlier step is not asked again for its DNS.
+    @Test func aCameraThatStoppedAnsweringLeavesTheWatchNotRun() async throws {
+        let box = FakeGuard()
+        let fixture = try await fixture(guarded: box)
+        defer { fixture.directory.remove() }
+        let (camera, configuration) = try await setupCamera(fixture)
+        defer { camera.stop() }
+        camera.dropPUT.update { $0.insert("/ISAPI/System/Network/UPnP") }
+        let report = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        #expect(report.stoppedAt == .upnp)
+        let watch = try #require(report.steps.first { $0.id == .internetWatch })
+        #expect(watch.status == .notRun)
+        #expect(watch.detail == "the camera stopped answering at “UPnP off”, so Camera Bridge did not try it")
+        #expect(!camera.puts.value.contains(Self.ipAddressPath))
+        #expect(await settled(fixture))
+        #expect(!everListed(box))
+    }
+
+    /// An earlier step the camera refuses for its own reasons (streams that "didn't stick", here an HTTP 403) stops the steps after it, but
+    /// not Watch: the camera answers, and its DNS is another setting.
+    @Test func aRefusedStreamsStepStillWatchesTheCamera() async throws {
+        let box = FakeGuard()
+        let fixture = try await fixture(guarded: box)
+        defer { fixture.directory.remove() }
+        let (camera, configuration) = try await setupCamera(fixture)
+        defer { camera.stop() }
+        camera.refusePUT.update { $0.insert("/ISAPI/Streaming/channels/101") }
+        let report = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        #expect(report.stoppedAt == .streams, "the run stopped at the streams")
+        #expect(report.steps.first { $0.id == .streams }?.status == .refused)
+        for id in [CameraSetupStepID.upnp, .cloud] { #expect(report.steps.first { $0.id == id }?.status == .notRun, "\(id)") }
+        #expect(camera.documents.value["/ISAPI/System/Network/UPnP"] == CameraSetupEngineTests.FakeHikvision.originals["/ISAPI/System/Network/UPnP"])
+        #expect(report.steps.first { $0.id == .internetWatch }?.status == .done)
+        #expect(camera.documents.value[Self.ipAddressPath] == Self.ipAddress(primary: Self.bridgeAddress, secondary: Self.bridgeAddress))
+        #expect(stored(fixture, configuration.id)?.setupState?.watchedServer == Self.bridgeAddress)
+        #expect(await fixture.waitFor { box.last == [GuardedCamera(address: Self.cameraAddress, level: .watch)] })
     }
 
     @Test func aRefusedListIsTriedAgainAndNeverHoldsTheSetup() async throws {
@@ -402,13 +571,13 @@ import Testing
     @Test func aCameraTheBoxDoesNotWatchIsGreenAtBest() async throws {
         let box = FakeGuard()
         var tuning = Self.tuning()
-        everythingOff(&tuning)
+        everythingOff(&tuning, dns: ["192.168.77.1"])   // it asks the router
         let fixture = try await fixture(guarded: box, tuning: tuning)
         defer { fixture.directory.remove() }
         var camera = CameraConfiguration(name: "Yard", kind: .camera, vendor: .hikvision, endpoint: CameraEndpoint(host: "192.168.77.25"), username: "admin")
         camera.isEnabled = false
         try await fixture.engine.addCamera(camera, password: "pa55")
-        // The box still lists it (an old list), but its Watch is not done here.
+        // The box still lists it (an old list), but its Watch is not done here and its DNS does not point at the bridge.
         box.report.set(report([GuardReport.Camera(address: "192.168.77.25", level: .watch, today: 0, last24h: 0, names: [])]))
         await fixture.engine.pollGuardReport()
         let security = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
@@ -421,6 +590,624 @@ import Testing
         try await mac.engine.addCamera(camera, password: "pa55")
         let there = try await mac.engine.checkCameraSecurity(cameraID: camera.id)
         #expect(there.level == .green && there.internetGuard == nil, "no guard on this bridge: green is the best")
+    }
+
+    // MARK: The camera's DNS, read
+
+    /// What the cameras' DNS servers read as in these tests (the readers themselves: CameraAdaptersTests): `servers` (nil: the camera does not
+    /// show them; the bridge's address twice by default), whether they come from DHCP, an error the next read throws, and every read, by
+    /// camera name, with its time.
+    final class DNSAnswers: Sendable {
+        let servers = Box<[String]?>([InternetGuardEngineTests.bridgeAddress, InternetGuardEngineTests.bridgeAddress])
+        let fromDHCP = Box(false)
+        /// The reading says it does not know which servers DHCP gives (a Reolink on automatic DNS whose ONVIF did not say).
+        let unknown = Box(false)
+        /// Thrown by the next read only.
+        let error = Box<CameraAdapterError?>(nil)
+        let reads = Box<[(camera: String, at: ContinuousClock.Instant, date: Date)]>([])
+
+        func install(_ tuning: inout EngineTuning) {
+            tuning.securityDNS = { [self] camera, _ in
+                reads.update { $0.append((camera.name, .now, Date())) }
+                let thrown = error.update { value -> CameraAdapterError? in
+                    defer { value = nil }
+                    return value
+                }
+                if let thrown { throw thrown }
+                let dhcp = fromDHCP.value
+                if unknown.value {
+                    return CameraDNSReading(servers: [], fromDHCP: true, method: .reolinkAPI,
+                                            backup: CameraDNSBackup(method: .reolinkAPI, fromDHCP: true, servers: ["", ""]), serversUnknown: true)
+                }
+                return servers.value.map { servers in
+                    CameraDNSReading(servers: servers, fromDHCP: dhcp, method: .onvifMinimal,
+                                     backup: CameraDNSBackup(method: .onvifMinimal, fromDHCP: dhcp, servers: dhcp ? [] : servers))
+                }
+            }
+        }
+
+        func count(_ name: String) -> Int { reads.value.filter { $0.camera == name }.count }
+        func times(_ name: String) -> [ContinuousClock.Instant] { reads.value.filter { $0.camera == name }.map(\.at) }
+        func dates(_ name: String) -> [Date] { reads.value.filter { $0.camera == name }.map(\.date) }
+    }
+
+    /// A camera at `host` that was never set up (not running: only the readings are tried).
+    private func plainCamera(_ fixture: EngineFixture, host: String, name: String) async throws -> CameraConfiguration {
+        var camera = CameraConfiguration(name: name, kind: .camera, vendor: .hikvision, endpoint: CameraEndpoint(host: host), username: "admin")
+        camera.isEnabled = false
+        try await fixture.engine.addCamera(camera, password: "pa55")
+        return camera
+    }
+
+    /// A running camera on a loopback fake Hikvision (it answers, so it is reachable), standing for one at `address`.
+    private func runningCamera(_ fixture: EngineFixture, _ fake: CameraSetupEngineTests.FakeHikvision, name: String) async throws -> CameraConfiguration {
+        let camera = CameraConfiguration(name: name, kind: .camera, vendor: .hikvision,
+                                         endpoint: CameraEndpoint(host: "127.0.0.1", httpPort: Int(fake.port), onvifPort: Int(fake.port)), username: "admin")
+        try await fixture.engine.addCamera(camera, password: "pa55")
+        return camera
+    }
+
+    /// A camera whose DNS was pointed at the bridge on the camera itself (no setup run; owner decision, 2026-10-18) is watched from the read
+    /// that finds it: it joins the box's list then (the box's `since` starts there) and grows no setup record. Pointed elsewhere again, it
+    /// leaves the list at the next read.
+    @Test func aCameraPointedAtTheBridgeByHandJoinsTheListAndLeavesItWhenChangedBack() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.servers.set(["192.168.77.1"])   // the router's
+        answers.install(&tuning)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        await fixture.engine.start()   // the log reaches `recentLogs`
+        let first = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(answers.count("Doorbell") == 1, "read although no setup watched it")
+        #expect(first.internetGuard?.watched == false)
+        #expect(await settled(fixture))
+        #expect(!everListed(box, "192.168.77.25"))
+
+        answers.servers.set([Self.bridgeAddress, Self.bridgeAddress])   // both DNS servers set to the bridge on the camera
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        let listed = [GuardedCamera(address: "192.168.77.25", level: .watch)]
+        #expect(await fixture.waitFor { box.last == listed }, "it joins the list at the read that finds it")
+        let saved = try #require(stored(fixture, camera.id))
+        #expect(saved.setupState == nil, "no setup record: the page still says it is not set up")
+        #expect(saved.dnsWatch == CameraDNSWatch(server: Self.bridgeAddress) && BridgeEngine.internetWatchDone(saved))
+        #expect(await fixture.waitFor { fixture.engine.recentLogs.contains { $0.message == "Doorbell: its DNS points at Camera Bridge, so the Internet guard watches it" } })
+        box.report.set(report([GuardReport.Camera(address: "192.168.77.25", level: .watch, since: Date(), today: 0, last24h: 0, names: [])]))
+        await fixture.engine.pollGuardReport()
+        #expect(fixture.status(camera.id)?.security?.internetGuard?.watched == true)
+
+        answers.servers.set(["192.168.77.1"])   // changed back on the camera
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(await fixture.waitFor { box.last == [] }, "it leaves the list")
+        #expect(stored(fixture, camera.id)?.dnsWatch == nil)
+        #expect(fixture.status(camera.id)?.security?.internetGuard?.watched == false)
+        #expect(await fixture.waitFor {
+            fixture.engine.recentLogs.contains { $0.message == "Doorbell: its DNS no longer points at Camera Bridge, so the Internet guard no longer watches it" }
+        })
+        await fixture.tearDown()
+    }
+
+    /// A read that gives nothing changes nothing (owner decision): the camera does not show its DNS servers this time, or it did not answer
+    /// the read. The camera stays on the list and its level keeps the last reading.
+    @Test func anUnreadableReadChangesNothing() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.install(&tuning)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        defer { fixture.directory.remove() }
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        box.report.set(report([GuardReport.Camera(address: "192.168.77.25", level: .watch, since: Date(), today: 0, last24h: 0, names: [])]))
+        await fixture.engine.pollGuardReport()
+        #expect(try await fixture.engine.checkCameraSecurity(cameraID: camera.id).internetGuard?.watched == true)
+        let listed = [GuardedCamera(address: "192.168.77.25", level: .watch)]
+        #expect(await fixture.waitFor { box.last == listed })
+
+        for error in [nil, CameraAdapterError.httpStatus(500)] as [CameraAdapterError?] {
+            if let error { answers.error.set(error) } else { answers.servers.set(nil) }
+            let again = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+            #expect(again.internetGuard?.watched == true, "\(String(describing: error)): the last reading stands")
+            #expect(again.findings.first { $0.feature == .internetGuard }?.sentence.contains("couldn’t read") == false)
+            #expect(stored(fixture, camera.id)?.dnsWatch == CameraDNSWatch(server: Self.bridgeAddress))
+        }
+        #expect(answers.count("Doorbell") == 3)
+        #expect(await settled(fixture))
+        #expect(box.last == listed)
+    }
+
+    /// A camera on automatic DNS whose reading does not know which servers DHCP gives (a Reolink whose ONVIF timed out, refused or paused
+    /// its login, or has no `GetDNS`: "servers unknown", not "no servers") is an unreadable read, which changes nothing (owner decision): a
+    /// camera watched through its router's DHCP stays on the box's list with its watch and its last reading as evidence. A reading that knows
+    /// DHCP gives no server ends the watch, as one of other servers does.
+    @Test func aReadingWhoseServersAreUnknownChangesNothing() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.fromDHCP.set(true)
+        answers.servers.set([Self.bridgeAddress])   // the router hands out the bridge
+        answers.install(&tuning)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        defer { fixture.directory.remove() }
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        box.report.set(report([GuardReport.Camera(address: "192.168.77.25", level: .watch, since: Date().addingTimeInterval(-7200), today: 0, last24h: 0,
+                                                  names: [])]))
+        await fixture.engine.pollGuardReport()
+        #expect(try await fixture.engine.checkCameraSecurity(cameraID: camera.id).internetGuard?.watched == true)
+        let listed = [GuardedCamera(address: "192.168.77.25", level: .watch)]
+        #expect(await fixture.waitFor { box.last == listed })
+        #expect(await settled(fixture))
+        let sent = box.lists.value.count
+
+        answers.unknown.set(true)
+        for _ in 0..<2 {
+            let again = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+            #expect(again.internetGuard?.watched == true, "the last reading stands")
+            #expect(again.findings.first { $0.feature == .internetGuard }?.sentence
+                .hasSuffix("Its DNS servers come from your router, which can change them when it renews the camera’s address.") == true)
+            #expect(stored(fixture, camera.id)?.dnsWatch == CameraDNSWatch(server: Self.bridgeAddress))
+        }
+        await fixture.engine.readGuardDNS(camera.id)   // the guard's own read too
+        #expect(stored(fixture, camera.id)?.dnsWatch == CameraDNSWatch(server: Self.bridgeAddress))
+        #expect(answers.count("Doorbell") == 4)
+        #expect(await settled(fixture))
+        #expect(box.last == listed && box.lists.value.dropFirst(sent).allSatisfy { $0 == listed }, "it never left the list")
+
+        answers.unknown.set(false)
+        answers.servers.set([])   // known: DHCP gives no server
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(await fixture.waitFor { box.last == [] })
+        #expect(stored(fixture, camera.id)?.dnsWatch == nil)
+    }
+
+    /// A camera the setup watched whose DNS was changed back on the camera leaves the list at the next read (the setup's record of what it
+    /// did, and the servers to give back, stay); pointed at the bridge again, it is back on it.
+    @Test func aSetUpCameraChangedBackOnTheCameraLeavesTheListUntilPointedAgain() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning)
+        tuning.securityDNS = nil   // the camera's own answer, through ISAPI
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        defer { fixture.directory.remove() }
+        let (camera, configuration) = try await setupCamera(fixture)
+        defer { camera.stop() }
+        _ = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        let watched = [GuardedCamera(address: Self.cameraAddress, level: .watch)]
+        #expect(await fixture.waitFor { box.last == watched })
+
+        camera.documents.update { $0[Self.ipAddressPath] = Self.ipAddress() }   // its own servers again, set on the camera
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: configuration.id)
+        #expect(await fixture.waitFor { box.last == [] }, "it leaves the list")
+        let saved = try #require(stored(fixture, configuration.id))
+        #expect(saved.setupState?.watchedServer == nil && !BridgeEngine.internetWatchDone(saved))
+        #expect(saved.setupState?.steps.last { $0.id == .internetWatch }?.status == .done, "the setup's record of what it did stays")
+        #expect(saved.setupBackup?.internetWatch?.servers == ["8.8.8.8", "1.1.1.1"], "and the servers to give back")
+
+        camera.documents.update { $0[Self.ipAddressPath] = Self.ipAddress(primary: Self.bridgeAddress, secondary: Self.bridgeAddress) }
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: configuration.id)
+        #expect(await fixture.waitFor { box.last == watched })
+        #expect(stored(fixture, configuration.id)?.setupState?.watchedServer == Self.bridgeAddress)
+    }
+
+    /// A camera that works only through its maker's cloud (a Tapo) is red and never asked what it lets out, but its DNS is its own: it is
+    /// read, and one pointed at the bridge is watched.
+    @Test func aCloudDependentCameraHasItsDNSRead() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        let asked = Box(0)
+        tuning.securityReading = { _, _ in
+            asked.update { $0 += 1 }
+            return []
+        }
+        tuning.rtspAccessProbe = { _ in .off }
+        let answers = DNSAnswers()
+        answers.install(&tuning)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        defer { fixture.directory.remove() }
+        var camera = CameraConfiguration(name: "Patio", kind: .camera, vendor: .onvif, endpoint: CameraEndpoint(host: "192.168.77.44"), username: "admin")
+        camera.manufacturer = "tp-link"
+        camera.model = "C325WB"
+        camera.isEnabled = false
+        try await fixture.engine.addCamera(camera, password: "pa55")
+        let security = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(security.level == .red && security.findings.first?.service == "TP-Link Tapo")
+        #expect(asked.value == 0, "what it lets out is not asked: it works only through TP-Link's cloud")
+        #expect(answers.count("Patio") == 1, "its DNS is read")
+        #expect(await fixture.waitFor { box.last == [GuardedCamera(address: "192.168.77.44", level: .watch)] })
+    }
+
+    /// Every camera the guard can watch has its DNS read again every `guardDNSInterval` (30 min), by itself (what it lets out is not asked
+    /// again) and one camera after the other, never all at once: a change made on the camera is seen at its next read, in its level too.
+    @Test func theDNSIsReadAgainEveryIntervalOneCameraAfterTheOther() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let readings = Box(0)
+        tuning.securityReading = { _, _ in
+            readings.update { $0 += 1 }
+            return []
+        }
+        let answers = DNSAnswers()
+        answers.install(&tuning)
+        tuning.securityChecks = true
+        tuning.securityCheckDelay = .seconds(600)   // only the guard's own reads
+        tuning.guardDNSInterval = .milliseconds(400)
+        tuning.guardCameraAddress = { camera in camera.name == "North" ? "192.168.77.21" : "192.168.77.22" }
+        let northCamera = try await CameraSetupEngineTests.FakeHikvision(), southCamera = try await CameraSetupEngineTests.FakeHikvision()
+        defer {
+            northCamera.stop()
+            southCamera.stop()
+        }
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let north = try await runningCamera(fixture, northCamera, name: "North")
+        _ = try await runningCamera(fixture, southCamera, name: "South")
+        await fixture.engine.start()
+        let both = [GuardedCamera(address: "192.168.77.21", level: .watch), GuardedCamera(address: "192.168.77.22", level: .watch)]
+        #expect(await fixture.waitFor(.seconds(20)) { answers.count("North") >= 3 && answers.count("South") >= 3 })
+        #expect(await fixture.waitFor { box.last == both }, "both ask the bridge")
+        let northTimes = answers.times("North"), southTimes = answers.times("South")
+        #expect(zip(northTimes, northTimes.dropFirst()).allSatisfy { $1 - $0 >= .milliseconds(300) }, "once each interval")
+        #expect(southTimes[0] - northTimes[0] >= .milliseconds(150), "one after the other")
+        #expect(readings.value == 0, "only the DNS is read")
+
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: north.id)
+        box.report.set(report([GuardReport.Camera(address: "192.168.77.21", level: .watch, since: Date(), today: 0, last24h: 0, names: []),
+                               GuardReport.Camera(address: "192.168.77.22", level: .watch, since: Date(), today: 0, last24h: 0, names: [])]))
+        await fixture.engine.pollGuardReport()
+        #expect(fixture.status(north.id)?.security?.internetGuard?.watched == true)
+        answers.servers.set(["192.168.77.1"])   // changed on the cameras
+        #expect(await fixture.waitFor(.seconds(10)) { box.last == [] }, "seen at the next reads, with no check asked for")
+        #expect(await fixture.waitFor { fixture.status(north.id)?.security?.internetGuard?.watched == false }, "the level rests on the newest read")
+        await fixture.tearDown()
+    }
+
+    /// A camera that comes back online after it went offline (it may have just taken a network change) has its DNS read
+    /// `guardDNSReconnectDelay` (2 min) later; its first time online is no return, and neither is a reconnect alone (a camera that streams
+    /// on demand reconnects at every wake).
+    @Test func aCameraBackOnlineIsReadAfterTheDelay() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.install(&tuning)
+        tuning.securityChecks = true
+        tuning.securityCheckDelay = .seconds(600)
+        tuning.guardDNSInterval = .seconds(3600)
+        tuning.guardDNSReconnectDelay = .milliseconds(300)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        await fixture.engine.start()
+        func seen(_ connection: ConnectionState) {
+            var status = CameraStatus(id: camera.id, name: camera.name, kind: camera.kind, vendor: camera.vendor)
+            status.connection = connection
+            fixture.engine.noteGuardConnections([status])
+        }
+        seen(.connecting)
+        seen(.online)
+        #expect(fixture.engine.internetGuard.dnsDue[camera.id] == nil, "its first time online is no return")
+        seen(.connecting)
+        seen(.online)
+        #expect(fixture.engine.internetGuard.dnsDue[camera.id] == nil, "a reconnect alone (an on-demand camera's wake) is no return")
+        seen(.offline("the camera stopped answering"))
+        seen(.connecting)
+        seen(.online)
+        let back = ContinuousClock.now
+        #expect(fixture.engine.internetGuard.dnsDue[camera.id] != nil)
+        #expect(answers.count("Doorbell") == 0)
+        #expect(await fixture.waitFor(.seconds(10)) { answers.count("Doorbell") == 1 })
+        #expect(try #require(answers.times("Doorbell").first) - back >= .milliseconds(250))
+        #expect(await fixture.waitFor { box.last == [GuardedCamera(address: "192.168.77.25", level: .watch)] })
+        await fixture.tearDown()
+    }
+
+    /// A read that meets a login pause (Camera Bridge's own after the camera refused a login: the doorbell after its refused time step)
+    /// reads nothing then; no read runs during the pause, also not on "Check again"; the DNS is read right after the pause ends.
+    @Test func aReadThatMeetsALoginPauseIsDoneRightAfterItEnds() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.install(&tuning)
+        tuning.securityChecks = true
+        tuning.securityCheckDelay = .seconds(600)
+        tuning.guardDNSInterval = .seconds(3600)
+        tuning.guardDNSPauseMargin = .milliseconds(50)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        await fixture.engine.start()
+        let until = Date().addingTimeInterval(2)   // long enough for both checks under a full suite's load
+        answers.error.set(.loginsPaused(until: until))
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(answers.count("Doorbell") == 1 && stored(fixture, camera.id)?.dnsWatch == nil, "nothing read, nothing changed")
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)   // "Check again" during the pause
+        #expect(answers.count("Doorbell") == 1, "no read during the pause")
+        #expect(await fixture.waitFor(.seconds(10)) { answers.count("Doorbell") == 2 }, "read again once it ends")
+        #expect(try #require(answers.dates("Doorbell").last) >= until)
+        #expect(await fixture.waitFor { box.last == [GuardedCamera(address: "192.168.77.25", level: .watch)] }, "the DNS set on the camera is seen")
+        await fixture.tearDown()
+    }
+
+    /// A read whose login the camera refused is not repeated on the guard's own schedule (each would be another wrong password, and cameras
+    /// lock the account after a few): the camera is read again when it is checked, and from then on on schedule again.
+    @Test func aRefusedLoginStopsTheGuardsOwnReadsUntilOneWorks() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.error.set(.unauthorized)
+        answers.install(&tuning)
+        tuning.securityChecks = true
+        tuning.securityCheckDelay = .seconds(600)
+        tuning.guardDNSInterval = .milliseconds(300)
+        let fake = try await CameraSetupEngineTests.FakeHikvision()
+        defer { fake.stop() }
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let camera = try await runningCamera(fixture, fake, name: "Gate")
+        await fixture.engine.start()
+        #expect(await fixture.waitFor(.seconds(20)) { answers.count("Gate") == 1 })
+        try await Task.sleep(for: .milliseconds(1000))   // three of the loop's turns
+        #expect(answers.count("Gate") == 1, "not read again on its own")
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(answers.count("Gate") >= 2, "the check reads it")
+        #expect(await fixture.waitFor(.seconds(10)) { answers.count("Gate") >= 3 }, "a read that worked: on schedule again")
+        await fixture.tearDown()
+    }
+
+    /// DNS the router gives (DHCP) that points only at the bridge is watched (owner decision, 2026-10-18), with a note that the router can
+    /// change it (`CameraDNSReading.pointsAt` takes such a reading).
+    @Test func aCameraOnTheRoutersDNSThatPointsAtTheBridgeIsWatchedWithANote() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.fromDHCP.set(true)
+        answers.install(&tuning)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        defer { fixture.directory.remove() }
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        box.report.set(report([GuardReport.Camera(address: "192.168.77.25", level: .watch, since: Date().addingTimeInterval(-7200), today: 0, last24h: 0,
+                                                  names: [])]))
+        await fixture.engine.pollGuardReport()
+        let given = CameraDNSReading(servers: [Self.bridgeAddress], fromDHCP: true, method: .onvifMinimal,
+                                     backup: CameraDNSBackup(method: .onvifMinimal, fromDHCP: true, servers: []))
+        #expect(given.pointsAt(Self.bridgeAddress))
+        let security = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(security.internetGuard?.watched == true)
+        #expect(security.findings.first { $0.feature == .internetGuard }?.sentence
+            .hasSuffix("Its DNS servers come from your router, which can change them when it renews the camera’s address.") == true)
+        #expect(await fixture.waitFor(.seconds(2)) { box.last == [GuardedCamera(address: "192.168.77.25", level: .watch)] })
+    }
+
+    /// The camera's connection as the status loop sees it (`refreshStatus` → `noteGuardConnections`): an enabled camera with no runtime
+    /// running takes the event router's connection, as a running one's ingest sets it.
+    private func connection(_ fixture: EngineFixture, _ id: UUID, _ state: ConnectionState) async {
+        await fixture.engine.router.setStreamConnection(state, for: id)
+        await fixture.engine.refreshStatus()
+    }
+
+    /// A camera back online after it went offline, seen through the status loop itself (`refreshStatus`), has its DNS read once,
+    /// `guardDNSReconnectDelay` later.
+    @Test func aReturnSeenByTheStatusLoopHasTheDNSReadAfterTheDelay() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.install(&tuning)
+        tuning.securityChecks = true
+        tuning.securityCheckDelay = .seconds(600)
+        tuning.guardDNSInterval = .seconds(3600)
+        tuning.guardDNSReconnectDelay = .milliseconds(300)
+        let fake = try await CameraSetupEngineTests.FakeHikvision()
+        defer { fake.stop() }
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let camera = try await runningCamera(fixture, fake, name: "Doorbell")
+        await fixture.engine.start()
+        await fixture.engine.stopRuntime(camera.id)   // the test sets its connection, as its ingest would
+        #expect(fixture.engine.runtimes[camera.id] == nil)
+        await connection(fixture, camera.id, .online)
+        #expect(fixture.status(camera.id)?.connection == .online)
+        #expect(fixture.engine.internetGuard.dnsDue[camera.id] == nil, "its first time online is no return")
+        await connection(fixture, camera.id, .offline("the camera stopped answering"))
+        await connection(fixture, camera.id, .online)
+        let back = ContinuousClock.now
+        #expect(fixture.engine.internetGuard.dnsDue[camera.id] != nil, "the status loop saw it come back")
+        #expect(await fixture.waitFor(.seconds(10)) { answers.count("Doorbell") == 1 })
+        #expect(try #require(answers.times("Doorbell").first) - back >= .milliseconds(250))
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(answers.count("Doorbell") == 1, "once")
+        await fixture.tearDown()
+    }
+
+    /// A camera whose stream keeps dropping (the Wi-Fi doorbell's) is not read at every return: the reads after a reconnect keep
+    /// `guardDNSSpacing` between them (a Reolink's read is a login of its own), returns close together share one read, and a camera whose
+    /// last read was refused for its login is not read on a return at all.
+    @Test func aCameraThatKeepsDroppingIsReadAtMostOnceEachSpacing() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        let answers = DNSAnswers()
+        answers.install(&tuning)
+        tuning.securityChecks = true
+        tuning.securityCheckDelay = .seconds(600)
+        tuning.guardDNSInterval = .seconds(3600)
+        tuning.guardDNSReconnectDelay = .milliseconds(50)
+        tuning.guardDNSSpacing = .milliseconds(800)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        await fixture.engine.start()
+        func seen(_ connection: ConnectionState) {
+            var status = CameraStatus(id: camera.id, name: camera.name, kind: camera.kind, vendor: camera.vendor)
+            status.connection = connection
+            fixture.engine.noteGuardConnections([status])
+        }
+        // Online, dropped, back: one return, whatever the status loop (which sees this camera disabled) said in between.
+        func flap() {
+            seen(.online)
+            seen(.offline("the camera stopped answering"))
+            seen(.online)
+        }
+        flap()
+        #expect(await fixture.waitFor(.seconds(10)) { answers.count("Doorbell") == 1 })
+        let first = try #require(answers.times("Doorbell").first)
+        flap()
+        flap()
+        flap()
+        #expect(await fixture.waitFor(.seconds(10)) { answers.count("Doorbell") == 2 })
+        let times = answers.times("Doorbell")
+        #expect(times[1] - first >= .milliseconds(700), "no sooner than the spacing after the last read")
+        try await Task.sleep(for: .milliseconds(1200))
+        #expect(answers.count("Doorbell") == 2, "the returns close together shared one read")
+
+        answers.error.set(.unauthorized)
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(fixture.engine.internetGuard.loginRefused.contains(camera.id))
+        let refused = answers.count("Doorbell")
+        flap()
+        #expect(fixture.engine.internetGuard.dnsDue[camera.id] == nil, "a refused login is not tried again on a return")
+        try await Task.sleep(for: .milliseconds(1000))
+        #expect(answers.count("Doorbell") == refused)
+        await fixture.tearDown()
+    }
+
+    /// A security check whose DNS read falls inside a setup run (the check 60 s after a camera is added, during "Set up" right away) waits
+    /// for the run to save what it changed; its reading is from before the run's Watch, so it is no evidence: the camera is read again, and
+    /// the run's own check does not join the stale one. The evidence and the watch then rest on the camera as the run left it.
+    @Test func aReadingTakenDuringASetupRunIsReadAgainAfterIt() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning)
+        tuning.securityDNS = nil   // the camera's own answer, through ISAPI
+        tuning.securityChecks = true
+        tuning.securityCheckDelay = .seconds(600)
+        tuning.guardDNSInterval = .seconds(3600)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let (camera, configuration) = try await setupCamera(fixture)
+        defer { camera.stop() }
+        await fixture.engine.start()
+        let id = configuration.id
+        camera.holdPUT.set("/ISAPI/System/Video/inputs/channels/1/overlays")   // the run holds at Clean picture, before its Watch
+        let run = Task { try await fixture.engine.applyCameraSetup(cameraID: id) }
+        #expect(await fixture.waitFor { camera.held.value == 1 })
+        let check = Task { try await fixture.engine.checkCameraSecurity(cameraID: id) }
+        #expect(await fixture.waitFor { fixture.engine.operations.waiterCount >= 1 }, "the check's reading waits for the run")
+        camera.release.set(true)
+        let report = try await run.value
+        #expect(report.steps.first { $0.id == .internetWatch }?.status == .done)
+        _ = try? await check.value
+        func asksBridge() -> Bool {
+            guard case .read(let reading)? = fixture.engine.securityChecks.records[id]?.dns else { return false }
+            return reading.pointsAt(Self.bridgeAddress)
+        }
+        #expect(await fixture.waitFor(.seconds(10)) { asksBridge() }, "the evidence is the camera after the run: \(String(describing: fixture.engine.securityChecks.records[id]?.dns))")
+        #expect(stored(fixture, id)?.setupState?.watchedServer == Self.bridgeAddress)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(asksBridge(), "and stays so")
+        await fixture.tearDown()
+    }
+
+    /// The same for Restore: a check that read the bridge before a full Restore gave the camera its DNS back waits for it, and then reads
+    /// again: it does not watch the camera again (an older build's record, so the reading wanted to save the watch), and its evidence is
+    /// the camera's own servers.
+    @Test func aReadingTakenDuringARestoreIsReadAgainAfterIt() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning)
+        tuning.securityDNS = nil
+        tuning.securityChecks = true
+        tuning.securityCheckDelay = .seconds(600)
+        tuning.guardDNSInterval = .seconds(3600)
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let (camera, configuration) = try await setupCamera(fixture)
+        defer { camera.stop() }
+        let id = configuration.id
+        camera.documents.update { $0[Self.ipAddressPath] = Self.ipAddress(primary: Self.bridgeAddress, secondary: Self.bridgeAddress) }
+        let older = #"{"version":1,"started":814032990,"applied":814032991,"steps":[{"id":"internetWatch","status":"done","needsRestart":false}]}"#
+        let state = try JSONDecoder().decode(CameraSetupState.self, from: Data(older.utf8))
+        await fixture.engine.changeConfiguration(id) { configuration in
+            configuration.name = "Restored Gate"   // its own name in the log, which the other tests' engines share
+            configuration.setupBackup = CameraSetupBackup(version: 1, created: Self.now,
+                                                          internetWatch: CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: ["8.8.8.8", "1.1.1.1"]))
+            configuration.setupState = state
+        }
+        await fixture.engine.start()
+        #expect(await fixture.waitFor { box.last == [GuardedCamera(address: Self.cameraAddress, level: .watch)] })
+        camera.holdPUT.set(Self.ipAddressPath)   // Restore holds at the DNS it gives back
+        let restore = Task { try await fixture.engine.restoreCameraSetup(cameraID: id) }
+        #expect(await fixture.waitFor { camera.held.value == 1 })
+        let check = Task { try await fixture.engine.checkCameraSecurity(cameraID: id) }
+        #expect(await fixture.waitFor { fixture.engine.operations.waiterCount >= 1 }, "the check's reading waits for the restore")
+        camera.release.set(true)
+        let report = try await restore.value
+        #expect(report.steps.map(\.status) == [.restored] && !report.canRestore)
+        _ = try? await check.value
+        func asksOwn() -> Bool {
+            guard case .read(let reading)? = fixture.engine.securityChecks.records[id]?.dns else { return false }
+            return reading.servers == ["8.8.8.8", "1.1.1.1"]
+        }
+        #expect(await fixture.waitFor(.seconds(10)) { asksOwn() }, "\(String(describing: fixture.engine.securityChecks.records[id]?.dns))")
+        let saved = try #require(stored(fixture, id))
+        #expect(saved.setupState == nil && saved.dnsWatch == nil && !BridgeEngine.internetWatchDone(saved), "not watched again by the stale reading")
+        #expect(await fixture.waitFor { box.last == [] })
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(stored(fixture, id)?.dnsWatch == nil && box.last == [])
+        #expect(!fixture.engine.recentLogs.contains { $0.message == "Restored Gate: its DNS points at Camera Bridge, so the Internet guard watches it" },
+                "the reading from before the restore never watched it again, not even for a moment")
+        await fixture.tearDown()
+    }
+
+    /// The check right after a setup run or a restore (`scheduleSecurityCheck(fresh:)`, `runSecurityCheck(startedAfter:)`) waits for a check
+    /// that began before it and then checks again, instead of taking that check's older readings; any other caller joins the check under way.
+    @Test func aCheckAfterAnOperationDoesNotJoinOneThatBeganBefore() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning)
+        let gate = Box(false)
+        let reads = Box(0)
+        tuning.securityDNS = { _, _ in
+            reads.update { $0 += 1 }
+            while !gate.value { try? await Task.sleep(for: .milliseconds(10)) }
+            return CameraDNSReading(servers: [InternetGuardEngineTests.bridgeAddress], fromDHCP: false, method: .hikvisionISAPI,
+                                    backup: CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: [InternetGuardEngineTests.bridgeAddress]))
+        }
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        defer { fixture.directory.remove() }
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        let first = Task { await fixture.engine.runSecurityCheck(camera) }
+        #expect(await fixture.waitFor { reads.value == 1 })
+        let joined = Task { await fixture.engine.runSecurityCheck(camera) }
+        let after = ContinuousClock.now
+        let fresh = Task { await fixture.engine.runSecurityCheck(camera, startedAfter: after) }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(reads.value == 1, "nothing new while the first one runs")
+        gate.set(true)
+        _ = await first.value
+        _ = await joined.value
+        _ = await fresh.value
+        #expect(reads.value == 2, "the joining call took the first check, the fresh one ran its own")
+    }
+
+    /// A camera watched because its DNS was set on the camera has no servers of its own kept to give back: removing it says to change its
+    /// DNS on the camera (the box stops answering it).
+    @Test func removingACameraWatchedByItsOwnDNSSaysToChangeItOnTheCamera() async throws {
+        let box = FakeGuard()
+        var tuning = Self.tuning()
+        everythingOff(&tuning, dns: nil)
+        DNSAnswers().install(&tuning)
+        tuning.restoresWatchOnRemoval = true
+        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let camera = try await plainCamera(fixture, host: "192.168.77.25", name: "Doorbell")
+        await fixture.engine.start()   // the log reaches `recentLogs`
+        _ = try await fixture.engine.checkCameraSecurity(cameraID: camera.id)
+        #expect(await fixture.waitFor { box.last?.count == 1 })
+        await fixture.engine.removeCamera(id: camera.id)
+        #expect(await fixture.waitFor { box.last == [] })
+        #expect(await fixture.waitFor {
+            fixture.engine.recentLogs.contains { $0.message.hasPrefix("Doorbell: its DNS still points at Camera Bridge (set on the camera)") }
+        })
+        await fixture.tearDown()
     }
 
     // MARK: The notice

@@ -9,33 +9,97 @@ import Synchronization
 // ONVIF manufacturer "A_ONVIF_CAMERA"). Camera Bridge uses their own API next to ONVIF to read what can reach outside the home (the maker's
 // cloud, DDNS, RTMP, extra services, video without a password) and for three steps of "Set up for Camera Bridge".
 
-/// Per camera address (scheme, host, web port): whether the address showed the family's sign-in page, and whether the camera refused
-/// Camera Bridge's sign-in. A refusal stops every request to the address until the camera's next start in the bridge (`ONVIFDriver
-/// .makeNightVision`), so a wrong password is never tried twice. Shared by every client of the address.
+/// Per camera address (scheme, host, web port): whether the address showed the family's sign-in page, whether the camera refused
+/// Camera Bridge's sign-in, and whether its last sign-in called the password insecure. A refusal stops every request to the address. The
+/// camera's next start in the bridge (`cameraStarted`, from `ONVIFDriver.makeNightVision`) gives the sign-in a new try only when the camera's
+/// username or password changed since, or 30 minutes after the refusal: a setup run or a settings change that restarts the camera never
+/// resends a password the camera refused. Nothing is saved, so a restart of Camera Bridge itself (a reboot, an update) tries once more. The credentials are kept only as the SHA-256 of "username:password", in memory: never logged or saved.
+/// Shared by every client of the address.
 final class IPCamWebLatch: Sendable {
     static let shared = IPCamWebLatch()
+    /// How long a refusal holds through the camera's starts while its username and password stay the same.
+    static let refusalHold: TimeInterval = 30 * 60
+
+    private struct Refusal {
+        var at: Date
+        /// `fingerprint` of the credentials the camera refused.
+        var credentials: [UInt8]?
+        /// The camera's code when it said why (532374: no privilege).
+        var code: Int?
+    }
     private struct State {
-        var tripped: Set<String> = []
+        var refused: [String: Refusal] = [:]
         var family: Set<String> = []
+        var insecurePassword: Set<String> = []
     }
     private let state = Mutex(State())
 
     static func key(_ endpoint: CameraEndpoint) -> String { "\(endpoint.httpScheme)://\(endpoint.urlHost):\(endpoint.httpPort)" }
 
-    func isTripped(_ key: String) -> Bool { state.withLock { $0.tripped.contains(key) } }
+    /// The SHA-256 of "username:password" (nil without credentials).
+    static func fingerprint(_ credentials: HTTPCredentials?) -> [UInt8]? {
+        credentials.map { Hashes.sha256(Data("\($0.username):\($0.password)".utf8)) }
+    }
 
-    /// True the first time (the caller says so in the log once).
+    func isTripped(_ key: String) -> Bool { state.withLock { $0.refused[key] != nil } }
+
+    /// Why nothing is sent to the address now (nil while its sign-in may be tried): the account's want of privilege when the camera said
+    /// so (`IPCamWebUnavailable.noPrivilege`), else a refused sign-in (`.paused`).
+    func refusal(_ key: String) -> IPCamWebUnavailable? {
+        state.withLock { state in
+            guard let refusal = state.refused[key] else { return nil }
+            return refusal.code == IPCamWebCameraError.noPrivilege ? .noPrivilege : .paused
+        }
+    }
+
+    /// Keeps the refusal of `credentials`, with the camera's `code` when it gave one. True the first time (the caller says so in the log once).
     @discardableResult
-    func trip(_ key: String) -> Bool { state.withLock { $0.tripped.insert(key).inserted } }
+    func trip(_ key: String, credentials: HTTPCredentials?, code: Int? = nil, now: Date = Date()) -> Bool {
+        let fingerprint = Self.fingerprint(credentials)
+        return state.withLock { state in
+            guard state.refused[key] == nil else { return false }
+            state.refused[key] = Refusal(at: now, credentials: fingerprint, code: code)
+            return true
+        }
+    }
+
+    /// The camera started in the bridge with `credentials`: its page is checked again, and a refused sign-in gets a new try only with
+    /// other credentials, or `refusalHold` after the refusal.
+    func cameraStarted(_ key: String, credentials: HTTPCredentials?, now: Date = Date()) {
+        let fingerprint = Self.fingerprint(credentials)
+        state.withLock { state in
+            state.family.remove(key)
+            if let refusal = state.refused[key], refusal.credentials != fingerprint || now.timeIntervalSince(refusal.at) >= Self.refusalHold {
+                state.refused[key] = nil
+            }
+        }
+    }
 
     func isFamily(_ key: String) -> Bool { state.withLock { $0.family.contains(key) } }
 
     func markFamily(_ key: String) { state.withLock { _ = $0.family.insert(key) } }
 
+    /// The camera's last sign-in answered 532379: it signed Camera Bridge in, but calls the password insecure and asks for a stronger one.
+    func asksForStrongerPassword(_ key: String) -> Bool { state.withLock { $0.insecurePassword.contains(key) } }
+
+    /// What a sign-in answered about the password. True when the camera starts calling it insecure (the caller says so in the log once).
+    @discardableResult
+    func signedIn(_ key: String, insecurePassword: Bool) -> Bool {
+        state.withLock { state in
+            guard insecurePassword else {
+                state.insecurePassword.remove(key)
+                return false
+            }
+            return state.insecurePassword.insert(key).inserted
+        }
+    }
+
+    /// Forgets the address (tests: a fake camera's ephemeral port must not keep what an earlier test left).
     func reset(_ key: String) {
         state.withLock { state in
-            state.tripped.remove(key)
+            state.refused[key] = nil
             state.family.remove(key)
+            state.insecurePassword.remove(key)
         }
     }
 }
@@ -46,27 +110,47 @@ struct IPCamWebNoAnswer: Error, Equatable, CustomStringConvertible {
     var description: String { "the camera’s web server did not answer" }
 }
 
-/// The camera answered a call with an error code (`<root><code>N</code><error>…</error></root>`).
-struct IPCamWebCameraError: Error, Equatable, CustomStringConvertible {
+/// The camera answered a call with an error code (`<root><code>N</code><error>…</error></root>`). The codes are those of the camera's own
+/// page (`land.js`, `common.js`).
+struct IPCamWebCameraError: Error, Equatable, LocalizedError, CustomStringConvertible {
     /// "no option": the camera has no such feature.
     static let noOption = 532229
-    /// The session is no longer known: signed in again once.
-    static let sessionExpired = 531203
-    /// A sign-in answered this way is signed in too.
-    static let alreadySignedIn = 531355
+    /// The session is not valid (the page goes back to its sign-in): a call signs in once more and asks again, once. A sign-in answered
+    /// this way is refused.
+    static let invalidSession = 532227
+    /// "No Privilege": the account Camera Bridge signs in with may not do this.
+    static let noPrivilege = 532374
+    /// A sign-in answered this way is signed in, with a session, but the camera calls the password insecure (its page then asks for a new
+    /// one: 9 to 16 characters with a letter, a digit and a symbol).
+    static let insecurePassword = 532379
 
     var code: Int
-    var description: String { "the camera answered error \(code)" }
+    var description: String {
+        code == Self.noPrivilege
+            ? "the camera says the account Camera Bridge signs in with may not do this (no privilege); use an administrator account in the camera’s settings"
+            : "the camera answered error \(code)"
+    }
+    var errorDescription: String? { description }
 }
 
 /// A camera of the family whose API cannot be used now: its features say why and change nothing.
 struct IPCamWebUnavailable: Error, Equatable, LocalizedError, CustomStringConvertible {
-    static let paused = IPCamWebUnavailable(reason: "the camera refused Camera Bridge’s sign-in, so Camera Bridge stopped asking it until the camera "
-                                            + "restarts in the bridge")
+    static let paused = IPCamWebUnavailable(reason: "the camera did not take Camera Bridge’s sign-in to its web page, so Camera Bridge stopped "
+                                            + "asking it; it tries again once the camera’s username or password changes in Camera Bridge, or "
+                                            + "when the camera restarts in the bridge after 30 minutes")
+    /// The sign-in refused for want of privilege (532374): the account may not use the camera's web page.
+    static let noPrivilege = IPCamWebUnavailable(reason: "the camera says the account Camera Bridge uses has no privilege for its web page (use an "
+                                                 + "administrator account in the camera’s settings), so Camera Bridge stopped asking it; it tries "
+                                                 + "again once the camera’s username or password changes in Camera Bridge, or when the camera "
+                                                 + "restarts in the bridge after 30 minutes")
     static let noCredentials = IPCamWebUnavailable(reason: "Camera Bridge has no username or password for this camera")
     static let noSession = IPCamWebUnavailable(reason: "the camera signed in without giving a session")
 
     let reason: String
+
+    /// The account may not use the camera's web page (`noPrivilege`): a step this stops is a change the account may not make
+    /// (`CameraSetupOutcome.notPermitted`), not a wrong password, so the setup goes on with the steps after it.
+    var notPermitted: Bool { self == Self.noPrivilege }
 
     var description: String { reason }
     var errorDescription: String? { reason }
@@ -74,12 +158,14 @@ struct IPCamWebUnavailable: Error, Equatable, LocalizedError, CustomStringConver
 
 /// A client of one camera's IPCamera Web API. Every call is an HTTP `GET` without a body on the web port: the sign-in
 /// `/cgi/auth.cgi?act=auth&auth=123456&data=<xml>&guid=<ms>`, reads `/cgi/<name>.cgi?get=<what>&auth=<session>&guid=<ms>`, writes
-/// `…?set=<what>&auth=<session>&data=<xml>&guid=<ms>` (every value percent-encoded); answers are `<root>…</root>`. The sign-in value
-/// (`encrypted(username:password:)`) can be turned back into nothing better than the password's hash, but it is still the camera's
-/// login: it goes only to a camera whose page and sign-in script, loaded without it, are the family's (`showsItsPage()`), and never
-/// while the camera's logins are paused (`ONVIFLoginGuard`, shared with ONVIF: the same account). The session is kept and reused; a call
-/// answered "session expired" signs in once more. A refused sign-in trips the address's `IPCamWebLatch` and pauses the camera's logins.
-/// One HTTP client for the client's life; 10 s per request. Nothing the camera answers, no session and no sign-in value is ever logged.
+/// `…?set=<what>&auth=<session>&data=<xml>&guid=<ms>` (each value encoded as the camera's page's browser sends it: `percentEncoded`);
+/// answers are `<root>…</root>`. The sign-in value (`encrypted(username:password:)`) can be turned back into nothing better than the
+/// password's hash, but it is still the camera's login: it goes only to a camera whose page and sign-in script, loaded without it, are the
+/// family's (`showsItsPage()`), and never while the camera's logins are paused (`ONVIFLoginGuard`, shared with ONVIF: the same account).
+/// The session is kept and reused; a call answered 532227 (session not valid) signs in once more. A refused sign-in trips the address's
+/// `IPCamWebLatch` and stops this API only: the family's ONVIF and RTSP may ask no password at all, so ONVIF's logins go on. One HTTP
+/// client for the client's life; 10 s per request. Nothing the camera answers, no session and no sign-in value is ever logged: only the
+/// code of a refused sign-in.
 actor IPCamWebClient {
     static let pageTitle = "IPCamera Web"
     /// The sign-in page names its script relatively (`../js/script/land.js`).
@@ -99,11 +185,14 @@ actor IPCamWebClient {
     private let http: AuthenticatingHTTPClient
     private let latch: IPCamWebLatch
     private let key: String
-    /// `ONVIFLoginGuard`'s keys for this camera ("host:port" of the web port and of the ONVIF port): one account behind both.
+    /// `ONVIFLoginGuard`'s keys for this camera ("host:port" of the web port and of the ONVIF port): one account behind both, so a paused
+    /// ONVIF login stops the sign-in too.
     private let loginKeys: [String]
     private let log: Log
     private var session: String?
     private var signingIn: Task<String, any Error>?
+    /// The camera's last sign-in at this address signed Camera Bridge in but called the password insecure (532379), for the security check.
+    nonisolated var asksForStrongerPassword: Bool { latch.asksForStrongerPassword(key) }
     /// What `showsItsPage()` found once the camera answered.
     private var probed: Bool?
     /// The camera's web server did not answer a page check (`IPCamWebNoAnswer`) during this client's life.
@@ -126,21 +215,26 @@ actor IPCamWebClient {
         return web == onvif ? [web] : [web, onvif]
     }
 
-    /// The sign-in value: the lowercase MD5 of "username:password" (`WyzeMD5`, the same RFC 1321 hash), encrypted with RC4 under "pwnsd",
-    /// in lowercase hex.
+    /// The sign-in value: the MD5 of "username:password" (`WyzeMD5`, the same RFC 1321 hash) in UPPERCASE hex, as the camera's page has it
+    /// (its `md5-min.js` uppercases), encrypted with RC4 under "pwnsd", in lowercase hex. A camera never matches the lowercase hash.
     static func encrypted(username: String, password: String) -> String {
-        IPCamWebRC4.hex(IPCamWebRC4.apply(key: signInKey, to: Array(WyzeMD5.hex(username + ":" + password).utf8)))
+        IPCamWebRC4.hex(IPCamWebRC4.apply(key: signInKey, to: Array(WyzeMD5.hex(username + ":" + password).uppercased().utf8)))
     }
 
-    /// `text` with every byte outside the unreserved characters (letters, digits, `-._~`) as `%XX`, so the camera reads the XML exactly.
+    /// What a query value keeps as it is: the bytes the camera's page's browser sends raw. The page appends the XML to the URL unencoded,
+    /// and the browser encodes only the WHATWG URL standard's special-query set (controls, space, `"`, `#`, `'`, `<`, `>`, and what is not
+    /// ASCII), so `=`, `/`, `?` and `:` go raw. Also encoded here: what would change the query's meaning (`&`, `+`, `%`) and what a URL
+    /// can't carry raw (`[`, `\`, `]`, `^`, `` ` ``, `{`, `|`, `}`).
+    private static let rawInQuery = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~!$()*,;:@/?=".utf8)
+
+    /// `text` as the camera's page's browser puts it in the query (`rawInQuery`; every other byte as `%XX`): the camera reads the XML
+    /// exactly, from the same bytes it gets from its own page.
     static func percentEncoded(_ text: String) -> String {
         var out = ""
         for byte in text.utf8 {
-            switch byte {
-            case UInt8(ascii: "a")...UInt8(ascii: "z"), UInt8(ascii: "A")...UInt8(ascii: "Z"), UInt8(ascii: "0")...UInt8(ascii: "9"),
-                 UInt8(ascii: "-"), UInt8(ascii: "."), UInt8(ascii: "_"), UInt8(ascii: "~"):
+            if rawInQuery.contains(byte) {
                 out.unicodeScalars.append(Unicode.Scalar(byte))
-            default:
+            } else {
                 out += String(format: "%%%02X", byte)
             }
         }
@@ -208,12 +302,15 @@ actor IPCamWebClient {
         }
     }
 
-    /// `set=<what>` with `<?xml version='1.0'?><root>` + `element` + `</root>`, as the camera's page writes it.
+    /// `set=<what>` with `<?xml version='1.0'?><root>` + `element` + `</root>`, as the camera's page writes it. A write the camera answers
+    /// 532374 ("No Privilege") once it signed Camera Bridge in is a change the account may not make: `CameraAdapterError.notPermitted`
+    /// (owner decision, 2026-10-18: no wrong password, nothing latched, the setup's other steps still run).
     func write(_ what: String, element: String, cgi: String = "network") async throws {
         _ = try await call(cgi, op: "set", what: what, data: "<?xml version='1.0'?><root>\(element)</root>")
     }
 
-    /// One call with the session (signing in first when there is none); a "session expired" answer signs in once more and asks again.
+    /// One call with the session (signing in first when there is none); a 532227 answer (the session is not valid) signs in once more and
+    /// asks again. A write answered 532374 throws `CameraAdapterError.notPermitted` ("set mobile"), any other code `IPCamWebCameraError`.
     private func call(_ cgi: String, op: String, what: String, data: String?) async throws -> String {
         for attempt in 0..<2 {
             let current = try await validSession()
@@ -223,49 +320,68 @@ actor IPCamWebClient {
             let answer = try await send("/cgi/\(cgi).cgi", items)
             guard answer.contains("<root") else { throw CameraAdapterError.invalidResponse("\(op) \(what): not the camera's answer") }
             if let code = Self.code(in: answer), code != 0 {
-                if code == IPCamWebCameraError.sessionExpired, attempt == 0 {
+                if code == IPCamWebCameraError.invalidSession, attempt == 0 {
                     if session == current { session = nil }
                     continue
+                }
+                if code == IPCamWebCameraError.noPrivilege, op == "set" {
+                    log.info("The camera's web API does not let this account change \(what) (code \(code): no privilege)")
+                    throw CameraAdapterError.notPermitted("\(op) \(what)")
                 }
                 throw IPCamWebCameraError(code: code)
             }
             return answer
         }
-        throw IPCamWebCameraError(code: IPCamWebCameraError.sessionExpired)
+        throw IPCamWebCameraError(code: IPCamWebCameraError.invalidSession)
+    }
+
+    /// Signs in now when there is no session yet (the setup asks first, so a refusal is a reason its steps give, not an error in one).
+    func signIn() async throws {
+        _ = try await validSession()
     }
 
     private func validSession() async throws -> String {
         if let session { return session }
         if let signingIn { return try await signingIn.value }
-        let task = Task { try await self.signIn() }
+        let task = Task { try await self.newSession() }
         signingIn = task
         defer { if signingIn == task { signingIn = nil } }
         return try await task.value
     }
 
-    /// Signs in: only to a camera of the family, never while its logins are paused or after it refused one.
-    private func signIn() async throws -> String {
+    /// Signs in: only to a camera of the family, never while its logins are paused or after it refused one. Answered 0, or 532379 (signed
+    /// in, but the camera calls the password insecure), with an `authid`: the session. Any other code is a refusal, as on the camera's page
+    /// ("Login Failed!"); an answer without a code is not the camera's (`invalidResponse`). Either stops this API only (`refused`).
+    private func newSession() async throws -> String {
         guard let credentials else { throw IPCamWebUnavailable.noCredentials }
         guard try await showsItsPage() else { throw CameraAdapterError.unsupported("the camera is not of the IPCamera Web family") }
-        guard !latch.isTripped(key) else { throw IPCamWebUnavailable.paused }
-        if let until = loginKeys.compactMap({ ONVIFLoginGuard.shared.blockedUntil(host: $0) }).max() { throw CameraAdapterError.lockedOut(until: until) }
+        if let refusal = latch.refusal(key) { throw refusal }
+        if let pause = ONVIFLoginGuard.shared.pause(hosts: loginKeys) { throw pause.error }   // the camera's lock, or Camera Bridge's own pause
         let data = "<?xml version='1.0'?><root><mode>1</mode><encrypt>\(Self.encrypted(username: credentials.username, password: credentials.password))</encrypt></root>"
         let answer = try await send("/cgi/auth.cgi", [("act", "auth"), ("auth", Self.signInAuth), ("data", data), ("guid", Self.millis())])
-        let code = Self.code(in: answer)
-        if code == 0 || code == IPCamWebCameraError.alreadySignedIn {
-            guard let id = Self.text("authid", in: answer), !id.isEmpty else { throw IPCamWebUnavailable.noSession }
-            session = id
-            log.debug("Signed in to the camera's web API")
-            return id
+        guard answer.contains("<root"), let code = Self.code(in: answer) else {
+            refused("answered Camera Bridge's sign-in without a code")
+            throw CameraAdapterError.invalidResponse("the sign-in's answer has no code")
         }
-        refused("the camera refused the sign-in")
-        for key in loginKeys { ONVIFLoginGuard.shared.recordRejection(host: key) }
-        throw CameraAdapterError.unauthorized
+        let insecure = code == IPCamWebCameraError.insecurePassword
+        guard code == 0 || insecure else {
+            let noPrivilege = code == IPCamWebCameraError.noPrivilege
+            refused("refused Camera Bridge's sign-in (code \(code)\(noPrivilege ? ": no privilege" : ""))", code: code)
+            throw noPrivilege ? IPCamWebCameraError(code: code) : CameraAdapterError.unauthorized
+        }
+        guard let id = Self.text("authid", in: answer), !id.isEmpty else { throw IPCamWebUnavailable.noSession }
+        session = id
+        if latch.signedIn(key, insecurePassword: insecure) {
+            log.warning("The camera signed Camera Bridge in to its web API, but it calls the camera's password insecure and asks for a stronger "
+                        + "password (9 to 16 characters with a letter, a digit and a symbol): change it in the camera's web page, then in Camera Bridge")
+        }
+        log.debug("Signed in to the camera's web API")
+        return id
     }
 
     /// One `GET`. The URL holds the session or the sign-in value: it is never put in an error or the log.
     private func send(_ path: String, _ items: [(String, String)]) async throws -> String {
-        guard !latch.isTripped(key) else { throw IPCamWebUnavailable.paused }
+        if let refusal = latch.refusal(key) { throw refusal }
         let query = items.map { "\($0.0)=\(Self.percentEncoded($0.1))" }.joined(separator: "&")
         guard let base = endpoint.httpURL(path: path), let url = URL(string: base.absoluteString + "?" + query) else {
             throw CameraAdapterError.invalidResponse("invalid camera address")
@@ -277,18 +393,21 @@ actor IPCamWebClient {
             throw CameraHTTP.sanitized(error)
         }
         if response.statusCode == 401 || response.statusCode == 403 {
-            refused("HTTP \(response.statusCode)")
-            for key in loginKeys { ONVIFLoginGuard.shared.recordRejection(host: key) }
+            refused("refused Camera Bridge (HTTP \(response.statusCode))")
             throw CameraAdapterError.unauthorized
         }
         guard (200..<300).contains(response.statusCode) else { throw CameraAdapterError.httpStatus(response.statusCode) }
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func refused(_ why: String) {
-        guard latch.trip(key) else { return }
-        log.warning("The camera's web API refused Camera Bridge's sign-in (\(why)): Camera Bridge stops asking it until the camera restarts in the "
-                    + "bridge, so the camera does not lock its account")
+    /// Trips the latch for this API only. ONVIF's logins are not paused: the family's ONVIF and RTSP may ask no password at all (the
+    /// owner's camera's don't), and pausing them stopped the camera's events and snapshots for 2 minutes at every start, for nothing.
+    /// `what` names the camera's answer (its code, or an HTTP status): never the URL, the sign-in value, a session or the answer's text;
+    /// `code` is kept with the refusal, so a want of privilege is said as such (`IPCamWebLatch.refusal`).
+    private func refused(_ what: String, code: Int? = nil) {
+        guard latch.trip(key, credentials: credentials, code: code) else { return }
+        log.warning("The camera's web API \(what): Camera Bridge stops asking it until the camera's username or password changes in Camera "
+                    + "Bridge, or the camera restarts in the bridge after 30 minutes, so the camera does not lock its account")
     }
 
     /// The answer's `<code>`, nil when it has none.

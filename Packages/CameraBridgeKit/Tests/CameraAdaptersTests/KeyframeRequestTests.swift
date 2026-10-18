@@ -94,6 +94,12 @@ import Testing
         await #expect { try await driver.requestKeyframe(subStream: false) } throws: { error in
             if case CameraAdapterError.lockedOut = error { true } else { false }
         }
+        // Camera Bridge's own pause after a refused login reads as that, not as the camera's lock.
+        forgetLogins(camera.endpoint)
+        ONVIFLoginGuard.shared.recordRejection(host: "\(camera.endpoint.host):\(camera.endpoint.httpPort)")
+        await #expect { try await driver.requestKeyframe(subStream: false) } throws: { error in
+            if case CameraAdapterError.loginsPaused = error { true } else { false }
+        }
         #expect(camera.server.requests.isEmpty)
     }
 
@@ -150,7 +156,7 @@ import Testing
         camera.rejectCredentials.set(true)
         let driver = ONVIFDriver(endpoint: camera.endpoint, credentials: HTTPCredentials(username: "admin", password: "wrong"), mainStreamURL: nil, subStreamURL: nil,
                                  transport: PlatformNetworkTransport(), keyframeGuard: CameraKeyframeGuard(spacing: .zero))
-        // The first refused login throws as `.unauthorized` or, when the profile listing's follow-up calls meet the pause it set, `.lockedOut`.
+        // The refused login throws `.unauthorized`, and so do the profile listing's follow-up calls that meet the pause it set.
         await #expect { try await driver.requestKeyframe(subStream: false) } throws: { error in (error as? CameraAdapterError)?.isLoginRefusal == true }
         let sent = camera.server.requests.count
         for _ in 0..<3 { await #expect(throws: CameraAdapterError.self) { try await driver.requestKeyframe(subStream: false) } }
@@ -173,6 +179,26 @@ import Testing
         }
         await #expect(throws: CameraAdapterError.self) { try await driver.requestKeyframe(subStream: false) }
         #expect(camera.synchronizationPoints.value == ["000"], "asked once")
+    }
+
+    /// A camera that signs the account in but refuses it `SetSynchronizationPoint` (`.notPermitted`, as the Reolink doorbell's ONVIF user
+    /// is refused its writes) is not asked again at every spacing: the guard marks it as having no keyframe request for this account.
+    @Test func onvifKeyframeRequestTheAccountMayNotMakeIsNotAskedAgain() async throws {
+        let camera = try await MockONVIFCamera.start()
+        ONVIFLoginGuard.shared.clear(host: "127.0.0.1:\(camera.server.port)")
+        defer {
+            camera.stop()
+            ONVIFLoginGuard.shared.clear(host: "127.0.0.1:\(camera.server.port)")
+        }
+        camera.refusedWrites.set(["SetSynchronizationPoint": .notAuthorizedFault])
+        let driver = ONVIFDriver(endpoint: camera.endpoint, credentials: HTTPCredentials(username: MockONVIFCamera.username, password: MockONVIFCamera.password),
+                                 mainStreamURL: nil, subStreamURL: nil, transport: PlatformNetworkTransport(), keyframeGuard: CameraKeyframeGuard(spacing: .zero))
+        await #expect { try await driver.requestKeyframe(subStream: false) } throws: { error in
+            if case CameraAdapterError.unsupported = error { true } else { false }
+        }
+        await #expect(throws: CameraAdapterError.self) { try await driver.requestKeyframe(subStream: false) }
+        #expect(camera.actions.value.filter { $0 == "SetSynchronizationPoint" }.count == 1, "asked once")
+        #expect(ONVIFLoginGuard.shared.pause(host: "127.0.0.1:\(camera.server.port)") == nil, "no login pause")
     }
 }
 #endif

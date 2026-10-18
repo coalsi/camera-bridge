@@ -14,7 +14,7 @@ Amcrest cameras and doorbells are Dahua-built and share its HTTP API; Dahua's ow
   - `VideoBlind`, `VideoUnFocus`, `VideoAbnormalDetection` → tamper; `AudioMutation`, `AudioAnomaly`, `AudioIntensity` → sound alarm; `AlarmLocal` → alarm input;
   - **doorbell press:** `CallNoAnswered`, `PhoneCallDetect`, `_DoTalkAction_` with `Action: Invite` (Amcrest AD110/AD410), `BackKeyLight` with state 1 or 2 (Dahua VTO). Presses within three seconds count once.
 - **Snapshots:** `snapshot.cgi?channel=1` (a vendor block some firmware appends after the JPEG is cut off).
-- **Login safety:** after one rejected login Camera Bridge sends nothing more to the camera's API for two minutes (shared with ONVIF), and the event channel then waits ten minutes: Amcrest and Dahua cameras lock accounts after a few wrong passwords, which would also block the stream.
+- **Login safety:** after one rejected login Camera Bridge sends nothing more to the camera's API for two minutes (shared with ONVIF; an event channel that meets this pause waits for it, one refused itself waits ten minutes): Amcrest and Dahua cameras lock accounts after a few wrong passwords, which would also block the stream.
 
 ## What does not
 

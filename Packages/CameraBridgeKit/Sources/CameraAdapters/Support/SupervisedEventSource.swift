@@ -14,7 +14,7 @@ struct ReconnectPolicy: Sendable {
     /// attempt is a failed login, and cameras lock the client out after a few (Hikvision: ~30 min after 5–7 illegal
     /// logins, which would also block RTSP after the user fixes the password), so this is minutes, not seconds.
     var delayAfterUnauthorized: Duration = .seconds(600)
-    /// Waited on top of a login pause (`CameraAdapterError.lockedOut(until:)`) before the next attempt.
+    /// Waited on top of a login pause (`CameraAdapterError.lockedOut(until:)` / `.loginsPaused(until:)`) before the next attempt.
     var marginAfterLoginPause: Duration = .seconds(1)
     /// Backoff for sessions that connected but ended before `healthyAfter` (a camera that accepts the subscription and then
     /// drops it: Tapo's PullPoint, which closes a request idle for 10 s). nil: the same backoff as failed attempts. Without
@@ -26,7 +26,7 @@ struct ReconnectPolicy: Sendable {
     /// The delay before the next attempt, after a session that `connected` (or not), lasted `lasted` and ended with
     /// `error` (nil: the camera closed the channel). Advances or resets the backoff.
     mutating func delay(connected: Bool, lasted: Duration, error: (any Error)?, now: Date = Date()) -> Duration {
-        if case CameraAdapterError.lockedOut(let until)? = error {
+        if let until = Self.pauseEnd(error) {
             // No login was tried: an earlier refusal paused them (CameraBridge's own 2 min, or the camera's lockout). Try again
             // when the pause ends, not ten minutes later: a password fixed meanwhile would otherwise look wrong all that time.
             _ = backoff.next()
@@ -46,6 +46,14 @@ struct ReconnectPolicy: Sendable {
             if shortSessionBackoff != nil { return max(minimumDelayAfterFailure, shortSessionBackoff?.next() ?? .zero) }
         }
         return max(minimumDelayAfterFailure, backoff.next())
+    }
+
+    /// When the login pause `error` met ends (the camera's lock or Camera Bridge's own pause); nil for any other error.
+    static func pauseEnd(_ error: (any Error)?) -> Date? {
+        switch error as? CameraAdapterError {
+        case .lockedOut(let until), .loginsPaused(let until): until
+        default: nil
+        }
     }
 }
 
@@ -127,7 +135,9 @@ final class ReconnectWaker: Sendable {
 /// The reconnect loop behind `SupervisedEventSource` and `HikvisionAlertHub`: runs `attempt` (one connection's
 /// lifetime) again and again until the task is cancelled, then `afterAttempt` (always, also on cancellation), then
 /// waits as `policy` says. `onUnauthorized` runs after an attempt that ended with rejected credentials
-/// (`CameraAdapterError.unauthorized`), after `afterAttempt` and before the (long) delay.
+/// (`CameraAdapterError.unauthorized`, or the camera's own lock, `.lockedOut`), after `afterAttempt` and before the (long) delay;
+/// never after one that met Camera Bridge's own pause (`.loginsPaused`): that attempt sent no login, and the refusal that started the
+/// pause was reported by whoever met it.
 ///
 /// With a `reachability`, no attempt starts while the camera is known to be unreachable (the loop waits for the probe
 /// to find it, then connects at once with a fresh backoff): attempts at a camera that is down only burden it when it
@@ -205,12 +215,16 @@ enum ReconnectLoop {
             }
             if connection.everConnected { onShortSessions(policy.consecutiveShortSessions) }
             if let failure = failure as? CameraAdapterError, failure.isLoginRefusal {
-                if case .lockedOut = failure {
-                    log.warning("\(label): logins to the camera are paused after a refused login; next attempt in \(Int(delay.timeInterval)) s")
-                } else {
+                switch failure {
+                case .loginsPaused:
+                    log.info("\(label): waits for Camera Bridge's login pause after the camera refused a login; next attempt in \(Int(delay.timeInterval)) s")
+                case .lockedOut:
+                    log.warning("\(label): the camera locked its logins after too many wrong passwords; next attempt in \(Int(delay.timeInterval)) s")
+                    onUnauthorized()
+                default:
                     log.warning("\(label): the camera rejected the credentials; next attempt in \(Int(delay.timeInterval)) s")
+                    onUnauthorized()
                 }
-                onUnauthorized()
                 if let reachability, reachability.isOffline { continue }
                 if let waker {
                     // The long wait protects the camera from a lockout. Video that signs in with the same credentials ends it,

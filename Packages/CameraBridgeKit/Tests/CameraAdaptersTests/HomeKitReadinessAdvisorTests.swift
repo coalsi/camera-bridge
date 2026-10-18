@@ -1,3 +1,4 @@
+import BridgeSupport
 import Foundation
 import Testing
 @testable import CameraAdapters
@@ -100,6 +101,38 @@ import Testing
         let bad = HomeKitReadinessAdvisor.evaluate(vendor: .onvif, deviceInfo: nil,
                                                    snapshot: snapshot(main: .h264(encoding: "H265", fps: 5, gov: 1000, bitrate: 200)))
         #expect(bad.score < good.score)
+    }
+
+    /// The ONVIF check while logins are paused says whose pause it is (the camera's lock, or Camera Bridge's own after a refused login), with
+    /// its end in the bridge's time zone (`BridgeTime`), not the process's (UTC on the box). Checked in two zones, Phoenix and UTC, each with
+    /// its own clock: with one zone the test could not tell the bridge's from the process's on a machine that runs in it.
+    @Test func aLoginPauseSaysWhoseItIsAndEndsInTheBridgesTimeZone() throws {
+        let until = try Date("2026-10-18T16:19:37Z", strategy: .iso8601)
+        let phoenix = try #require(TimeZone(identifier: "America/Phoenix")), utc = try #require(TimeZone(identifier: "UTC"))
+        #expect(BridgeTime.clock(until, in: phoenix) != BridgeTime.clock(until, in: utc))
+        for (zone, other) in [(phoenix, utc), (utc, phoenix)] {
+            var paused = snapshot(main: nil, supportsONVIF: false)
+            paused.onvifLoginRejected = true
+            paused.onvifLoginPausedUntil = until
+            func onvifCheck(_ snapshot: CameraSettingsSnapshot) throws -> HomeKitReadinessCheck {
+                let report = BridgeTime.$taskZone.withValue(zone) { HomeKitReadinessAdvisor.evaluate(vendor: .onvif, deviceInfo: nil, snapshot: snapshot) }
+                return try #require(report.checks.first { $0.id == "onvif" })
+            }
+            let clock = BridgeTime.clock(until, in: zone)
+
+            let refused = try onvifCheck(paused)
+            #expect(refused.status == .problem)
+            #expect(refused.explanation.contains("The camera refused the username or password Camera Bridge has, so Camera Bridge waits until \(clock) "
+                                                 + "before it logs in again, so the camera doesn't lock the account."), "\(zone.identifier): \(refused.explanation)")
+            #expect(refused.explanation.contains("Check the camera's username and password in Camera Bridge"))
+            #expect(!refused.explanation.contains("locked") && !refused.explanation.contains(BridgeTime.clock(until, in: other)), "\(zone.identifier)")
+
+            paused.onvifLoginLockedByCamera = true
+            let locked = try onvifCheck(paused)
+            #expect(locked.explanation.hasPrefix("The camera locked its logins after too many wrong passwords. Camera Bridge waits until \(clock) "
+                                                 + "before it tries again"), "\(zone.identifier): \(locked.explanation)")
+            #expect(locked.recommendedValue == "Wait until \(clock)", "\(zone.identifier)")
+        }
     }
 
     @Test func manualStepsAreEmptyForUnmappedChecks() {

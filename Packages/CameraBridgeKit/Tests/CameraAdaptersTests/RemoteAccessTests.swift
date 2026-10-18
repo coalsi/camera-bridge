@@ -179,6 +179,8 @@ import Testing
         let p2p = Box<String?>(#"{"P2p":{"enable":1,"uid":"95270000TEST0001"}}"#)
         let upnp = Box<String?>(#"{"Upnp":{"enable":0}}"#)
         let ddns = Box<String?>(#"{"Ddns":{"enable":0,"type":"3322","domain":"","userName":"","password":""}}"#)
+        /// `GetAbility`'s value; nil answers -9 "not support".
+        let ability = Box<String?>(nil)
         let commands = Box<[String]>([])
 
         var endpoint: CameraEndpoint { CameraEndpoint(host: "127.0.0.1", httpPort: Int(server.port)) }
@@ -201,6 +203,7 @@ import Testing
                     return .json(#"[{"cmd":"\#(cmd)","code":1,"error":{"detail":"not support","rspCode":-9}}]"#)
                 }
                 return value(answer)
+            case "GetAbility" where ability.value != nil: return value(ability.value ?? "")
             default: return .json(#"[{"cmd":"\#(cmd)","code":1,"error":{"detail":"not support","rspCode":-9}}]"#)
             }
         }
@@ -210,11 +213,25 @@ import Testing
         let camera = try await FakeReolink()
         defer { camera.server.stop() }
         let service = CameraSettingsService(endpoint: camera.endpoint, credentials: HTTPCredentials(username: "admin", password: "secret"), vendor: .reolink)
-        #expect(try await service.readRemoteAccess() == [finding(.cloud, .on, service: "Reolink P2P"), finding(.upnp, .off), finding(.ddns, .off)])
+        // "Set up for Camera Bridge" turns the UID and UPnP off through `SetP2p` and `SetUpnp` (GetAbility does not say otherwise here).
+        #expect(try await service.readRemoteAccess() == [finding(.cloud, .on, service: "Reolink P2P", canChange: true), finding(.upnp, .off, canChange: true),
+                                                         finding(.ddns, .off)])
         camera.p2p.set(nil)
         camera.ddns.set(#"{"Ddns":{"enable":1}}"#)
-        #expect(try await service.readRemoteAccess() == [finding(.cloud, .unknown, service: "Reolink P2P"), finding(.upnp, .off), finding(.ddns, .on)])
+        #expect(try await service.readRemoteAccess() == [finding(.cloud, .unknown, service: "Reolink P2P"), finding(.upnp, .off, canChange: true),
+                                                         finding(.ddns, .on)])
         #expect(camera.commands.value.filter { $0.hasPrefix("Set") }.isEmpty, "a check never writes")
+        #expect(camera.commands.value.filter { $0 == "Login" }.count == 1, "one session for the service")
+    }
+
+    /// A UID or UPnP switch `GetAbility` says this account may not change is not offered as something the setup can change.
+    @Test func aReolinkSwitchTheAccountMayNotChangeIsNotOfferedAsChangeable() async throws {
+        let camera = try await FakeReolink()
+        defer { camera.server.stop() }
+        camera.ability.set(#"{"Ability":{"p2p":{"permit":4,"ver":1},"upnp":{"permit":6,"ver":1}}}"#)
+        let service = CameraSettingsService(endpoint: camera.endpoint, credentials: HTTPCredentials(username: "admin", password: "secret"), vendor: .reolink)
+        #expect(try await service.readRemoteAccess() == [finding(.cloud, .on, service: "Reolink P2P"), finding(.upnp, .off, canChange: true),
+                                                         finding(.ddns, .off)])
     }
 
     // MARK: Cameras without a reader

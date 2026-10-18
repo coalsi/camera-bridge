@@ -75,27 +75,78 @@ struct ONVIFSubscription: Sendable, Equatable {
 /// port (`serviceURL(_:deviceServiceURL:)`).
 /// Keeps CameraBridge from locking a camera out (Hikvision locks logins for 30 min after a handful of wrong
 /// passwords, and every further attempt restarts the lock). After a rejected login, ONVIF logins to that host
-/// pause for 2 minutes; after a lockout, for 30 minutes. Successful-looking requests never touch it.
+/// pause for 2 minutes (Camera Bridge's own pause); after the camera locked them, for 30 minutes. Successful-looking
+/// requests never touch it, nor does a write refused to an account the camera just signed in (`CameraAdapterError.notPermitted`: the
+/// password is right). The pause keeps its cause, so a call that meets it throws the right error (`Pause.error`).
 final class ONVIFLoginGuard: @unchecked Sendable {
+    /// Why logins to a host are paused.
+    enum Cause: Sendable, Equatable {
+        /// The camera refused a login: Camera Bridge's own pause, so the next tries don't lock the account.
+        case refused
+        /// The camera locked its logins after too many wrong passwords.
+        case cameraLocked
+    }
+
+    struct Pause: Sendable, Equatable {
+        var until: Date
+        var cause: Cause
+
+        /// What a call that meets the pause throws: `.lockedOut` for the camera's lock, `.loginsPaused` for Camera Bridge's own.
+        var error: CameraAdapterError {
+            cause == .cameraLocked ? .lockedOut(until: until) : .loginsPaused(until: until)
+        }
+    }
+
     static let shared = ONVIFLoginGuard()
     static let rejectionPause: TimeInterval = 120
     static let lockoutPause: TimeInterval = 30 * 60
     private let lock = NSLock()
-    private var blocked: [String: Date] = [:]
+    /// Per host, when Camera Bridge's pause after a refusal ends and when the camera's lock does.
+    private var paused: [String: (refused: Date?, locked: Date?)] = [:]
+
+    /// The pause of `host` now: it lasts until the later of its two ends. While the camera's lock lasts it is the cause (a refusal never
+    /// shortens or recasts it); after that, what is left is Camera Bridge's own.
+    func pause(host: String, now: Date = Date()) -> Pause? {
+        lock.withLock {
+            guard let entry = paused[host] else { return nil }
+            let until = max(entry.refused ?? .distantPast, entry.locked ?? .distantPast)
+            guard until > now else { return nil }
+            return Pause(until: until, cause: (entry.locked ?? .distantPast) > now ? .cameraLocked : .refused)
+        }
+    }
+
+    /// The longest pause of `hosts` (one account behind several ports), the camera's lock when any of them has one.
+    func pause(hosts: [String], now: Date = Date()) -> Pause? {
+        let pauses = hosts.compactMap { pause(host: $0, now: now) }
+        guard let until = pauses.map(\.until).max() else { return nil }
+        return Pause(until: until, cause: pauses.contains { $0.cause == .cameraLocked } ? .cameraLocked : .refused)
+    }
 
     func blockedUntil(host: String, now: Date = Date()) -> Date? {
-        lock.withLock { blocked[host].flatMap { $0 > now ? $0 : nil } }
+        pause(host: host, now: now)?.until
     }
+
+    /// The camera refused a login: Camera Bridge pauses logins to `host` for `rejectionPause`.
     func recordRejection(host: String, now: Date = Date()) {
-        lock.withLock { blocked[host] = max(blocked[host] ?? now, now.addingTimeInterval(Self.rejectionPause)) }
+        lock.withLock {
+            let until = now.addingTimeInterval(Self.rejectionPause)
+            paused[host, default: (nil, nil)].refused = max(paused[host]?.refused ?? until, until)
+        }
     }
+
+    /// The camera locked its logins for `duration` (by default 30 minutes, Hikvision's). Returns when the pause ends.
     @discardableResult
-    func recordLockout(host: String, now: Date = Date()) -> Date {
-        lock.withLock { let until = now.addingTimeInterval(Self.lockoutPause); blocked[host] = until; return until }
+    func recordLockout(host: String, now: Date = Date(), for duration: TimeInterval = ONVIFLoginGuard.lockoutPause) -> Date {
+        lock.withLock {
+            let until = now.addingTimeInterval(duration)
+            paused[host, default: (nil, nil)].locked = max(paused[host]?.locked ?? until, until)
+            return max(paused[host]?.refused ?? until, paused[host]?.locked ?? until)
+        }
     }
+
     /// Forgets a pause (tests: a mock camera's ephemeral port must not stay blocked for the next test that binds it).
     func clear(host: String) {
-        lock.withLock { _ = blocked.removeValue(forKey: host) }
+        lock.withLock { _ = paused.removeValue(forKey: host) }
     }
 }
 
@@ -112,16 +163,57 @@ actor ONVIFClient {
     private(set) var dateTimeType: String?
     private var cachedCapabilities: ONVIFCapabilities?
     private var cachedServices: [String: URL]?
+    /// The camera refused this client's own login, and no login has worked since. A call that then meets Camera Bridge's pause reports
+    /// that refusal (`.unauthorized`) rather than the pause it caused: an event channel whose first call was refused meets the pause on
+    /// its next one (the subscription, after `eventsServiceURL` swallowed the refusal), and it is that channel the camera refused.
+    private var refusedLogin = false
+    /// When a call the camera answers only to the right password last succeeded on this client (`provesLogin`), since its last refused
+    /// login. A write the camera refuses (`NotAuthorized`, HTTP 401) within `loginProofWindow` of it is one this account may not make
+    /// (`.notPermitted`), not a wrong password: the Reolink doorbell's ONVIF account reads `GetNTP` and `GetDNS` but is refused `SetNTP`.
+    private var loginProvenAt: Date?
+    /// How long a call that signed in proves the login for a write refused after it (`.notPermitted`): a setup run reads right before it
+    /// writes, while a driver's long-lived client whose password changed on the camera since takes the refusal for a refused login again.
+    static let loginProofWindow: TimeInterval = 300
+    private let now: @Sendable () -> Date
     private let log: Log
 
-    /// `cameraID`: the camera the client serves (its log lines are tagged with it).
+    /// `cameraID`: the camera the client serves (its log lines are tagged with it). `now`: the clock a login's proof is timed by (tests).
     init(deviceServiceURL: URL, credentials: HTTPCredentials?, timeout: Duration = .seconds(10), longPollTimeout: Duration = .seconds(80),
-         cameraID: UUID? = nil) {
+         cameraID: UUID? = nil, now: @escaping @Sendable () -> Date = { Date() }) {
         self.deviceServiceURL = deviceServiceURL
         self.credentials = credentials
         self.http = AuthenticatingHTTPClient(credentials: credentials, timeout: timeout)
         self.longPollHTTP = AuthenticatingHTTPClient(credentials: credentials, timeout: longPollTimeout)
+        self.now = now
         self.log = Log(category: "onvif", cameraID: cameraID)
+    }
+
+    /// The operation an ONVIF action names when it changes something on the camera (a setting, the picture, the camera's position): "SetNTP",
+    /// "SetDNS", "SetSystemDateAndTime", "SetVideoEncoderConfiguration", "CreateOSD", "DeleteOSD", "SetImagingSettings", "ContinuousMove",
+    /// "Stop", "SendAuxiliaryCommand", "SystemReboot"; nil for a read and for the event service's messages (subscribe, pull, renew).
+    static func writeName(action: String?) -> String? {
+        guard let name = operation(action), !name.hasSuffix("Request") else { return nil }
+        let writes = ["Set", "Create", "Delete", "Remove", "Add", "Goto", "Send"].contains { name.hasPrefix($0) }
+            || name.hasSuffix("Move") || ["Stop", "SystemReboot"].contains(name)
+        return writes ? name : nil
+    }
+
+    /// ONVIF's calls a device answers before authentication (the Core specification's PRE_AUTH access class): their answer says nothing
+    /// about the password the request carried.
+    static let preAuthenticationCalls: Set<String> = ["GetSystemDateAndTime", "GetCapabilities", "GetServices", "GetServiceCapabilities",
+                                                       "GetWsdlUrl", "GetHostname", "GetEndpointReference"]
+
+    /// Whether the camera answering `action` proves the login: an authenticated call it answers only to the right password. Not ONVIF's
+    /// calls before authentication (`preAuthenticationCalls`), which a camera may answer to anyone, nor the event service's messages.
+    static func provesLogin(action: String?) -> Bool {
+        guard let name = operation(action) else { return false }
+        return !preAuthenticationCalls.contains(name) && !name.hasSuffix("Request")
+    }
+
+    /// The operation an action URI names: its last path component ("SetNTP" of ".../device/wsdl/SetNTP").
+    private static func operation(_ action: String?) -> String? {
+        guard let name = action?.split(separator: "/").last, !name.isEmpty else { return nil }
+        return String(name)
     }
 
     /// `http(s)://host:(onvifPort ?? httpPort)/onvif/device_service`.
@@ -131,13 +223,14 @@ actor ONVIFClient {
 
     // MARK: Transport
 
-    /// POSTs a SOAP request and returns the response envelope. SOAP faults throw (`NotAuthorized` → `.unauthorized`).
+    /// POSTs a SOAP request and returns the response envelope. SOAP faults throw (`NotAuthorized` → `.unauthorized`, or `.notPermitted` for
+    /// a write this account may not make: `refusal(host:action:)`).
     func call(_ url: URL, body: String, action: String? = nil, header: String = "", authenticated: Bool = true,
               longPoll: Bool = false) async throws -> XMLTree {
         var security: String?
         let host = "\(url.host(percentEncoded: false) ?? ""):\(url.port ?? 80)"
-        if authenticated, credentials != nil, let until = ONVIFLoginGuard.shared.blockedUntil(host: host) {
-            throw CameraAdapterError.lockedOut(until: until)
+        if authenticated, credentials != nil, let pause = ONVIFLoginGuard.shared.pause(host: host) {
+            throw refusedLogin && pause.cause == .refused ? CameraAdapterError.unauthorized : pause.error
         }
         if authenticated, let credentials {
             security = ONVIFSOAP.securityHeader(username: credentials.username, password: credentials.password,
@@ -167,18 +260,44 @@ actor ONVIFClient {
         }
         if let envelope, let fault = ONVIFSOAP.fault(in: envelope) {
             if fault.isNotAuthorized {
-                if authenticated { ONVIFLoginGuard.shared.recordRejection(host: host) }
-                throw CameraAdapterError.unauthorized
+                guard authenticated else { throw CameraAdapterError.unauthorized }
+                throw refusal(host: host, action: action)
             }
             throw CameraAdapterError.soapFault(fault.summary)
         }
         if response.statusCode == 401 {
-            if authenticated { ONVIFLoginGuard.shared.recordRejection(host: host) }
-            throw CameraAdapterError.unauthorized
+            guard authenticated else { throw CameraAdapterError.unauthorized }
+            throw refusal(host: host, action: action)
         }
         guard (200..<300).contains(response.statusCode) else { throw CameraAdapterError.httpStatus(response.statusCode) }
         guard let envelope, envelope.child("Body") != nil else { throw CameraAdapterError.invalidResponse("not a SOAP envelope") }
+        if authenticated, credentials != nil {
+            refusedLogin = false
+            if Self.provesLogin(action: action) { loginProvenAt = now() }
+        }
         return envelope
+    }
+
+    /// What an authenticated call the camera refused (`NotAuthorized`, HTTP 401) throws. A write refused while this client's login is proven
+    /// (a call that signed in, `loginProvenAt`, within `loginProofWindow`) is one this account may not make: `.notPermitted`, and nothing
+    /// pauses, since the password is right. Anything else, a first call included, is a refused login: logins to `host` pause
+    /// (`ONVIFLoginGuard`) and the proof is gone.
+    private func refusal(host: String, action: String?) -> CameraAdapterError {
+        if credentials != nil, let name = Self.writeName(action: action), let proven = loginProvenAt,
+           now().timeIntervalSince(proven) < Self.loginProofWindow {
+            log.info("ONVIF \(host): the camera refused \(name) to the account Camera Bridge uses, which it signed in and read with: the account "
+                     + "may not change this (not a wrong password, so logins are not paused)")
+            return .notPermitted(name)
+        }
+        refused(host)
+        return .unauthorized
+    }
+
+    /// The camera refused this client's login: logins to `host` pause (`ONVIFLoginGuard`).
+    private func refused(_ host: String) {
+        refusedLogin = true
+        loginProvenAt = nil
+        ONVIFLoginGuard.shared.recordRejection(host: host)
     }
 
     func responseBody(_ envelope: XMLTree, _ name: String) throws -> XMLTree {

@@ -1,7 +1,7 @@
 // "Set up for Camera Bridge" on the page: how the steps of a preview, a run and a restore read, and the status line of a camera.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cloudName, describeStep, resultTitle, SETUP_TEXT, setupErrorText, setupStatusLine, setupSupported, summarize } from '../web/js/screens/camera-setup.js';
+import { cloudName, describeStep, resultTitle, SETUP_TEXT, setupErrorText, setupStatusLine, setupSupported, stoppedText, summarize } from '../web/js/screens/camera-setup.js';
 
 const preview = {
   steps: [
@@ -74,4 +74,21 @@ test('a run with a refused step that did not stop it is not called stopped', () 
   assert.equal(resultTitle(summarize({ steps: [cloud] })), 'Camera set up');
   assert.equal(resultTitle(summarize({ steps: [] })), 'Nothing was changed');
   assert.equal(resultTitle(summarize({ steps: [{ ...cloud, status: 'restored' }] }), { restored: true }), 'Original settings restored');
+});
+
+test('a run that stopped says so, and says when “Watch its internet” still ran after the stop', () => {
+  const streams = { id: 'streams', title: 'Streams for recording, Apple Home and live view', status: 'refused', detail: 'ONVIF minimal: didn’t stick' };
+  const cloud = { id: 'cloud', title: 'Cloud off', status: 'notRun' };
+  const watch = { id: 'internetWatch', title: 'Watch its internet', status: 'done' };
+  assert.equal(stoppedText(summarize({ steps: [streams, cloud, { ...watch, status: 'notRun' }], stoppedAt: 'streams' })),
+    'The camera refused “Streams for recording, Apple Home and live view”, so the setup stopped there. The changes before it stay; '
+      + '“Restore original settings” puts them back.');
+  for (const status of ['done', 'refused']) {
+    assert.equal(stoppedText(summarize({ steps: [streams, cloud, { ...watch, status }], stoppedAt: 'streams' })),
+      'The camera refused “Streams for recording, Apple Home and live view”, so the setup stopped there, except for “Watch its internet”, '
+        + 'which still ran. The changes made stay; “Restore original settings” puts them back.', status);
+  }
+  assert.equal(stoppedText(summarize({ steps: [{ ...watch, status: 'refused' }], stoppedAt: 'internetWatch' })),
+    'The camera refused “Watch its internet”, so the setup stopped there. The changes before it stay; “Restore original settings” puts them back.');
+  assert.equal(stoppedText(summarize({ steps: [watch] })), null);
 });

@@ -194,12 +194,13 @@ import Testing
         let osd = try #require(body[0]?["param"]?["Osd"])
         #expect(osd["osdTime"]?["enable"]?.int == 0 && osd["osdTime"]?["pos"]?.string == "Top Center")
         #expect(osd["osdChannel"]?["enable"]?.int == 1 && osd["osdChannel"]?["name"]?.string == "Camera1" && osd["watermark"]?.int == 1)
-        #expect(camera.logouts.value.count >= 1, "the API session is ended")
 
         let backup = try #require(change.backup)
         #expect(try await service.restoreCameraClock(backup).succeeded)
         let after = try JSONValue.parse(Data(try #require(camera.osd.value).utf8))
         #expect(after["osdTime"]?["enable"]?.int == 1)
+        await service.close()
+        #expect(camera.logins.value == 1 && camera.logouts.value == ["tok1"], "one API session for the service, ended")
     }
 
     @Test func reolinkReadsBackAndFallsThroughWhenSetOsdDoesNotStick() async throws {

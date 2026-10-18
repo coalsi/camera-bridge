@@ -13,9 +13,10 @@ import Testing
     private let onvifCredentials = HTTPCredentials(username: MockONVIFCamera.username, password: MockONVIFCamera.password)
     private let bridge = "192.168.77.2"
 
-    /// A refused step stops the steps after it: the steps not yet tried on many cameras (the IPCamera Web family's, Watch) come after UPnP
-    /// off and Cloud off, so a refusal of theirs leaves the camera's cloud as Set up for Camera Bridge always turned it off. Watch is last,
-    /// so Restore (in reverse) puts the camera's DNS back first.
+    /// A refused step stops the steps after it that would change something (Watch aside, and a change the account may not make stops
+    /// nothing): the steps not yet tried on many cameras (the IPCamera Web family's, Watch) come after UPnP off and Cloud off, so a refusal
+    /// of theirs leaves the camera's cloud as Set up for Camera Bridge always turned it off. Watch is last, so Restore (in reverse) puts the
+    /// camera's DNS back first.
     @Test func theStepComesLastAfterTheCloud() throws {
         #expect(CameraSetupStepID.allCases == [.timeZone, .timeSource, .cleanPicture, .streams, .upnp, .cloud, .videoPassword, .extraServices, .internetWatch])
         #expect(CameraSetupStepID.internetWatch.rawValue == "internetWatch")

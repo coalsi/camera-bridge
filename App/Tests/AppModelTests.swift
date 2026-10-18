@@ -330,7 +330,8 @@ import Testing
         let errors: [any Error] = [
             CameraAdapterError.unauthorized, CameraAdapterError.httpStatus(503), CameraAdapterError.invalidResponse("deviceInfo"),
             CameraAdapterError.soapFault("ter:ActionNotSupported"), CameraAdapterError.apiError(command: "Login", code: 1),
-            CameraAdapterError.unsupported("no media profile"),
+            CameraAdapterError.unsupported("no media profile"), CameraAdapterError.lockedOut(until: Date()), CameraAdapterError.loginsPaused(until: Date()),
+            CameraAdapterError.notPermitted("SetNTP"),
             RTSPError.unauthorized, RTSPError.notFound, RTSPError.badStatus(454), RTSPError.protocolError("bad header"), RTSPError.timeout,
             RTSPError.noVideoTrack, RTSPError.unsupportedCodec("MJPEG"),
             EngineError.unknownCamera, EngineError.duplicateCamera, EngineError.cameraNotRunning,
@@ -346,6 +347,12 @@ import Testing
             let typeName = String(describing: type(of: error))
             #expect(!text.isEmpty && !text.contains(typeName) && !text.contains("(\"") && text.hasSuffix("."), "\(typeName): \(text)")
         }
+        // Camera Bridge's own pause after a refused login says what to check; the camera's own lock only says when it ends.
+        #expect(AppModel.describe(CameraAdapterError.loginsPaused(until: Date())).hasSuffix(" Check the camera’s username and password in Camera Bridge."))
+        #expect(!AppModel.describe(CameraAdapterError.lockedOut(until: Date())).contains("Check"))
+        // A change the account may not make: its login works, so nothing about the password; an administrator account to use.
+        #expect(AppModel.describe(CameraAdapterError.notPermitted("SetNTP"))
+                == "The account Camera Bridge uses may not change this; use an administrator account in the camera’s settings.")
         #expect(AppModel.describe(PlainTestError.notImplemented("BridgeEngine.addCamera")) == ErrorText.unexpected)
         #expect(ErrorText.logDescription(PlainTestError.notImplemented("BridgeEngine.addCamera"))
                 == "PlainTestError.notImplemented(\"BridgeEngine.addCamera\")")

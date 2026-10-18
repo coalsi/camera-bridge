@@ -2,10 +2,11 @@ import BridgeSupport
 import Foundation
 
 /// The camera's own network features the setup turns off: Hikvision's UPnP (it opens ports on the router) and Hik-Connect (the EZVIZ
-/// cloud: the camera keeps a connection to the maker's servers), through ISAPI; and the maker's cloud of an ONVIF camera that speaks the
-/// IP camera web API (`CameraSettingsService+IPCWeb.swift`) or is of the IPCamera Web family (`CameraSettingsService+IPCamWeb.swift`). ONVIF
-/// itself has no such settings. For Hikvision only the switch is read and kept (a Hik-Connect document also holds the camera's
-/// verification code, which is never saved or logged); turning it back on is a read-modify-write of the camera's document as it is then.
+/// cloud: the camera keeps a connection to the maker's servers), through ISAPI; a Reolink's UPnP and UID (P2P: Reolink's cloud), through its
+/// own API (`SetUpnp`, `SetP2p`: CameraSettingsService+Reolink.swift); and the maker's cloud of an ONVIF camera that speaks the IP camera web
+/// API (`CameraSettingsService+IPCWeb.swift`) or is of the IPCamera Web family (`CameraSettingsService+IPCamWeb.swift`). ONVIF itself has no
+/// such settings. For Hikvision only the switch is read and kept (a Hik-Connect document also holds the camera's verification code, which is
+/// never saved or logged); turning it back on is a read-modify-write of the camera's document as it is then.
 public enum CameraNetworkFeature: String, Sendable, Codable, CaseIterable {
     case upnp, cloud
 
@@ -25,8 +26,10 @@ extension CameraSettingsService {
     /// Whether the feature is on, read from the first of its paths the camera answers; the backup holds that path and the switch. An ONVIF
     /// camera that speaks the IP camera web API has its cloud read there (`readIPCWebCloud`; not possible now while that API cannot be
     /// asked); it has no UPnP step. A camera of the IPCamera Web family has its cloud read through its API (`readIPCamWebCloud`), and its
-    /// UPnP too (the family has none to change). Any other camera: Camera Bridge can't change it (`CameraNetworkFeature.cannotChange`).
+    /// UPnP too (the family has none to change). A Reolink through its own API (`GetUpnp`, `GetP2p`; its cloud step's note says what the UID
+    /// off means). Any other camera: Camera Bridge can't change it (`CameraNetworkFeature.cannotChange`).
     public func readFeature(_ feature: CameraNetworkFeature) async throws -> (CameraSetupReading, CameraFeatureBackup?) {
+        if vendor == .reolink { return try await readReolinkFeature(feature) }
         if vendor != .hikvision {
             switch try await ipcWeb() {
             case .speaks(let client, _): if feature == .cloud { return try await readIPCWebCloud(client) }
@@ -34,7 +37,7 @@ extension CameraSettingsService {
             case .none:
                 switch try await ipcamWeb() {
                 case .speaks(let client): return try await feature == .cloud ? readIPCamWebCloud(client) : readIPCamWebUPnP(client)
-                case .unavailable(let why): return (.notSupported(why), nil)
+                case .unavailable(let why): return (.notSupported(why.reason), nil)
                 case .none: break
                 }
             }
@@ -50,6 +53,7 @@ extension CameraSettingsService {
     /// IP camera web API's cloud gets its kind and sign-in value back from it).
     public func setFeature(_ feature: CameraNetworkFeature, enabled: Bool, path known: String? = nil,
                            saved: CameraFeatureBackup? = nil) async throws -> CameraSetupOutcome {
+        if vendor == .reolink { return try await setReolinkFeature(feature, enabled: enabled) }
         if vendor != .hikvision, feature == .cloud {
             switch try await ipcWeb() {
             case .speaks(let client, _): return try await setIPCWebCloud(enabled: enabled, saved: saved, client: client)
@@ -57,7 +61,7 @@ extension CameraSettingsService {
             case .none:
                 switch try await ipcamWeb() {
                 case .speaks(let client): return try await setIPCamWebCloud(enabled: enabled, client: client)
-                case .unavailable(let why): return .refused(why)
+                case .unavailable(let why): return .refused(why)   // `notPermitted` for an account without privilege
                 case .none: break
                 }
             }

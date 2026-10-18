@@ -4,6 +4,7 @@
 import { api } from '../api.js';
 import { h, modal, replace, spinner } from '../dom.js';
 import { icon } from '../icons.js';
+import { manualHelpBlock, manualHelpView } from './manual-help.js';
 import { GUARD_TEXT } from './security.js';
 
 /** Every name the setup shows, in one table, so it can be renamed in one place. */
@@ -52,7 +53,8 @@ export function setupStatusLine(camera, locale) {
   return `${SETUP_TEXT.setUp(state.version || 1)}${when}`;
 }
 
-/** One step as the page shows it: its title, the status in words, the changes ("Main stream: H.265 … → H.264 …") and why. */
+/** One step as the page shows it: its title, the status in words, the changes ("Main stream: H.265 … → H.264 …"), why, and the bridge's
+ *  "Change it by hand" for a step the camera refused or does not support (`manual`, manual-help.js; null for the others). */
 export function describeStep(step) {
   const [statusText, tone] = STATUS[step?.status] || [String(step?.status || ''), 'idle'];
   const changes = Array.isArray(step?.changes) ? step.changes.filter((c) => c && c.label) : [];
@@ -60,7 +62,8 @@ export function describeStep(step) {
   let detail = typeof step?.detail === 'string' && step.detail ? step.detail : null;
   if (step?.status === 'notSupported' && detail === 'not supported by this camera') detail = null;   // the status says it
   if (step?.status === 'done' && detail && /^via /.test(detail)) detail = null;                         // how is not news
-  return { id: step?.id, title: step?.title || '', statusText, tone, lines, detail: detail ? sentence(detail) : null, needsRestart: step?.needsRestart === true };
+  return { id: step?.id, title: step?.title || '', statusText, tone, lines, detail: detail ? sentence(detail) : null, needsRestart: step?.needsRestart === true,
+    manual: manualHelpView(step?.manualHelp) };
 }
 
 /** The dialog's heading after a run or a restore. A step refused without stopping the run (the streams step when the camera still sends
@@ -82,6 +85,9 @@ export function summarize(report) {
     refused: count('refused'),
     restored: count('restored'),
     stoppedAt: steps.find((s) => s.id === report?.stoppedAt)?.title || null,
+    // "Watch its internet" runs after a refused step unless that refusal kept it from the camera (its record says not run).
+    watchAfterStop: Boolean(report?.stoppedAt) && report.stoppedAt !== 'internetWatch'
+      && steps.some((s) => s.id === 'internetWatch' && (s.status === 'done' || s.status === 'refused')),
     needsRestart: steps.some((s) => s.needsRestart === true),
     canRestore: report?.canRestore === true,
     streamRestarted: report?.streamRestarted === true,
@@ -91,6 +97,15 @@ export function summarize(report) {
   };
 }
 
+/** The banner of a run that stopped at a step the camera refused; null when it did not stop. */
+export function stoppedText(info) {
+  if (!info?.stoppedAt) return null;
+  return info.watchAfterStop
+    ? `The camera refused “${info.stoppedAt}”, so the setup stopped there, except for “${GUARD_TEXT.watchStep}”, which still ran. The changes made stay; `
+      + `“${SETUP_TEXT.restore}” puts them back.`
+    : `The camera refused “${info.stoppedAt}”, so the setup stopped there. The changes before it stay; “${SETUP_TEXT.restore}” puts them back.`;
+}
+
 function sentence(text) {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
@@ -98,13 +113,15 @@ function sentence(text) {
   return /[.!?)]$/.test(first) ? first : `${first}.`;
 }
 
-function stepList(report) {
+/** The dialog's list of steps: each with its changes, why, and "Change it by hand" under a step the camera refused or does not support. */
+export function stepList(report) {
   const steps = (report?.steps || []).map(describeStep);
   return h('ul', { class: 'events setup-steps' }, steps.map((step) => h('li', null,
     h('div', null, h('div', { class: 'title' }, step.title),
       step.lines.map((line) => h('div', { class: 'change' }, line)),
       step.detail ? h('div', { class: 'change' }, step.detail) : null,
-      step.needsRestart ? h('div', { class: 'change' }, 'Applies after the camera restarts.') : null),
+      step.needsRestart ? h('div', { class: 'change' }, 'Applies after the camera restarts.') : null,
+      manualHelpBlock(step.manual)),
     h('span', { class: `pill ${step.tone}` }, step.statusText))));
 }
 
@@ -183,8 +200,7 @@ export function cameraSetupDialog(camera, { restore = false } = {}) {
       const title = resultTitle(info, { restored });
       replace(box,
         h('h2', null, title),
-        info.stoppedAt ? h('div', { class: 'banner warning' }, icon('alert'), h('div', { class: 'text' },
-          `The camera refused “${info.stoppedAt}”, so the setup stopped there. The changes before it stay; “${SETUP_TEXT.restore}” puts them back.`)) : null,
+        info.stoppedAt ? h('div', { class: 'banner warning' }, icon('alert'), h('div', { class: 'text' }, stoppedText(info))) : null,
         restored && info.refused ? h('div', { class: 'banner warning' }, icon('alert'), h('div', { class: 'text' },
           'The saved values the camera didn’t take back are kept, so you can try again.')) : null,
         stepList(report),
@@ -273,11 +289,22 @@ export const ROUTER_HELP = [
 ];
 
 /** What removing a camera whose Watch kept its DNS servers does to them (camera.js's remove dialog); '' for any other camera. The engine gives
- *  the servers back before the camera goes: the box stops answering it once it is removed. */
+ *  the servers back before the camera goes: the box stops answering it once it is removed. They are kept also when the step was refused or not
+ *  run (a camera can take part of a change), so only a watched camera is said to point at Camera Bridge (`watchDone`). */
 export function removalNote(camera) {
   if (!camera?.setupBackup?.internetWatch) return '';
+  if (!watchDone(camera)) {
+    return `Camera Bridge gives the camera the DNS servers it had before “${GUARD_TEXT.watchStep}” back first. If the camera doesn’t answer, `
+      + 'check its DNS on the camera afterwards.';
+  }
   return `Its DNS points at Camera Bridge (${GUARD_TEXT.watchStep}): Camera Bridge gives the camera its own DNS servers back first. If the camera `
     + 'doesn’t answer, change its DNS on the camera afterwards, or it can’t look up names.';
+}
+
+/** Whether the Internet guard watches the camera: the engine's verdict (`internetWatched` on the camera resource, `internetWatchDone`: its
+ *  DNS points at the bridge as the newest of the setup's result and the guard's readings says, whoever set it). Never worked out here. */
+function watchDone(camera) {
+  return camera?.internetWatched === true;
 }
 
 /** The camera's own address on the home network, for the router steps; '' when Camera Bridge reaches it through something else (go2rtc's
@@ -304,7 +331,7 @@ export function localOnlyCard(camera) {
   const steps = camera?.setupState?.steps || [];
   const done = (id) => steps.some((s) => s.id === id && (s.status === 'done' || s.status === 'alreadyRight'));
   const off = ['cloud', 'upnp'].filter(done);
-  const watched = done('internetWatch');
+  const watched = watchDone(camera);
   const names = { cloud: cloudName(camera), upnp: 'UPnP' };
   const host = cameraAddress(camera);
   const address = host ? ` (${host})` : '';

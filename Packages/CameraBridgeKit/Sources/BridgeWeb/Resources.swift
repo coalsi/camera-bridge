@@ -297,8 +297,9 @@ struct CameraStatusResource: Encodable {
 }
 
 /// `CameraStatus.security`: `level` red, yellow, green or gold, its `title` and `summary`, when it was checked, and the `findings` worst first,
-/// each `{feature, state, level, sentence, canChange, linked, service}` (`feature`: cloud, upnp, ddns, rtmp, unauthenticatedVideo,
-/// extraService, internetGuard; `state`: on, off, absent, unknown; `linked` and `service` null when the camera does not say), and `guard`,
+/// each `{feature, state, level, sentence, canChange, linked, service, manualHelp}` (`feature`: cloud, upnp, ddns, rtmp, unauthenticatedVideo,
+/// extraService, internetGuard; `state`: on, off, absent, unknown; `linked` and `service` null when the camera does not say; `manualHelp`,
+/// "Change it by hand" (`CameraManualHelp`), null where there is none), and `guard`,
 /// what the internet guard saw (`{watched, today, last24h, names: [{name, count, last}]}`, the 10 most asked names of the last 7 days; null
 /// on a bridge without the guard). Every key is always there.
 struct CameraSecurityResource: Encodable {
@@ -310,6 +311,7 @@ struct CameraSecurityResource: Encodable {
         var canChange: Bool
         var linked: OrNull<Bool>
         var service: OrNull<String>
+        var manualHelp: OrNull<CameraManualHelp>
     }
 
     struct Guard: Encodable, Sendable {
@@ -339,7 +341,7 @@ struct CameraSecurityResource: Encodable {
         checkedAt = security.checkedAt
         findings = security.findings.map {
             Finding(feature: $0.feature.rawValue, state: $0.state.rawValue, level: $0.level.rawValue, sentence: Redact.string($0.sentence),
-                    canChange: $0.canChange, linked: OrNull($0.linked), service: OrNull($0.service))
+                    canChange: $0.canChange, linked: OrNull($0.linked), service: OrNull($0.service), manualHelp: OrNull($0.manualHelp))
         }
         `guard` = OrNull(security.internetGuard.map { activity in
             Guard(watched: activity.watched, today: activity.today, last24h: activity.last24h,
@@ -388,13 +390,15 @@ struct NVRStatusResource: Encodable {
     }
 }
 
-/// One camera: its configuration (`CameraConfiguration`, as saved, without any password) with its `status` and display names.
+/// One camera: its configuration (`CameraConfiguration`, as saved, without any password; with the engine-owned `setupState`, `setupBackup`
+/// and `dnsWatch`) with its `status`, display names, and `internetWatched`: the Internet guard watches it (`BridgeEngine.internetWatchDone`:
+/// its DNS points at the bridge as the newest of the setup's result and the guard's readings says), always there.
 struct CameraResource: Encodable {
     var configuration: CameraConfiguration
     var status: CameraStatusResource?
 
     private enum ExtraKeys: String, CodingKey {
-        case status, vendorName, kindName, motionSourceName, address, typeID
+        case status, vendorName, kindName, motionSourceName, address, typeID, internetWatched
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -405,6 +409,7 @@ struct CameraResource: Encodable {
         try container.encode(StatusText.kind(configuration.kind), forKey: .kindName)
         try container.encode(StatusText.motionSource(configuration.motionSource), forKey: .motionSourceName)
         try container.encode(Self.address(of: configuration), forKey: .address)
+        try container.encode(BridgeEngine.internetWatchDone(configuration), forKey: .internetWatched)
     }
 
     /// Where the camera is: its host, or for a camera behind a service the service's name.

@@ -15,6 +15,22 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.111',
+    date: '2026-10-18',
+    title: 'The Internet guard on more cameras, and help for what can’t be changed',
+    items: [
+      'Watch its internet now points every DNS server of a camera at Camera Bridge (a camera with two kept the second, such as 8.8.8.8). If a camera keeps one, the step says which.',
+      'A camera whose DNS you point at Camera Bridge yourself counts as watched. Camera Bridge checks every 30 minutes, when a camera comes back online and when you press Check again, and takes a camera off the list when it no longer asks Camera Bridge.',
+      'Reolink: Set up for Camera Bridge now turns UPnP and the cloud (UID) off, takes the time from the bridge and watches the internet, through Reolink’s own settings. With the UID off the Reolink app stops working away from home; doorbell rings still come through Apple Home.',
+      'Cameras with an “IPCamera Web” page (such as the N801B) work fully: Camera Bridge could never sign in to their page before, so their cloud, video password and extra services could not be changed.',
+      'A setting the camera’s account is not allowed to change says so (use an administrator account in the camera’s settings), and the rest of the setup still runs.',
+      'Every step that can’t be done says why and how to change it by hand on that camera.',
+      '“Locked” now only means the camera locked its logins; a short pause by Camera Bridge after a refused password says so, with the time in your time zone.',
+      'Passwords in a camera’s stream address are kept in the secret store, not in the settings file or logs.',
+      'Fixed: a battery camera woken while its last connection was still closing could show no video.',
+    ],
+  },
+  {
     version: '0.1.110',
     date: '2026-10-18',
     title: 'Cameras start sooner after a restart',

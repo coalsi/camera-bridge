@@ -226,21 +226,25 @@ import TestSupport
         await ingest.stop()
     }
 
-    /// Streams keyframes until stopped; `stop()` takes `stopDelay` (an RTSP TEARDOWN to a camera that went away).
+    /// Streams keyframes until stopped (once `connects` opens, when given); `stop()` takes `stopDelay` (an RTSP TEARDOWN to a camera that
+    /// went away).
     final class SlowStopSource: MediaSource {
         let displayName = "Slow"
         let stopDelay: Duration
         let stopsStarted: Box<Int>
         let stopsFinished: Box<Int>
+        let connects: Gate?
         private let feeder = Mutex<Task<Void, Never>?>(nil)
 
-        init(stopDelay: Duration, stopsStarted: Box<Int>, stopsFinished: Box<Int>) {
+        init(stopDelay: Duration, stopsStarted: Box<Int>, stopsFinished: Box<Int>, connects: Gate? = nil) {
             self.stopDelay = stopDelay
             self.stopsStarted = stopsStarted
             self.stopsFinished = stopsFinished
+            self.connects = connects
         }
 
         func samples() async throws -> AsyncThrowingStream<MediaSample, any Error> {
+            await connects?.wait()
             let (stream, continuation) = AsyncThrowingStream.makeStream(of: MediaSample.self)
             let task = Task {
                 var pts: Int64 = 0
@@ -425,6 +429,35 @@ import TestSupport
         await again.reconnect()
         #expect(await !again.isRunning)
         #expect(made.value == 3)
+    }
+
+    /// An on-demand camera woken (`start()`) while its idle stop was still closing the old connection counted as delivering at once, on
+    /// that connection's state and last frame: the live view was handed the stream before the woken one had sent a picture (an empty
+    /// hub; RuntimeOnDemandTests failed 3 of 20 runs under load). The new run is connecting until it delivers.
+    @Test(.timeLimit(.minutes(1))) func aStartWhileTheStopIsClosingIsNotOnlineBeforeTheNewConnectionDelivers() async throws {
+        let made = Box(0), stopsStarted = Box(0), stopsFinished = Box(0)
+        let reconnected = Gate()
+        let source = IngestSupervisor.Source(label: "RTSP") {
+            made.update { $0 += 1 }
+            return SlowStopSource(stopDelay: .milliseconds(800), stopsStarted: stopsStarted, stopsFinished: stopsFinished,
+                                  connects: made.value > 1 ? reconnected : nil)
+        }
+        let ingest = IngestSupervisor(name: "Main stream", hub: MediaHub(), primary: source, timing: Self.fast(), log: Self.log)
+        await ingest.start()
+        #expect(await eventually(timeout: .seconds(5)) { await ingest.isDelivering(within: .seconds(2)) })
+        let stopping = Task { await ingest.stop() }
+        #expect(await eventually(timeout: .seconds(5)) { stopsStarted.value == 1 }, "the stop is closing the connection")
+        await ingest.start()
+        #expect(await ingest.state == .connecting, "not the closing connection's state")
+        #expect(await !ingest.isDelivering(within: .seconds(2)), "the closing connection's last frame is not the new one's")
+        await stopping.value
+        #expect(stopsFinished.value == 1)
+        #expect(await ingest.isRunning, "the later start wins")
+        #expect(await ingest.state == .connecting)
+        reconnected.open()
+        #expect(await eventually(timeout: .seconds(5)) { await ingest.isDelivering(within: .seconds(2)) }, "online once the new connection delivers")
+        #expect(made.value == 2)
+        await ingest.stop()
     }
 
     /// Review finding (W4 round 4): the ingest source's stop (RTSP TEARDOWN, HTTP-FLV) was bounded by its own 3 s literal,

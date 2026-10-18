@@ -27,19 +27,25 @@ public struct CleanPictureChange: Sendable {
     public var backup: CleanPictureBackup?
     /// What happened, for a person ("via ISAPI", or why not).
     public var summary: String
+    /// Every way that could change the labels was refused to the account Camera Bridge uses (`CameraAdapterError.notPermitted`; a way the
+    /// camera does not have aside): `summary` is then `CameraAdapterError.notPermittedReason`, and Set up for Camera Bridge goes on.
+    public var notPermitted: Bool
 
-    public init(succeeded: Bool, method: CameraConfigMethod? = nil, backup: CleanPictureBackup? = nil, summary: String) {
+    public init(succeeded: Bool, method: CameraConfigMethod? = nil, backup: CleanPictureBackup? = nil, summary: String, notPermitted: Bool = false) {
         self.succeeded = succeeded
         self.method = method
         self.backup = backup
         self.summary = summary
+        self.notPermitted = notPermitted
     }
 }
 
 /// "Clean picture": every label the camera draws itself (date and time, its name, text lines, a logo) off, so the bridge draws its own the same
 /// way on every camera. The vendor's API is tried first (Hikvision ISAPI's overlays document, Reolink's `Osd`), then ONVIF's OSD service (its
-/// text elements are removed). An ONVIF camera that speaks the IP camera web API uses only that (its overlay switch): its ONVIF OSD answers
-/// cannot be trusted, also while that API cannot be asked. Turning it back on writes back what was saved.
+/// text elements are removed); on a Reolink, ONVIF only when Reolink's API cannot do it at all (no `GetOsd`, "not support", "ability
+/// error": `CameraConfigFailure.leavesONVIF`), never after it answered otherwise (the account may not, another refusal). An ONVIF camera
+/// that speaks the IP camera web API uses only that (its overlay switch): its ONVIF OSD answers cannot be trusted, also while that API
+/// cannot be asked. Turning it back on writes back what was saved.
 extension CameraSettingsService {
     public func cleanPicture() async throws -> CleanPictureChange {
         let web: IPCWebAccess
@@ -63,6 +69,7 @@ extension CameraSettingsService {
             }
         }
         var reasons: [String] = []
+        var refusals: [any Error] = []
         for method in CameraConfigMethod.clockOrder(vendor: vendor, preferred: preferredMethod) {
             try Task.checkCancellation()
             do {
@@ -75,10 +82,39 @@ extension CameraSettingsService {
             } catch let error as CameraAdapterError where error.isLoginRefusal {
                 return CleanPictureChange(succeeded: false, summary: "the camera refused the login")
             } catch {
-                reasons.append("\(method.clockDisplayName): \(Redact.string(String(describing: error)))")
+                refusals.append(error)
+                reasons.append("\(method.clockDisplayName): \(CameraAdapterError.refusalWords(error))")
+                // Reolink's API answered: its ONVIF user would only be refused too (and a refused first call pauses its logins).
+                if method == .reolinkAPI, !CameraConfigFailure.from(error).leavesONVIF { break }
             }
         }
+        if Self.refusedOnlyForTheAccount(refusals) {
+            return CleanPictureChange(succeeded: false, summary: CameraAdapterError.notPermittedReason, notPermitted: true)
+        }
         return CleanPictureChange(succeeded: false, summary: reasons.isEmpty ? "not supported by this camera" : reasons.joined(separator: "; "))
+    }
+
+    /// An error after which the same way is not asked again: the account may not make the change (`.notPermitted`), a refused login, a
+    /// cancellation (the logo is not the reason then).
+    static func endsTheWay(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        guard let error = error as? CameraAdapterError else { return false }
+        if case .notPermitted = error { return true }
+        return error.isLoginRefusal
+    }
+
+    /// Whether the ways that failed were refused for the account Camera Bridge uses (`.notPermitted`), at least one, and the others found
+    /// nothing to use (`.unsupported`).
+    static func refusedOnlyForTheAccount(_ refusals: [any Error]) -> Bool {
+        var refused = false
+        for error in refusals {
+            switch error as? CameraAdapterError {
+            case .notPermitted?: refused = true
+            case .unsupported?: continue
+            default: return false
+            }
+        }
+        return refused
     }
 
     /// Writes back what `cleanPicture()` saved.
@@ -94,9 +130,7 @@ extension CameraSettingsService {
                 guard let document = backup.document, let osd = try? JSONDecoder().decode(JSONValue.self, from: Data(document.utf8)) else {
                     throw CameraAdapterError.invalidResponse("no saved Osd")
                 }
-                let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-                defer { Task { await api.logout() } }
-                _ = try await api.command("SetOsd", param: .object(["Osd": osd]))
+                _ = try await reolink().command("SetOsd", param: .object(["Osd": osd]))
             case .onvifMinimal, .onvifFull:
                 guard let client = await client() else { throw CameraAdapterError.unsupported("camera has no ONVIF service") }
                 for osd in backup.removedOSDs {
@@ -117,7 +151,7 @@ extension CameraSettingsService {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            return CleanPictureChange(succeeded: false, summary: Redact.string(String(describing: error)))
+            return CleanPictureChange(succeeded: false, summary: CameraAdapterError.refusalWords(error))
         }
     }
 
@@ -134,8 +168,7 @@ extension CameraSettingsService {
             return CleanPictureBackup(method: .hikvisionISAPI, document: document)
         case .reolinkAPI:
             guard vendor == .reolink else { return nil }
-            let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-            defer { Task { await api.logout() } }
+            let api = reolink()
             guard let osd = try await api.command("GetOsd", param: .object(["channel": .number(Double(reolinkChannel))]))["Osd"]?.object else {
                 throw CameraAdapterError.unsupported("no on-screen display in GetOsd")
             }
@@ -153,7 +186,7 @@ extension CameraSettingsService {
             if off["channel"] == nil { off["channel"] = .number(Double(reolinkChannel)) }
             do {
                 _ = try await api.command("SetOsd", param: .object(["Osd": .object(off)]))
-            } catch where logo {
+            } catch let error where logo && !Self.endsTheWay(error) {
                 off["watermark"] = osd["watermark"]
                 _ = try await api.command("SetOsd", param: .object(["Osd": .object(off)]))
             }
@@ -163,13 +196,25 @@ extension CameraSettingsService {
             let texts = try await client.osds().filter { $0.type.caseInsensitiveCompare("Text") == .orderedSame }
             guard !texts.isEmpty else { throw CameraAdapterError.unsupported("no text elements in the camera's OSD") }
             var removed: [HiddenCameraClock.RemovedOSD] = []
+            var notPermitted: (any Error)?
             for text in texts {
-                if (try? await client.deleteOSD(token: text.token)) != nil {
+                do {
+                    try await client.deleteOSD(token: text.token)
                     removed.append(.init(token: text.token, children: text.children, how: .deleted))
-                } else if let blank = ONVIFClient.blanked(children: text.children), (try? await client.setOSD(token: text.token, children: blank)) != nil {
+                    continue
+                } catch {
+                    if case CameraAdapterError.notPermitted = error { notPermitted = error }
+                }
+                guard let blank = ONVIFClient.blanked(children: text.children) else { continue }
+                do {
+                    try await client.setOSD(token: text.token, children: blank)
                     removed.append(.init(token: text.token, children: text.children, how: .blanked))
+                } catch {
+                    if case CameraAdapterError.notPermitted = error { notPermitted = error }
                 }
             }
+            // Every change refused to the account (its login works) is said so: the setup goes on after it.
+            if removed.isEmpty, let notPermitted { throw notPermitted }
             guard !removed.isEmpty else { throw CameraAdapterError.unsupported("the camera kept its labels") }
             return CleanPictureBackup(method: method, removedOSDs: removed)
         case .ipcWebAPI:

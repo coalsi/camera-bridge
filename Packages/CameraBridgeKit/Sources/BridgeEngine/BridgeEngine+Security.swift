@@ -4,14 +4,18 @@ import Foundation
 
 // The cameras' security checks (owner decision, 2026-10-17; the levels: `CameraSecurity`). A check reads what the camera says about its
 // ways out (`CameraSettingsService.readRemoteAccess()`), asks one of its stream addresses for its video without credentials
-// (`RTSPAccessProbe`), reads a watched camera's DNS servers (`readDNS()`: the guard's gold rests on the camera asking the bridge now), and
-// adds the Internet guard's evidence where there is a guard. It runs `securityCheckDelay` after a camera's runtime starts (unless it was
-// checked within `securityCheckFreshness`), every `securityCheckInterval`, right after "Set up for Camera Bridge" ran or was restored, and on
-// demand (`checkCameraSecurity`, at most once per `securityCheckCooldown`); a camera that did not answer (unreachable at its time, or it
-// stopped answering during the check) is tried again after `securityCheckRetry`, doubling up to `securityCheckRetryCap`, and keeps its last
-// check's readings meanwhile. The guard's report re-assesses without asking the cameras (`guardEvidenceChanged`), keeping the readings' time.
-// Results are kept in memory only (`CameraStatus.security`). A check never writes to a camera, never sends credentials with the RTSP check,
-// and does not hold the engine's operations: it only reads.
+// (`RTSPAccessProbe`), reads the DNS servers of every camera the Internet guard can watch (`readDNS()`, `readsGuardDNS`: also one whose
+// Watch is not done, and one that works only through its maker's cloud, which is otherwise not asked; the reading decides whether the camera
+// is watched and the guard's gold rests on it asking the bridge now), and adds the guard's evidence where there is a guard. It runs
+// `securityCheckDelay` after a camera's runtime starts (unless it was checked within `securityCheckFreshness`), every `securityCheckInterval`,
+// right after "Set up for Camera Bridge" ran or was restored (a fresh one: a check under way that began before is waited for, not joined),
+// and on demand (`checkCameraSecurity` from "Check again", at most once per
+// `securityCheckCooldown`); a camera that did not answer (unreachable at its time, or it stopped answering during the check) is tried again
+// after `securityCheckRetry`, doubling up to `securityCheckRetryCap`, and keeps its last check's readings meanwhile. The guard also reads the
+// cameras' DNS servers by themselves (BridgeEngine+InternetGuard.swift). The guard's report re-assesses without asking the cameras
+// (`guardEvidenceChanged`), keeping the readings' time. Results are kept in memory only (`CameraStatus.security`). A check never writes to a
+// camera and never sends credentials with the RTSP check; it holds the engine's operations only to save what a DNS reading changes about
+// the camera's watch.
 
 /// A check on demand came too soon after the camera's last one.
 public struct CameraSecurityCheckTooSoon: Error, Equatable, Sendable, CustomStringConvertible {
@@ -32,7 +36,8 @@ final class CameraSecurityChecks {
     struct Record {
         var readings: [RemoteAccessFinding]
         var cloudModel: String?
-        /// The camera's DNS servers as the check read them (a watched camera's only).
+        /// The camera's DNS servers as they were last read (by the check, or since by the guard's own read; a read that gave none keeps
+        /// the last reading). Only for a camera the guard can watch.
         var dns: CameraDNSCheck
         var security: CameraSecurity
         var finished: ContinuousClock.Instant
@@ -99,11 +104,20 @@ extension BridgeEngine {
         if changed { await refreshStatus() }
     }
 
-    /// One check of `camera`, or the one already under way; nil when the camera was removed meanwhile.
+    /// One check of `camera`, or the one already under way; nil when the camera was removed meanwhile. With `startedAfter`, a check under way
+    /// that began before it is waited for and a new one runs (its readings may be older than what the caller just did: a setup run or a
+    /// restore).
     @discardableResult
-    func runSecurityCheck(_ camera: CameraConfiguration) async -> CameraSecurityChecks.Outcome? {
+    func runSecurityCheck(_ camera: CameraConfiguration, startedAfter: ContinuousClock.Instant? = nil) async -> CameraSecurityChecks.Outcome? {
         let id = camera.id
-        if let running = securityChecks.running[id] { return await running.value }
+        var camera = camera
+        while let running = securityChecks.running[id] {
+            guard let startedAfter, let started = securityChecks.lastStarted[id], started < startedAfter else { return await running.value }
+            _ = await running.value
+            if securityChecks.running[id] == running { securityChecks.running[id] = nil }   // its caller may not have cleared it yet
+            guard let current = configurations.first(where: { $0.id == id }) else { return nil }
+            camera = current
+        }
         securityChecks.lastStarted[id] = .now
         let task = Task { [weak self] () -> CameraSecurityChecks.Outcome? in await self?.performSecurityCheck(camera) }
         securityChecks.running[id] = task
@@ -115,17 +129,28 @@ extension BridgeEngine {
     private func performSecurityCheck(_ camera: CameraConfiguration) async -> CameraSecurityChecks.Outcome? {
         let checkedAt = Date()
         let model = CloudDependentModels.brand(of: camera)
+        let readsDNS = readsGuardDNS(camera)
         var readings: [RemoteAccessFinding] = []
         var answered = true
-        var dns = CameraDNSCheck.notAsked
-        if model == nil {   // a camera that works only through its maker's cloud is not asked
+        var dnsRead: GuardDNSRead?
+        var dnsTakenAt = checkedAt
+        var secrets: HTTPCredentials?
+        var service: CameraSettingsService?
+        if model == nil || readsDNS {
             let credentials = credentials
-            let secrets = (try? await Self.offMain { try credentials.credentials(for: camera) }) ?? nil
-            let service = camera.integration == nil && Self.securityProbeVendors.contains(camera.vendor)
+            secrets = (try? await Self.offMain { try credentials.credentials(for: camera) }) ?? nil
+            service = camera.integration == nil && Self.securityProbeVendors.contains(camera.vendor)
                 ? Self.encoderService(camera, secrets, profiles: cameraProfiles) : nil
-            if let read = await securityReadings(camera, secrets, service: service) {
+            if model != nil {
+                // A camera that works only through its maker's cloud is not asked what it lets out; its DNS is still its own.
+                dnsTakenAt = Date()
+                dnsRead = await guardDNSRead(camera, secrets, service: service)
+            } else if let read = await securityReadings(camera, secrets, service: service) {
                 readings = read
-                if offersInternetGuard, Self.internetWatchDone(camera) { dns = await securityDNS(camera, secrets, service: service) }
+                if readsDNS {
+                    dnsTakenAt = Date()
+                    dnsRead = await guardDNSRead(camera, secrets, service: service)
+                }
                 if let url = await securityProbeURL(camera) {
                     let state: RemoteAccessState
                     if let probe = tuning.rtspAccessProbe { state = await probe(url) } else {
@@ -144,7 +169,18 @@ extension BridgeEngine {
             log.info("\(camera.name): security check: the camera did not answer; its last check stands")
             return .init(security: previous.security, answered: false)
         }
-        let evidence = await guardEvidence(for: camera, dns: dns)
+        let previous = securityChecks.records[camera.id]?.dns
+        var dns = CameraDNSCheck.notAsked
+        if let dnsRead {
+            // A reading a setup run or a restore changed the camera under is read again (`settleGuardDNS`).
+            let reused = (secrets: secrets, service: service)
+            dns = await settleGuardDNS(camera, first: dnsRead, takenAt: dnsTakenAt, previous: previous) { current in
+                await self.guardDNSRead(current, reused.secrets, service: reused.service)
+            }
+        }
+        // What the reading changed about the camera's watch is in its configuration now (saving it may have waited for an operation).
+        guard let current = configurations.first(where: { $0.id == camera.id }) else { return nil }
+        let evidence = await guardEvidence(for: current, dns: dns)
         let security = CameraSecurity.assess(readings, cloudModel: model, internetGuard: evidence, checkedAt: checkedAt)
         securityChecks.records[camera.id] = .init(readings: readings, cloudModel: model, dns: dns, security: security, finished: .now)
         log.info("\(camera.name): security check: \(answered ? security.title : "the camera did not answer")")
@@ -159,13 +195,6 @@ extension BridgeEngine {
         guard let service else { return [.cloudUnknown] }
         let readings = (try? await service.readRemoteAccess()) ?? [.cloudUnknown]
         return await service.remoteAccessUnanswered ? nil : readings
-    }
-
-    /// A watched camera's DNS servers (`readDNS`), for the guard's evidence.
-    private func securityDNS(_ camera: CameraConfiguration, _ secrets: HTTPCredentials?, service: CameraSettingsService?) async -> CameraDNSCheck {
-        if let read = tuning.securityDNS { return await read(camera, secrets).map(CameraDNSCheck.read) ?? .unreadable }
-        guard let service, let reading = try? await service.readDNS() else { return .unreadable }
-        return .read(reading)
     }
 
     /// The address the RTSP check asks: the configured sub stream, else the main stream (the vendor's usual ones when none is configured),
@@ -190,11 +219,13 @@ extension BridgeEngine {
 
     /// One check of the camera `delay` from now (a later call replaces it): only while the bridge runs, for a camera that is still there;
     /// one unreachable then is tried again later (`scheduleSecurityRetry`). `skipIfFresh` skips a camera checked within
-    /// `securityCheckFreshness`.
-    func scheduleSecurityCheck(_ cameraID: UUID, after delay: Duration, skipIfFresh: Bool) {
+    /// `securityCheckFreshness`; `fresh` waits for a check under way that began before this call instead of joining it (after a setup run or
+    /// a restore: what it read may be older).
+    func scheduleSecurityCheck(_ cameraID: UUID, after delay: Duration, skipIfFresh: Bool, fresh: Bool = false) {
         guard tuning.securityChecks, !isPreview else { return }
         securityChecks.scheduled.removeValue(forKey: cameraID)?.cancel()
         let freshness = tuning.securityCheckFreshness
+        let startedAfter = fresh ? ContinuousClock.now : nil
         securityChecks.scheduled[cameraID] = Task { [weak self] in
             if delay > .zero { try? await Task.sleep(for: delay) }
             guard !Task.isCancelled, let self else { return }
@@ -202,7 +233,7 @@ extension BridgeEngine {
             guard self.isActive, let camera = self.configurations.first(where: { $0.id == cameraID }), Self.checksSecurity(camera) else { return }
             if self.runtimes[cameraID]?.isUnreachable == true { return self.scheduleSecurityRetry(cameraID) }
             if skipIfFresh, let record = self.securityChecks.records[cameraID], ContinuousClock.now - record.finished < freshness { return }
-            await self.runSecurityCheck(camera)
+            await self.runSecurityCheck(camera, startedAfter: startedAfter)
         }
     }
 
@@ -243,11 +274,12 @@ extension BridgeEngine {
         securityChecks.scheduled.removeAll()
     }
 
-    /// A removed camera's result and schedule go with it.
+    /// A removed camera's result and schedule go with it, and the guard's reads of its DNS.
     func forgetSecurity(_ cameraID: UUID) {
         securityChecks.scheduled.removeValue(forKey: cameraID)?.cancel()
         securityChecks.records[cameraID] = nil
         securityChecks.lastStarted[cameraID] = nil
         securityChecks.retries[cameraID] = nil
+        forgetGuardDNS(cameraID)
     }
 }

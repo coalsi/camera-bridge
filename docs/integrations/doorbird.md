@@ -16,7 +16,7 @@ Uses DoorBird's **official LAN API** (revision 0.36, <https://www.doorbird.com/a
 - **Two-way audio, the door relay and light** are not offered yet.
 - **Permissions.** The DoorBird user needs **"Watch always"**; without it video and images only work for about a minute after a ring and the device answers HTTP 204 (Camera Bridge says so). It needs no other permission (do not give it "API operator").
 - **The DoorBird app wins.** The device allows one live call at a time; when the DoorBird app is open, Camera Bridge's stream can be cut and reconnects.
-- **Rate and lock-out.** After wrong credentials DoorBird blocks the address for a minute (HTTP 423). Camera Bridge stops sending after the first rejection (two minutes, shared with ONVIF) and the event channel waits ten minutes.
+- **Rate and lock-out.** After wrong credentials DoorBird blocks the address for a minute (HTTP 423). Camera Bridge stops sending after the first rejection (two minutes, shared with ONVIF: Camera Bridge's own pause, worded as such) and after a 423 (the doorbell's own lock, also two minutes); an event channel that meets the pause waits for it, one refused itself waits ten minutes.
 - HTTPS is not used for video; events use plain HTTP on the LAN (with Use HTTPS on, events fall back to URLSession and may arrive late).
 - The UDP broadcast notifications and HTTP favorites/schedules that DoorBird also offers are not used: the monitor needs no setup on the doorbell. (Revision 0.34 of the API notes calls "event monitoring" deprecated in favour of the UDP scheme but the monitor is still documented in 0.36.)
 

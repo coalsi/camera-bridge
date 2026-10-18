@@ -19,8 +19,14 @@ typealias RTSPSessionFactory = @Sendable (RTSPConfiguration) -> any RTSPSessionC
 enum RTSPProbing {
     static let probeTimeout: Duration = .seconds(8)
 
-    static func factory(transport: any NetworkTransport) -> RTSPSessionFactory {
-        { configuration in RTSPClient(configuration: configuration, transport: transport) }
+    /// `streamCredentials`: the configured camera's stream URLs with their credentials (the secret store's), given to every session
+    /// this factory makes (probes, the ONVIF backchannel, talkback), which sends them in its request lines only.
+    static func factory(transport: any NetworkTransport, streamCredentials: StreamURLCredentials = .none) -> RTSPSessionFactory {
+        { configuration in
+            var configuration = configuration
+            if !streamCredentials.isEmpty { configuration.streamCredentials = streamCredentials }
+            return RTSPClient(configuration: configuration, transport: transport)
+        }
     }
 
     /// `StreamInfo` from a negotiated session (codec, size, SPS frame rate, audio).

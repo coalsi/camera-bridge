@@ -1,6 +1,6 @@
 #if canImport(Darwin)
 import BridgeSupport
-import CameraAdapters
+@testable import CameraAdapters
 import FMP4
 import Foundation
 #if canImport(FoundationNetworking)
@@ -128,7 +128,12 @@ struct EngineFixture {
 /// network changes, restarts and races: `RuntimeCameraLifecycleTests`).
 @Suite(.serialized) struct RuntimeEngineTests {
     @MainActor @Test(.timeLimit(.minutes(3))) func demoCameraPairsStreamsRecordsAndReportsMotion() async throws {
-        let fixture = try await EngineFixture()
+        // The demo camera's own motion (from a timer, 10 s after the start) stays out of the test: under load pairing alone took 16 s,
+        // that motion was on by the time the test subscribed, and the test's motion pulse changed nothing (no event: the first one the
+        // controller saw was the motion ending).
+        var tuning = EngineTuning.testing
+        tuning.driverFactory = { _, _, _ in DemoCameraDriver(firstMotionAfter: .seconds(3_600)) }
+        let fixture = try await EngineFixture(tuning: tuning)
         let engine = fixture.engine
         let camera = EngineFixture.demoCamera()
         try await engine.addCamera(camera, password: nil)
@@ -734,9 +739,32 @@ struct EngineFixture {
         var tuning = EngineTuning.testing
         tuning.statusInterval = .milliseconds(250)
         let fixture = try await EngineFixture(tuning: tuning)
-        let engine = fixture.engine
-        await engine.start()
+        await fixture.engine.start()
         try await Task.sleep(for: .milliseconds(600))
+        try await Self.expectTheLogPublishedAtMostFourTimesASecond(fixture)
+        await fixture.tearDown()
+    }
+
+    /// The log has its own loop at the status rate (`startLogLoop`), and the status loop's refreshes published it too: under load a
+    /// refresh took long enough to put the two loops out of step, and the log was published up to twice as often (10 to 13 times in
+    /// 1.3 to 2 s; the test above failed 4 of 25 runs at a load of 30 to 70). A refresh slowed by half the interval does it every time.
+    @MainActor @Test(.timeLimit(.minutes(1))) func theLogIsPublishedAtMostFourTimesASecondWhenStatusRefreshesAreSlow() async throws {
+        var tuning = EngineTuning.testing
+        tuning.statusInterval = .milliseconds(250)
+        tuning.afterSensorsBridgeStatus = { try? await Task.sleep(for: .milliseconds(125)) }
+        let fixture = try await EngineFixture(tuning: tuning)
+        let engine = fixture.engine
+        try await engine.addCamera(EngineFixture.demoCamera(name: "Gate"), password: nil)
+        await engine.start()
+        #expect(await fixture.waitFor { engine.sensorsBridge != nil }, "with the sensors bridge running, every status refresh waits")
+        try await Task.sleep(for: .milliseconds(600))
+        try await Self.expectTheLogPublishedAtMostFourTimesASecond(fixture)
+        await fixture.tearDown()
+    }
+
+    /// Logs 150 lines 8 ms apart: `recentLogs` is published at least twice meanwhile, and at most 4 times a second.
+    @MainActor private static func expectTheLogPublishedAtMostFourTimesASecond(_ fixture: EngineFixture) async throws {
+        let engine = fixture.engine
         let counter = PublicationCounter()
         counter.observe(engine)
         let publications = counter.count
@@ -750,7 +778,6 @@ struct EngineFixture {
         let elapsed = Double((ContinuousClock.now - started) / .milliseconds(1)) / 1000
         #expect(publications.value <= Int(elapsed * 4) + 2, "\(publications.value) publications in \(elapsed) s")
         #expect(publications.value >= 2, "the logs were published")
-        await fixture.tearDown()
     }
 
     @MainActor @Test(.timeLimit(.minutes(1))) func localNetworkCheckMapsTransportAnswers() async throws {

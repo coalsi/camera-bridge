@@ -165,8 +165,9 @@ public final class BridgeEngine {
         // Settings and cameras are shown before the first start (a missing or unreadable file is handled by `start`).
         if let configuration = try? store.load() {
             storedSettings = configuration.settings
-            configurations = configuration.cameras
+            configurations = Self.movingStreamCredentials(of: configuration, to: credentials, store: store, log: log)
             loaded = true
+            Self.useBridgeTimeZone(configuration.settings.timeZone)
         }
         // A damaged configuration set aside on an earlier launch and not dismissed yet.
         configurationRecoveredFrom = store.recoveryNotice()
@@ -460,6 +461,7 @@ public final class BridgeEngine {
         }
         storedSettings = settings
         Self.applyTimeZone(settings.timeZone)
+        if old.timeZone != settings.timeZone { BridgeTime.use(settings.timeZone) }
         if old.logLevel != settings.logLevel { applyLogLevel() }
         guard isActive else { return }
         await nvr.settingsChanged(from: old, to: settings)   // a new folder reloads the catalog, new limits run the janitor
@@ -481,7 +483,15 @@ public final class BridgeEngine {
             guard !configurations.contains(where: { $0.id == configuration.id }) else { throw EngineError.duplicateCamera }
             let credentials = credentials, id = configuration.id
             if let password { try await Self.offMain { try credentials.setPassword(password, for: id) } }
-            var updated = configurations + [configuration.withoutStreamCredentials]
+            // The stream URLs' credentials (query or path) go to the secret store; the camera is kept and saved without them.
+            let stored: CameraConfiguration
+            do {
+                stored = try await Self.offMain { try credentials.storeStreamCredentials(of: configuration) }
+            } catch {
+                if password != nil { _ = try? await Self.offMain { try credentials.setPassword(nil, for: id) } }
+                throw error
+            }
+            var updated = configurations + [stored]
             updated = PortAllocator.assignPorts(to: updated, settings: storedSettings)
             if isActive {
                 updated = await PortAllocator(transport: environment.platform.transport)
@@ -491,6 +501,7 @@ public final class BridgeEngine {
                 try await save(BridgeConfiguration(settings: storedSettings, cameras: updated))
             } catch {
                 if password != nil { _ = try? await Self.offMain { try credentials.setPassword(nil, for: id) } }
+                _ = try? await Self.offMain { try credentials.forgetStreamCredentials(for: id) }
                 throw error
             }
             configurations = updated
@@ -517,17 +528,23 @@ public final class BridgeEngine {
             clockUnsupported[configuration.id] = nil
             onvifRefusals[configuration.id] = nil   // new settings (a new password, an ONVIF user added): ask again
             var updated = configurations
-            var camera = configuration.withoutStreamCredentials
+            let credentials = credentials
+            // Query credentials typed into a stream URL replace the stored ones (a restart below sends them); an address the form left
+            // as shown keeps them.
+            let typedStreamCredentials = configuration.mainStreamURL?.hasStreamCredentials == true
+                || configuration.subStreamURL?.hasStreamCredentials == true
+            var camera = try await Self.offMain { try credentials.storeStreamCredentials(of: configuration) }
             if camera.hapPort == 0 { camera.hapPort = old.hapPort }
             camera.hiddenCameraClock = old.hiddenCameraClock   // the engine owns it (`setCameraClockHidden`); a form never carries it back
             camera.cleanPictureBackup = old.cleanPictureBackup   // and this one (`setCleanPicture`)
             camera.setupBackup = old.setupBackup               // and "Set up for Camera Bridge" owns these two
             camera.setupState = old.setupState
+            camera.dnsWatch = old.dnsWatch                     // and the Internet guard's DNS reads this one
             camera.nvrEnabled = old.nvrEnabled                 // and `setNVR` owns these two: an edit made from a stale copy never undoes Record
             camera.nvrRecordSound = old.nvrRecordSound
             updated[index] = camera
             updated = PortAllocator.assignPorts(to: updated, settings: storedSettings)
-            let credentials = credentials, id = camera.id
+            let id = camera.id
             if let password { try await Self.offMain { try credentials.setPassword(password, for: id) } }
             try await save(BridgeConfiguration(settings: storedSettings, cameras: updated))
             configurations = updated
@@ -537,7 +554,7 @@ public final class BridgeEngine {
             await bridge?.update(cameras: bridgedConfigurations)
             if isActive {
                 let paired = await runtimes[camera.id]?.isPaired ?? false
-                if password != nil || Self.needsRestart(old, camera, paired: paired) {
+                if password != nil || typedStreamCredentials || Self.needsRestart(old, camera, paired: paired) {
                     log.notice("Restarting \(camera.name) with its new settings")
                     await stopRuntime(camera.id)
                     if camera.isEnabled { await startRuntimes([camera]) }
@@ -748,16 +765,19 @@ public final class BridgeEngine {
     /// address this way before `updateCamera`, so the camera keeps its identity and pairing.
     public func probeCamera(_ configuration: CameraConfiguration, password: String?) async throws -> CameraProbeResult {
         guard !isPreview else { throw EngineError.cameraNotRunning }
+        let credentials = credentials
         let secrets: HTTPCredentials?
         if let password {
             secrets = configuration.username.isEmpty && password.isEmpty ? nil : HTTPCredentials(username: configuration.username, password: password)
         } else {
-            let credentials = credentials
             secrets = try await Self.offMain { try credentials.credentials(for: configuration) }
         }
+        // The stored credentials of its stream URLs, for the addresses it still has (a typed address brings its own). One that
+        // cannot be read is left out: the check then tells whether the address works without them.
+        let streamCredentials = (try? await Self.offMain { try credentials.streamCredentials(for: configuration) }) ?? .none
         return try await probe(vendor: configuration.vendor, endpoint: configuration.endpoint, username: configuration.username, credentials: secrets,
                                mainStreamURL: configuration.mainStreamURL, subStreamURL: configuration.subStreamURL,
-                               integration: configuration.integration)
+                               integration: configuration.integration, streamCredentials: streamCredentials)
     }
 
     /// The Add Camera wizard's check of a camera behind a service (`CameraVendor.go2rtc`, `.unifi`): `secret` is the service's
@@ -1359,11 +1379,13 @@ public final class BridgeEngine {
     }
 
     private func probe(vendor: CameraVendor?, endpoint: CameraEndpoint, username: String, credentials: HTTPCredentials?,
-                       mainStreamURL: URL?, subStreamURL: URL?, integration: IntegrationSettings? = nil) async throws -> CameraProbeResult {
+                       mainStreamURL: URL?, subStreamURL: URL?, integration: IntegrationSettings? = nil,
+                       streamCredentials: StreamURLCredentials = .none) async throws -> CameraProbeResult {
         let accessBefore = localNetworkAccess
         do {
             return try await probeOnce(vendor: vendor, endpoint: endpoint, username: username, credentials: credentials,
-                                       mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, integration: integration)
+                                       mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, integration: integration,
+                                       streamCredentials: streamCredentials)
         } catch {
             guard !Task.isCancelled, Self.mayNotHaveReachedTheCamera(error) else { throw error }
             // Local Network privacy blocks connections without telling URLSession or detection why (TN3179): ask the
@@ -1378,12 +1400,14 @@ public final class BridgeEngine {
             guard access == .granted, accessBefore != .granted, !Task.isCancelled else { throw error }
             log.info("Local Network access is allowed; checking \(endpoint.host) again")
             return try await probeOnce(vendor: vendor, endpoint: endpoint, username: username, credentials: credentials,
-                                       mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, integration: integration)
+                                       mainStreamURL: mainStreamURL, subStreamURL: subStreamURL, integration: integration,
+                                       streamCredentials: streamCredentials)
         }
     }
 
     private func probeOnce(vendor: CameraVendor?, endpoint: CameraEndpoint, username: String, credentials: HTTPCredentials?,
-                           mainStreamURL: URL?, subStreamURL: URL?, integration: IntegrationSettings? = nil) async throws -> CameraProbeResult {
+                           mainStreamURL: URL?, subStreamURL: URL?, integration: IntegrationSettings? = nil,
+                           streamCredentials: StreamURLCredentials = .none) async throws -> CameraProbeResult {
         var endpoint = endpoint
         var chosen = vendor
         if chosen == nil {
@@ -1413,7 +1437,7 @@ public final class BridgeEngine {
         let driver = tuning.driverFactory?(camera, credentials, environment.platform.transport)
             ?? CameraDrivers.make(vendor: chosen, endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL,
                                   transport: environment.platform.transport, cameraID: nil, integration: integration, go2rtc: go2rtc,
-                                  helpers: environment.platform.helpers)
+                                  helpers: environment.platform.helpers, streamCredentials: streamCredentials)
         let onvifPort = chosen == .onvif ? endpoint.onvifPort.flatMap { $0 == endpoint.httpPort ? nil : $0 } : nil
         log.info("Probing \(endpoint.host) as \(chosen.rawValue)\(onvifPort.map { " (ONVIF port \($0))" } ?? "")")
         // The check's camera session ends with it (Reolink: a login holds one of the camera's few API sessions for an
@@ -1630,7 +1654,8 @@ public final class BridgeEngine {
         for camera in wanted { accessoryRetries.removeValue(forKey: camera.id)?.cancel() }   // starting now
         let credentials = credentials
         let passwords = await Self.offMainResults(wanted) { try credentials.credentials(for: $0) }
-        for (camera, password) in zip(wanted, passwords) where runtimes[camera.id] == nil {
+        let streamURLs = await Self.offMainResults(wanted) { try credentials.streamCredentials(for: $0) }
+        for ((camera, password), stream) in zip(zip(wanted, passwords), streamURLs) where runtimes[camera.id] == nil {
             let secrets: HTTPCredentials?
             switch password {
             case .success(let value):
@@ -1639,7 +1664,16 @@ public final class BridgeEngine {
                 log.warning("The password of \(camera.name) could not be read (\(error)); connecting without it")
                 secrets = camera.username.isEmpty ? nil : HTTPCredentials(username: camera.username, password: "")
             }
-            let runtime = CameraRuntime(configuration: camera, credentials: secrets, dependencies: runtimeDependencies())
+            let streamCredentials: StreamURLCredentials
+            switch stream {
+            case .success(let value):
+                streamCredentials = value
+            case .failure(let error):
+                log.warning("The credentials of the stream addresses of \(camera.name) could not be read (\(error)); connecting without them")
+                streamCredentials = .none
+            }
+            let runtime = CameraRuntime(configuration: camera, credentials: secrets, streamCredentials: streamCredentials,
+                                        dependencies: runtimeDependencies())
             runtimes[camera.id] = runtime
             await nvr.attach(camera, hub: runtime.hub)   // the recorder subscribes to the main stream's hub; samples arrive once the ingest runs
             started.append((camera, runtime, reservedPorts(excluding: camera.id)))
@@ -1912,9 +1946,15 @@ public final class BridgeEngine {
             case .soapFault(let reason): return "the camera’s ONVIF service reported an error: \(Redact.string(reason))"
             case .apiError(let command, let code): return "the camera’s Reolink interface reported error \(code) for \(Redact.string(command))"
             case .unsupported(let reason): return Redact.string(reason)
+            // The times are the bridge's (`BridgeTime`: its settings' zone), not the process's (UTC on the box).
             case .lockedOut(let until):
-                return "the camera locked logins after too many wrong passwords; Camera Bridge will try again after "
-                    + until.formatted(date: .omitted, time: .shortened)
+                return "the camera locked its logins after too many wrong passwords; Camera Bridge waits until \(BridgeTime.clock(until)) "
+                    + "before it tries again"
+            case .loginsPaused(let until):
+                return "the camera refused the username or password Camera Bridge has, so Camera Bridge waits until \(BridgeTime.clock(until)) "
+                    + "before it logs in again, so the camera doesn’t lock the account"
+            // The camera signed the account in, then refused it a change: no password to check, an administrator account to use.
+            case .notPermitted: return CameraAdapterError.notPermittedReason
             }
         case let config as CameraConfigError:
             return "the camera wouldn’t change its video settings (\(Redact.string(config.summary)))"
@@ -2169,7 +2209,7 @@ public final class BridgeEngine {
         let changes = changes
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.refreshStatus()
+                await self?.refreshStatus(publishingLogs: false)   // the log loop publishes the log, at the same rate
                 try? await Task.sleep(for: interval)
                 await changes.wait(timeout: .seconds(2))
             }
@@ -2197,9 +2237,12 @@ public final class BridgeEngine {
     /// Rebuilds `cameras`, `sensorsBridge` and `recentLogs` (only assigned when they changed). What it read before an
     /// operation changed the cameras, runtimes, sensors bridge or state (`statusGeneration`) is not published: the
     /// status loop runs outside the operations, and a removed camera's row or a stopped bridge's code would come back.
-    func refreshStatus() async {
+    /// The status loop's refreshes leave `recentLogs` to the log loop (`publishingLogs` false): both loops publishing it, out of
+    /// step (a refresh that takes a while), published it up to twice per `statusInterval`. An operation's refresh publishes it
+    /// at once, with the operation's outcome.
+    func refreshStatus(publishingLogs: Bool = true) async {
         let generation = statusGeneration
-        defer { drainLogs() }
+        defer { if publishingLogs { drainLogs() } }
         await refreshNetworkNotices()
         var statuses: [CameraStatus] = []
         for camera in configurations {
@@ -2263,6 +2306,7 @@ public final class BridgeEngine {
         if storage != nvrStorage { nvrStorage = storage }
         if statuses != cameras { cameras = statuses }
         if let bridge, bridge === self.bridge, let bridgeStatus, bridgeStatus != sensorsBridge { sensorsBridge = bridgeStatus }
+        noteGuardConnections(statuses)   // a camera back online has its DNS read again (BridgeEngine+InternetGuard.swift)
     }
 
     /// A live view's controller on a VPN (`NetworkNotice`), from a camera's streaming delegate: kept (and refreshed) per
@@ -2384,14 +2428,18 @@ public final class BridgeEngine {
 
     private func ensureLoaded() async throws {
         guard !loaded else { return }
-        let store = store
+        let store = store, credentials = credentials, log = log
         let (existed, loadedConfiguration) = try await Self.offMain {
-            (FileManager.default.fileExists(atPath: store.fileURL.path(percentEncoded: false)), try store.loadOrRecover())
+            let existed = FileManager.default.fileExists(atPath: store.fileURL.path(percentEncoded: false))
+            var (configuration, recovered) = try store.loadOrRecover()
+            configuration.cameras = Self.movingStreamCredentials(of: configuration, to: credentials, store: store, log: log)
+            return (existed, (configuration, recovered))
         }
         let (configuration, recovered) = loadedConfiguration
         guard !loaded else { return }
         storedSettings = configuration.settings
         Self.applyTimeZone(storedSettings.timeZone)
+        Self.useBridgeTimeZone(storedSettings.timeZone)
         configurations = configuration.cameras
         loaded = true
         if !existed, !environment.platform.power.hasBattery {
@@ -2414,6 +2462,37 @@ public final class BridgeEngine {
         let store = store
         try await Self.offMain { try store.save(configuration) }
         syncInternetGuard(configuration.cameras)
+    }
+
+    /// `configuration`'s cameras with the credentials in their stream URLs moved to the secret store (`storeStreamCredentials`),
+    /// saved that way when any moved: `config.json` of a build that kept them in the URL is rewritten when it is loaded. A camera whose
+    /// credentials the secret store cannot take keeps its URLs as they are (it still connects) and is tried again at the next load; one
+    /// whose move was stored but whose file could not be saved is kept without them (the next load finds them stored already). Logs
+    /// name the camera, never a URL.
+    nonisolated static func movingStreamCredentials(of configuration: BridgeConfiguration, to credentials: CredentialStore,
+                                                    store: ConfigurationStore, log: Log) -> [CameraConfiguration] {
+        var cameras = configuration.cameras
+        var moved = false
+        for index in cameras.indices
+        where cameras[index].mainStreamURL?.hasStreamCredentials == true || cameras[index].subStreamURL?.hasStreamCredentials == true {
+            let name = cameras[index].name
+            do {
+                cameras[index] = try credentials.storeStreamCredentials(of: cameras[index])
+                moved = true
+                log.notice("\(name): the credentials in its stream address are now kept in the secret store with its password; "
+                           + "config.json has the address without them")
+            } catch {
+                log.warning("\(name): the credentials in its stream address could not be moved to the secret store (\(error)); "
+                            + "they stay in config.json, and the next start tries again")
+            }
+        }
+        guard moved else { return configuration.cameras }
+        do {
+            try store.save(BridgeConfiguration(settings: configuration.settings, cameras: cameras))
+        } catch {
+            log.error("The configuration without the stream address credentials could not be saved: \(error)")
+        }
+        return cameras
     }
 
     func persist() async {
@@ -2449,8 +2528,15 @@ public final class BridgeEngine {
         return ports
     }
 
-    /// Makes `identifier` the process's time zone (the timestamp overlay and every date the bridge formats follow it; ffmpeg children inherit
-    /// `TZ`). nil leaves the system's.
+    /// The loaded configuration's zone for the clock times the bridge words for people and the zone it hands the box (`BridgeTime`). The
+    /// process's own zone is left as it is at launch (the recorder names its folders in it; `applyTimeZone` runs when settings are saved).
+    /// Without a zone the bridge already uses the process's.
+    private static func useBridgeTimeZone(_ identifier: String?) {
+        if let identifier { BridgeTime.use(identifier) }
+    }
+
+    /// Makes `identifier` the process's time zone (the timestamp overlay and the dates formatted in the process's zone follow it; ffmpeg
+    /// children inherit `TZ`). nil leaves the system's. Clock times worded for people follow `BridgeTime` instead.
     static func applyTimeZone(_ identifier: String?) {
         guard let identifier, TimeZone(identifier: identifier) != nil else { return }
         setenv("TZ", identifier, 1)
@@ -2540,6 +2626,7 @@ public final class BridgeEngine {
         comparable.cleanPictureBackup = old.cleanPictureBackup
         comparable.setupBackup = old.setupBackup
         comparable.setupState = old.setupState
+        comparable.dnsWatch = old.dnsWatch
         comparable.nvrEnabled = old.nvrEnabled               // Record and Record sound are applied in place (`setNVR`): never a restart
         comparable.nvrRecordSound = old.nvrRecordSound
         if paired { comparable.name = old.name }

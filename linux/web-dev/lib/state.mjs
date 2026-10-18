@@ -181,6 +181,8 @@ export class DevState {
       kindName: configuration.kind === 'doorbell' ? 'Video Doorbell' : 'Camera',
       motionSourceName: 'Camera Events',
       address: configuration.endpoint.host,
+      // The bridge's verdict (BridgeEngine.internetWatchDone); here only the pretend setup's "Watch its internet" makes it.
+      internetWatched: (configuration.setupState?.steps ?? []).some((step) => step.id === 'internetWatch' && (step.status === 'done' || step.status === 'alreadyRight')),
     };
   }
 

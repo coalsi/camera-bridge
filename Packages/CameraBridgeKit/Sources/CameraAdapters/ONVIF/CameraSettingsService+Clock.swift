@@ -67,12 +67,12 @@ public struct CameraClockChange: Sendable, Equatable {
 extension CameraConfigMethod {
     /// The methods that can change a camera's on-screen clock for `vendor`, in order: the vendor's own API, then ONVIF's
     /// OSD service (`.onvifMinimal` stands for it; the encoder's minimal/full split does not apply). A `preferred` method
-    /// that applies goes first.
+    /// that applies goes first, except on a Reolink, where Reolink's API stays first (ONVIF only for what it cannot do at all).
     public static func clockOrder(vendor: CameraVendor?, preferred: CameraConfigMethod? = nil) -> [CameraConfigMethod] {
         var order: [CameraConfigMethod]
         switch vendor {
         case .hikvision: order = [.hikvisionISAPI, .onvifMinimal]
-        case .reolink: order = [.reolinkAPI, .onvifMinimal]
+        case .reolink: return [.reolinkAPI, .onvifMinimal]
         default: order = [.onvifMinimal]
         }
         let wanted = preferred == .onvifFull ? CameraConfigMethod.onvifMinimal : preferred
@@ -111,10 +111,24 @@ extension CameraSettingsService {
     /// Puts the camera's clock in `posixTimeZone` (ONVIF `SetSystemDateAndTime`), so the date and time it draws on its picture is local time. Returns
     /// nil when it worked, else why not. Throws only `CancellationError`.
     public func setCameraTimeZone(posix posixTimeZone: String) async throws -> String? {
-        // Reolink cameras refuse ONVIF's SetSystemDateAndTime to their ONVIF user; their own API changes daylight saving (the offset they
-        // already have from their setup is kept).
-        if vendor == .reolink, try await setReolinkDaylightSaving(PosixTimeZone.hasDaylightSaving(posixTimeZone)) == nil { return nil }
-        guard let client = await client() else { return "the camera has no ONVIF device service" }
+        try await cameraTimeZoneRefusal(posix: posixTimeZone)?.detail
+    }
+
+    /// `setCameraTimeZone(posix:)` as a setup step's refusal: nil when it worked, else the outcome (with `notPermitted` for a change the
+    /// account may not make). Throws only `CancellationError`.
+    func cameraTimeZoneRefusal(posix posixTimeZone: String) async throws -> CameraSetupOutcome? {
+        // Reolink cameras refuse ONVIF's SetSystemDateAndTime to their ONVIF user: their own API sets the offset and the daylight-saving rule.
+        if vendor == .reolink {
+            do {
+                let outcome = try await applyReolinkTimeZone(posix: posixTimeZone)
+                return outcome.succeeded ? nil : outcome
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return .refused(error)
+            }
+        }
+        guard let client = await client() else { return .refused("the camera has no ONVIF device service") }
         do {
             try await client.setTimeZone(posix: posixTimeZone)
             log.info("Set the camera's time zone to \(posixTimeZone)")
@@ -122,7 +136,7 @@ extension CameraSettingsService {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            return Redact.string(String(describing: error))
+            return .refused(error)
         }
     }
 
@@ -202,40 +216,9 @@ extension CameraSettingsService {
         return .done(HiddenCameraClock(method: .hikvisionISAPI, wasShown: shown))
     }
 
-    /// GetTime, then SetTime with only `Dst.enable` changed (to `daylightSaving`). nil when it worked (or was already so), else why not.
-    func setReolinkDaylightSaving(_ daylightSaving: Bool) async throws -> String? {
-        let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-        defer { Task { await api.logout() } }
-        do {
-            let answer = try await api.command("GetTime")
-            guard var dst = answer["Dst"]?.object, let enable = dst["enable"]?.int else { return "no daylight saving in GetTime" }
-            let wanted = daylightSaving ? 1 : 0
-            if enable == wanted { return nil }
-            dst["enable"] = .number(Double(wanted))
-            _ = try await api.command("SetTime", param: .object(["Dst": .object(dst)]))
-            let check = try await api.command("GetTime")
-            guard check["Dst"]?.object?["enable"]?.int == wanted else { return "the camera kept its daylight saving" }
-            log.info("Turned the camera's daylight saving \(daylightSaving ? "on" : "off") through its own API")
-            return nil
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            return Redact.string(String(describing: error))
-        }
-    }
-
     private func hideViaReolink() async throws -> ClockOutcome {
         guard vendor == .reolink else { return .failed(.unsupported("not a Reolink camera")) }
-        let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-        let outcome: ClockOutcome
-        do {
-            outcome = try await hideViaReolink(api: api)
-        } catch {
-            await api.logout()
-            throw error
-        }
-        await api.logout()
-        return outcome
+        return try await hideViaReolink(api: reolink())
     }
 
     /// GetOsd once, change only `osdTime.enable` in what it returned, SetOsd with that whole `Osd` object (Reolink replaces
@@ -334,16 +317,9 @@ extension CameraSettingsService {
         case .reolinkAPI:
             guard vendor == .reolink else { return .unsupported("not a Reolink camera") }
             guard backup.wasShown != false else { return nil }
-            let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-            do {
-                try await setReolinkClock(shown: true, api: api)
-                let shown = try await reolinkClockShown(api: api)
-                await api.logout()
-                return shown == true ? nil : .didNotStick
-            } catch {
-                await api.logout()
-                throw error
-            }
+            let api = reolink()
+            try await setReolinkClock(shown: true, api: api)
+            return try await reolinkClockShown(api: api) == true ? nil : .didNotStick
         case .onvifMinimal, .onvifFull:
             guard let client = await client() else { return .unsupported("camera has no ONVIF service") }
             return try await restoreONVIF(backup.removedOSDs, client: client)

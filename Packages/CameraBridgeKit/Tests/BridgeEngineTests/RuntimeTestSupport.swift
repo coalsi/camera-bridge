@@ -62,12 +62,14 @@ struct ReceivedPacket: Sendable {
     var at: ContinuousClock.Instant
 }
 
-/// Reads `stream` until it ends (or `limit` packets arrived); errors end the read.
-func collect(_ stream: AsyncThrowingStream<RecordingPacket, any Error>, limit: Int = .max) async -> (packets: [ReceivedPacket], error: (any Error)?) {
+/// Reads `stream` until it ends (or `limit` packets arrived); errors end the read. `progress` counts the packets read so far.
+func collect(_ stream: AsyncThrowingStream<RecordingPacket, any Error>, limit: Int = .max,
+             progress: Box<Int>? = nil) async -> (packets: [ReceivedPacket], error: (any Error)?) {
     var packets: [ReceivedPacket] = []
     do {
         for try await packet in stream {
             packets.append(ReceivedPacket(packet: packet, at: .now))
+            progress?.set(packets.count)
             if packets.count >= limit { break }
         }
         return (packets, nil)

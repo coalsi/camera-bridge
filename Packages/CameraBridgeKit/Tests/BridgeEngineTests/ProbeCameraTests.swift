@@ -44,10 +44,12 @@ import Testing
 
     private let built = Box<[Built]>([])
 
+    /// `answerWait`: how long a probe that could not reach the camera waits for the answer to the system's Local Network alert (short:
+    /// the denial tests end as soon as it runs out).
     private func engine(transport: any NetworkTransport, directory: TemporaryDirectory, driver: RecordingDriver,
-                        detection: VendorDetection? = nil, onvifPort: Int? = nil) -> BridgeEngine {
+                        detection: VendorDetection? = nil, onvifPort: Int? = nil, answerWait: Duration = .milliseconds(300)) -> BridgeEngine {
         var tuning = EngineTuning.testing
-        tuning.localNetworkAnswerWait = .milliseconds(300)
+        tuning.localNetworkAnswerWait = answerWait
         let built = built
         tuning.driverFactory = { camera, credentials, _ in
             built.update { $0.append(Built(camera: camera, credentials: credentials)) }
@@ -129,8 +131,10 @@ import Testing
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let driver = RecordingDriver(vendor: .hikvision, failures: [URLError(.notConnectedToInternet)])
+        // The real wait for the person's answer: the click comes within it, as the third attempt does here at once. (With the short wait
+        // of the denial tests, the 20 ms retries came so late under heavy load that the window ran out first, and the denial counted.)
         let engine = engine(transport: ScriptedConnectTransport([.localNetworkDenied, .localNetworkDenied], then: .connectionRefused),
-                            directory: directory, driver: driver)
+                            directory: directory, driver: driver, answerWait: BridgeEngine.localNetworkAnswerWait)
         let result = try await probe(engine, vendor: .hikvision)
         #expect(result.vendor == .hikvision && driver.probes.value == 2)
         #expect(engine.localNetworkAccess == .granted)

@@ -30,7 +30,9 @@ public enum CameraConfigMethod: String, Sendable, Codable, CaseIterable, Hashabl
     }
 
     /// The methods to try for a camera of `vendor`, in order: the vendor's own API first, then ONVIF minimal, then
-    /// ONVIF full. A `preferred` method (the one that worked last time) moves to the front when it applies to the vendor.
+    /// ONVIF full. A `preferred` method (the one that worked last time) moves to the front when it applies to the vendor; on a
+    /// Reolink, Reolink's API stays first (ONVIF is only for a change it cannot make at all: `CameraConfigFailure.leavesONVIF`), so a
+    /// preferred ONVIF method goes first of the ONVIF ones.
     public static func attemptOrder(vendor: CameraVendor?, preferred: CameraConfigMethod? = nil) -> [CameraConfigMethod] {
         var order: [CameraConfigMethod]
         switch vendor {
@@ -38,9 +40,10 @@ public enum CameraConfigMethod: String, Sendable, Codable, CaseIterable, Hashabl
         case .reolink: order = [.reolinkAPI, .onvifMinimal, .onvifFull]
         default: order = [.onvifMinimal, .onvifFull]
         }
-        if let preferred, let index = order.firstIndex(of: preferred), index != 0 {
+        let first = vendor == .reolink ? 1 : 0
+        if let preferred, let index = order.firstIndex(of: preferred), index > first {
             order.remove(at: index)
-            order.insert(preferred, at: 0)
+            order.insert(preferred, at: first)
         }
         return order
     }
@@ -54,22 +57,35 @@ public enum CameraConfigFailure: Sendable, Equatable {
     case rejected(String)
     /// The camera refused the credentials. Ends the chain: another method would only add failed logins.
     case unauthorized
-    /// The camera locked logins. Ends the chain.
+    /// The camera locked its logins after too many wrong passwords. Ends the chain.
     case lockedOut(until: Date)
+    /// Camera Bridge holds off the camera's logins after it refused one (`CameraAdapterError.loginsPaused`). Ends the chain.
+    case loginsPaused(until: Date)
     /// The camera did not answer.
     case network(String)
     /// The camera accepted the change but reading the setting back showed the old value.
     case didNotStick
+    /// The camera refused the account Camera Bridge uses this change (`CameraAdapterError.notPermitted`): its login works, so the chain goes on.
+    case notPermitted
 
     /// Credential problems end the chain (continuing could lock the camera out).
     public var stopsChain: Bool {
         switch self {
-        case .unauthorized, .lockedOut: true
+        case .unauthorized, .lockedOut, .loginsPaused: true
         default: false
         }
     }
 
-    /// A few words: "unsupported", "InvalidArgVal", "login rejected", "didn't stick".
+    /// After Reolink's API failed this way, ONVIF is still tried on a Reolink: only when Reolink's API cannot make the change at all
+    /// (`.unsupported`: no such command or setting, a codec it ties to another picture size). After any other answer (the account may not
+    /// make it, a refusal, a change that did not stick, no answer) nothing goes through ONVIF: Reolink refuses ONVIF's writes to its ONVIF
+    /// user, and an ONVIF `NotAuthorized` as a first call is a refused login that pauses the camera's logins (owner decision, 2026-10-18).
+    var leavesONVIF: Bool {
+        if case .unsupported = self { return true }
+        return false
+    }
+
+    /// A few words: "unsupported", "InvalidArgVal", "login rejected", "logins paused", "didn't stick", "this account may not change it".
     public var summary: String {
         switch self {
         case .unsupported:
@@ -81,10 +97,14 @@ public enum CameraConfigFailure: Sendable, Equatable {
             return "login rejected"
         case .lockedOut:
             return "logins locked"
+        case .loginsPaused:
+            return "logins paused"
         case .network:
             return "no answer"
         case .didNotStick:
             return "didn't stick"
+        case .notPermitted:
+            return "this account may not change it"
         }
     }
 
@@ -95,6 +115,7 @@ public enum CameraConfigFailure: Sendable, Equatable {
             switch adapter {
             case .unauthorized: return .unauthorized
             case .lockedOut(let until): return .lockedOut(until: until)
+            case .loginsPaused(let until): return .loginsPaused(until: until)
             case .unsupported(let reason): return .unsupported(reason)
             case .soapFault(let reason):
                 let lowered = reason.lowercased()
@@ -109,6 +130,7 @@ public enum CameraConfigFailure: Sendable, Equatable {
             case .apiError(let command, let code):
                 // -9 "not support", -26 "ability error": the camera does not have the feature, and asking again will not give it.
                 return ReolinkAPI.unsupportedCodes.contains(code) ? .unsupported("\(command) not supported") : .rejected("\(command) error \(code)")
+            case .notPermitted: return .notPermitted
             }
         default:
             return .network("the camera did not answer")

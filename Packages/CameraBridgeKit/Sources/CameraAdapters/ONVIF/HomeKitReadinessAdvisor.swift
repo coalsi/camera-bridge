@@ -101,7 +101,10 @@ public enum HomeKitReadinessAdvisor {
                                  mainStreamFacts: MeasuredStreamFacts? = nil, subStreamFacts: MeasuredStreamFacts? = nil,
                                  manualStepOverrides: [String: [String]] = [:]) -> HomeKitReadinessReport {
         var checks: [HomeKitReadinessCheck] = []
-        if !snapshot.supportsONVIF { checks.append(onvifAccessCheck(vendor: vendor, loginRejected: snapshot.onvifLoginRejected == true, pausedUntil: snapshot.onvifLoginPausedUntil)) }
+        if !snapshot.supportsONVIF {
+            checks.append(onvifAccessCheck(vendor: vendor, loginRejected: snapshot.onvifLoginRejected == true, pausedUntil: snapshot.onvifLoginPausedUntil,
+                                           lockedByCamera: snapshot.onvifLoginLockedByCamera == true))
+        }
         let main = snapshot.mainProfile?.settings
         let effectiveCodec = (mainStreamFacts?.codec ?? main?.encoding)?.uppercased()
         let effectiveFPS = mainStreamFacts?.fps ?? main?.frameRate
@@ -321,15 +324,27 @@ public enum HomeKitReadinessAdvisor {
                                      explanation: "Audio is present (AAC/G.711 both work with Camera Bridge).", fixMethod: .none)
     }
 
-    private static func onvifAccessCheck(vendor: CameraVendor, loginRejected: Bool, pausedUntil: Date? = nil) -> HomeKitReadinessCheck {
-        if let pausedUntil {
-            let time = pausedUntil.formatted(date: .omitted, time: .shortened)
+    /// `pausedUntil`: Camera Bridge holds off ONVIF logins, after the camera locked them (`lockedByCamera`) or refused one. The time is
+    /// the bridge's (`BridgeTime`), not the process's (UTC on the box).
+    private static func onvifAccessCheck(vendor: CameraVendor, loginRejected: Bool, pausedUntil: Date? = nil,
+                                         lockedByCamera: Bool = false) -> HomeKitReadinessCheck {
+        if let pausedUntil, lockedByCamera {
+            let time = BridgeTime.clock(pausedUntil)
             return HomeKitReadinessCheck(
                 id: "onvif", title: "ONVIF access", status: .problem,
-                explanation: "The camera has temporarily locked logins after too many wrong passwords. Camera Bridge won't "
-                    + "try again until \(time), because each attempt restarts the camera's lock. If you've already added "
-                    + "the ONVIF user, just wait, then click Check Again.",
+                explanation: "The camera locked its logins after too many wrong passwords. Camera Bridge waits until \(time) before it "
+                    + "tries again, because each attempt restarts the camera's lock. If you've already added the ONVIF user, just wait, "
+                    + "then click Check Again.",
                 recommendedValue: "Wait until \(time)", fixMethod: .none)
+        }
+        if let pausedUntil {
+            let time = BridgeTime.clock(pausedUntil)
+            return HomeKitReadinessCheck(
+                id: "onvif", title: "ONVIF access", status: .problem,
+                explanation: "The camera refused the username or password Camera Bridge has, so Camera Bridge waits until \(time) before it "
+                    + "logs in again, so the camera doesn't lock the account. Check the camera's username and password in Camera Bridge"
+                    + (vendor == .hikvision ? " (Hikvision keeps ONVIF users separate from its web accounts)" : "") + ", then click Check Again.",
+                recommendedValue: "Check the camera's username and password in Camera Bridge", fixMethod: .none)
         }
         let steps = manualSteps(vendor: vendor, checkID: loginRejected ? "onvifLogin" : "onvif")
         return HomeKitReadinessCheck(

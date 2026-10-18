@@ -461,6 +461,8 @@ Internal: `EngineTuning` (`Runtime/EngineTuning.swift`; `afterSensorsBridgeStatu
   `ConfigurationMigration`; `CameraConfiguration.withoutStreamCredentials`.
 - `CredentialStore.credentials(for:)`, `.forgetCamera(_:dataDirectory:)`, `.account(for:)`; `HAPStorage` (FileHAPStore
   accounts/directories for cameras and the sensors bridge).
+- `CredentialStore.storeStreamCredentials(of:)`, `.streamCredentials(for:)`, `.streamURLsAccount(for:)` (2026-10-18): the
+  credentials a camera takes in its stream URLs' query (BridgeSupport's `StreamURLCredentials`).
 - `EventRouter` (actor; `maximumInputsPerCamera`, `maximumInputIDLength`), `EventOrigin`, `SensorState`,
   `EventRouterOutput`.
 - `SensorsBridge` (actor), `BridgedSensor`. `PortAllocator` (`resolvePorts(…, listening:)`), `PortAllocationError`.
@@ -627,9 +629,13 @@ MediaHub (per camera) ─► recorder ─► <recordings>/<camera folder>/<yyyy-
 
 ## Additions beyond the contract: the bridge's time zone (2026-10-14, docs/CONTRACT_CHANGES.md)
 
-`BridgeSettings.timeZone` (an IANA identifier; nil: the system's) becomes the process's time zone when the settings load or change (`TZ` and
-Foundation's default, so the timestamp overlay and ffmpeg children follow it). `BridgeEngine.setCameraTimeZone(cameraID:)` sets a camera's clock to
-it through ONVIF `SetSystemDateAndTime` (a POSIX string from `PosixTimeZone`), so the date and time the camera draws itself is local time.
+`BridgeSettings.timeZone` (an IANA identifier; nil: the system's) becomes the process's time zone when the settings are saved (`TZ` and
+Foundation's default, so the timestamp overlay and ffmpeg children follow it until the next launch); at launch the engine leaves the
+process's zone as it is (the recorder names its folders in the zone it starts with, and the overlay draws that zone until a save). It is the
+zone of every clock time the engine words for people ("Camera Bridge waits until 9:19 AM", `readableReason`) and of the internet guard's
+"today", from the start: `BridgeTime` (BridgeSupport), set when the configuration loads and when the setting changes (2026-10-18).
+`BridgeEngine.setCameraTimeZone(cameraID:)` sets a camera's clock to it through ONVIF `SetSystemDateAndTime` (a POSIX string from
+`PosixTimeZone`), so the date and time the camera draws itself is local time.
 
 `BridgeEngine.setCleanPicture(cameraID:clean:)` (2026-10-14) turns every label the camera draws itself off or back, keeping the saved copy in
 `CameraConfiguration.cleanPictureBackup` (engine-owned, like `hiddenCameraClock`).
@@ -667,6 +673,41 @@ with the IR lights off), a Home write turns the camera to auto (on; a camera alr
 What Home showed before starts as the accessory's saved Night Vision (`CameraController.operatingState`, read when the accessory comes up), so
 a write of the value Home already shows leaves it so.
 
+## Additions beyond the contract: Change it by hand (2026-10-18, docs/CONTRACT_CHANGES.md)
+
+Why a step of Set up for Camera Bridge, or a finding of the Security card, could not be done, and how to do it by hand (owner decisions,
+2026-10-18). `Security/CameraManualHelp.swift`: `CameraFamily` (`hikvision`, `reolink`, `tapo`, `ipcWebAPI` (Jennov and other Anjvision
+cameras), `ipcamWeb` (the IPCamera Web family), `dahua` (Dahua and Amcrest), `onvif`; `CameraFamily.of(_:webAPI:)`: the vendor, then the web
+API the camera's address showed in this run (CameraAdapters' `CameraWebAPIFamily.seen(at:)`), then its maker and model, then what an earlier
+setup kept), `CameraManualHelp` (`why`, one sentence; `places`, each `CameraManualHelp.Place` with `app`, menu `path`, `action` and
+`confirmed`; `values` to set, `CameraManualHelp.Value`; `router`, `note`, `then`; `caveat`, set by the init whenever a place is not
+confirmed), and `CameraManualHelpText`, every word in one table like `InternetGuardText` (`CameraManualHelpText.Context`: the bridge's time
+server and DNS address on the camera's network and its time zone in words; `CameraManualHelpText.caveat`; `CameraManualHelpText.step(_:status:detail:family:context:changes:)`;
+`CameraManualHelpText.withHelp(_:family:context:)` for a `CameraSetupReport` or a `CameraSecurity`). Only `notSupported` and `refused`
+steps get help, and none for the DNS or the time without the bridge's address. The why comes from the step's own detail where it says
+something (a refused login, paused logins, no answer, an account that may not change it: "sign Camera Bridge in with an administrator
+account", the camera's own words); a menu path is `confirmed` only when it was read on the camera's own pages or in its maker's documents
+(the IPCamera Web family's page, the IP camera web API's page, TP-Link FAQ 4372, Reolink's UPnP and UID articles), and any other path or a
+general instruction carries "Menu names differ between models and firmware versions, so look for the closest match." Watch also offers the
+router's way (a DHCP reservation with the bridge as the camera's DNS, which counts too but can change when the router renews the address, or
+blocking the camera's internet) and "Then press Check again on the camera’s Security card."; UPnP and the cloud offer the router too. On the
+Security card: UPnP or the cloud on or unreadable, the video or an extra service without a password, where `canChange` is false, and the
+Internet guard's finding while `CameraSecurity.internetGuard` does not watch the camera because of its DNS (`CameraManualHelpText.GuardDNS`,
+from the engine's last reading, `manualHelpGuardDNS`: it asks other servers and is not waiting for a restart that takes the bridge, or its DNS
+could not be read; not while it already asks the bridge, nor while a listed camera's box isn't running). `CameraSetupStep.manualHelp` and
+`CameraSecurityFinding.manualHelp` (init parameters, default nil) carry it; nothing in the engine sets them and they are never saved:
+`BridgeEngine.withManualHelp(_:cameraID:)` (a report or a security result) and `BridgeEngine.withManualHelp(_:)` (statuses, the bridge's
+interfaces and its zone read once) add it for a camera the setup works with, reached directly, and BridgeWeb's `EngineBackend` calls them for
+the page's preview, run, check and statuses, never for a restore's report (its help would say how to make the change Restore is undoing).
+Hikvision's, Dahua's and Amcrest's menus (only in other people's guides) and the IP camera web API's OSD tab get the general instruction with
+the caveat; Reolink's cloud note says doorbell rings still come through Apple Home only for a doorbell (`Context.doorbell`); where the camera
+has no place of its own (a Tapo's cloud and UPnP, the IPCamera Web family's UPnP) the router's way is said as the way, not as another.
+`BridgeEngine.cameraFamily(_:)` keeps the web API family each camera's address showed while the bridge runs (the clients forget it when the
+camera starts again). Tests: `CameraManualHelpTests` (every step and family that can fail says why and where; the bridge's address; only the
+confirmed paths unmarked; the caveat; the why from the detail; the families; the Security card; the guard's DNS help only where the DNS is
+why), `CameraManualHelpEngineTests`, and BridgeWeb's `CameraManualHelpBackendTests` (the real `EngineBackend`: preview, run, check and status
+carry it, a restore does not).
+
 ## Additions beyond the contract: Set up for Camera Bridge (2026-10-16, docs/CONTRACT_CHANGES.md)
 
 `BridgeEngine.cameraSetupPreview(cameraID:)` (reads only), `BridgeEngine.applyCameraSetup(cameraID:)` and
@@ -674,8 +715,13 @@ a write of the value Home already shows leaves it so.
 and `BridgeEngine.cameraSetupTitle(_:)` (the step names, one table). `CameraConfiguration.setupBackup` (`CameraSetupBackup`) and
 `CameraConfiguration.setupState` (`CameraSetupState`, with `currentVersion`: the setup's contents are versioned in code), engine-owned like
 `cleanPictureBackup` and decoded leniently. The backup is saved before the first change; an earlier run's values, Optimize's undo and Clean
-picture's backup are folded in (the oldest value wins), so there is one way back, and the Clean picture switch also restores from it. Steps run
-in order (time zone, time from the bridge, watch its internet, clean picture, streams, video password, extra services, UPnP, cloud); a refusal stops the run, the steps before it stay done. The
+picture's backup are folded in (the oldest value wins), so there is one way back, and the Clean picture switch also restores from it. A
+Reolink backup an earlier build saved with less than a run now changes is completed from the camera's values as read, for a run that
+changes the step (`mergedSetupBackup`): a time zone kept as the daylight-saving switch alone (before 2026-10-18; that build changed only
+the switch) gets the camera's `timeZone` and `Dst` rule, with the old switch as `Dst.enable` (`completedReolinkTimeZone`), and a time
+source saved through ONVIF that names no server gets the camera's own server, port and interval (`completedReolinkTimeSource`), so Restore
+puts back everything the run writes. Steps run
+in order (time zone, time from the bridge, clean picture, streams, UPnP, cloud, video password, extra services, watch its internet); a refusal stops the run, the steps before it stay done, and only "Watch its internet" may still run after it (below); a step refused only because the account Camera Bridge uses may not make the change stops nothing (2026-10-18, below). The
 streams step is the HomeKit optimizer's plan (`plannedEncoderFixes`, shared with `optimizeForHomeKit`), made from the codec the bridge really
 receives (`CameraRuntime.readinessFacts`, counted only when the measured picture size is the stream's) as well as the camera's settings: a
 camera whose settings say H.264 while it sends H.265 is planned as a codec change, written although the camera already names it
@@ -711,8 +757,9 @@ Each camera's security level (owner decision, 2026-10-17), from what Camera Brid
 access possible", `yellow` "Needs work", `green` "Good", `gold` "Local only"; `Comparable`, red lowest; `title`); `CameraSecurityFinding`
 (`feature`, `state`, `level`: the best level the finding leaves, `sentence`, `canChange`, `linked`, `service`); `CameraSecurityFeature`
 (`RemoteAccessFeature`'s cases and `internetGuard`); `GuardEvidence` (`watched`, `outsideLookups24h`, `lastLookupNames`, `available`: what the
-Internet guard saw, nil without a guard, so green is the best there; `listed`: its Watch is done here, `asksBridge`: the camera's DNS read at
-its last check is the bridge's address now, nil when not read, `watchedFor`: how long the box has watched it without a break, nil when it
+Internet guard saw, nil without a guard, so green is the best there; `listed`: it is on the guard's list here (its Watch done, or its DNS
+read pointing at the bridge), `asksBridge`: the camera's DNS as last read is the bridge's address now, nil when not read, `dnsFromRouter`: those
+servers came from the router's DHCP, `watchedFor`: how long the box has watched it without a break, nil when it
 does not say, `waitsForRestart`: the step was taken "after the camera restarts" (ISAPI `statusCode` 7: "The camera takes Camera Bridge as its
 DNS server when it restarts."); the init's `listed` defaults to `watched` and `asksBridge` to true for a watched camera; `GuardEvidence.quietDay`
 24 h);
@@ -722,8 +769,9 @@ asked). Red: the cloud on and linked or of unknown link, UPnP, DDNS or RTMP on, 
 or unknown (a camera without a reader), video (or another service, named) without a password, watched and still looking up internet names.
 Green: none of that, but an unknown, another service on, no guard, not watched, a camera that no longer asks the bridge or whose DNS could
 not be read, or watched for less than a day ("has watched it for 2 hours and seen no internet lookups yet"). Gold: all confirmed off or
-absent, the video locked, watched for a full day without a lookup. The guard's finding says "doesn't watch this camera" for a camera whose
-Watch is not done whatever the box's state (a box watching no camera has its DNS off), and "isn't running" only for a watched one.
+absent, the video locked, watched for a full day without a lookup. The guard's finding says "doesn't watch this camera" for a camera not on
+its list whatever the box's state (a box watching no camera has its DNS off), and "isn't running" only for a listed one; a watch on DNS the
+router gives adds that the router can change it (`CameraSecurity.dnsFromRouterNote`).
 
 `BridgeEngine.checkCameraSecurity(cameraID:)` checks now (a check under way is joined; `CameraSecurityCheckTooSoon` with
 `retryAfterSeconds` within a minute of the camera's last check; not the demo camera; `CameraOfflineError` for a camera known unreachable or
@@ -732,17 +780,21 @@ from the last readings with the guard's evidence, without asking the cameras and
 the box's report; the status is refreshed only when something changed). `CameraStatus.security` holds the last result (nil until the first check; in memory only). A check reads
 `CameraSettingsService.readRemoteAccess()` with the camera's credentials and sends one RTSP `DESCRIBE` without credentials to the configured
 sub stream (else the main, the vendor's usual one, or the address the running ingest got: `CameraRuntime.rtspAddresses`), never for a camera
-behind a helper or a console. A watched camera's DNS servers are read too (`CameraSettingsService.readDNS()`, kept with the readings as
-`CameraDNSCheck`), so the guard's gold rests on the camera asking the bridge's address now. It runs `EngineTuning.securityCheckDelay` (60 s)
-after a camera's runtime starts (unless checked within `securityCheckFreshness`, 10 min), every `securityCheckInterval` (24 h), and right after
-"Set up for Camera Bridge" ran or was restored; a camera unreachable at its time, or that stopped answering during the check
-(`CameraSettingsService.remoteAccessUnanswered`), is tried again after `securityCheckRetry` (10 min), doubling up to `securityCheckRetryCap`
-(2 h), and keeps its last readings meanwhile. It never holds the engine's operations and never writes. `EngineTuning.testing` turns these off
-(`securityChecks`); `securityReading` (nil: the camera did not answer), `securityDNS`, `rtspAccessProbe` and `guardEvidence` replace the
-readings in tests, and `guardEvidence(for:dns:)` is where the Internet guard's report goes in.
+behind a helper or a console. The DNS servers of every camera the Internet guard can watch are read too (`CameraSettingsService.readDNS()`,
+`readsGuardDNS`: also one whose Watch is not done, and one of a cloud-dependent model, whose other readings are not asked; kept with the
+readings as `CameraDNSCheck`, and a read that gives none keeps the last reading): the reading decides whether the camera is watched, and the
+guard's gold rests on the camera asking the bridge's address now (the internet guard in the engine, below). It runs
+`EngineTuning.securityCheckDelay` (60 s) after a camera's runtime starts (unless checked within `securityCheckFreshness`, 10 min), every
+`securityCheckInterval` (24 h), right after "Set up for Camera Bridge" ran or was restored, and on "Check again" (`POST cameras/:id/security/check`);
+a camera unreachable at its time, or that stopped answering during the check (`CameraSettingsService.remoteAccessUnanswered`), is tried again
+after `securityCheckRetry` (10 min), doubling up to `securityCheckRetryCap` (2 h), and keeps its last readings meanwhile. It never writes to
+a camera, and holds the engine's operations only to save what a DNS reading changed about the camera's watch. `EngineTuning.testing` turns
+the scheduled ones off (`securityChecks`); `securityReading` (nil: the camera did not answer), `securityDNS` (nil: not readable; what it
+throws: the read's error, a login pause or a refused login), `rtspAccessProbe` and `guardEvidence` replace the readings in tests, and
+`guardEvidence(for:dns:)` is where the Internet guard's report goes in.
 
 Set up for Camera Bridge's new steps (the IPCamera Web family: docs/integrations/ipcamera-web.md): "Video password" and "Extra services off"
-(`cameraSetupTitle`), after UPnP off and Cloud off (a refused step stops the steps after it, and these are not yet tried on many cameras),
+(`cameraSetupTitle`), after UPnP off and Cloud off (a refused step stops the steps after it, but for a change the account may not make, and these are not yet tried on many cameras),
 their values in `CameraSetupBackup.videoPassword` / `extraServices`; other cameras show them "not offered for this camera"
 (`CameraSetupStepStatus.notOffered`).
 
@@ -761,30 +813,127 @@ one table, `InternetGuardText` (`name`, `watch`, `seal`, `watchStep` "Watch its 
   camera's subnet (`bridgeAddress(onNetworkOf:interfaces:)`, no fallback, unlike the time source); otherwise not offered, "Camera Bridge OS
   watches cameras’ internet; this bridge does not." or "Camera Bridge can watch only cameras on its own local network." A restore that gives
   the DNS back marks the step's record `restored`.
-- **Whose Watch is done** (`internetWatchDone`), so the box watches its address: while the setup keeps the camera's DNS servers to give back
-  (`CameraSetupBackup.internetWatch`; a later run whose read of the step failed for a moment does not drop it), or the last record of the step
-  is done or already right; Restore gives the servers back and marks the record restored. Whether the camera really asks the bridge is the
-  security check's to read. A camera being removed whose servers are kept gets them back first (`giveDNSBackOnRemoval`, best effort, logged;
-  `EngineTuning.restoresWatchOnRemoval`, off in `EngineTuning.testing`). A stored `CameraSetupState` with a step or status this build does not
-  know keeps its other records.
-- **The list.** Every camera whose Watch is done, by its local IPv4 address (`guardAddress`: 10/8, 172.16/12, 192.168/16, 169.254/16, as the
-  box checks), level `watch`, once each (`guardedCameraList`). It is sent with `BridgeEnvironment.setGuardedCameras` when the bridge starts
-  and whenever a saved configuration changes it (the step applied or restored, a camera removed or moved: `syncInternetGuard`, called by the
-  engine's save). It never holds the setup: a refusal is logged and sent again after `EngineTuning.guardSyncRetry` (5 s), doubling up to
-  `guardSyncRetryCap` (5 min), until the box takes it or a newer list replaces it. A report that lists other cameras than the list the box
-  took sends the list again (the box's job can end with an older list's result).
+- **After a refused step.** The steps after a refused one are not run, but this one still is whenever it is offered and was read (a
+  camera's DNS is another setting, and its read in this run just took the login it needs): streams that "didn't stick" no longer keep a
+  camera's DNS from the guard. It is not run, with why (`watchHeld`, the step's detail and the log), after a refusal that says the camera stopped
+  answering (`CameraReachability.isUnreachable`, or every encoder method without an answer) or refused the login of the API the DNS step goes
+  through (ISAPI on a Hikvision with the address document, Reolink's own API on a Reolink that shows its `LocalLink`, else ONVIF, whose
+  account the IP camera web APIs share; `CameraSetupLogin`), or of one the engine can't tell (clean picture and the streams try several):
+  another refused login can lock the camera's logins, and ONVIF's are paused for 2 minutes after one anyway. A login refused for another API
+  (ISAPI against ONVIF, Reolink's own against ONVIF) does not hold it; a Reolink's time zone, time source, UPnP off and Cloud off go through
+  its own API (`setupLogin`: the backup paths "reolink:Upnp" and "reolink:P2p" are Reolink's login), as its DNS does, so a login refused there
+  holds Watch (ReolinkAPI keeps no block after a refused login: Watch would log in again with the refused password).
+- **A change the account may not make** (owner decision, 2026-10-18). `CameraAdapterError.notPermitted` (the camera signed the account in,
+  then refused it the write, as the Reolink doorbell's ONVIF refuses `SetNTP`), or Reolink's `GetAbility` saying the account may not change
+  it before anything is sent, is the camera's answer about that change alone, not a refused login: no login pauses, the step reads "the
+  account Camera Bridge uses may not change this; use an administrator account in the camera’s settings" (`setupReason`, `readableReason`;
+  the streams step when every method was refused that way, `streamsRefusal`; clean picture when every way was), and the run goes on: every
+  step after it still runs, Watch too. The IPCamera Web family's 532374 ("No Privilege") is one too, at a write and at the sign-in (its
+  steps then say the family's words, which also say to use an administrator account). It is carried typed, never by the words:
+  `CameraSetupOutcome.notPermitted` (`BridgeEngine.refusal(_:)` for a step that threw it, by `CameraAdapterError.isNotPermitted`;
+  `encoderNotPermitted` for the streams, `CleanPictureChange.notPermitted`). Any other refusal stops the steps
+  after it that would change something, as before; the report's `stoppedAt` is the first such step (nil when only changes the account may
+  not make were refused).
+- **Who is watched** (`internetWatchDone`), so the box watches its address: the camera's DNS points at the bridge, as the newest of the
+  step's result and the guard's readings of its DNS says, whoever changed it (owner decision, 2026-10-18: the owner on the camera, its
+  router's DHCP, or the setup). `CameraSetupState.watchedServer` (decoded leniently, nil when absent) is the bridge's address once the step
+  is done or already right, nil once it is refused, not run or restored; a run keeps the value it starts with until the step has its result
+  (no list without the camera is sent meanwhile, so the box's `since`, which lasts only while it is listed, is kept) and when it could not
+  read the step (not supported or not offered this time). A reading sets it or clears it too (below). A record saved before that field
+  counts when its last record of the step is done or already right, so a camera an older build watched stays listed, also through a run
+  that takes the step again (the run's carry-over gives it the bridge's address), until a reading finds it asking other servers. A camera
+  never set up keeps a reading's watch in `CameraConfiguration.dnsWatch` (`CameraDNSWatch`: `server`, the bridge's address it points at, nil
+  when it asks others; `setupStarted`, the setup record it was read against, nil without one; engine-owned like `setupState`, carried over
+  by `updateCamera`, decoded leniently), so it grows no setup record and the page still says it is not set up; a reading of other servers
+  against a setup record keeps `CameraDNSWatch(server: nil, setupStarted:)` there (an older build's record has no `watchedServer` to clear),
+  and a watch read against a setup record Restore has cleared is none. The DNS servers the setup keeps to give back
+  (`CameraSetupBackup.internetWatch`) are no proof: they are saved before the step runs and kept when the camera refuses it (a camera can
+  take part of a change, such as the first of its two DNS servers), for Restore and for giving them back on removal. A camera being removed
+  whose servers are kept gets them back first, whether or not it is watched (`giveDNSBackOnRemoval`, best effort, logged "its DNS may still
+  point at Camera Bridge" when the camera doesn't take them; one watched by a reading has none kept: "its DNS still points at Camera Bridge
+  (set on the camera)"; `EngineTuning.restoresWatchOnRemoval`, off in `EngineTuning.testing`). A stored `CameraSetupState` with a step or
+  status this build does not know keeps its other records.
+- **The camera's DNS, read** (2026-10-18). The guard reads the DNS servers of every camera it can watch (`readsGuardDNS`: the bridge has
+  the guard and an address on the camera's network, and reaches the camera directly through Hikvision's, Reolink's or Amcrest's API or ONVIF;
+  whether its Watch is done does not matter, and a cloud-dependent model such as a Tapo is read too). A reading
+  (`watchAfterReading`, pure; saved under the engine's operations, so the box's list follows the save) watches a camera whose DNS points only
+  at the bridge (`CameraDNSReading.pointsAt`, DNS the router gives included; a Reolink on automatic DNS by the servers ONVIF says DHCP gives,
+  never by the slots its `LocalLink` keeps): it joins the list then, and the box's
+  `since` starts there; one that asks other servers ends the watch, and the camera leaves the list (the setup's record of what it did and its
+  backup stay). Logged "Doorbell: its DNS points at Camera Bridge, so the Internet guard watches it" and "… no longer points at Camera Bridge,
+  so the Internet guard no longer watches it". A read that gives nothing (the camera does not show its DNS, did not answer, or the read met a
+  login pause) changes nothing, and the camera's evidence keeps its last reading; so does a reading that does not know which servers the
+  camera asks (`CameraDNSReading.serversUnknown`, `GuardDNSRead.serversUnknown`: a Reolink on automatic DNS whose ONVIF did not say which
+  servers DHCP gives, as a Wi-Fi doorbell's often times out), not to be confused with one that knows DHCP gives none, which ends a watch.
+  Its login worked, though: it lets the guard's own reads of a camera whose login was refused go on. Nothing changes for a reading taken
+  before the setup's last run ended (the run's result is newer), nor while a Watch taken "after the camera restarts" still sees the
+  servers the setup saved. A
+  reading the camera's setup changed under (`setupChanged`: its setup record or backup is not what it was when the read began, because a
+  setup run or a restore saved meanwhile, also while the reading waited for that operation to save its own change) is no evidence either:
+  `recordGuardDNS` saves nothing, and `settleGuardDNS` reads the camera again (at most twice more), so the evidence and the watch rest on the
+  camera as the run or the restore left it; the check right after a run or a restore (`scheduleSecurityCheck(fresh:)`,
+  `runSecurityCheck(startedAfter:)`) waits for a check that began before it instead of joining it. A full Restore also clears a watch a
+  reading made (`dnsWatch`), and a reading with a setup record that finds the bridge leaves the watch to the record. When:
+  in each security check (above), right after "Check again" (`POST cameras/:id/security/check`, 60 s cooldown); by itself (`readGuardDNS`,
+  only the DNS: what the camera lets out is not asked, and the camera's level is worked out again with the newest reading,
+  `reassessSecurity`) every `EngineTuning.guardDNSInterval` (30 min) for each enabled camera, one after the other (`interval / count` apart,
+  `startGuardDNSReads`, from `startInternetGuard`; a camera read in the last half interval is skipped), `guardDNSReconnectDelay` (2 min) after a
+  camera comes back online after it went offline (`noteGuardConnections`, from the status loop; a reconnect alone, such as an on-demand
+  camera's wake, and its first time online after the bridge starts are no return), and `guardDNSPauseMargin` (5 s) after a login pause a read
+  met ends (`CameraAdapterError.loginsPaused` or `.lockedOut`); those two (`scheduleGuardDNSRead`) no sooner than `guardDNSSpacing` (5 min)
+  after the camera's last read (a camera whose stream keeps dropping is read at most that often: a Reolink's read is a login of its own), not
+  at all when a read happened since they were asked for, and returns close together share one read. No read runs during that pause, also not
+  on "Check again" (`GuardDNSRead.paused`; a read that met it sent nothing and is no read for the spacing). A read whose login the camera
+  refused stops the guard's own reads of that camera, those after a return or a pause too, until a read works (each would be another wrong
+  password).
+  These reads are scheduled only while the bridge runs and `EngineTuning.securityChecks` is on; a read shares the security check's
+  `CameraSettingsService` when it is part of one, and is one `readDNS()` with a service of its own otherwise. Removing a camera forgets its
+  reads (`forgetGuardDNS`).
+- **The list.** Every watched camera, by its local IPv4 address (`guardAddress`: 10/8, 172.16/12, 192.168/16, 169.254/16, as the box
+  checks), level `watch`, once each (`guardedCameraList`). It is sent with `BridgeEnvironment.setGuardedCameras` when the bridge starts
+  and whenever a saved configuration changes it (the step applied or restored, a reading that watches a camera or ends its watch, a camera
+  removed or moved: `syncInternetGuard`, called by the engine's save). It never holds the setup: a refusal is logged and sent again after
+  `EngineTuning.guardSyncRetry` (5 s), doubling up to `guardSyncRetryCap` (5 min), until the box takes it or a newer list replaces it. A
+  report that lists other cameras than the list the box took sends the list again (the box's job can end with an older list's result).
 - **The evidence.** While the bridge runs the box's report (`BridgeEnvironment.guardReport`) is read every `guardPollInterval` (1 min,
   `pollGuardReport`), and every level is worked out again (`guardEvidenceChanged`: the report may have changed, a day of watching passed, or
-  the bridge moved to another address). `GuardEvidence` gains `today` and `names`; a camera is `watched` when its Watch is done here, the box
-  watches its address and the camera's DNS, as its last check read it, is the bridge's address on its network now (`asksBridge`), and the
-  report is evidence (`available`) only while the box has the guard, its DNS answers and the report is younger than `guardReportStaleAfter`
-  (10 min) (`guardEvidence(address:listed:asksBridge:report:fresh:now:)`); `watchedFor` comes from the box's `since`. `lastLookupNames` are the last 24 hours' names, newest first. Names are shown as
-  `GuardNames.shown` has them: a part that looks like a camera's id (12 or more letters and digits, 4 or more digits) becomes "*".
-  `CameraSecurity.internetGuard` (`CameraGuardActivity`: `watched`, `today`, `last24h`, `names`, at most 10, most asked first; nil without a
-  guard) is `status.security.guard` on the web API.
+  the bridge moved to another address). `GuardEvidence` gains `today` and `names`; a camera is `watched` when it is on the list here, the box
+  watches its address and the camera's DNS, as last read, is the bridge's address on its network now (`asksBridge`), and the report is
+  evidence (`available`) only while the box has the guard, its DNS answers and the report is younger than `guardReportStaleAfter` (10 min)
+  (`guardEvidence(address:listed:asksBridge:waitsForRestart:dnsFromRouter:report:fresh:now:)`); `watchedFor` comes from the box's `since`.
+  `GuardEvidence.dnsFromRouter` (init parameter, default false): the reading's servers came from the router's DHCP; a camera watched on them
+  says "Its DNS servers come from your router, which can change them when it renews the camera’s address." (`CameraSecurity.dnsFromRouterNote`).
+  `lastLookupNames` are the last 24 hours' names, newest first. Names are shown as `GuardNames.shown` has them: a part that looks like a
+  camera's id (12 or more letters and digits, 4 or more digits) becomes "*". `CameraSecurity.internetGuard` (`CameraGuardActivity`: `watched`,
+  `today`, `last24h`, `names`, at most 10, most asked first; nil without a guard) is `status.security.guard` on the web API.
 - **The notice.** `BridgeEngine.internetGuardNotice` (`InternetGuardNotice`: `day`, `lookups`, `cameras`, `cameraID` and `cameraName` of the
   camera that tried most, `date`, `title`, `sentence` "Internet guard blocked 7 lookups from 2 cameras today."): one a day, from the first
   blocked lookup of the guard's day; its figures change at most every `guardNoticeRefresh` (1 h); none when nothing was blocked today or the
-  report is no evidence. Only cameras whose Watch is done count.
+  report is no evidence. Only watched cameras count.
 - Tests: `EngineTuning.guardCameraAddress` stands a loopback fake camera for one at 192.168.77.x; nothing else of the guard runs unless the
-  test's environment has it.
+  test's environment has it. `EngineTuning.securityDNS` stands for the cameras' DNS (it may throw the read's error), and the reads' times are
+  shortened through `guardDNSInterval`, `guardDNSReconnectDelay`, `guardDNSPauseMargin` and `guardDNSSpacing`.
+
+## Additions beyond the contract: credentials in stream URLs (2026-10-18, docs/CONTRACT_CHANGES.md)
+
+Some cameras take credentials in their stream URL's query (`?user=admin&password=…`, a password `hash=`, a `token=`; an ONVIF
+`GetStreamUri` answer can carry them) or path (XMEye `/user=admin&password=…&channel=1&stream=0.sdp`, its `_`-joined variant,
+`;pwd=…`). They are kept like the password:
+
+- **Saved without them.** `addCamera` and `updateCamera` move them to the secret store (`CredentialStore.storeStreamCredentials(of:)`,
+  account `camera.<UUID>.stream-urls`: `{"main": "<URL>", "sub": "<URL>"}`) before saving; `configurations`, `config.json`, backups,
+  the web API and the diagnostics report have the URLs without them (`URL.removingStreamCredentials`). An address saved again as
+  shown keeps what is stored for it; a new address without credentials drops them (they never go to another address); credentials
+  typed into an address replace the stored ones and restart the camera. A secret store that refuses them fails the save. Removing the
+  camera deletes them (`forgetCamera`).
+- **Moved on load.** A `config.json` that has them (earlier builds kept them in the URL) is rewritten without them when it is loaded
+  (`movingStreamCredentials(of:to:store:log:)`, in `init` and in `ensureLoaded`), once each camera's are stored. A camera whose
+  credentials the secret store cannot take keeps its URLs as they were, so it still connects, and the next load tries again. The
+  move is logged by camera name, never with a URL.
+- **Sent only when connecting.** `streamCredentials(for:)` gives the stored URLs whose address is still the camera's to its runtime
+  (`CameraRuntime.init(configuration:credentials:streamCredentials:dependencies:)`: the ingest's `RTSPConfiguration`s and the driver
+  through `CameraDrivers.make(…, streamCredentials:)`) and to `probeCamera(_:password:)`; `RTSPClient` puts them into its request lines
+  only. The RTSP access check of the security check asks the address without them, as before with no credentials at all.
+- In the path, the saved URL loses each credential assignment and keeps the rest of its segment (`/channel=1&stream=0.sdp`,
+  `/channel=1_stream=0.sdp`, `/snapshot.cgi`); a segment that was only credentials goes. `Redact.url` keeps masking only the secret
+  values there (a path's `user=admin` shows in logs, as before).

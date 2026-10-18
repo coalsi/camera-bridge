@@ -7,8 +7,9 @@ import Testing
 @testable import CameraAdapters
 
 /// The internet guard's Watch (docs/superpowers/specs/2026-10-17-internet-guard-design.md), the camera's side: its DNS servers read (the
-/// backup), pointed at the bridge, read back and put back; its gateway and network interfaces read. Against fakes only, with the answers
-/// two real cameras gave (addresses changed to documentation ones).
+/// backup), pointed at the bridge (every slot of a camera that keeps a slot it is not sent), read back and put back, a refusal saying what
+/// the camera kept; its gateway and network interfaces read. Against fakes only, with the answers two real cameras gave (addresses changed
+/// to documentation ones). The cameras' own APIs: `CameraDNSOwnAPITests`.
 @Suite(.timeLimit(.minutes(1))) struct CameraDNSTests {
     private let onvifCredentials = HTTPCredentials(username: MockONVIFCamera.username, password: MockONVIFCamera.password)
     private let bridge = "192.0.2.10"
@@ -141,6 +142,7 @@ import Testing
         #expect(try await service.applyDNS(server: bridge) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
         #expect(camera.dns.value == MockONVIFCamera.DNS(fromDHCP: false, searchDomains: ["domain.name"], manualServers: [bridge]),
                 "only the servers change: the search domain is kept")
+        #expect(camera.setDNSBodies.value.count == 1, "a camera that takes the bridge alone is written once")
         let after = try #require(try await service.readDNS())
         #expect(after.servers == [bridge] && !after.fromDHCP && after.pointsAt(bridge))
         #expect(!read.pointsAt(bridge) && !after.pointsAt("192.0.2.11"))
@@ -196,6 +198,113 @@ import Testing
         #expect(try await service.restoreDNS(backup) == CameraSetupOutcome(succeeded: false, detail: "the camera did not take its old DNS servers back"))
     }
 
+    // MARK: ONVIF on a camera with two slots
+
+    /// One `DNSManual` entry as `SetDNS` sends it.
+    private func entry(_ address: String) -> String {
+        "<tds:DNSManual><tt:Type>IPv4</tt:Type><tt:IPv4Address>\(address)</tt:IPv4Address></tds:DNSManual>"
+    }
+
+    /// The number of `DNSManual` entries of each `SetDNS` the camera was sent.
+    private func entries(_ camera: MockONVIFCamera) -> [Int] {
+        camera.setDNSBodies.value.map { $0.components(separatedBy: "<tds:DNSManual>").count - 1 }
+    }
+
+    /// As "Patio New" answered: on DHCP, and the servers of its page's two slots (not shown while on DHCP).
+    private static let patioNew = MockONVIFCamera.DNS(fromDHCP: true, searchDomains: ["domain.name"], dhcpServers: ["1.1.1.1", "8.8.8.8"],
+                                                      manualServers: ["1.1.1.1", "8.8.8.8"])
+
+    /// "Patio New" kept 8.8.8.8 in its second slot when `SetDNS` named the bridge alone: the bridge goes into both slots, and Restore puts
+    /// DHCP back.
+    @Test func aCameraWithTwoSlotsGetsTheBridgeInBoth() async throws {
+        let camera = try await MockONVIFCamera.start()
+        defer { camera.stop() }
+        camera.dnsSlots.set(.two)
+        camera.dns.set(Self.patioNew)
+        let service = onvif(camera)
+        let read = try #require(try await service.readDNS())
+        #expect(read.backup == CameraDNSBackup(method: .onvifMinimal, fromDHCP: true, servers: [], searchDomains: ["domain.name"]))
+
+        #expect(try await service.applyDNS(server: bridge) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(entries(camera) == [1, 2], "the bridge alone, then the bridge in both slots")
+        #expect(camera.setDNSBodies.value.last?.contains(entry(bridge) + entry(bridge)) == true)
+        #expect(camera.dns.value.manualServers == [bridge, bridge] && !camera.dns.value.fromDHCP)
+        #expect(try await service.readDNS()?.pointsAt(bridge) == true)
+
+        #expect(try await service.restoreDNS(read.backup) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(camera.dns.value.fromDHCP, "back on DHCP, as it was")
+    }
+
+    @Test func aCameraWithTwoSlotsGetsBackExactlyTheServersItHad() async throws {
+        let camera = try await MockONVIFCamera.start()
+        defer { camera.stop() }
+        camera.dnsSlots.set(.two)
+        let service = onvif(camera)
+
+        // One server set by hand, the second slot empty: the bridge alone fills what the camera asks.
+        camera.dns.set(MockONVIFCamera.DNS(fromDHCP: false, searchDomains: ["ipnc"], dhcpServers: [], manualServers: ["1.1.1.1", ""]))
+        let one = try #require(try await service.readDNS()).backup
+        #expect(one.servers == ["1.1.1.1"])
+        #expect(try await service.applyDNS(server: bridge).succeeded)
+        #expect(entries(camera) == [1])
+        // A run before left the bridge in both slots: the old server alone would keep the bridge second, so the second slot is emptied.
+        camera.dns.update { $0.manualServers = [bridge, bridge] }
+        #expect(try await service.restoreDNS(one) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(camera.dns.value.manualServers == ["1.1.1.1", ""])
+        #expect(Array(entries(camera).suffix(2)) == [1, 2])
+        #expect(camera.setDNSBodies.value.last?.contains(entry("1.1.1.1") + entry("")) == true)
+
+        // Two servers set by hand come back as they were.
+        camera.dns.set(MockONVIFCamera.DNS(fromDHCP: false, searchDomains: ["ipnc"], dhcpServers: [], manualServers: ["1.1.1.1", "8.8.8.8"]))
+        let two = try #require(try await service.readDNS()).backup
+        #expect(try await service.applyDNS(server: bridge).succeeded)
+        #expect(camera.dns.value.manualServers == [bridge, bridge])
+        #expect(try await service.restoreDNS(two).succeeded)
+        #expect(camera.dns.value.manualServers == ["1.1.1.1", "8.8.8.8"])
+    }
+
+    @Test func aCameraThatRefusesOneAddressTwiceGetsTheBridgeAndAnEmptySlot() async throws {
+        let camera = try await MockONVIFCamera.start()
+        defer { camera.stop() }
+        camera.dnsSlots.set(.twoRefusingDuplicates)
+        camera.dns.set(Self.patioNew)
+        let service = onvif(camera)
+        #expect(try await service.applyDNS(server: bridge) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(entries(camera) == [1, 2, 2], "the bridge alone, twice (refused), then with an empty second slot")
+        #expect(camera.setDNSBodies.value.last?.contains(entry(bridge) + entry("")) == true)
+        #expect(camera.dns.value.manualServers == [bridge, ""])
+        #expect(try await service.readDNS()?.servers == [bridge])
+    }
+
+    @Test func aCameraThatKeepsItsOtherServerIsRefusedInWordsThatSayWhatItKept() async throws {
+        let camera = try await MockONVIFCamera.start()
+        defer { camera.stop() }
+        camera.dnsSlots.set(.twoKeepingSecond)
+        camera.dns.set(Self.patioNew)
+        let service = onvif(camera)
+        let read = try #require(try await service.readDNS())
+        #expect(try await service.applyDNS(server: bridge)
+                == CameraSetupOutcome(succeeded: false, detail: "the camera asks Camera Bridge first but kept 8.8.8.8 as its other DNS server"))
+        #expect(entries(camera) == [1, 2, 2])
+        #expect(camera.dns.value.manualServers == [bridge, "8.8.8.8"])
+        #expect(try await service.restoreDNS(read.backup).succeeded)
+        #expect(camera.dns.value.fromDHCP, "Restore puts back what the camera had")
+    }
+
+    @Test func aRefusalSaysWhatTheCameraKept() {
+        func reading(_ servers: [String], fromDHCP: Bool = false) -> CameraDNSReading {
+            CameraDNSReading(servers: servers, fromDHCP: fromDHCP, method: .onvifMinimal,
+                             backup: CameraDNSBackup(method: .onvifMinimal, fromDHCP: fromDHCP, servers: servers))
+        }
+        #expect(CameraSettingsService.kept(reading([bridge, "8.8.8.8", "1.1.1.1"]), server: bridge)
+                == "the camera asks Camera Bridge first but kept 8.8.8.8 and 1.1.1.1 as its other DNS servers")
+        #expect(CameraSettingsService.kept(reading(["8.8.8.8", bridge]), server: bridge)
+                == "the camera kept 8.8.8.8 as DNS server besides Camera Bridge, and asks 8.8.8.8 first")
+        for other in [reading(["1.1.1.1", "8.8.8.8"]), reading(["1.1.1.1", "8.8.8.8"], fromDHCP: true), reading([])] {
+            #expect(CameraSettingsService.kept(other, server: bridge) == "the camera kept its own DNS servers")
+        }
+    }
+
     @Test func aCameraWithoutDNSOrWithAWrongPasswordAndANameForAServer() async throws {
         let camera = try await MockONVIFCamera.start()
         defer { camera.stop() }
@@ -216,6 +325,57 @@ import Testing
         let error = await #expect(throws: CameraAdapterError.self) { try await service.applyDNS(server: bridge) }
         #expect(error?.isLoginRefusal == true)
         #expect(camera.setDNSBodies.value.isEmpty)
+    }
+
+    // MARK: Whoever changed it (owner decision, 2026-10-18)
+
+    private func reading(_ servers: [String], fromDHCP: Bool) -> CameraDNSReading {
+        CameraDNSReading(servers: servers, fromDHCP: fromDHCP, method: .onvifMinimal,
+                         backup: CameraDNSBackup(method: .onvifMinimal, fromDHCP: fromDHCP, servers: servers))
+    }
+
+    /// A camera asks the bridge when every DNS server it uses is the bridge, wherever it has them from: one the router's DHCP points at the
+    /// bridge counts too (the reading still says it came from DHCP, so the page can say it may change when the router renews it). A slot that
+    /// holds 0.0.0.0 or :: is an empty slot, not a server (round one's review).
+    @Test func dnsThatPointsOnlyAtTheBridgeCountsWhoeverSetIt() {
+        #expect(reading([bridge], fromDHCP: true).pointsAt(bridge), "the router's DHCP hands out the bridge")
+        #expect(reading([bridge, bridge], fromDHCP: true).pointsAt(bridge))
+        #expect(!reading([bridge, "8.8.8.8"], fromDHCP: true).pointsAt(bridge), "another server: not the bridge alone")
+        #expect(!reading([], fromDHCP: true).pointsAt(bridge))
+        #expect(reading([bridge, "0.0.0.0"], fromDHCP: false).pointsAt(bridge), "0.0.0.0 is an empty slot")
+        #expect(reading(["2001:db8::10", "::"], fromDHCP: false).pointsAt("2001:DB8:0:0:0:0:0:10"), ":: is an empty slot")
+        #expect(!reading(["0.0.0.0", "0:0:0:0:0:0:0:0"], fromDHCP: false).pointsAt(bridge), "no server at all")
+    }
+
+    /// A camera whose DHCP already points it at the bridge is left as it is, and the step says the router can change it.
+    @Test func aCameraTheRouterPointsAtTheBridgeIsAlreadyRightAndMayChange() async throws {
+        let camera = try await MockONVIFCamera.start()
+        defer { camera.stop() }
+        camera.dns.set(MockONVIFCamera.DNS(fromDHCP: true, searchDomains: ["domain.name"], dhcpServers: [bridge], manualServers: []))
+        let (reading, backup) = try await onvif(camera).readInternetWatch(server: bridge)
+        #expect(reading.state == .alreadyRight)
+        #expect(reading.note == "Its DNS servers come from the router (DHCP): the router can change them when it renews the camera’s address.")
+        #expect(backup?.fromDHCP == true)
+        #expect(camera.setDNSBodies.value.isEmpty)
+    }
+
+    /// A camera that shows an emptied slot as 0.0.0.0: after Watch it asks only the bridge, and after Restore exactly its old server.
+    @Test func anEmptiedSlotShownAsZerosIsEmpty() async throws {
+        let camera = try await MockONVIFCamera.start()
+        defer { camera.stop() }
+        camera.dnsSlots.set(.twoRefusingDuplicates)
+        camera.emptySlotShownAs.set("0.0.0.0")
+        camera.dns.set(MockONVIFCamera.DNS(fromDHCP: false, searchDomains: ["ipnc"], dhcpServers: [], manualServers: ["1.1.1.1", "8.8.8.8"]))
+        let service = onvif(camera)
+        #expect(try await service.applyDNS(server: bridge) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(camera.dns.value.manualServers == [bridge, ""])
+        #expect(try await service.readDNS()?.servers == [bridge])
+
+        camera.dnsSlots.set(.two)
+        camera.dns.update { $0.manualServers = [bridge, bridge] }
+        let one = CameraDNSBackup(method: .onvifMinimal, fromDHCP: false, servers: ["1.1.1.1"], searchDomains: ["ipnc"])
+        #expect(try await service.restoreDNS(one) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(camera.dns.value.manualServers == ["1.1.1.1", ""])
     }
 
     // MARK: Hikvision ISAPI
@@ -258,6 +418,18 @@ import Testing
 
         #expect(try await service.restoreDNS(read.backup) == CameraSetupOutcome(succeeded: true, detail: "via ISAPI"))
         #expect(camera.documents.value[HikvisionISAPI.ipAddressPath] == FakeSetupCamera.ipAddress(), "the document is exactly as it was")
+    }
+
+    /// Both slots are sent the bridge, and the read-back needs both: a camera that keeps its second server is refused, saying which.
+    @Test func aHikvisionThatKeepsItsSecondServerIsRefusedInWordsThatSayWhatItKept() async throws {
+        let camera = try await FakeSetupCamera.start()
+        defer { camera.stop() }
+        camera.keepSecondaryDNS.set(true)
+        let service = hikvision(camera)
+        #expect(try await service.applyDNS(server: bridge)
+                == CameraSetupOutcome(succeeded: false, detail: "the camera asks Camera Bridge first but kept 1.1.1.1 as its other DNS server"))
+        #expect(camera.puts(to: HikvisionISAPI.ipAddressPath) == [FakeSetupCamera.ipAddress(primaryDNS: bridge, secondaryDNS: bridge)])
+        #expect(try await service.readDNS()?.servers == [bridge, "1.1.1.1"])
     }
 
     @Test func aFixedAddressStaysFixed() async throws {
@@ -330,6 +502,10 @@ import Testing
         #expect(try JSONDecoder().decode(CameraDNSBackup.self, from: JSONEncoder().encode(backup)) == backup)
         let older = try JSONDecoder().decode(CameraDNSBackup.self, from: Data(#"{"method":"hikvisionISAPI","fromDHCP":false,"servers":["8.8.8.8"]}"#.utf8))
         #expect(older == CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: ["8.8.8.8"]), "search domains are optional")
+        let own = CameraDNSBackup(method: .onvifMinimal, fromDHCP: true, servers: [], searchDomains: ["domain.name"],
+                                  ownAPI: ["ondhcp": "1", "dns1": "1.1.1.1", "dns2": "8.8.8.8"])
+        #expect(try JSONDecoder().decode(CameraDNSBackup.self, from: JSONEncoder().encode(own)) == own)
+        #expect(older.ownAPI == nil, "a backup saved before the camera's own API was read has none")
     }
 }
 #endif

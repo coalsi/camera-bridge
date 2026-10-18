@@ -51,12 +51,46 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
   is read back; `HiddenCameraClock` (how, and what was there before), `CameraClockChange`, `CameraConfigMethod.clockOrder(vendor:preferred:)`
   (the vendor's API, then ONVIF; the remembered method first) and `CameraConfigMethod.clockDisplayName`. A camera without such an
   overlay is reported as not supported, never thrown; credential problems end the chain (the ONVIF login guard is respected).
+- Login pauses (2026-10-18, docs/CONTRACT_CHANGES.md): `CameraAdapterError.loginsPaused(until:)` is Camera Bridge's own pause after the camera
+  refused a login (`ONVIFLoginGuard`, 2 min: nothing is sent, the camera locked nothing); `.lockedOut(until:)` is only the camera's own lock
+  (Hikvision's "locked" answer, the IP camera web API's `passwordLock`, DoorBird's HTTP 423). Both are login refusals (`isLoginRefusal`, and
+  `CameraConfigFailure.loginsPaused(until:)` ends a chain like `.lockedOut`: "logins paused"). `CameraSettingsSnapshot.onvifLoginLockedByCamera`
+  says whose pause `onvifLoginPausedUntil` is, and `HomeKitReadinessAdvisor` words the two apart, its time in the bridge's zone (`BridgeTime`).
+  The guard keeps the cause per host (`ONVIFLoginGuard.Pause`, `pause(host:)`, `pause(hosts:)` for one account behind several ports,
+  `Pause.error`): while the camera's lock lasts it is the reason, and a refusal never shortens or recasts it. An `ONVIFClient` whose own login
+  was refused reports `.unauthorized` on its next calls, not the pause it caused, so an ONVIF event channel (PullPoint, Reolink's ONVIF side
+  channel) refused on its own login waits the 10-minute unauthorized delay (`ReconnectPolicy.delayAfterUnauthorized`), not the 2-minute pause.
+- Changes the account may not make (2026-10-18, docs/CONTRACT_CHANGES.md): `CameraAdapterError.notPermitted(_:)` (the operation, "SetNTP"):
+  the camera signed in the account Camera Bridge uses, then refused it a change, as the Reolink doorbell's ONVIF account reads `GetNTP` and
+  `GetDNS` but is refused `SetNTP`. It is not a login refusal (`isLoginRefusal` is false): nothing pauses, the camera answered
+  (`cameraAnswered`), `CameraConfigFailure.notPermitted` ("this account may not change it") lets a chain try its next method (on a Reolink
+  never ONVIF after Reolink's API: the Reolink section below), and a step or
+  a settings change says `CameraAdapterError.notPermittedReason` ("the account Camera Bridge uses may not change this; use an administrator
+  account in the camera’s settings"; the steps quote refusals through the internal `refusalWords(_:)`). A setup step refused so says it typed,
+  not only in words: `CameraSetupOutcome.notPermitted` (init parameter, default false; internal `CameraSetupOutcome.refused(_ error:)` and
+  `notPermittedRefusal`) and `CleanPictureChange.notPermitted` (every way to take the labels off refused so, a way the camera does not have
+  aside: internal `refusedOnlyForTheAccount(_:)`), so Set up for Camera Bridge goes on with the steps after it;
+  `CameraAdapterError.isNotPermitted(_:)` says whether an error is one (`.notPermitted`, or the IPCamera Web family's API stopped for want of
+  privilege). The IPCamera Web family's 532374 ("No Privilege") is one too: at a write once the camera signed Camera Bridge in it is
+  `.notPermitted` ("set mobile"; nothing latched), and the steps a sign-in refused so stops are typed so (`CameraSetupOutcome.notPermitted`,
+  their words the family's: internal `IPCamWebUnavailable.noPrivilege`, `notPermitted`). `ONVIFClient` throws it for a write
+  (internal `writeName(action:)`: `Set…`, `Create…`, `Delete…`, PTZ moves and `Stop`, `SendAuxiliaryCommand`, `SystemReboot`; not the event
+  service's messages) answered `NotAuthorized` or HTTP 401 within `loginProofWindow` (5 minutes) of a call that signed in on the same client
+  (`provesLogin(action:)`: not ONVIF's calls before authentication, `preAuthenticationCalls`, which a camera may answer to anyone). A first
+  call refused, or a write refused after only those, is a refused login as before (logins pause), and a refused login ends the proof. A camera
+  whose ONVIF checks no password on its reads but does on its writes would read a wrong password as `.notPermitted` too: no pause, and the
+  same words. The other way round, a write that no call proving the login came before on its client is still a refused login when the
+  camera refuses it to the account: the page's camera time zone (`setCameraTimeZone(posix:)` asks only `GetSystemDateAndTime` first, a
+  call before authentication) pauses logins for 2 minutes on such an account, as a Restore does whose first ONVIF call is a write. A
+  keyframe request refused so (`SetSynchronizationPoint`) marks the camera as having none (`CameraKeyframeGuard`), so it is not sent again
+  at every spacing.
 
 ## Behaviour and invariants
 
 - Event sources (`SupervisedEventSource`) start on the first `events()`, reconnect with `Backoff` (1 s → 60 s; a session
-  that lived ≥ `healthyAfter` reconnects at once; rejected credentials emit `.authenticationFailed` — Hikvision's shared
-  stream replays it to late subscribers — and wait 10 min, so login lockouts are never tripped), emit
+  that lived ≥ `healthyAfter` reconnects at once; rejected credentials and the camera's own lock emit `.authenticationFailed` — Hikvision's
+  shared stream replays it to late subscribers — and wait 10 min, so login lockouts are never tripped; an attempt that met Camera Bridge's
+  own login pause (`.loginsPaused`) sent no login: it emits nothing, logs that it waits, and tries again when the pause ends), emit
   `.eventChannel(connected:)` per session and stop when released (keep the source; `stop()` finishes every stream and
   runs the source's stop hook, e.g. Reolink `Logout`). A session that connected but ended before `healthyAfter` backs off on its
   own schedule (`ReconnectPolicy.shortSessionBackoff`: 5 s doubling to 5 min for ONVIF and Reolink; ONVIF's `healthyAfter` is
@@ -122,8 +156,15 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
   -6/-21. One `ReolinkAPI` per driver serves probe, snapshots and event polling (reconnects reuse the live token;
   concurrent callers share one login; stopping the event source sends `Logout`, and so does `close()`, which the
   engine's probe calls on its throwaway driver: an Add Camera or Connection check no longer holds one of the camera's
-  few sessions for an hour); after -5 (max sessions) or -105 ("Frequent logins, please try again later!") no login is
-  attempted for 5 min (W4 review round 4). `GetEvents` (else `GetMdState` + `GetAiState`) polled at 1 Hz; doorbells (`type BELL`, model,
+  few sessions for an hour); after -5 (max sessions), -105 ("Frequent logins, please try again later!"), -500 (too many
+  addresses) or -507 (too many logins) no login is attempted for 5 min (W4 review round 4; -500 and -507 since 2026-10-18).
+  Answers as the v8 error table and reolink_aio read them (2026-10-18): a setting succeeded only when `code` is 0 and
+  `value.rspCode` is 200, and a refusal keeps the camera's `detail` (internal `ReolinkAPI.answer`, `Answer`); -7, -27, -501,
+  -502 and a detail saying "password wrong" are wrong credentials; -503 "login deny", -506 "login locked" and a detail saying
+  "locked" are the camera's lock (`.lockedOut`, no login for 30 min); -12, -13 and -17 (the camera did not get the command) are
+  asked once more after 1 s; a `Set…` refused with a credential code after the session's login worked is
+  `CameraAdapterError.notPermitted` (the account may not make it), not a wrong password. A `CameraSettingsService` keeps one
+  `ReolinkAPI` for its life (a setup run or a security check logs in once; `close()` or the service's end logs out). `GetEvents` (else `GetMdState` + `GetAiState`) polled at 1 Hz; doorbells (`type BELL`, model,
   `visitor`) and ONVIF-detection models also run ONVIF PullPoint when ONVIF is switched on: `GetNetPort.onvifEnable`
   decides (`supportOnvifEnable` only says the camera has the switch, and newer firmware ships with it off); off → no
   side channel and a once-per-source notice to turn ONVIF on for instant rings; `GetNetPort` refused (older firmware,
@@ -179,6 +220,9 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
   (`HTTPClientError.bodyTooLarge`, passed through unchanged) and the client's timeout per round trip in total (10 s;
   the long poll's 80 s), so the Reolink and ONVIF event loops cannot hang on, or buffer, an endless body (W4 review).
 - Stream URLs drop `user:password@` with BridgeSupport's `URL.removingUserInfo` (StreamInfo never carries it).
+  A configured camera's stream URLs come without their query credentials; `CameraDrivers.make(…, streamCredentials:)` gives
+  the secret store's copy to the driver's RTSP sessions (probes, the ONVIF backchannel, talkback: `RTSPProbing.factory`),
+  which send it in their request lines only; StreamInfo keeps the URL as configured.
 - ONVIF SOAP faults (`ONVIFSOAP.fault(in:)`: code, subcode, reason) pass through BridgeSupport's `Redact.cameraText`
   (at most 200 characters each, control characters replaced) before they reach `CameraAdapterError.soapFault`, the
   logs and the app (W4 review round 4: a fault could be 16 MiB of text with line breaks).
@@ -192,12 +236,26 @@ via `#filePath`); loopback mock cameras (`MockHTTPServer` on `AppleNetworkTransp
 only); RTSP through `FakeRTSPSession` (no real RTSP or LAN traffic; the live multicast probe is not unit-tested). The IP camera web API:
 `IPCWebTests` (DES and token vectors, the page check, the request's bytes, editing in place, night vision and its overlapping changes,
 the latch, the shared login pause) and `IPCWebSetupTests` against `FakeIPCWebCamera`. The internet guard's DNS: `CameraDNSTests` (two real
-cameras' ONVIF answers, then read, apply, read back, restore, refusals and IPv6 against `MockONVIFCamera` and `FakeSetupCamera`).
+cameras' ONVIF answers, then read, apply, read back, restore, refusals and IPv6 against `MockONVIFCamera` and `FakeSetupCamera`; cameras
+with two slots that keep one not sent, refuse one address twice or keep their second server whatever they are sent, `MockONVIFCamera.dnsSlots`)
+and `CameraDNSOwnAPITests` (the IPCamera Web family's `set=eth` byte for byte, its restart and Restore, against `FakeIPCamWebCamera` beside a
+`MockONVIFCamera`; Reolink's `SetLocalLink` against `MockONVIFCamera.otherAPI`). A change the account may not make: `ONVIFWriteNameTests`
+(which calls are writes and which prove the login) and `ONVIFWriteRefusalTests` (`MockONVIFCamera.refusedWrites` answers chosen writes with
+`NotAuthorized` or HTTP 401 while its reads answer: `.notPermitted`, no pause; a first refused call, a write after only calls anyone gets, a
+proof older than `loginProofWindow` and one ended by a refused login are refused logins).
 
 ## References
 
 Public ONVIF specifications, the Hikvision ISAPI and Reolink HTTP API v8 documents, the project's research notes (not
-published), and Scrypted's Hikvision, ONVIF and Reolink plugins (read for behaviour only; no code copied).
+published), Scrypted's Hikvision, ONVIF and Reolink plugins and reolink_aio (read for behaviour only; no code copied).
+Reolink's commands, answers and menu paths: docs/integrations/reolink.md.
+
+## Additions beyond the contract: the web API a camera showed (2026-10-18, docs/CONTRACT_CHANGES.md)
+
+`CameraWebAPIFamily` (`ipcWebAPI`, `ipcamWeb`) and `CameraWebAPIFamily.seen(at:)`: the web API the address of an ONVIF camera showed since
+the camera last started in the bridge (the IP camera web API's sign-in script, `IPCWebLatch`; the IPCamera Web family's page,
+`IPCamWebLatch`), nil when none was seen. Nothing is sent. BridgeEngine's "Change it by hand" (`CameraFamily`) names the family's own menus
+with it.
 
 ## Additions beyond the contract: Set up for Camera Bridge (2026-10-16, docs/CONTRACT_CHANGES.md)
 
@@ -209,7 +267,7 @@ which is noted and never acted on), `CameraSetupBackup` (one backup: `CameraTime
 `CameraStreamsBackup`, `CameraFeatureBackup`; never a Hik-Connect verification code; the IP camera web API cloud's Authcode, which turning
 that cloud back on needs, is carried but never encoded), `CameraNetworkFeature`, `CameraSetupText`
 (the values in a person's words). `CameraSettingsService.readTimeZone(posix:zoneName:)` / `applyTimeZone(posix:)` / `restoreTimeZone(_:)`
-(Hikvision ISAPI `/ISAPI/System/time` `timeZone` in Hikvision's own text, else ONVIF; Reolink its daylight-saving switch),
+(Hikvision ISAPI `/ISAPI/System/time` `timeZone` in Hikvision's own text, else ONVIF; Reolink its own API, below),
 `CameraSettingsService.readTimeSource(server:)` / `applyTimeSource(server:)` / `restoreTimeSource(_:)` (ISAPI mode NTP and
 `/ISAPI/System/time/ntpServers/1`; ONVIF `SetNTP` then `SetSystemDateAndTime` with NTP), `CameraSettingsService.readCleanPicture()`,
 `CameraSettingsService.readFeature(_:)` / `setFeature(_:enabled:path:)` (Hikvision UPnP and Hik-Connect: `/ISAPI/System/Network/capabilities`
@@ -218,30 +276,114 @@ profiles among those whose `GetStreamUri` address matches the configured URLs (`
 and smallest such profiles, never a JPEG one; `CameraSetupReading.note` says when one of them is not offered. A `CameraSettingsService` keeps one ISAPI client for its
 life (a client per request can crash FoundationNetworking on Linux).
 
+## Additions beyond the contract: Reolink through its own API (2026-10-18, docs/CONTRACT_CHANGES.md)
+
+Every Reolink step of "Set up for Camera Bridge" writes through Reolink's HTTP API (Reolink refuses ONVIF's writes to its ONVIF user;
+commands, answers and menu paths: docs/integrations/reolink.md), each read back and restorable. ONVIF is written to only where Reolink's API
+cannot make the change at all (internal `CameraConfigFailure.leavesONVIF`: `.unsupported`): the streams (a codec change, which Reolink ties
+to the picture size and `SetEnc` cannot carry; `GetEnc` "not support"; a stream, a picture size or a value `GetEnc` does not show) and Clean
+picture (no `GetOsd`, or `SetOsd` answered "not support" or "ability error") go on to ONVIF's `SetVideoEncoderConfiguration` and OSD calls
+then. After any other answer of Reolink's API (the account may not, another refusal, a change that did not stick, no answer) nothing goes
+through ONVIF, and Reolink's API goes first even when ONVIF changed the streams last time (`CameraConfigMethod.attemptOrder` and
+`clockOrder` keep it first on a Reolink). The time zone, UPnP and the cloud never write through ONVIF, nor do the time source and the DNS
+but on a Reolink without `GetNtp` or `LocalLink`. The streams step reads the camera's video profiles through ONVIF, as for every camera.
+The steps: the time zone (`GetTime` / `SetTime`: `Time.timeZone` and the `Dst` rule, compared and written, not only the daylight-saving
+switch; internal `ReolinkTimeZone`, which reads the sign of `timeZone` from the camera's own clock and else takes the guide's, west of
+UTC), the time source (`GetNtp` / `SetNtp`), UPnP off (`GetUpnp` / `SetUpnp`), the cloud off (`GetP2p` / `SetP2p`, the UID; its preview's
+note says the Reolink app stops working away from home and doorbell rings still come through Apple Home) and the DNS (`GetLocalLink` /
+`SetLocalLink`, above); the streams through `GetEnc` with its range and `SetEnc` (`frameRate`, values inside the range, no `width`, `height`
+or `vType`). `CameraTimeSourceBackup.interval` (Reolink's `Ntp.interval`; `hostName` and `port` hold `Ntp.server` and `Ntp.port`, `mode`
+"NTP" or "manual"), `CameraTimeZoneBackup.reolinkTime` (`timeZone` and every number of `Dst` as the camera had them; nil in a backup saved
+before 2026-10-18, which held only the switch: a run that changes the time zone completes it with the camera's zone and rule as read and
+the old switch as `Dst.enable`, BridgeEngine's README, else it restores only the switch), and `CameraSettingsService.close()` (ends the
+service's Reolink API session now; the service's end does too). A change `GetAbility` says the account may not make is not sent, and a
+setting refused with a credential code once the login worked is `CameraAdapterError.notPermitted`: the step says to use an administrator
+account (`CameraAdapterError.notPermittedReason`, `CameraSetupOutcome.notPermitted` set), and no login is paused. A time source an earlier
+build saved through ONVIF (the setup keeps the oldest backup: the owner's doorbell holds `onvifMinimal`, NTP, pool.ntp.org) goes back
+through `SetNtp` too, with `Ntp` as read, `enable` from the backup's mode and `server` its first server, else its `hostName`, with its
+`port` and `interval` when it has them (a run that changes the time source completes such a backup that names no server with the camera's
+own, BridgeEngine's README); one of NTP that still names no server is refused with why, nothing written (internal
+`restoreReolinkTimeSourceFromONVIF`, `noSavedTimeServer`); ONVIF only for a Reolink without `GetNtp`.
+`CameraSettingsService.setCameraTimeZone(posix:)` gives a Reolink the whole zone the same way (it set only the daylight-saving switch, and
+fell back to ONVIF). Internal: `CameraSettingsService.reolink()`, `reolinkAbility(_:perChannel:)`, `reolinkMayNotChange(_:perChannel:)`,
+`reolinkSet` (a refusal as the step's outcome), `ReolinkAbility`.
+Tests: `ReolinkSetupTests` against `MockReolinkCamera` (`ReolinkDriverTests.swift`), which answers `GetAbility` (with the account's
+permits), `GetNtp`/`SetNtp`, `GetUpnp`/`SetUpnp`, `GetP2p`/`SetP2p`, `GetLocalLink`/`SetLocalLink` (restarting its network after a write),
+`GetEnc` with its range and `SetEnc` (-13 for a value outside the range), `GetTime`/`SetTime` (its clock in its zone, either sign),
+`GetNetPort`, `GetOsd`/`SetOsd`, and error answers of the v8 table; every request body is kept and checked whole, and the doorbell's ONVIF
+beside it must get no request but the reads of a doorbell on automatic DNS (`GetDNS`), and the writes of a change Reolink's API cannot make
+at all (`onvifStaysTheWayForAChangeReolinksAPICannotMake`).
+
 ## Additions beyond the contract: Internet guard, the camera's DNS (2026-10-17, docs/CONTRACT_CHANGES.md)
 
-Stage 1 (Watch) of the internet guard (design: `docs/superpowers/specs/2026-10-17-internet-guard-design.md`), the camera's side: its DNS
-servers pointed at the bridge, so the bridge sees every name it looks up. `CameraDNSBackup` (`method`, `fromDHCP`, `servers`, optional
-`searchDomains`), `CameraDNSReading` (`servers` in use, `fromDHCP`, `method`, `backup`, `pointsAt(_:)`: the camera asks that address and no
-other, an IPv6 address matching however it is written), `CameraSettingsService.readDNS()` (nil when the camera does not show its DNS
-servers; throws a login refusal), `CameraSettingsService.applyDNS(server:)` (that one address only, read back) and
+Stage 1 (Watch) of the internet guard (design: `docs/superpowers/specs/2026-10-17-internet-guard-design.md`), the camera's side: every DNS
+server it asks pointed at the bridge, so the bridge sees every name it looks up. `CameraDNSBackup` (`method`, `fromDHCP`, `servers`, optional
+`searchDomains`, optional `ownAPI` since 2026-10-18: the DNS values of the camera's own API, below), `CameraDNSReading` (`servers` in use,
+`fromDHCP`, `method`, `backup`, `pointsAt(_:)`: the camera asks that address and no other, an IPv6 address matching however it is written;
+since 2026-10-18 wherever it has its servers from, the router's DHCP included (`fromDHCP` says so, and the Watch step's note that the
+router can change them), and a slot holding 0.0.0.0 or :: is an empty slot, not a server, in readings and in Restore's comparison;
+`serversUnknown` since 2026-10-18: a Reolink on automatic DNS whose ONVIF did not say which servers DHCP gives, below),
+`CameraSettingsService.readDNS()` (nil when the camera does not show its DNS servers; throws a login refusal),
+`CameraSettingsService.applyDNS(server:)` (every server the camera asks set to that one address, read back; a refusal says what the camera
+kept: "the camera asks Camera Bridge first but kept 8.8.8.8 as its other DNS server", or "the camera kept its own DNS servers") and
 `CameraSettingsService.restoreDNS(_:)` (read back). Hikvision through ISAPI: `/ISAPI/System/Network/interfaces/1/ipAddress`, a
 read-modify-write of the whole document in which only the `ipAddress` inside `PrimaryDNS` and `SecondaryDNS` changes (both set to the
-bridge; the camera's own address, `addressingType` and gateway stay as they are; a missing `SecondaryDNS` is not added; IPv4 only;
-`statusCode` 7 noted, never acted on: the step is done, waiting for the camera's restart, and the security check reads the DNS again before
-the guard counts the camera as watched; a camera that shows no document after the write is a refusal). The ISAPI document is built from the ISAPI 2.0 schema's shape and is not yet checked on a real
-camera. Other cameras, and a Hikvision without that document, through ONVIF: `GetDNS` / `SetDNS` (`DNSManual` entries, IPv4 and IPv6; the
-search domains are written back as the camera had them), checked against two real cameras' answers (one on DHCP, one set by hand).
+bridge, and the read-back needs both: a camera that keeps its second server is refused, naming it; the camera's own address,
+`addressingType` and gateway stay as they are; a missing `SecondaryDNS` is not added; IPv4 only; `statusCode` 7 noted, never acted on: the
+step is done, waiting for the camera's restart, and the security check reads the DNS again before the guard counts the camera as watched; a
+camera that shows no document after the write is a refusal). The ISAPI document is built from the ISAPI 2.0 schema's shape and is not yet
+checked on a real camera. Other cameras, and a Hikvision without that document, through ONVIF: `GetDNS` / `SetDNS` (`DNSManual` entries,
+IPv4 and IPv6; the search domains are written back as the camera had them), checked against two real cameras' answers (one on DHCP, one
+set by hand). `SetDNS` names the bridge alone first; a camera with fixed slots that took it but kept another server set by hand (the
+owner's "Patio New" kept 8.8.8.8 as its second) is then sent the bridge twice, then the bridge and an empty entry (an empty `IPv4Address`,
+for a camera that refuses one address twice), each read back. Restore writes the old servers (or DHCP), and empties a slot its write did
+not name when the camera kept the bridge there. Tapo, Dahua/Amcrest, Jennov and every other ONVIF camera go this way; a camera whose ONVIF
+refuses `SetDNS` is refused in its words, and one without `GetDNS` is not supported (router help).
+
+Where ONVIF leaves a server that is not the bridge, or refuses, the IPCamera Web family's own API sets both of its slots, and a Reolink's
+always does (2026-10-18). Its write restarts the camera's network service, so it is read back for up to 30 s (`DNSReadBackTiming`): no
+answer, a 5xx or a lost session while waiting is not a refusal, and for the family ONVIF's `GetDNS`, when the camera shows it, must point
+at the bridge too (the guard's own read; a Reolink's guard read is its `LocalLink`).
+- **The IPCamera Web family** (docs/integrations/ipcamera-web.md), when its web API can be asked (`ipcamWeb()` `.speaks`): `get=eth`, then
+  `set=eth` with the interface exactly as the camera's page writes it (`network.js`: `eth`'s ten attributes in the page's order with the
+  values as read, then `<dns ondhcp='0' dns1='BRIDGE' dns2='BRIDGE' />`). An answer the page would write otherwise (another attribute or
+  child, one missing, a value that is not an address, a number or a plain host name) is refused instead of written. When the API cannot
+  be asked (a refused sign-in), ONVIF's words stand with why. Restore writes the backup's `dns` attributes back the same way whenever the
+  API can be asked, else through ONVIF (also when the camera refuses Camera Bridge's sign-in at Restore time). The answer holds the
+  camera's addresses and host name: it is never logged or kept. Internal: `ipcamWebDNS(_:)`, `ipcamEthWrite(_:dns:)`, `setIPCamWebDNS`,
+  `restoreIPCamWebDNS`.
+- **Reolink** (owner decision, 2026-10-18: Reolink refuses ONVIF's writes to its ONVIF user): read through `GetLocalLink` (`dns.auto` 1:
+  from DHCP; the backup's `method` is `.reolinkAPI`), and set through `SetLocalLink` with the whole `LocalLink` as read and only `dns`
+  changed (`auto` 0, `dns1` and `dns2` the bridge; IPv4 only), over the run's API session. With `auto` 1 its `dns1` and `dns2` are not the
+  servers in use (the camera asks those DHCP hands out, and may keep the ones set by hand in the slots: the v8 guide's own example does): the
+  reading's servers are ONVIF `GetDNS`'s `DNSFromDHCP` (a read, which Reolink's ONVIF user may make; internal `reolinkDHCPServers`), at
+  the saved ONVIF port, else the one `GetNetPort` reports (`onvifPort`), else Reolink's default 8000, as the driver's events find it; no
+  port is searched for, and nothing is asked when `GetNetPort` says ONVIF is off (internal `reolinkONVIFPort(saved:netPort:)`). When ONVIF
+  does not say (off, no answer, a refused or paused login, no `GetDNS`, an answer not from DHCP), the reading says it does not know its
+  servers (`CameraDNSReading.serversUnknown`, `servers` empty): it never points at the bridge, the step's preview still offers the change,
+  and the Internet guard takes it as unreadable (BridgeEngine's README). ONVIF that says DHCP gives none is a reading of no servers. It is refused
+  rather than written when that could change the camera's address (a `type` other than DHCP or Static, none, or a fixed address that is
+  not the one Camera Bridge reaches it at), and not sent when `GetAbility` says the account may not change `localLink`
+  (`CameraAdapterError.notPermittedReason`). Restore writes the backup's `dns` values back the same way; a backup an earlier build saved
+  through ONVIF, without them (the owner's doorbell: from DHCP, no servers), is translated (internal `reolinkDNS(restoring:current:)`):
+  `auto` 1 with the slots as they are, read back by `auto` alone, or `auto` 0 with its servers in the two slots. A Reolink without
+  `LocalLink` goes through ONVIF. `LocalLink`'s address and MAC are never logged or kept. Built from Reolink's HTTP API v8 document
+  (docs/integrations/reolink.md), not yet checked on a real camera.
+
+The backup keeps the own API's DNS values (`ownAPI`: the family's `ondhcp`, `dns1`, `dns2`; Reolink's `auto`, `dns1`, `dns2`), read by
+`readInternetWatch(server:)` before anything is written; a backup saved before 2026-10-18 has none and restores through ONVIF (a
+Reolink's through `LocalLink`, above).
 Internal, read only until Seal: `ONVIFClient.defaultGateway()` (`GetNetworkDefaultGateway`) and `networkInterfaces()`
 (`GetNetworkInterfaces`: DHCP or fixed, the addresses with their prefix lengths; never the MAC address). The IP camera web API's own
-network settings (`getNetworkConfig`, whose answer also holds the camera's mail, FTP and Wi-Fi passwords) are not used.
+network settings (`getNetworkConfig`, whose answer also holds the camera's mail, FTP and Wi-Fi passwords) are not used: those cameras
+(Jennov) go through ONVIF.
 
 The setup step "Watch its internet" (`CameraSetupStepID.internetWatch`, the last step; the engine offers it only where the bridge has
 the guard: BridgeEngine's README): `CameraSettingsService.readInternetWatch(server:)` reads the DNS servers against the bridge's address for
 the preview (the change row "DNS": "8.8.8.8 and 1.1.1.1", "1.1.1.1 and 8.8.8.8 from the router (DHCP)", "from the router (DHCP)" or "none
 set" → "the bridge (192.168.77.2)"; already right when the camera asks that address and no other; not supported, "the camera does not show its
-DNS servers", when `readDNS()` is nil), and its value now is the backup, kept in `CameraSetupBackup.internetWatch`; the step applies with
-`applyDNS(server:)` and restores with `restoreDNS(_:)`.
+DNS servers", when `readDNS()` is nil), and its value now is the backup (with the own API's DNS values), kept in
+`CameraSetupBackup.internetWatch`; the step applies with `applyDNS(server:)` and restores with `restoreDNS(_:)`.
 
 ## Additions beyond the contract: integrations beyond RTSP/ONVIF (2026-10-08, docs/CONTRACT_CHANGES.md; user docs: `docs/integrations/`)
 
@@ -333,7 +475,8 @@ What a camera says about its ways out, for the security levels (BridgeEngine's `
 `ddns`, `rtmp`, `unauthenticatedVideo`, `extraService`), `RemoteAccessState` (`on`, `off`, `absent`, `unknown`), `RemoteAccessFinding`
 (`feature`, `state`, `linked`, `service`, `canChange`; `RemoteAccessFinding.cloudUnknown`) and `CameraSettingsService.readRemoteAccess()`
 (read only; Hikvision: Hik-Connect, UPnP (absent only where `/ISAPI/System/Network/capabilities` says the camera has none; a document that
-can't be read is unknown) and `/ISAPI/System/Network/DDNS`; Reolink: `GetP2p`, `GetUpnp`, `GetDdns`, a refused command unknown; the IP camera
+can't be read is unknown) and `/ISAPI/System/Network/DDNS`; Reolink: `GetP2p`, `GetUpnp`, `GetDdns` (only each `enable`), a refused command
+unknown, the UID and UPnP `canChange` unless `GetAbility` says the account may not change them (2026-10-18); the IP camera
 web API: `P2PConfig` and `UPNPConfig`, RTMP unknown (`getMediaStreamConfig` is not among the calls checked by hand, and a call the camera
 lacks pauses its web API and night vision); the IPCamera Web family (an extra service on with `authorized` 0 is also video without a password,
 named); any other camera: its cloud unknown; a cloud's online or signed-in status (`registerStatus`, `LoginStatus`) is never read as linked to
@@ -345,9 +488,19 @@ an account; a login refusal or a camera that stops answering ends the reading, t
 
 The IPCamera Web family (`IPCamWeb/`, notes: `docs/integrations/ipcamera-web.md`): `IPCamWebClient` (the page check first, `GET /` titled
 "IPCamera Web" naming `js/script/land.js` and that script holding `auth.cgi?act=auth`, no credentials; the sign-in `GET /cgi/auth.cgi` with the
-RC4 (`IPCamWebRC4`, key "pwnsd") of the MD5 (`WyzeMD5`) of "username:password"; the session reused, one new sign-in on 531203; every value
-percent-encoded), `IPCamWebLatch` (a refused sign-in stops every request to the address until the camera's next start, and pauses
-`ONVIFLoginGuard`), `IPCamWebNoAnswer`, `IPCamWebCameraError` (532229: no such option), `IPCamWebUnavailable`, `IPCamWebAccess`, all internal.
+RC4 (`IPCamWebRC4`, key "pwnsd") of the UPPERCASE hex MD5 (`WyzeMD5`) of "username:password", as the page's `md5-min.js` has it; answered 0,
+or 532379 (signed in, the password called insecure: logged once, `asksForStrongerPassword`), with an `authid`; any other code a refusal, its
+code logged; no `<code>` `invalidResponse`; the session reused, one new sign-in on 532227; 532374 "no privilege" said as such, and at a
+write `CameraAdapterError.notPermitted` (a change the account may not make: the setup's other steps still run); each query
+value encoded as the page's browser sends it, `=` `/` `?` `:` raw), `IPCamWebLatch` (a refused sign-in stops every request to the address,
+keeping the camera's code: `refusal(_:)` is `IPCamWebUnavailable.noPrivilege` after 532374, which every step then names, typed as a change
+the account may not make (`notPermitted`), else `.paused`;
+the camera's next start (`cameraStarted`) tries again only with other credentials, kept as an in-memory SHA-256 from BridgeSupport's
+`Hashes.sha256`, or 30 minutes after the refusal; ONVIF's logins are not paused by it, while a paused ONVIF login still stops the sign-in),
+`IPCamWebNoAnswer`, `IPCamWebCameraError` (532229: no such option), `IPCamWebUnavailable`, `IPCamWebAccess` (`.unavailable` carries the
+`IPCamWebUnavailable`; the setup signs in first, so a
+refusal is each step's reason; a sign-in the camera does not answer, a 5xx or a transport failure, is that step's reason too, "the camera’s
+web page did not answer Camera Bridge’s sign-in (HTTP 503)", so each step sends it once and the next one tries again), all internal.
 "Set up for Camera Bridge" gains `CameraSetupStepID.videoPassword` and `.extraServices` (`CameraSetupReading.State.notOffered(_:)` and
 `CameraSetupReading.notOffered(_:)` for other cameras: "not offered for this camera"), with `CameraSettingsService.readVideoPassword()` /
 `requireVideoPassword()` (`rtsp` and `onvif` `authorized` 1; offered only with a saved password), `readExtraServices()` /

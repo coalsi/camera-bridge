@@ -191,6 +191,9 @@ public struct CameraSettingsSnapshot: Sendable, Equatable, Codable {
     public var cameraClockOffsetSeconds: Double? = nil
     /// Set while CameraBridge is holding off ONVIF logins because the camera locked them (or just rejected one).
     public var onvifLoginPausedUntil: Date? = nil
+    /// Whose pause `onvifLoginPausedUntil` is: true when the camera locked its logins after too many wrong passwords, false when it is
+    /// Camera Bridge's own after the camera refused a login. nil without a pause.
+    public var onvifLoginLockedByCamera: Bool? = nil
 
     public init(supportsONVIF: Bool, webPageURL: URL? = nil, deviceInfo: CameraDeviceInfo? = nil, videoSourceToken: String? = nil,
                 mainProfile: CameraVideoProfile? = nil, subProfile: CameraVideoProfile? = nil, imaging: CameraImagingSettings? = nil,
@@ -299,6 +302,16 @@ public actor CameraSettingsService {
 
     /// The IPCamera Web API client of an ONVIF camera, made once and kept for the service's life (`ipcamWeb()`).
     var ipcamWebClient: IPCamWebClient?
+    /// A Reolink's API session, made once and kept for the service's life (`reolink()`): a setup run or a security check logs in once, not
+    /// once per step. `close()` ends it, and so does the service's end.
+    var reolinkSession: ReolinkAPI?
+    /// What the Reolink's `GetAbility` said for Camera Bridge's account, asked once for the service's life (`reolinkAbility(_:perChannel:)`):
+    /// `asked` false until then; `value` nil when the camera did not answer it.
+    var reolinkAbilities: (asked: Bool, value: JSONValue?) = (false, nil)
+
+    deinit {
+        if let reolinkSession { Task { await reolinkSession.logout() } }
+    }
     /// The last `readRemoteAccess()` stopped because the camera did not answer (a transport failure or a timeout, not a refused login).
     public internal(set) var remoteAccessUnanswered = false
 
@@ -339,7 +352,11 @@ public actor CameraSettingsService {
             log.info("ONVIF device information unavailable (\(error)); offering the camera's web page only")
             var snapshot = CameraSettingsSnapshot(supportsONVIF: false, webPageURL: webPageURL)
             snapshot.onvifLoginRejected = answeredWithoutLogin
-            if case CameraAdapterError.lockedOut(let until) = error { snapshot.onvifLoginPausedUntil = until }
+            switch error as? CameraAdapterError {
+            case .lockedOut(let until): (snapshot.onvifLoginPausedUntil, snapshot.onvifLoginLockedByCamera) = (until, true)
+            case .loginsPaused(let until): (snapshot.onvifLoginPausedUntil, snapshot.onvifLoginLockedByCamera) = (until, false)
+            default: break
+            }
             snapshot.cameraTimeType = timeType
             snapshot.cameraClockOffsetSeconds = clockOffset
             return snapshot

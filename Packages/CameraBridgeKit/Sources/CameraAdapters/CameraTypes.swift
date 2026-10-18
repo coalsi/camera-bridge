@@ -209,7 +209,7 @@ public protocol CameraDriver: Sendable {
     /// not know the call is not asked again, and requests to one camera keep their distance (`CameraKeyframeGuard`). Hikvision:
     /// ISAPI `requestKeyFrame`; ONVIF: `SetSynchronizationPoint`. Returns without sending anything when a request went out lately;
     /// throws `CameraAdapterError.unsupported` for cameras without the call (the default), `.unauthorized` / `.lockedOut` when the
-    /// camera refuses the login.
+    /// camera refuses the login, and `.loginsPaused` while Camera Bridge holds off its logins after a refusal.
     func requestKeyframe(subStream: Bool) async throws
 
     /// The camera streams only while something wants its picture (a battery camera that sleeps between views): the engine connects

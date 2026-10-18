@@ -4,7 +4,8 @@ import Foundation
 /// Encoder changes that try several methods before failing (`CameraConfigMethod`): the vendor's own API, then ONVIF
 /// with the camera's own configuration sent back changed in only the fields that differ, then ONVIF's complete
 /// request. Each write is read back; a change that does not show up counts as a failure of that method. A credential
-/// problem (rejected login, locked-out camera) ends the chain: more attempts would only add failed logins.
+/// problem (rejected login, locked-out camera) ends the chain: more attempts would only add failed logins. On a Reolink,
+/// ONVIF is tried only after Reolink's API could not make the change at all (`CameraConfigFailure.leavesONVIF`).
 extension CameraSettingsService {
     private enum AttemptOutcome {
         /// Applied and read back (`changed`), or already as wanted (`changed == false`).
@@ -34,7 +35,7 @@ extension CameraSettingsService {
                                            failures: [CameraConfigAttempt(method: first, failure: credentialFailure)])
         }
         var failures: [CameraConfigAttempt] = []
-        for method in order {
+        chain: for method in order {
             switch try await attempt(method, edit) {
             case .done(let changed):
                 if changed {
@@ -50,6 +51,8 @@ extension CameraSettingsService {
                     credentialFailure = failure
                     return CameraEncoderEditResult(isSub: edit.isSub, succeeded: false, method: nil, failures: failures)
                 }
+                // Reolink's API answered (the account may not, a refusal, no answer): its ONVIF would only be refused too.
+                if method == .reolinkAPI, !failure.leavesONVIF { break chain }
             }
         }
         if memoryUpdate == nil, preferredMethod != nil {
@@ -159,48 +162,99 @@ extension CameraSettingsService {
 
     // MARK: Reolink
 
+    /// Why a codec change is not written through Reolink's HTTP API: the camera's range ties each picture size to one codec, and `vType` is not
+    /// a `SetEnc` field (reolink_aio changes the codec through Reolink's other protocol, Baichuan).
+    static let reolinkCodecTiedToSize = "this camera changes its codec only together with its picture size, in the Reolink app or Client"
+    /// A size change alone that the camera's range ties to another codec than the one it sends.
+    static let reolinkSizeChangesCodec = "at that picture size this camera sends another codec, so Camera Bridge left its size as it is"
+
     private func viaReolink(_ edit: CameraEncoderEdit) async throws -> AttemptOutcome {
         guard vendor == .reolink else { return .failed(.unsupported("not a Reolink camera")) }
-        let api = ReolinkAPI(endpoint: endpoint, credentials: credentials, channel: reolinkChannel, cameraID: cameraID)
-        let outcome: AttemptOutcome
-        do {
-            outcome = try await viaReolink(edit, api: api)
-        } catch {
-            await api.logout()
-            throw error
-        }
-        await api.logout()
-        return outcome
+        return try await viaReolink(edit, api: reolink())
     }
 
+    /// `GetEnc` with action 1 (the value and the range: each picture size the camera offers with its one codec, its frame rates, bit rates,
+    /// `gop` bounds and profiles), then `SetEnc` with the camera's `Enc` as read and only this stream's values changed, each inside the range:
+    /// the nearest `frameRate` and `bitRate` the camera offers, `gop` (whole seconds of frames, of the frame rate asked for) within its bounds,
+    /// a profile it offers (else the stream's). The codec follows the size: `vType` is never sent, and `width`, `height` and `resolution`
+    /// ("internal use only, not needed for SetEnc", v8 guide §3.5.1) are left out of both streams. Read back with `GetEnc`.
     private func viaReolink(_ edit: CameraEncoderEdit, api: ReolinkAPI) async throws -> AttemptOutcome {
         let key = edit.isSub ? "subStream" : "mainStream"
         let channelParam = JSONValue.object(["channel": .number(Double(reolinkChannel))])
-        guard var encoder = try await api.command("GetEnc", param: channelParam)["Enc"]?.object, let stream = encoder[key]?.object else {
+        let value: JSONValue
+        let element: JSONValue
+        switch try await api.answer("GetEnc", param: channelParam, action: 1) {
+        case .value(let read, let whole): (value, element) = (read, whole)
+        case .refused(let code, _): return .failed(.from(CameraAdapterError.apiError(command: "GetEnc", code: code)))
+        }
+        guard var encoder = value["Enc"]?.object, let stream = encoder[key]?.object else {
             return .failed(.unsupported("no encoder settings in GetEnc"))
         }
         let current = Self.reolinkValues(stream)
         var (changes, unreadable) = current.changes(toReach: edit.desired)
         Self.rewritingCodec(&changes, edit)
         if changes.isEmpty { return unreadable.isEmpty ? .done(changed: false) : .failed(Self.unreadableFailure(unreadable)) }
-        let fps = Int((changes.frameRate ?? current.frameRate ?? 15).rounded())
-        if let gov = changes.govLength {
-            // Reolink's `gop` counts seconds of frames (1…4): the nearest whole number of seconds.
-            guard stream["gop"] != nil else { return .failed(.unsupported("no keyframe interval in GetEnc")) }
-            let seconds = min(4, max(1, Int((Double(gov) / Double(max(1, fps))).rounded())))
-            changes.govLength = seconds * max(1, fps)
+        let ranges = Self.reolinkRanges(element["range"]?["Enc"], key: key, channel: reolinkChannel)
+        let size = changes.width.flatMap { width in changes.height.map { "\(width)*\($0)" } } ?? stream["size"]?.string
+        let range = ranges.first { $0["size"]?.string == size }
+        if !ranges.isEmpty, range == nil { return .failed(.unsupported("the camera does not offer \(size ?? "this picture size") for this stream")) }
+        let rangeCodec = range?["vType"]?.string.map(EncoderValues.normalizedCodec)
+        if let codec = changes.codec, rangeCodec != codec {
+            return .failed(.unsupported(Self.reolinkCodecTiedToSize))
         }
-        var edited = stream
-        if let codec = changes.codec { edited["vType"] = .string(codec == "H265" ? "h265" : "h264") }
-        if let width = changes.width, let height = changes.height { edited["size"] = .string("\(width)*\(height)") }
-        if let rate = changes.frameRate { edited["frame"] = .number(rate.rounded()) }
-        if let bitrate = changes.bitrate { edited["bitRate"] = .number(Double(bitrate)) }
-        if let gov = changes.govLength { edited["gop"] = .number(Double(gov / max(1, fps))) }
-        if let profile = changes.h264Profile { edited["profile"] = .string(profile.lowercased().hasPrefix("base") ? "Base" : profile) }
+        // A size the camera offers only with another codec would switch it unnoticed (the read-back checks only what was asked).
+        if changes.codec == nil, changes.width != nil, let rangeCodec, let now = current.codec, rangeCodec != now {
+            return .failed(.unsupported(Self.reolinkSizeChangesCodec))
+        }
+
+        // The keyframe interval in whole seconds of the frame rate asked for (Reolink's `gop`), then every value inside the range.
+        let asked = changes.frameRate ?? current.frameRate ?? 15
+        var gop = stream["gop"]?.int
+        if let frames = changes.govLength {
+            guard gop != nil else { return .failed(.unsupported("no keyframe interval in GetEnc")) }
+            gop = min(4, max(1, Int((Double(frames) / max(1, asked)).rounded())))
+        }
+        var frameRate = changes.frameRate ?? current.frameRate
+        var bitRate = changes.bitrate ?? current.bitrate
+        var profile = changes.h264Profile.map(Self.reolinkProfile) ?? stream["profile"]?.string
+        if let range {
+            frameRate = frameRate.map { Self.nearest($0, in: range["frameRate"]) }
+            bitRate = bitRate.map { Int(Self.nearest(Double($0), in: range["bitRate"])) }
+            if let low = range["gop"]?["min"]?.int, let high = range["gop"]?["max"]?.int, low <= high { gop = gop.map { min(high, max(low, $0)) } }
+            if let offered = range["profile"]?.array?.compactMap(\.string), let wanted = profile, !offered.contains(wanted) {
+                profile = stream["profile"]?.string
+            }
+        }
+
+        // What the camera should show afterwards: only what differs from now.
+        var expected = EncoderValues()
+        expected.codec = changes.codec
+        expected.width = changes.width
+        expected.height = changes.height
+        if let frameRate, frameRate != current.frameRate { expected.frameRate = frameRate }
+        if let bitRate, bitRate != current.bitrate { expected.bitrate = bitRate }
+        if let gop {
+            let frames = gop * max(1, Int((frameRate ?? asked).rounded()))
+            if frames != current.govLength { expected.govLength = frames }
+        }
+        if let profile, profile != stream["profile"]?.string { expected.h264Profile = profile == "Base" ? "Baseline" : profile }
+        guard !expected.isEmpty else { return .failed(.rejected("the value is outside the range the camera reports")) }
+
+        var edited = Self.reolinkWritable(stream)
+        if changes.width != nil, let size { edited["size"] = .string(size) }
+        if let frameRate { edited["frameRate"] = .number(frameRate) }
+        if let bitRate { edited["bitRate"] = .number(Double(bitRate)) }
+        if let gop { edited["gop"] = .number(Double(gop)) }
+        if let profile { edited["profile"] = .string(profile) }
         encoder[key] = .object(edited)
+        let other = edit.isSub ? "mainStream" : "subStream"
+        if let stream = encoder[other]?.object { encoder[other] = .object(Self.reolinkWritable(stream)) }
         encoder["channel"] = .number(Double(reolinkChannel))
-        _ = try await api.command("SetEnc", param: .object(["Enc": .object(encoder)]))
-        let expected = changes
+        if try await reolinkMayNotChange("enc", perChannel: true) { return .failed(.notPermitted) }
+        if case .refused(let code, let detail) = try await api.answer("SetEnc", param: .object(["Enc": .object(encoder)])) {
+            return .failed(ReolinkAPI.unsupportedCodes.contains(code) ? .unsupported("SetEnc not supported")
+                : .rejected("SetEnc error \(code)\(detail.map { ": \($0)" } ?? "")"))
+        }
         let verifiedChange = try await verified(expected) {
             guard let stream = try await api.command("GetEnc", param: channelParam)["Enc"]?[key]?.object else {
                 throw CameraAdapterError.invalidResponse("GetEnc: no \(key)")
@@ -208,6 +262,36 @@ extension CameraSettingsService {
             return Self.reolinkValues(stream)
         }
         return verifiedChange ? .done(changed: true) : .failed(.didNotStick)
+    }
+
+    /// A stream object as `SetEnc` takes it: as read without `width`, `height`, `resolution` and `vType`.
+    static func reolinkWritable(_ stream: [String: JSONValue]) -> [String: JSONValue] {
+        var writable = stream
+        for field in ["width", "height", "resolution", "vType"] { writable[field] = nil }
+        return writable
+    }
+
+    /// The range entries (`GetEnc` with action 1) of stream `key` that apply to `channel` (`chnBit`, when given, has its bit).
+    static func reolinkRanges(_ range: JSONValue?, key: String, channel: Int) -> [[String: JSONValue]] {
+        let entries = range?.array ?? range.map { [$0] } ?? []
+        return entries.compactMap { entry in
+            if let bits = entry["chnBit"]?.int, (0..<62).contains(channel), bits & (1 << channel) == 0 { return nil }
+            return entry[key]?.object
+        }
+    }
+
+    /// The offered value nearest `value` (the lower one of two as near); `value` when the camera lists none.
+    static func nearest(_ value: Double, in offered: JSONValue?) -> Double {
+        let values = (offered?.array ?? []).compactMap(\.double)
+        return values.min { lhs, rhs in
+            let (a, b) = (abs(lhs - value), abs(rhs - value))
+            return a == b ? lhs < rhs : a < b
+        } ?? value
+    }
+
+    /// Reolink's name of an H.264 profile: "Base", "Main", "High".
+    static func reolinkProfile(_ profile: String) -> String {
+        profile.lowercased().hasPrefix("base") ? "Base" : profile
     }
 
     /// A Reolink `Enc` stream object as `EncoderValues`; the keyframe interval (`gop`, seconds of frames when 1…8, else
@@ -222,7 +306,7 @@ extension CameraSettingsService {
                 values.height = CameraNumbers.dimension(parts[1])
             }
         }
-        values.frameRate = stream["frame"]?.double
+        values.frameRate = stream["frameRate"]?.double
         values.bitrate = stream["bitRate"]?.int
         if let gop = stream["gop"]?.int {
             let fps = Int((values.frameRate ?? 15).rounded())

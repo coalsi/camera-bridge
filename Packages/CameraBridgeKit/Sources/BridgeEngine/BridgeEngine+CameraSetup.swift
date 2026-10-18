@@ -25,15 +25,19 @@ public struct CameraSetupStep: Sendable, Codable, Equatable {
     public var detail: String?
     /// The camera took the change and applies it when it restarts (it is not restarted by the bridge).
     public var needsRestart: Bool
+    /// "Change it by hand" for a step the camera refused or does not support (Security/CameraManualHelp.swift); filled in for the web page
+    /// (`withManualHelp(_:cameraID:)`), never saved.
+    public var manualHelp: CameraManualHelp?
 
     public init(id: CameraSetupStepID, title: String, status: CameraSetupStepStatus, changes: [CameraSetupChange] = [], detail: String? = nil,
-                needsRestart: Bool = false) {
+                needsRestart: Bool = false, manualHelp: CameraManualHelp? = nil) {
         self.id = id
         self.title = title
         self.status = status
         self.changes = changes
         self.detail = detail
         self.needsRestart = needsRestart
+        self.manualHelp = manualHelp
     }
 }
 
@@ -62,18 +66,24 @@ public struct CameraSetupState: Sendable, Codable, Equatable {
     /// When the last run ended; nil while one runs (or when the bridge stopped during it: the page offers to finish or restore).
     public var applied: Date?
     public var steps: [Record]
+    /// The bridge's address "Watch its internet" left the camera's DNS pointing at (the step done or already right), so the box watches
+    /// the camera; nil once the step's last result says it does not (refused, not run, restored) or it never ran. A run keeps the value it
+    /// starts with until its step has a result, and keeps it when it could not read the step. A record saved before this field has none:
+    /// its last record of the step says (`BridgeEngine.internetWatchDone`).
+    public var watchedServer: String?
 
-    public init(version: Int = CameraSetupState.currentVersion, started: Date, applied: Date? = nil, steps: [Record] = []) {
+    public init(version: Int = CameraSetupState.currentVersion, started: Date, applied: Date? = nil, steps: [Record] = [], watchedServer: String? = nil) {
         self.version = version
         self.started = started
         self.applied = applied
         self.steps = steps
+        self.watchedServer = watchedServer
     }
 
     /// The run ended (it may have stopped at a step the camera refused).
     public var isFinished: Bool { applied != nil }
 
-    private enum CodingKeys: String, CodingKey { case version, started, applied, steps }
+    private enum CodingKeys: String, CodingKey { case version, started, applied, steps, watchedServer }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -81,6 +91,7 @@ public struct CameraSetupState: Sendable, Codable, Equatable {
         started = try container.decode(Date.self, forKey: .started)
         applied = try container.decodeIfPresent(Date.self, forKey: .applied)
         steps = try container.decodeIfPresent([Lenient].self, forKey: .steps)?.compactMap(\.record) ?? []
+        watchedServer = (try? container.decodeIfPresent(String.self, forKey: .watchedServer)) ?? nil   // an odd value loses only the watch
     }
 
     /// One record, or nil for a step or status this build does not know.
@@ -102,7 +113,8 @@ public struct CameraSetupReport: Sendable, Codable, Equatable {
     public var state: CameraSetupState?
     /// Saved values exist: "Restore original settings" can run.
     public var canRestore: Bool
-    /// The step the run stopped at (the camera refused it); the steps before it stay done.
+    /// The step the run stopped at (the camera refused it); the steps before it stay done. A step refused only because the account Camera
+    /// Bridge uses may not make the change (`CameraSetupOutcome.notPermitted`) stops nothing.
     public var stoppedAt: CameraSetupStepID?
     /// The bridge restarted the camera's stream (its encoder changed): recording has a short gap.
     public var streamRestarted: Bool
@@ -136,6 +148,26 @@ struct CameraSetupRead {
     var streamsNote: String?
 }
 
+/// The login a step's change goes through: Hikvision's ISAPI, Reolink's API, or ONVIF, whose account and paused logins
+/// (`ONVIFLoginGuard`) the IP camera web APIs share.
+enum CameraSetupLogin: Sendable, Equatable {
+    case isapi, reolink, onvif
+
+    init(_ method: CameraConfigMethod) {
+        self = method == .hikvisionISAPI ? .isapi : method == .reolinkAPI ? .reolink : .onvif
+    }
+}
+
+/// What a refused step's failure says about the camera, for "Watch its internet" (`BridgeEngine.watchHeld`): its own answer (a value it
+/// would not take, a change that did not stick, a change the account Camera Bridge uses may not make: `CameraAdapterError.notPermitted`,
+/// whose login works), no answer at all, or a refused login (of `login`; nil when the engine can't tell which of the camera's APIs refused
+/// it).
+enum CameraSetupFailure: Sendable, Equatable {
+    case answered
+    case silent
+    case loginRefused(CameraSetupLogin?)
+}
+
 extension BridgeEngine {
     /// The cameras the setup works with: those the bridge reaches directly through their own API or ONVIF.
     public static let cameraSetupVendors: Set<CameraVendor> = [.hikvision, .onvif, .reolink, .amcrest]
@@ -167,7 +199,11 @@ extension BridgeEngine {
 
     /// Applies the setup: reads every step again, saves the values it will change (an existing setup, Optimize or Clean picture backup is
     /// folded in: the oldest value wins), then applies the steps in order, each read back. A step the camera refuses stops the run; the
-    /// steps before it stay done and `restoreCameraSetup` undoes them. Running it again changes nothing that is already right.
+    /// steps before it stay done and `restoreCameraSetup` undoes them. "Watch its internet" (the camera's DNS, last) still runs after it,
+    /// unless the refusal says the camera stopped answering or refused the login the DNS step uses (`watchHeld`). A step refused only
+    /// because the account may not make the change (`CameraSetupOutcome.notPermitted`: `CameraAdapterError.notPermitted`, or Reolink's
+    /// `GetAbility`; owner decision, 2026-10-18) stops nothing: the camera signed the account in, so no login pauses, the step says to use an
+    /// administrator account, and the steps after it still run. Running it again changes nothing that is already right.
     public func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
         guard !isPreview else { throw EngineError.cameraNotRunning }
         return try await operations.withLock {
@@ -180,6 +216,10 @@ extension BridgeEngine {
                 backup.cloud?.cloudAuthcode = nil
             }
             var state = CameraSetupState(started: Date())
+            // A watched camera stays on the box's list while the run goes on (the box's `since` lasts only while it is listed), until the
+            // step has its result; one set up by a build before `watchedServer` gets the bridge's address on its network now.
+            state.watchedServer = camera.setupState?.watchedServer
+                ?? (Self.internetWatchDone(camera) ? read.guardServer ?? internetWatchServer(camera) : nil)
             // The backup is saved before the first change.
             await changeConfiguration(cameraID) { configuration in
                 configuration.setupBackup = backup.isEmpty ? nil : backup
@@ -190,15 +230,22 @@ extension BridgeEngine {
 
             var steps: [CameraSetupStep] = []
             var stoppedAt: CameraSetupStepID?
+            // Why "Watch its internet" does not run after the step that stopped the run; nil while it still runs.
+            var watchHeld: String?
             var streamChanged = false
             var codecChanged = false
             for id in CameraSetupStepID.allCases {
                 let preview = Self.previewStep(id, read.readings[id])
                 var step = preview
-                if stoppedAt != nil, preview.status == .willChange {
+                if stoppedAt != nil, preview.status == .willChange, id != .internetWatch || watchHeld != nil {
                     step.status = .notRun
+                    if id == .internetWatch, let watchHeld {
+                        step.detail = watchHeld
+                        log.info("\(camera.name): camera setup, \(Self.cameraSetupTitle(id).lowercased()): not run (\(watchHeld))")
+                    }
                 } else if preview.status == .willChange {
-                    let outcome = await applyStep(id, read: read, service: service, backup: &backup, camera: camera)
+                    var failure = CameraSetupFailure.answered
+                    let outcome = await applyStep(id, read: read, service: service, backup: &backup, failure: &failure, camera: camera)
                     step.status = outcome.succeeded ? .done : .refused
                     // A note about a part not offered stays; the streams step's "it sends H.265" sentence goes once it is changed.
                     step.detail = outcome.succeeded ? ((id == .streams ? read.streamsNote : preview.detail) ?? outcome.detail) : outcome.detail
@@ -207,9 +254,14 @@ extension BridgeEngine {
                         streamChanged = true
                         codecChanged = read.planned.contains { $0.fixes.contains("codec") }
                     }
-                    if !outcome.succeeded { stoppedAt = id }
+                    // A change the account may not make is the camera's answer about that change alone: the steps after it still run.
+                    if !outcome.succeeded, !outcome.notPermitted, stoppedAt == nil {
+                        stoppedAt = id
+                        watchHeld = Self.watchHeld(by: failure, at: id, watch: Self.setupLogin(.internetWatch, read: read))
+                    }
                     log.info("\(camera.name): camera setup, \(Self.cameraSetupTitle(id).lowercased()): \(outcome.succeeded ? "done" : "refused") (\(outcome.detail))")
                 }
+                if id == .internetWatch { state.watchedServer = Self.watchedServer(after: step.status, was: state.watchedServer, server: read.guardServer) }
                 steps.append(step)
                 state.steps.append(.init(id: id, status: step.status, detail: step.detail, needsRestart: step.needsRestart))
                 let saved = backup, record = state
@@ -245,7 +297,7 @@ extension BridgeEngine {
                     await changeConfiguration(cameraID) { $0.setupState = checked }
                 }
             }
-            scheduleSecurityCheck(cameraID, after: .zero, skipIfFresh: false)   // what the camera now lets out
+            scheduleSecurityCheck(cameraID, after: .zero, skipIfFresh: false, fresh: true)   // what the camera now lets out
             return CameraSetupReport(steps: steps, state: record, canRestore: !saved.isEmpty, stoppedAt: stoppedAt, streamRestarted: streamChanged,
                                      mayNeedRecordingReEnabled: codecChanged)
         }
@@ -270,8 +322,13 @@ extension BridgeEngine {
                     let saved = backup
                     await changeConfiguration(cameraID) { configuration in
                         configuration.setupBackup = saved.isEmpty ? nil : saved
-                        // The camera asks its own DNS servers again: its Watch is over (the guard's list follows the save).
-                        if id == .internetWatch { configuration.setupState?.mark(.internetWatch, .restored) }
+                        // The camera asks its own DNS servers again: its Watch is over (the guard's list follows the save), also one a
+                        // reading made.
+                        if id == .internetWatch {
+                            configuration.setupState?.mark(.internetWatch, .restored)
+                            configuration.setupState?.watchedServer = nil
+                            configuration.dnsWatch = nil
+                        }
                     }
                 }
                 log.info("\(camera.name): camera setup, \(Self.cameraSetupTitle(id).lowercased()) \(outcome.succeeded ? "restored" : "not restored") (\(outcome.detail))")
@@ -282,7 +339,7 @@ extension BridgeEngine {
             if cleared { await changeConfiguration(cameraID) { $0.setupBackup = nil; $0.setupState = nil } }
             await rememberConfigMethod(cameraID: cameraID, service.memoryUpdate)
             if streamChanged { await restartAfterCameraSetup(camera) }
-            scheduleSecurityCheck(cameraID, after: .zero, skipIfFresh: false)
+            scheduleSecurityCheck(cameraID, after: .zero, skipIfFresh: false, fresh: true)
             let state = configurations.first { $0.id == cameraID }?.setupState
             return CameraSetupReport(steps: Array(steps.reversed()), state: state, canRestore: !cleared, streamRestarted: streamChanged)
         }
@@ -503,13 +560,17 @@ extension BridgeEngine {
     // MARK: The backup
 
     /// One backup: what an earlier run saved stays (it is the camera's original value); a Clean picture or Optimize backup is folded in;
-    /// the values read now fill the steps that will change and have none yet.
+    /// the values read now fill the steps that will change and have none yet. A Reolink backup an earlier build saved with less than this
+    /// run changes is completed from the camera's values now (`completedReolinkTimeZone`, `completedReolinkTimeSource`), so Restore puts
+    /// back everything the run writes.
     static func mergedSetupBackup(existing: CameraSetupBackup?, fresh: CameraSetupBackup, readings: [CameraSetupStepID: CameraSetupReading],
                                   cleanPicture: CleanPictureBackup?, optimization: HomeKitOptimizationSnapshot?) -> CameraSetupBackup {
         var backup = existing ?? CameraSetupBackup(version: CameraSetupState.currentVersion, created: fresh.created)
         func changing(_ id: CameraSetupStepID) -> Bool { readings[id]?.state == .willChange }
         if backup.timeZone == nil, changing(.timeZone) { backup.timeZone = fresh.timeZone }
+        if let kept = backup.timeZone, changing(.timeZone) { backup.timeZone = completedReolinkTimeZone(kept, fresh: fresh.timeZone) }
         if backup.timeSource == nil, changing(.timeSource) { backup.timeSource = fresh.timeSource }
+        if let kept = backup.timeSource, changing(.timeSource) { backup.timeSource = completedReolinkTimeSource(kept, fresh: fresh.timeSource) }
         if backup.internetWatch == nil, changing(.internetWatch) { backup.internetWatch = fresh.internetWatch }
         if backup.cleanPicture == nil { backup.cleanPicture = cleanPicture }
         if backup.upnp == nil, changing(.upnp) { backup.upnp = fresh.upnp }
@@ -534,10 +595,37 @@ extension BridgeEngine {
         return backup
     }
 
+    /// A Reolink time-zone backup a build before 2026-10-18 saved (`.reolinkAPI` with only the daylight-saving switch, `value`, no
+    /// `reolinkTime`): that build changed only the switch, so the camera's `timeZone` and `Dst` rule as read now (`fresh`) are its own. They
+    /// are kept with the old switch as `Dst.enable`, for a run that writes the offset and the whole rule. Any other backup stays as it is.
+    nonisolated static func completedReolinkTimeZone(_ kept: CameraTimeZoneBackup, fresh: CameraTimeZoneBackup?) -> CameraTimeZoneBackup {
+        guard kept.method == .reolinkAPI, kept.reolinkTime == nil, let fresh, fresh.method == .reolinkAPI, var time = fresh.reolinkTime else { return kept }
+        time["Dst.enable"] = kept.value == "1" ? 1 : 0
+        var completed = kept
+        completed.reolinkTime = time
+        return completed
+    }
+
+    /// A Reolink time-source backup an earlier build saved through ONVIF that names no server (`fromDHCP`, or no server set by hand: what
+    /// ONVIF showed) gets the camera's own server, port and interval as `GetNtp` reads them now (`fresh`, `.reolinkAPI`), for a run that
+    /// changes them (the camera does not ask the bridge now, so they are not the bridge's). Restore then puts them back
+    /// (`restoreReolinkTimeSourceFromONVIF`). Any other backup stays as it is.
+    nonisolated static func completedReolinkTimeSource(_ kept: CameraTimeSourceBackup, fresh: CameraTimeSourceBackup?) -> CameraTimeSourceBackup {
+        guard kept.method == .onvifMinimal || kept.method == .onvifFull, kept.hostName == nil,
+              !kept.servers.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+              let fresh, fresh.method == .reolinkAPI, let host = fresh.hostName, !host.trimmingCharacters(in: .whitespaces).isEmpty else { return kept }
+        var completed = kept
+        completed.hostName = host
+        completed.port = fresh.port
+        completed.interval = fresh.interval
+        return completed
+    }
+
     // MARK: Applying and restoring
 
+    /// Applies one step; `failure` is what a refusal says about the camera (`watchHeld`), left `.answered` where it is the camera's answer.
     private func applyStep(_ id: CameraSetupStepID, read: CameraSetupRead, service: CameraSettingsService, backup: inout CameraSetupBackup,
-                           camera: CameraConfiguration) async -> CameraSetupOutcome {
+                           failure: inout CameraSetupFailure, camera: CameraConfiguration) async -> CameraSetupOutcome {
         do {
             switch id {
             case .timeZone:
@@ -552,9 +640,11 @@ extension BridgeEngine {
             case .cleanPicture:
                 let change = try await service.cleanPicture()
                 if change.succeeded, backup.cleanPicture == nil { backup.cleanPicture = change.backup }
-                return CameraSetupOutcome(succeeded: change.succeeded, detail: change.summary)
+                // A refused login is answered in these words, without the way that was refused (the vendor's API or ONVIF).
+                if !change.succeeded, change.summary == Self.refusedLogin { failure = .loginRefused(nil) }
+                return CameraSetupOutcome(succeeded: change.succeeded, detail: change.summary, notPermitted: change.notPermitted)
             case .streams:
-                return try await applyStreams(read, service: service, camera: camera)
+                return try await applyStreams(read, service: service, failure: &failure, camera: camera)
             case .videoPassword:
                 return try await service.requireVideoPassword()
             case .extraServices:
@@ -565,11 +655,13 @@ extension BridgeEngine {
                 return try await service.setFeature(.cloud, enabled: false, path: backup.cloud?.path)
             }
         } catch {
-            return CameraSetupOutcome(succeeded: false, detail: Self.setupReason(error))
+            failure = Self.setupFailure(error, login: Self.setupLogin(id, read: read))
+            return Self.refusal(error)
         }
     }
 
-    private func applyStreams(_ read: CameraSetupRead, service: CameraSettingsService, camera: CameraConfiguration) async throws -> CameraSetupOutcome {
+    private func applyStreams(_ read: CameraSetupRead, service: CameraSettingsService, failure: inout CameraSetupFailure,
+                              camera: CameraConfiguration) async throws -> CameraSetupOutcome {
         if read.mainSmartCodecOn {
             try await service.setHikvisionSmartCodec(enabled: false, channelID: CameraDrivers.hikvisionChannelID(mainStreamURL: camera.mainStreamURL, sub: false))
         }
@@ -579,7 +671,10 @@ extension BridgeEngine {
         guard !read.planned.isEmpty else { return CameraSetupOutcome(succeeded: true, detail: "via ISAPI") }
         let results = try await service.applyEncoder(read.planned.map(\.edit))
         let failed = results.filter { !$0.succeeded }
-        if !failed.isEmpty { return CameraSetupOutcome(succeeded: false, detail: failed.map(\.summary).joined(separator: "; ")) }
+        if !failed.isEmpty {
+            failure = Self.encoderFailure(failed.flatMap(\.failures))
+            return CameraSetupOutcome(succeeded: false, detail: Self.streamsRefusal(failed), notPermitted: Self.encoderNotPermitted(failed))
+        }
         let methods = results.compactMap(\.method).map(\.displayName).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
         return CameraSetupOutcome(succeeded: true, detail: methods.isEmpty ? "already as wanted" : "via \(methods.joined(separator: " and "))")
     }
@@ -593,7 +688,7 @@ extension BridgeEngine {
                 return try await service.restoreTimeZone(value)
             case .timeSource:
                 guard let value = backup.timeSource else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
-                return try await service.restoreTimeSource(value)
+                return try await service.restoreTimeSource(value, bridge: internetWatchServer(camera))
             case .internetWatch:
                 guard let value = backup.internetWatch else { return CameraSetupOutcome(succeeded: true, detail: "nothing saved") }
                 return try await service.restoreDNS(value)
@@ -646,7 +741,7 @@ extension BridgeEngine {
                 return outcome
             }
         } catch {
-            return CameraSetupOutcome(succeeded: false, detail: Self.setupReason(error))
+            return Self.refusal(error)
         }
     }
 
@@ -662,11 +757,102 @@ extension BridgeEngine {
         }
     }
 
-    /// A step's failure in a person's words (never with an address or a password).
+    /// A refused login in a step's words (the adapters' clean picture says it so too).
+    nonisolated static let refusedLogin = "the camera refused the login"
+
+    /// A step's failure in a person's words (never with an address or a password). A change the account may not make
+    /// (`CameraAdapterError.notPermitted`) says to use an administrator account: the login worked, so it is no refused login.
     nonisolated static func setupReason(_ error: any Error) -> String {
-        if let error = error as? CameraAdapterError, error.isLoginRefusal { return "the camera refused the login" }
+        if let error = error as? CameraAdapterError, error.isLoginRefusal { return refusedLogin }
         if let error = error as? CameraConfigError { return error.summary }
         return Redact.string(readableReason(error))
+    }
+
+    /// A step that threw `error`, as its outcome: `setupReason`'s words, `notPermitted` for a change the account may not make
+    /// (`CameraAdapterError.isNotPermitted`: `.notPermitted`, or the IPCamera Web family's API stopped for want of privilege).
+    nonisolated static func refusal(_ error: any Error) -> CameraSetupOutcome {
+        CameraSetupOutcome(succeeded: false, detail: setupReason(error), notPermitted: CameraAdapterError.isNotPermitted(error))
+    }
+
+    // MARK: Watch after a refused step
+
+    /// Whether "Watch its internet" still runs after the step `failure` stopped the run at, and why not (the step's detail): it runs after
+    /// the camera's own answer, and after a login refused for another of its APIs (ISAPI, Reolink's API or ONVIF, `watch` being the DNS
+    /// step's: its read in this run just took that login). It does not run once the camera stopped answering, nor after a refused login of
+    /// its API or of one the engine can't tell, since another refused login can lock the camera's logins.
+    nonisolated static func watchHeld(by failure: CameraSetupFailure, at step: CameraSetupStepID, watch: CameraSetupLogin?) -> String? {
+        let title = "“\(cameraSetupTitle(step))”"
+        switch failure {
+        case .answered:
+            return nil
+        case .silent:
+            return "the camera stopped answering at \(title), so Camera Bridge did not try it"
+        case .loginRefused(let login):
+            if let login, let watch, login != watch { return nil }
+            return "the camera refused the login at \(title), so Camera Bridge did not try it: another refused login can lock the camera’s logins"
+        }
+    }
+
+    /// What `error`, thrown by a step whose change goes through `login`, says about the camera. A change the account may not make
+    /// (`.notPermitted`) is its answer: the camera signed the account in.
+    nonisolated static func setupFailure(_ error: any Error, login: CameraSetupLogin?) -> CameraSetupFailure {
+        if let error = error as? CameraAdapterError, error.isLoginRefusal { return .loginRefused(login) }
+        return CameraReachability.isUnreachable(error) ? .silent : .answered
+    }
+
+    /// The streams step's words for the encoder changes that failed: each method's few words ("ONVIF minimal: InvalidArgVal"), or, when every
+    /// method refused the account the change (`encoderNotPermitted`), that it may not change it.
+    nonisolated static func streamsRefusal(_ failed: [CameraEncoderEditResult]) -> String {
+        if encoderNotPermitted(failed) { return CameraAdapterError.notPermittedReason }
+        return failed.map(\.summary).joined(separator: "; ")
+    }
+
+    /// Every method of the encoder changes that failed refused the account the change (`CameraConfigFailure.notPermitted`): the step's refusal
+    /// stops nothing.
+    nonisolated static func encoderNotPermitted(_ failed: [CameraEncoderEditResult]) -> Bool {
+        let attempts = failed.flatMap(\.failures)
+        return !attempts.isEmpty && attempts.allSatisfy { $0.failure == .notPermitted }
+    }
+
+    /// What a failed encoder change says about the camera: a refused login ends the methods' chain (that method's login); every method
+    /// failing without an answer is a camera that stopped answering; anything else is its answer.
+    nonisolated static func encoderFailure(_ attempts: [CameraConfigAttempt]) -> CameraSetupFailure {
+        if let refused = attempts.first(where: \.failure.stopsChain) { return .loginRefused(CameraSetupLogin(refused.method)) }
+        let silent = !attempts.isEmpty && attempts.allSatisfy { attempt in
+            if case .network = attempt.failure { true } else { false }
+        }
+        return silent ? .silent : .answered
+    }
+
+    /// The login a step's change goes through on this camera, as the run's read found it; nil for the steps that try more than one way
+    /// (clean picture, streams: the vendor's API, then ONVIF), or without a reading.
+    nonisolated static func setupLogin(_ id: CameraSetupStepID, read: CameraSetupRead) -> CameraSetupLogin? {
+        switch id {
+        case .timeZone: read.fresh.timeZone.map { CameraSetupLogin($0.method) }
+        case .timeSource: read.fresh.timeSource.map { CameraSetupLogin($0.method) }
+        case .internetWatch: read.fresh.internetWatch.map { CameraSetupLogin($0.method) }
+        // Hikvision's ISAPI documents, Reolink's own commands ("reolink:Upnp", "reolink:P2p"), or the IP camera web API's cloud (one account
+        // with ONVIF).
+        case .upnp: read.fresh.upnp.map { featureLogin($0.path) }
+        case .cloud: read.fresh.cloud.map { featureLogin($0.path) }
+        case .videoPassword, .extraServices: .onvif   // the IPCamera Web family's API: one account with ONVIF
+        case .cleanPicture, .streams: nil
+        }
+    }
+
+    /// The login of the UPnP or cloud switch at `path` (`CameraFeatureBackup.path`).
+    nonisolated static func featureLogin(_ path: String) -> CameraSetupLogin {
+        path.hasPrefix("/ISAPI/") ? .isapi : path.hasPrefix("reolink:") ? .reolink : .onvif
+    }
+
+    /// The watch "Watch its internet"'s result leaves (`CameraSetupState.watchedServer`): `server`, the bridge's address, once the camera's
+    /// DNS points at it; none once the camera refused the step, it did not run or it was restored; `was` when the step could not be read.
+    nonisolated static func watchedServer(after status: CameraSetupStepStatus, was: String?, server: String?) -> String? {
+        switch status {
+        case .done, .alreadyRight: server
+        case .refused, .notRun, .restored: nil
+        case .notSupported, .notOffered, .willChange: was
+        }
     }
 
     private func restartAfterCameraSetup(_ camera: CameraConfiguration) async {

@@ -564,7 +564,7 @@ public struct RequestFileSystemControl: SystemControlling {
         }
         struct Body: Encodable {
             var cameras: [Entry]
-            /// The time zone "today" is counted in: the bridge's own (the engine makes it the process's).
+            /// The time zone "today" is counted in: the bridge's own (`BridgeTime`, its settings' zone), not the process's (UTC on the box).
             var timeZone: String
         }
         var entries: [Entry] = []
@@ -577,7 +577,7 @@ public struct RequestFileSystemControl: SystemControlling {
         }
         guard entries.count <= Self.maximumGuardedCameras else { throw SystemError("At most \(Self.maximumGuardedCameras) cameras can be watched.") }
         let failure = "The system couldn’t change the internet guard."
-        try await runShortJob(.guardSet, Body(cameras: entries, timeZone: TimeZone.current.identifier), failure: failure)
+        try await runShortJob(.guardSet, Body(cameras: entries, timeZone: BridgeTime.zone.identifier), failure: failure)
         // The job's end can be an older list's (one that ran while this one was sent): taken only when the box reports these cameras.
         let reported = read(.internetGuard, maximum: Self.maximumGuardReportBytes).map { (report: GuardReport) in Set(report.cameras.map(\.address)) }
         guard reported == Set(entries.map(\.address)) else {

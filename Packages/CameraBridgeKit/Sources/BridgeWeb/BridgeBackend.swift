@@ -116,7 +116,8 @@ public struct EngineBackend: BridgeBackend {
 
     public func overview() async -> BridgeOverview {
         await MainActor.run {
-            BridgeOverview(state: engine.state, cameras: engine.cameras, configurations: engine.configurations, sensorsBridge: engine.sensorsBridge,
+            // "Change it by hand" on the findings the setup can't change goes with each camera's status (`withManualHelp`).
+            BridgeOverview(state: engine.state, cameras: engine.withManualHelp(engine.cameras), configurations: engine.configurations, sensorsBridge: engine.sensorsBridge,
                            localNetworkAccess: engine.localNetworkAccess, networkNotices: engine.recentNetworkNotices, settings: engine.settings,
                            webhookProblem: engine.webhookProblem, configurationRecovered: engine.configurationRecoveredFrom != nil,
                            streamingHelperInstalled: engine.isStreamingHelperInstalled, nvrStorage: engine.nvrStorage,
@@ -250,12 +251,18 @@ public struct EngineBackend: BridgeBackend {
         try await engine.undoHomeKitOptimization(cameraID: cameraID)
     }
 
+    // The preview, the run and the check carry "Change it by hand" for the page (`BridgeEngine.withManualHelp`): the steps the camera refused
+    // or does not support, the findings the setup can't change. A restore's report carries none: its help would say how to make the change
+    // Restore is undoing.
+
     public func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport {
-        try await engine.cameraSetupPreview(cameraID: cameraID)
+        let report = try await engine.cameraSetupPreview(cameraID: cameraID)
+        return await engine.withManualHelp(report, cameraID: cameraID)
     }
 
     public func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
-        try await engine.applyCameraSetup(cameraID: cameraID)
+        let report = try await engine.applyCameraSetup(cameraID: cameraID)
+        return await engine.withManualHelp(report, cameraID: cameraID)
     }
 
     public func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
@@ -263,7 +270,8 @@ public struct EngineBackend: BridgeBackend {
     }
 
     public func checkCameraSecurity(cameraID: UUID) async throws -> CameraSecurity {
-        try await engine.checkCameraSecurity(cameraID: cameraID)
+        let security = try await engine.checkCameraSecurity(cameraID: cameraID)
+        return await engine.withManualHelp(security, cameraID: cameraID)
     }
 }
 

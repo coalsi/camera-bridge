@@ -90,9 +90,10 @@ import PlatformApple
         }
         var timing = SnapshotProvider.Timing()
         timing.eventBudget = .milliseconds(300)
-        timing.budget = .milliseconds(300)
         timing.cameraAPITimeout = .seconds(30)
         let provider = recorder.provider(hub: MediaHub(), api: api, timing: timing)
+        // The first picture, on the periodic budget (4 s): with 300 ms for it too, under heavy load it was not ready in time, and with no
+        // picture to stand in the request failed ("no answer within 0.3 s") before the test reached the event snapshot it is about.
         let live = try await provider.snapshot(SnapshotRequest(width: 640, height: 360, reason: .periodic))
         slow.set(true)
         let began = ContinuousClock.now

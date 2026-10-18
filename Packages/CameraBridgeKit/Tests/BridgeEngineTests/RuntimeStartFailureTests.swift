@@ -15,6 +15,8 @@ final class ScriptedTransport: NetworkTransport {
     let base = AppleNetworkTransport()
     let lanHosts: Set<String>
     let listenFailures = Box<[UInt16: TransportError]>([:])
+    /// Fails every listen on a given port (not 0: an ephemeral one), wherever the engine put the server.
+    let fixedPortListenFailure = Box<TransportError?>(nil)
     let connectFailures = Box<[UInt16: TransportError]>([:])
     let listenAttempts = Box<[UInt16: Int]>([:])
     /// The latest listener handed out for each requested port.
@@ -26,7 +28,7 @@ final class ScriptedTransport: NetworkTransport {
 
     func listen(port: UInt16, loopbackOnly: Bool) async throws -> any TCPListener {
         listenAttempts.update { $0[port, default: 0] += 1 }
-        if let failure = listenFailures.value[port] { throw failure }
+        if let failure = listenFailures.value[port] ?? (port != 0 ? fixedPortListenFailure.value : nil) { throw failure }
         let listener = ScriptedListener(base: try await base.listen(port: port, loopbackOnly: loopbackOnly))
         listeners.update { $0[port] = listener }
         return listener
@@ -140,14 +142,16 @@ final class DenyingAdvertiser: ServiceAdvertiser {
         let engine = fixture.engine
         let camera = EngineFixture.demoCamera(name: "Porch")
         try await engine.addCamera(camera, password: nil)
-        let port = try #require(engine.configurations.first?.hapPort)
-        transport.listenFailures.set([port: .failed("listener failure")])
+        // The accessory's listener fails on whatever port the start gives it: the one assigned may be another test process's by then
+        // (the start moves the camera to the next free port), and a failure scripted for it alone never came.
+        transport.fixedPortListenFailure.set(.failed("listener failure"))
         await engine.start()
+        let port = try #require(engine.configurations.first?.hapPort)
         #expect(await fixture.waitFor {
             if case .offline(let reason) = fixture.status(camera.id)?.connection { reason.hasPrefix("the Apple Home accessory could not start") } else { false }
         }, "\(String(describing: fixture.status(camera.id)?.connection))")
         #expect(await fixture.waitFor { (transport.listenAttempts.value[port] ?? 0) >= 3 }, "tried again with backoff")
-        transport.listenFailures.set([:])
+        transport.fixedPortListenFailure.set(nil)
         #expect(await fixture.waitFor { fixture.status(camera.id)?.connection == .online && fixture.status(camera.id)?.hapPort == port })
         #expect(engine.runtimes[camera.id] != nil)
         await fixture.tearDown()

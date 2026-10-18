@@ -77,7 +77,8 @@ struct DoorBirdMonitorParser: Sendable {
 }
 
 /// DoorBird over HTTP with the app user's credentials (Basic or Digest). The device allows one connection per second and blocks the
-/// address for a minute after wrong credentials (HTTP 423): a rejected login pauses logins to it (`ONVIFLoginGuard`, two minutes).
+/// address for a minute after wrong credentials (HTTP 423): a rejected login pauses logins to it (`ONVIFLoginGuard`, two minutes), and so
+/// does its block (the camera's lock, `CameraAdapterError.lockedOut`).
 struct DoorBirdAPI: Sendable {
     let endpoint: CameraEndpoint
     private let http: AuthenticatingHTTPClient
@@ -108,15 +109,15 @@ struct DoorBirdAPI: Sendable {
             if hasCredentials { ONVIFLoginGuard.shared.recordRejection(host: key, now: now) }
             throw CameraAdapterError.unauthorized
         case 423:
-            ONVIFLoginGuard.shared.recordRejection(host: key, now: now)
-            throw CameraAdapterError.lockedOut(until: now.addingTimeInterval(ONVIFLoginGuard.rejectionPause))
+            // The doorbell blocks the address for a minute: its own lock, paused as long as a refusal is.
+            throw CameraAdapterError.lockedOut(until: ONVIFLoginGuard.shared.recordLockout(host: key, now: now, for: ONVIFLoginGuard.rejectionPause))
         default: throw CameraAdapterError.httpStatus(status)
         }
     }
 
     private func get(_ path: String) async throws -> Data {
         let key = Self.loginKey(endpoint)
-        if hasCredentials, let until = ONVIFLoginGuard.shared.blockedUntil(host: key) { throw CameraAdapterError.lockedOut(until: until) }
+        if hasCredentials, let pause = ONVIFLoginGuard.shared.pause(host: key) { throw pause.error }
         guard let url = endpoint.httpURL(path: path) else { throw CameraAdapterError.invalidResponse("invalid camera address") }
         let data: Data
         let response: HTTPURLResponse
