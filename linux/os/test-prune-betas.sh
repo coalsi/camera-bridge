@@ -309,6 +309,7 @@ check "no betas: os-sources is not made" "$(calls create)" 0
 # The clean-up only lists until the owner turns it on, and a full OS release may become "Latest" (the Mac app is archived): only betas
 # are pre-releases.
 create_step=$(awk '/gh release create "\$TAG"/ { on = 1 } on { print } on && /"\$\{FILES\[@\]\}"/ { exit }' "$WORKFLOW")
+# shellcheck disable=SC2016  # the literal text of the workflow is matched, not expanded
 if ! grep -qF -- '--latest=false' <<<"$create_step" && grep -qF -- '"${PRERELEASE[@]}"' <<<"$create_step"; then
     pass "the workflow publishes betas as pre-releases and lets a full OS release become Latest"; else
     bad "the workflow publishes betas as pre-releases and lets a full OS release become Latest"; printf '%s\n' "$create_step"; fi
