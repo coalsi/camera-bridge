@@ -24,19 +24,19 @@ import Testing
         {"state":"ok","message":"2 cameras watched","updatedAt":"2026-10-17T17:47:00Z","available":true,"running":false,
          "timeZone":"America/Los_Angeles","todayStart":"2026-10-17T07:00:00Z",
          "cameras":[{"address":"192.168.77.21","level":"watch","today":47,"last24h":51,
-                     "names":[{"name":"p2p.example.com","count":47,"first":"2026-10-17T08:00:01Z","last":"2026-10-17T17:46:01Z"}]}]}
+                     "names":[{"name":"p2p.example.com","count":47,"first":"2026-10-17T08:00:01Z","last":"2026-10-17T17:46:01Z"}],"local":12}]}
         """)
         #expect(decoded == GuardReport(available: true, running: false, updatedAt: try date("2026-10-17T17:47:00Z"), timeZone: "America/Los_Angeles",
                                        todayStart: try date("2026-10-17T07:00:00Z"),
                                        cameras: [GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 47, last24h: 51,
                                                                     names: [GuardReport.Lookup(name: "p2p.example.com", count: 47, first: try date("2026-10-17T08:00:01Z"),
-                                                                                               last: try date("2026-10-17T17:46:01Z"))])]))
+                                                                                               last: try date("2026-10-17T17:46:01Z"))], local: 12)]))
     }
 
     @Test func whatTheRootSideLeavesOutOrGetsWrongDoesNotLoseTheRest() throws {
         let decoded = try report("""
         {"available":true,"updatedAt":"yesterday","newField":{"x":1},
-         "cameras":[{"address":"192.168.77.21","level":"seal","today":"3","last24h":4.0,
+         "cameras":[{"address":"192.168.77.21","level":"seal","today":"3","last24h":4.0,"local":"many",
                      "names":[{"name":"","count":1},{"name":"cloud.example.net","count":2,"first":12},{"count":5}]},
                     {"level":"watch","today":3},
                     {"address":"","today":1},
@@ -47,7 +47,7 @@ import Testing
         #expect(decoded.cameras.map(\.address) == ["192.168.77.21", "192.168.77.22"], "a camera without an address is skipped")
         let first = decoded.cameras[0]
         #expect(first.level == nil, "a level this build does not know")
-        #expect(first.today == 3 && first.last24h == 4)
+        #expect(first.today == 3 && first.last24h == 4 && first.local == 0, "an older box says nothing of local questions")
         #expect(first.names == [GuardReport.Lookup(name: "cloud.example.net", count: 2, first: nil, last: nil)])
         #expect(decoded.cameras[1] == GuardReport.Camera(address: "192.168.77.22", level: nil, today: 0, last24h: 0, names: []))
         #expect(try report("{}") == GuardReport(available: false), "an empty file says nothing")
@@ -58,7 +58,7 @@ import Testing
         let original = GuardReport(available: true, running: true, updatedAt: try date("2026-10-17T17:47:00Z"), timeZone: "UTC", todayStart: try date("2026-10-17T00:00:00Z"),
                                    cameras: [GuardReport.Camera(address: "fd00::21", level: .watch, today: 1, last24h: 2,
                                                                 names: [GuardReport.Lookup(name: "a.example.com", count: 2, first: try date("2026-10-17T01:00:00Z"),
-                                                                                           last: try date("2026-10-17T02:00:00Z"))])])
+                                                                                           last: try date("2026-10-17T02:00:00Z"))], local: 3)])
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         #expect(try JSONDecoder().decode(GuardReport.self, from: encoder.encode(original)) == original)

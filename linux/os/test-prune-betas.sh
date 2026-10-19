@@ -2,7 +2,7 @@
 # Self-test of prune-betas.sh. No network, no GitHub: a fake gh on PATH serves a recorded release list (in two pages, as the
 # releases API sends them), keeps the release os-sources in a folder, and records every call; each case checks exactly which
 # releases would be removed and which package lists and source offers were kept first. It ends with the release workflow's
-# settings for the clean-up and for "Latest". The static checks job of .github/workflows/os-image.yml runs it.
+# settings for the clean-up and for pre-releases. The static checks job of .github/workflows/os-image.yml runs it.
 #
 #   linux/os/test-prune-betas.sh        (needs bash and jq)
 set -euo pipefail
@@ -306,10 +306,12 @@ expect "no betas among the releases: nothing to do" 0 "" "No OS betas found"
 check "no betas: os-sources is not made" "$(calls create)" 0
 
 # --- the release workflow -------------------------------------------------------------------------------------------------------
-# The clean-up only lists until the owner turns it on, and no OS release takes "Latest" from the Mac app.
+# The clean-up only lists until the owner turns it on, and a full OS release may become "Latest" (the Mac app is archived): only betas
+# are pre-releases.
 create_step=$(awk '/gh release create "\$TAG"/ { on = 1 } on { print } on && /"\$\{FILES\[@\]\}"/ { exit }' "$WORKFLOW")
-if grep -qF -- '--latest=false' <<<"$create_step"; then pass "the workflow publishes every OS release with --latest=false"; else
-    bad "the workflow publishes every OS release with --latest=false"; printf '%s\n' "$create_step"; fi
+if ! grep -qF -- '--latest=false' <<<"$create_step" && grep -qF -- '"${PRERELEASE[@]}"' <<<"$create_step"; then
+    pass "the workflow publishes betas as pre-releases and lets a full OS release become Latest"; else
+    bad "the workflow publishes betas as pre-releases and lets a full OS release become Latest"; printf '%s\n' "$create_step"; fi
 prune_step=$(awk '/- name: Remove older betas/ { on = 1; next } on && /- name: / { exit } on { print }' "$WORKFLOW")
 # shellcheck disable=SC2016  # the workflow's text, $ and all
 if grep -qF 'PRUNE_OS_BETAS: ${{ vars.PRUNE_OS_BETAS }}' <<<"$prune_step" && grep -qF 'mode=(--dry-run)' <<<"$prune_step" \

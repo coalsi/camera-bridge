@@ -1,7 +1,7 @@
 // api.js: getBytes, notifyAuth, timeoutMs and the extras on ApiError (NVR task T08, first commit).
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { ApiError, api, get, getBytes, notifyAuth, onAuthChange, setCSRFToken } from '../web/js/api.js';
+import { ApiError, api, get, getBytes, notifyAuth, onAuthChange, put, setCSRFToken } from '../web/js/api.js';
 
 const realFetch = globalThis.fetch;
 let calls = [];
@@ -57,6 +57,17 @@ describe('api()', () => {
     assert.equal(calls[0].init.headers['X-CSRF-Token'], 'token-2');
     assert.equal(calls[0].init.headers['Content-Type'], 'application/json');
     assert.equal(calls[0].init.body, '{"enabled":true}');
+  });
+
+  it('sends PUT (the AI key) with the token and a JSON body, and takes a 204', async () => {
+    stub(() => new Response(null, { status: 204 }));
+    setCSRFToken('token-4');
+    assert.equal(await put('ai/key', { key: 'sk-test-0000' }), null);
+    assert.equal(calls[0].url, '/api/v1/ai/key');
+    assert.equal(calls[0].init.method, 'PUT');
+    assert.equal(calls[0].init.headers['X-CSRF-Token'], 'token-4');
+    assert.equal(calls[0].init.headers['Content-Type'], 'application/json');
+    assert.equal(calls[0].init.body, '{"key":"sk-test-0000"}');
   });
 
   it('turns an error answer into an ApiError with the headers parsed', async () => {

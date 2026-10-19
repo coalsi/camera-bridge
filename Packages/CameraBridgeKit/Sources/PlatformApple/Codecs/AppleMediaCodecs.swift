@@ -45,6 +45,10 @@ public final class AppleMediaCodecs: MediaCodecs {
         try JPEGSnapshot.resize(jpeg, maxWidth: maxWidth, maxHeight: maxHeight)
     }
 
+    public func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data {
+        try JPEGSnapshot.resize(jpeg, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality)
+    }
+
     public func silentAACFrames(duration: Duration, sampleRate: Int, channels: Int, startPTS: MediaTime, wallClock: Date) throws -> [EncodedAudioFrame] {
         try SilentAudio.aacLCFrames(duration: duration, sampleRate: sampleRate, channels: channels, startPTS: startPTS, wallClock: wallClock)
     }

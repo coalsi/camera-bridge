@@ -9,24 +9,49 @@ import Foundation
 // in one table, `CameraManualHelpText`, like `InternetGuardText`. A menu path counts as confirmed only when it was read on the camera's own
 // pages or in its maker's documents; anything else is a general instruction, and the help then says "Menu names differ between models"
 // (`CameraManualHelp.caveat`). Worked out when a report or a status goes to the web page (BridgeWeb's `EngineBackend`), never saved.
+// Pointing the DNS at Camera Bridge by hand (docs/superpowers/specs/2026-10-18-camera-dns-design.md, "What the person sees" 1; the menus
+// from the research's §4, .superpowers/sdd/camera-dns-research.md) also links the camera's own page, says what the camera asks now, marks
+// the addresses to type for copying, says to keep and reserve the camera's address where its DNS stays only with a fixed one, and warns
+// of what lets a camera around the guard.
 
 /// The kinds of camera whose menus the help knows.
 public enum CameraFamily: String, Sendable, Codable, CaseIterable {
-    case hikvision, reolink
+    /// Hikvision and the cameras it makes for others (Annke).
+    case hikvision
+    case reolink
     /// TP-Link Tapo (changed in the Tapo app).
     case tapo
     /// The IP camera web API: Jennov and other Anjvision cameras ("IP Camera Web Login").
     case ipcWebAPI
     /// The IPCamera Web family (its page is titled "IPCamera Web").
     case ipcamWeb
-    /// Dahua and Amcrest.
+    /// Dahua, Amcrest and Lorex.
     case dahua
+    case axis
+    /// Hanwha Vision (Wisenet).
+    case hanwha
+    case uniview
+    case foscam
+    /// TP-Link VIGI.
+    case vigi
+    /// Xiongmai's XMEye / NetSurveillance cameras.
+    case xmeye
+    /// A UniFi camera on its own (not adopted by UniFi Protect).
+    case unifi
     /// Any other ONVIF camera.
     case onvif
 
+    /// The makers an ONVIF camera names (its manufacturer, any case, anywhere in it; VIGI in its model too, as TP-Link names itself), in
+    /// the order they are tried.
+    static let makers: [(family: CameraFamily, names: [String])] = [
+        (.hikvision, ["hikvision", "annke"]), (.reolink, ["reolink"]), (.dahua, ["dahua", "amcrest", "lorex"]), (.axis, ["axis"]),
+        (.hanwha, ["hanwha", "wisenet"]), (.uniview, ["uniview"]), (.foscam, ["foscam"]), (.vigi, ["vigi"]), (.xmeye, ["xiongmai"]),
+        (.unifi, ["ubiquiti"]),
+    ]
+
     /// The family of `camera`: its vendor, then the web API its address showed in this run (`webAPI`, CameraAdapters'
-    /// `CameraWebAPIFamily.seen(at:)`), then its maker and model (a Tapo, a Hikvision, Reolink, Dahua or Amcrest added as ONVIF), then what
-    /// an earlier setup kept of one of the two web API families; else a plain ONVIF camera.
+    /// `CameraWebAPIFamily.seen(at:)`), then its maker and model (a Tapo, then `makers`), then what an earlier setup kept of one of the two
+    /// web API families; else a plain ONVIF camera.
     public static func of(_ camera: CameraConfiguration, webAPI: CameraWebAPIFamily?) -> CameraFamily {
         switch camera.vendor {
         case .hikvision: return .hikvision
@@ -40,10 +65,8 @@ public enum CameraFamily: String, Sendable, Codable, CaseIterable {
         case nil: break
         }
         if CloudDependentModels.brand(of: camera) == "TP-Link Tapo" { return .tapo }
-        let maker = Set(camera.manufacturer.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
-        if maker.contains("hikvision") { return .hikvision }
-        if maker.contains("reolink") { return .reolink }
-        if !maker.isDisjoint(with: ["dahua", "amcrest", "lorex"]) { return .dahua }
+        let maker = camera.manufacturer.lowercased(), model = camera.model.lowercased()
+        for (family, names) in makers where names.contains(where: { maker.contains($0) || (family == .vigi && model.contains($0)) }) { return family }
         // Only the IPCamera Web family has a video password, extra services and the `mobile` cloud; only the IP camera web API keeps the
         // cloud's kind and turns the picture's labels off through its web API.
         let backup = camera.setupBackup
@@ -53,6 +76,15 @@ public enum CameraFamily: String, Sendable, Codable, CaseIterable {
         }
         if camera.cleanPictureBackup?.method == .ipcWebAPI || backup?.cleanPicture?.method == .ipcWebAPI || backup?.cloud?.cloudType != nil { return .ipcWebAPI }
         return .onvif
+    }
+
+    /// The camera's DNS set by hand stays only while its address is fixed (the research's §4 "Static first?" yes or probably, §5): the DNS
+    /// help says to keep its address as it is and reserve it in the router.
+    var dnsNeedsFixedAddress: Bool {
+        switch self {
+        case .hikvision, .foscam, .vigi, .tapo, .ipcWebAPI, .xmeye, .unifi: true
+        case .reolink, .ipcamWeb, .dahua, .axis, .hanwha, .uniview, .onvif: false
+        }
     }
 }
 
@@ -74,14 +106,52 @@ public struct CameraManualHelp: Sendable, Codable, Equatable {
         }
     }
 
-    /// A value to set ("Preferred DNS server": "192.168.77.28").
+    /// A value to set ("Preferred DNS server": "192.168.77.28"); `copy`: an address to type in, which the page offers to copy.
     public struct Value: Sendable, Codable, Equatable {
         public var label: String
         public var value: String
+        public var copy: Bool
 
-        public init(label: String, value: String) {
+        public init(label: String, value: String, copy: Bool = false) {
             self.label = label
             self.value = value
+            self.copy = copy
+        }
+    }
+
+    /// A link to the camera's own web page ("Open the camera’s web page"): only ever the address and web port Camera Bridge is configured
+    /// with (`CameraManualHelpText.webPageURL`), never anything the camera says.
+    public struct Link: Sendable, Codable, Equatable {
+        public var label: String
+        public var url: String
+
+        public init(label: String, url: String) {
+            self.label = label
+            self.url = url
+        }
+    }
+
+    /// The camera's address to keep as it is while fixing it: the address, and its mask and gateway where the camera showed them.
+    public struct Keep: Sendable, Codable, Equatable {
+        public var address: String
+        public var mask: String?
+        public var gateway: String?
+
+        public init(address: String, mask: String?, gateway: String?) {
+            self.address = address
+            self.mask = mask
+            self.gateway = gateway
+        }
+    }
+
+    /// The router reservation for the camera's fixed address: the address, and its hardware (MAC) address where the camera showed it.
+    public struct Reserve: Sendable, Codable, Equatable {
+        public var address: String
+        public var mac: String?
+
+        public init(address: String, mac: String?) {
+            self.address = address
+            self.mac = mac
         }
     }
 
@@ -97,9 +167,21 @@ public struct CameraManualHelp: Sendable, Codable, Equatable {
     public var then: String?
     /// `CameraManualHelpText.caveat` whenever a place is not confirmed; nil when every place is.
     public var caveat: String?
+    /// The camera's own web page, where a place is that page; nil for a camera without one Camera Bridge knows of (a Tapo, a camera of an
+    /// unknown maker).
+    public var link: Link?
+    /// The DNS help: the DNS servers the camera asks now, as last read ("Right now it asks A and B. Change both to C."); empty when not known,
+    /// and in a setup report (its own change row says them).
+    public var current: [String]
+    /// The DNS help of a camera whose DNS stays only with a fixed address: its address to keep, and to reserve in the router.
+    public var keep: Keep?
+    public var reserve: Reserve?
+    /// The DNS help: short warnings that apply (both slots the bridge, a restart, a recorder's ports).
+    public var warnings: [String]
 
     /// `caveat` follows `places`.
-    public init(why: String, places: [Place] = [], values: [Value] = [], router: String? = nil, note: String? = nil, then: String? = nil) {
+    public init(why: String, places: [Place] = [], values: [Value] = [], router: String? = nil, note: String? = nil, then: String? = nil,
+                link: Link? = nil, current: [String] = [], keep: Keep? = nil, reserve: Reserve? = nil, warnings: [String] = []) {
         self.why = why
         self.places = places
         self.values = values
@@ -107,12 +189,17 @@ public struct CameraManualHelp: Sendable, Codable, Equatable {
         self.note = note
         self.then = then
         caveat = places.contains { !$0.confirmed } ? CameraManualHelpText.caveat : nil
+        self.link = link
+        self.current = current
+        self.keep = keep
+        self.reserve = reserve
+        self.warnings = warnings
     }
 }
 
 /// The help's words, one table: for each step of the setup and each camera family, why, where and what.
 public enum CameraManualHelpText {
-    /// The bridge's addresses and zone the help names.
+    /// The bridge's addresses and zone the help names, and what the engine knows of the camera for its DNS help.
     public struct Context: Sendable, Equatable {
         /// The bridge's address on the camera's network as its time server (Camera Bridge OS); nil where the bridge serves no time.
         public var timeServer: String?
@@ -122,12 +209,29 @@ public enum CameraManualHelpText {
         public var timeZone: String?
         /// The camera is a doorbell (what turning its cloud off leaves working says so).
         public var doorbell: Bool
+        /// The camera's own web page as Camera Bridge is configured to reach it (`webPageURL`); nil: none.
+        public var webPage: String?
+        /// The camera's IPv4 address as Camera Bridge reaches it (the guard's); nil when it is reached by name.
+        public var cameraAddress: String?
+        /// The DNS servers the camera asks now, as the engine last read them; empty: not read.
+        public var currentDNS: [String]
+        /// The camera's address whole as its last reading showed it (CameraAdapters' `CameraDNSReading.addressing`); nil: not shown.
+        public var addressing: CameraAddressing?
+        /// The camera has IPv6 on, as the engine's last security check read it (CameraAdapters' `CameraSettingsService.readIPv6()`, ONVIF's
+        /// `GetNetworkInterfaces`); false: off, or not read.
+        public var ipv6On: Bool
 
-        public init(timeServer: String?, guardServer: String?, timeZone: String?, doorbell: Bool = false) {
+        public init(timeServer: String?, guardServer: String?, timeZone: String?, doorbell: Bool = false, webPage: String? = nil,
+                    cameraAddress: String? = nil, currentDNS: [String] = [], addressing: CameraAddressing? = nil, ipv6On: Bool = false) {
             self.timeServer = timeServer
             self.guardServer = guardServer
             self.timeZone = timeZone
             self.doorbell = doorbell
+            self.webPage = webPage
+            self.cameraAddress = cameraAddress
+            self.currentDNS = currentDNS
+            self.addressing = addressing
+            self.ipv6On = ipv6On
         }
     }
 
@@ -138,6 +242,8 @@ public enum CameraManualHelpText {
     static let reolinkApp = "The Reolink app"
     static let reolinkClient = "The Reolink Client (on a computer)"
     static let tapoApp = "The Tapo app"
+    /// The button that opens the camera's own web page.
+    static let openWebPage = "Open the camera’s web page"
 
     static let accountWhy = "The account Camera Bridge signs in with may not change this setting: change it by hand, or sign Camera Bridge in with an "
         + "administrator account."
@@ -145,10 +251,22 @@ public enum CameraManualHelpText {
     /// Words of a refusal for want of rights (the camera's "No Privilege", or Camera Bridge's own sentence for a write the account may not make).
     static let accountWords = ["administrator", "may not change", "not permitted", "no privilege", "permission"]
 
+    // The DNS help's warnings (research §5).
+    /// A second server that is not the bridge, or an empty one, is a way around the guard.
+    static let bothSlots = "Put Camera Bridge in both slots: with a public server, or none, as the second one, the camera can look names up without it."
+    static let restartWarning = "If the camera asks to restart after you save, let it: it may keep its old DNS servers until then."
+    static let recorderWarning = "If the camera is plugged into a recorder’s own ports, the recorder runs its network: set its DNS on the recorder instead."
+    /// For a camera whose DNS stays only with a fixed address, when nothing is known of its address (the page then has no reservation line).
+    static let reserveWarning = "Reserve the camera’s address in your router too, so nothing else takes it."
+    static let tapoWarning = "Check every number before you save: a wrong fixed address on a Tapo can need a factory reset."
+    /// A camera with IPv6 on can take DNS servers from the router's advertisements or DHCPv6, beside the IPv4 ones set by hand (research §5).
+    static let ipv6Warning = "IPv6 is on: the camera may get DNS servers from your router over IPv6 too. Turn IPv6 off on the camera."
+
     // MARK: Steps
 
     /// The help for step `id` that ended `status` (only `notSupported` and `refused` have any) with `detail`, on a camera of `family`;
-    /// `changes` are the step's planned values (the streams' "after"). nil for the DNS and the time without the bridge's address.
+    /// `changes` are the step's planned values (the streams' "after"). nil for the DNS and the time without the bridge's address. The camera's
+    /// own page is linked where a place is that page, for a maker Camera Bridge knows (`link`); the DNS help has its own parts (`dnsParts`).
     public static func step(_ id: CameraSetupStepID, status: CameraSetupStepStatus, detail: String?, family: CameraFamily, context: Context,
                             changes: [CameraSetupChange] = []) -> CameraManualHelp? {
         guard status == .notSupported || status == .refused else { return nil }
@@ -156,26 +274,81 @@ public enum CameraManualHelpText {
         switch id {
         case .timeSource:
             guard let server = context.timeServer else { return nil }
-            values = [.init(label: "Time from", value: "NTP (a time server)"), .init(label: "NTP server", value: server), .init(label: "Port", value: "123")]
+            values = [.init(label: "Time from", value: "NTP (a time server)"), .init(label: "NTP server", value: server, copy: true),
+                      .init(label: "Port", value: "123")]
         case .internetWatch:
             guard let server = context.guardServer else { return nil }
-            values = [.init(label: "DNS", value: "set by hand, not automatic"), .init(label: "Preferred DNS server", value: server),
-                      .init(label: "Alternate DNS server", value: server)]
+            values = [.init(label: "DNS", value: "set by hand, not automatic"), .init(label: "Preferred DNS server", value: server, copy: true),
+                      .init(label: "Alternate DNS server", value: server, copy: true)]
         default:
             values = Self.values(id, family: family, context: context, changes: changes)
         }
         let (places, note) = entry(id, family: family, doorbell: context.doorbell)
-        return CameraManualHelp(why: why(id, status: status, detail: detail, family: family), places: places, values: values,
-                                router: router(id, server: context.guardServer, alone: places.isEmpty), note: note,
-                                then: id == .internetWatch ? then : nil)
+        var help = CameraManualHelp(why: why(id, status: status, detail: detail, family: family), places: places, values: values,
+                                    router: router(id, server: context.guardServer, alone: places.isEmpty), note: note,
+                                    then: id == .internetWatch ? then : nil, link: link(places, family: family, context: context))
+        if id == .internetWatch { dnsParts(&help, family: family, context: context) }
+        return help
     }
 
-    /// `report` with each step's help (none on a step that was done, is right, or was not tried).
+    /// The camera's own page (ruling D1: its configured address and web port only), where a place of the help is that page; none for a
+    /// maker Camera Bridge does not know (its web port may be another service's, so the link could lead nowhere).
+    static func link(_ places: [CameraManualHelp.Place], family: CameraFamily, context: Context) -> CameraManualHelp.Link? {
+        guard family != .onvif, let page = context.webPage, places.contains(where: { $0.app == webPage }) else { return nil }
+        return .init(label: openWebPage, url: page)
+    }
+
+    /// The DNS help's own parts: what the camera asks now, its address to keep and reserve where its DNS stays only with a fixed address
+    /// (from its reading when that is of the address Camera Bridge reaches it at, else that address alone; nothing guessed), and the warnings
+    /// that apply (IPv6 only when the camera was read with it on).
+    static func dnsParts(_ help: inout CameraManualHelp, family: CameraFamily, context: Context) {
+        help.current = context.currentDNS
+        var warnings = [bothSlots]
+        if context.ipv6On { warnings.append(ipv6Warning) }
+        if family == .tapo { warnings.append(tapoWarning) }
+        if family.dnsNeedsFixedAddress {
+            let known = context.addressing.flatMap { context.cameraAddress == nil || $0.address == context.cameraAddress ? $0 : nil }
+            if let address = known?.address ?? context.cameraAddress {
+                help.keep = .init(address: address, mask: known?.subnetMask, gateway: known?.gateway)
+                help.reserve = .init(address: address, mac: known?.hardwareAddress)
+            } else {
+                warnings.append(reserveWarning)
+            }
+        }
+        if family != .foscam { warnings.append(restartWarning) }   // a Foscam restarts on its own (its note says so)
+        if family != .tapo { warnings.append(recorderWarning) }
+        help.warnings = warnings
+    }
+
+    /// `http://<host>[:<port>]/` (https where Camera Bridge reaches the camera so), the port left out when it is the scheme's own: the
+    /// camera's configured address and web port, nothing else. nil for a host that is not a plain name or address (no path, user, query or
+    /// anything but ASCII letters, digits, dots, hyphens and an IPv6 address's colons) or a port out of range.
+    static func webPageURL(_ endpoint: CameraEndpoint) -> String? {
+        var host = endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        guard !host.isEmpty, host.unicodeScalars.allSatisfy({ $0.isASCII && ($0.properties.isAlphabetic || ("0"..."9").contains($0) || ".-:".unicodeScalars.contains($0)) }),
+              (1...65_535).contains(endpoint.httpPort) else { return nil }
+        let scheme = endpoint.useHTTPS ? "https" : "http"
+        let port = endpoint.httpPort == (endpoint.useHTTPS ? 443 : 80) ? "" : ":\(endpoint.httpPort)"
+        let url = "\(scheme)://\(host.contains(":") ? "[\(host)]" : host)\(port)/"
+        guard let parts = URLComponents(string: url), parts.host?.isEmpty == false, parts.user == nil, parts.password == nil, parts.path == "/",
+              parts.query == nil, parts.fragment == nil else { return nil }
+        return url
+    }
+
+    /// `report` with each step's help (none on a step that was done, is right, or was not tried). Its Watch step says what the camera asks
+    /// now in its own change row, so its help does not (`current`), and the address it read just now (an offer to fix it, or the one it
+    /// fixed) is the one to keep.
     public static func withHelp(_ report: CameraSetupReport, family: CameraFamily, context: Context) -> CameraSetupReport {
         var helped = report
+        var reported = context
+        reported.currentDNS = []
         for index in helped.steps.indices {
             let step = helped.steps[index]
-            helped.steps[index].manualHelp = Self.step(step.id, status: step.status, detail: step.detail, family: family, context: context, changes: step.changes)
+            var stepContext = reported
+            if let addressing = step.fixAddress?.addressing ?? step.fixedAddress { stepContext.addressing = addressing }
+            helped.steps[index].manualHelp = Self.step(step.id, status: step.status, detail: step.detail, family: family, context: stepContext,
+                                                       changes: step.changes)
         }
         return helped
     }
@@ -226,7 +399,7 @@ public enum CameraManualHelpText {
             case .ipcamWeb: return [.init(label: "Enable Mobile Monitoring", value: "off")]
             case .ipcWebAPI: return [.init(label: "Cloud (Enable)", value: "off")]
             case .tapo: return []
-            case .dahua, .onvif: return [.init(label: "The maker’s cloud (P2P)", value: "off")]
+            case .dahua, .axis, .hanwha, .uniview, .foscam, .vigi, .xmeye, .unifi, .onvif: return [.init(label: "The maker’s cloud (P2P)", value: "off")]
             }
         case .videoPassword:
             return [.init(label: family == .ipcamWeb ? "Identity Authentication (RTSP and Onvif)" : "A password for its video (RTSP and ONVIF)", value: "on")]
@@ -244,9 +417,12 @@ public enum CameraManualHelpText {
         switch id {
         case .internetWatch:
             guard let server else { return nil }
-            return "Or give the camera a fixed address (a DHCP reservation) and have your router hand that camera \(server) as its DNS server, or "
-                + "block the camera’s internet there (see Keep this camera local). A DNS server from the router counts too, but it can change when "
-                + "the router renews the camera’s address."
+            return "Or have your router hand this camera \(server) as its DNS server, with a DHCP reservation: OpenWrt, pfSense, OPNsense, MikroTik, "
+                + "ASUS and Pi-hole can do that for one device; UniFi, Synology and Firewalla only for a whole network (such as a separate one for the "
+                + "cameras); eero, Google/Nest Wifi, Deco and Orbi can’t, so change it on the camera. The router’s way works only while the camera "
+                + "takes its DNS from DHCP (automatic), and only from the camera’s next DHCP renewal or restart. Or block the camera’s internet in your "
+                + "router (see Keep this camera local). A DNS server from the router counts too, but it can change when the router renews the camera’s "
+                + "address."
         case .upnp:
             return alone ? "Turn UPnP off on your router: then nothing at home can open ports to the internet."
                 : "Turn UPnP off on your router too: then nothing at home can open ports to the internet."
@@ -269,10 +445,13 @@ public enum CameraManualHelpText {
     static let dnsAction = "Set the DNS by hand (not automatic) and enter the DNS servers below."
 
     /// Where to change step `id` on a camera of `family`, and what else to know. Confirmed: the IPCamera Web family's own page (its
-    /// language file and menu), the IP camera web API's page (its language file and menu script), TP-Link's FAQ 4372 (the Tapo app's
-    /// network settings) and Reolink's support articles (UPnP, UID). Everything else is a general instruction (`generalAction`), with the
-    /// caveat: Hikvision's, Dahua's and Amcrest's menus are only in other people's guides, and the IP camera web API's OSD tab was not
-    /// confirmed.
+    /// language file and menu), the IP camera web API's page (its language file and menu script), TP-Link's FAQs 688 and 4372 (the Tapo
+    /// app's network settings), Reolink's support articles (UPnP, UID), and for the DNS the makers' documents in the research's §4
+    /// (Hikvision's manual 5.7.20, AXIS OS help, Hanwha's KB, Uniview's manual V3.00, Foscam FAQ 243, VIGI FAQ 4741). Best guesses carry the
+    /// caveat: Reolink's DNS switch (its network pages are confirmed), Amcrest's and Lorex's cameras (Dahua's menu is confirmed, and the family
+    /// is one), XMEye's and a standalone UniFi camera's menus. Everything else is a general instruction (`generalAction`), with the caveat:
+    /// Hikvision's, Dahua's and Amcrest's other menus are only in other people's guides, the other makers' are not known, and the IP camera
+    /// web API's OSD tab was not confirmed.
     static func entry(_ id: CameraSetupStepID, family: CameraFamily, doorbell: Bool = false) -> (places: [Place], note: String?) {
         switch (family, id) {
         // The IPCamera Web family: Configuration and its pages, in the page's own words.
@@ -313,21 +492,21 @@ public enum CameraManualHelpText {
         case (.ipcWebAPI, .internetWatch):
             return ([web(["Network", "Basic"], "Set Mode to Static and keep the camera’s IP address, subnet mask and gateway as they are, then enter "
                          + "the Preferred DNS Server and the Alternate DNS Server below.")],
-                    "The DNS fields can’t be changed while Mode is DHCP. Reserve the camera’s address in your router too, so nothing else takes it.")
+                    "The DNS fields can’t be changed while Mode is DHCP.")
 
-        // Tapo: the Tapo app's network settings (TP-Link FAQ 4372); nothing else is confirmed.
+        // Tapo: the Tapo app's network settings (TP-Link FAQs 688 and 4372); nothing else is confirmed.
         case (.tapo, .internetWatch):
             return ([Place(app: tapoApp, path: ["(your camera)", "Device Settings", "Advanced Settings", "Network Settings", "Static IP"],
                            action: "Choose Static IP, keep the camera’s IP address, subnet mask and gateway as they are, and enter the DNS servers below.",
                            confirmed: true)],
-                    "Keep the same address, and reserve that address in your router so it never changes. Some older and battery Tapo models don’t "
-                        + "have this setting.")
+                    "Battery Tapo models, and the C100, C200, TC60 and TC70 at hardware versions 1 and 2, don’t have this setting.")
         case (.tapo, .cloud), (.tapo, .upnp):
             return ([], nil)
         case (.tapo, _):
             return ([Place(app: tapoApp, action: tapoAction(id))], nil)
 
-        // Reolink: its support articles for UPnP and UID; where the network screens are is known, not their DNS fields.
+        // Reolink: its support articles for UPnP and UID; where the network screens are is known (the app's, the web page's), not their DNS
+        // switch (the Client's is from a search snippet of an article now gone).
         case (.reolink, .upnp):
             return ([Place(app: webPage, path: ["Settings (the gear)", "Network", "Advanced", "UPnP"], action: "Turn UPnP off.", confirmed: true),
                      Place(app: reolinkClient, path: ["Camera Settings", "Network", "Advanced", "Enable UPNP"], action: "Turn it off.", confirmed: true)],
@@ -338,12 +517,59 @@ public enum CameraManualHelpText {
                         + " The Reolink phone app has no switch for it, and battery cameras have none.")
         case (.reolink, .internetWatch):
             return ([Place(app: reolinkApp, path: ["Settings", "(your camera)", "Network Information"], action: dnsAction),
-                     Place(app: reolinkClient, path: ["Device Settings", "Network", "Network Information"], action: dnsAction),
-                     Place(app: webPage, path: ["Settings (the gear)", "Network Settings", "Set Up"], action: dnsAction)], nil)
+                     Place(app: reolinkClient, path: ["Device Settings", "Network", "Network Information", "Network Settings"],
+                           action: "Choose Static DNS instead of Auto DNS and enter the DNS servers below."),
+                     web(["Settings (the gear)", "Network Settings", "Set Up"],
+                         dnsAction + " On newer firmware it is under Device Settings › Network › Set up.", confirmed: false)],
+                    "Battery cameras have no DNS setting.")
         case (.reolink, _):
             return ([Place(app: "The Reolink Client or the camera’s web page", action: generalAction(id))], nil)
 
-        // Hikvision, Dahua, Amcrest and other ONVIF cameras: no menu of theirs is confirmed.
+        // The DNS of the other makers (research §4). Hikvision and its OEMs: probably kept only with DHCP off.
+        case (.hikvision, .internetWatch):
+            return ([web(["Configuration", "Network", "Basic Settings", "TCP/IP"],
+                         "Untick DHCP, keep the IPv4 address, subnet mask and default gateway as they are, and enter the Preferred DNS Server and the "
+                             + "Alternate DNS Server below.")], nil)
+        // Dahua's own manual; the DNS fields can be changed on DHCP. Amcrest's and Lorex's cameras: a best guess.
+        case (.dahua, .internetWatch):
+            return ([web(["Setup", "Network", "TCP/IP"],
+                         "Leave Mode as it is (the DNS can be changed on DHCP too) and enter the Preferred DNS and the Alternate DNS below.",
+                         confirmed: false)], nil)
+        case (.axis, .internetWatch):
+            return ([web(["System", "Network"],
+                         "Under DNS, turn off Assign DNS automatically and add the DNS servers below. Leave Assign IPv4 automatically as it is.")], nil)
+        case (.hanwha, .internetWatch):
+            return ([web(["Setup", "Basic", "IP & Port"], "Untick DNS setting by DHCP, enter the DNS servers below as DNS 1 and DNS 2, and press Apply.")],
+                     nil)
+        // Uniview's DNS page is confirmed, not its fields' names, nor whether it needs a fixed address.
+        case (.uniview, .internetWatch):
+            return ([web(["Setup", "Network", "DNS"], "Enter the DNS servers below as its preferred and alternate DNS servers.")],
+                    "If it won’t take them, set its address to static first under Setup › Network › Network, keeping the same address, mask and gateway, "
+                        + "and reserve it in your router.")
+        case (.foscam, .internetWatch):
+            return ([web(["Settings", "Network", "IP Configuration"],
+                         "Untick Obtain IP From DHCP, keep the IP address, subnet mask and gateway as they are, and enter the DNS servers below, starting "
+                             + "with the Primary DNS Server."),
+                     Place(app: "Foscam’s Equipment Search Tool (on a computer)", path: ["(your camera, right-click)", "Network Configuration"],
+                           action: "Untick Obtain IP From DHCP, keep the address as it is and enter the DNS servers below.", confirmed: true)],
+                    "The camera restarts when you save.")
+        case (.vigi, .internetWatch):
+            return ([web(["Settings", "Network Settings", "Connect"],
+                         "Set IPv4 Mode to Static, keep the IP address, subnet mask and gateway as they are, and enter the Preferred DNS and the "
+                             + "Alternative DNS below.")],
+                    "VIGI VMS and the VIGI Config Tool can change it too.")
+        // XMEye: a best guess, on the recorder or in its desktop app (the camera's own page's labels are not known).
+        case (.xmeye, .internetWatch):
+            return ([Place(app: "The recorder’s menu, or the CMS or VMS app on a computer", path: ["Setting", "System", "Network"],
+                           action: "Untick DHCP Enable, keep the IP address, subnet mask and gateway as they are, and enter the Primary DNS and the "
+                               + "Secondary DNS below.")], nil)
+        // A UniFi camera on its own: a best guess.
+        case (.unifi, .internetWatch):
+            return ([web(["Network"], "Choose Static, keep the IP address, subnet mask and gateway as they are, and enter the DNS servers below.",
+                         confirmed: false)],
+                    "Sign in with ubnt and the camera’s recovery code.")
+
+        // Any other step of these makers, and other ONVIF cameras: no menu of theirs is confirmed.
         default:
             return ([Place(app: webPage, action: generalAction(id))], nil)
         }
@@ -464,12 +690,19 @@ extension BridgeEngine {
         return CameraFamily.of(camera, webAPI: Self.seenWebAPIs[camera.id])
     }
 
-    /// The bridge's addresses on the camera's network (its time where the bridge serves time, its DNS where it has the Internet guard) and its
-    /// time zone in words (`zone`, `manualHelpZone`: read once for many cameras).
+    /// The bridge's addresses on the camera's network (its time where the bridge serves time, its DNS where it has the Internet guard), its
+    /// time zone in words (`zone`, `manualHelpZone`: read once for many cameras), and for the DNS help the camera's own page (its configured
+    /// address and web port), its address as Camera Bridge reaches it, the DNS servers and the address its last reading showed, and whether
+    /// its last security check found IPv6 on.
     func manualHelpContext(_ camera: CameraConfiguration, interfaces: [InterfaceAddress], zone: String?) -> CameraManualHelpText.Context {
         let timeServer = environment.servesTime ? Self.timeServerAddress(cameraHost: camera.endpoint.host, interfaces: interfaces) : nil
-        let guardServer = offersInternetGuard ? guardCameraAddress(camera).flatMap { Self.bridgeAddress(onNetworkOf: $0, interfaces: interfaces) } : nil
-        return CameraManualHelpText.Context(timeServer: timeServer, guardServer: guardServer, timeZone: zone, doorbell: camera.kind == .doorbell)
+        let cameraAddress = guardCameraAddress(camera)
+        let guardServer = offersInternetGuard ? cameraAddress.flatMap { Self.bridgeAddress(onNetworkOf: $0, interfaces: interfaces) } : nil
+        let record = securityChecks.records[camera.id]
+        let reading: CameraDNSReading? = if case .read(let reading)? = record?.dns { reading } else { nil }
+        return CameraManualHelpText.Context(timeServer: timeServer, guardServer: guardServer, timeZone: zone, doorbell: camera.kind == .doorbell,
+                                            webPage: CameraManualHelpText.webPageURL(camera.endpoint), cameraAddress: cameraAddress,
+                                            currentDNS: reading?.servers ?? [], addressing: reading?.addressing, ipv6On: record?.ipv6On == true)
     }
 
     /// The bridge's time zone in words ("America/Phoenix (UTC−7:00)"; its zone file is read).

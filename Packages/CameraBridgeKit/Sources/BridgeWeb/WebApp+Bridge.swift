@@ -10,7 +10,8 @@ extension WebApp {
 
     func getSettings() async -> HTTPResponse {
         let overview = await backend.overview()
-        return .json(SettingsResource(settings: overview.settings, bridgeName: await auth.bridgeName, webhookProblem: overview.webhookProblem))
+        return .json(SettingsResource(settings: overview.settings, bridgeName: await auth.bridgeName, webhookProblem: overview.webhookProblem,
+                                      aiKey: await backend.aiKeyStatus(), aiStatus: await backend.aiStatus()))
     }
 
     private struct SettingsPatch: Decodable {
@@ -23,6 +24,7 @@ extension WebApp {
         var logLevel: String?
         var motionShadowTest: Bool?
         var timeZone: String?
+        var ai: AIPatch?
     }
 
     func patchSettings(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -39,6 +41,8 @@ extension WebApp {
             guard let parsed = SettingsResource.level(named: name) else { throw APIError.badRequest("Choose a log level from debug to error.", field: "logLevel") }
             level = parsed
         }
+        var aiChange: AIChange?
+        if let aiPatch = patch.ai { aiChange = try await self.aiChange(from: aiPatch) }   // checked before anything is changed
         if let name = patch.bridgeName {
             guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError.badRequest("Give the bridge a name.", field: "bridgeName") }
             do {
@@ -54,6 +58,7 @@ extension WebApp {
         let token = patch.regenerateWebhookToken == true ? Secrets.hex(Secrets.randomBytes(16)) : nil
         let (basePort, sensorsPort, webhookEnabled, webhookPort, shadow) = (patch.basePort, patch.sensorsBridgePort, patch.webhookEnabled, patch.webhookPort, patch.motionShadowTest)
         let newLevel = level
+        let ai = aiChange
         do {
             try await backend.updateSettings { settings in
                 if let basePort { settings.basePort = UInt16(basePort) }
@@ -64,6 +69,7 @@ extension WebApp {
                 if let newLevel { settings.logLevel = newLevel }
                 if let shadow { settings.motionShadowTest = shadow }
                 if let zone { settings.timeZone = zone }
+                ai?.apply(to: &settings.ai)
             }
         } catch {
             throw APIError(status: 422, code: "settings_failed", message: ErrorText.describe(error))

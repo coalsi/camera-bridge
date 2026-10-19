@@ -25,6 +25,10 @@ public enum HTTPClientError: Error, Equatable, Sendable {
 /// `timeout` (`URLError(.timedOut)`), so a camera answering with an endless body can neither exhaust memory nor hold its
 /// caller forever.
 ///
+/// Redirects are followed, as URLSession does by default (a camera behind one still answers), unless the client is made with
+/// `followsRedirects: false`: then a 3xx answer is the answer, and the request (its headers, its body) goes to no other address. The AI
+/// client is made so: a key saved for one service must never travel to the address a redirect names.
+///
 /// Portable: bodies use delegate callbacks (no `URLSession.AsyncBytes`, which is Darwin-only).
 public final class AuthenticatingHTTPClient: Sendable {
     private enum CachedAuth: Sendable {
@@ -59,9 +63,10 @@ public final class AuthenticatingHTTPClient: Sendable {
     }
 
     /// `downgradeGuard`: shared with the camera's other clients of the same host (a media source's reconnects), so a
-    /// fresh client does not answer Basic after Digest either.
+    /// fresh client does not answer Basic after Digest either. `followsRedirects: false`: a redirect is not followed (the 3xx answer
+    /// is returned, with its `Location` header); the camera clients keep the default.
     package init(credentials: HTTPCredentials?, timeout: Duration, allowSelfSignedTLS: Bool, maximumBodySize: Int,
-                 downgradeGuard: BasicDowngradeGuard) {
+                 downgradeGuard: BasicDowngradeGuard, followsRedirects: Bool = true) {
         self.downgradeGuard = downgradeGuard
         self.credentials = credentials
         self.timeout = max(.seconds(1), timeout)
@@ -74,7 +79,7 @@ public final class AuthenticatingHTTPClient: Sendable {
         #if !os(Linux)
         configuration.waitsForConnectivity = false   // swift-corelibs-foundation: get-only (and false)
         #endif
-        sessionDelegate = SessionDelegate(allowSelfSignedTLS: allowSelfSignedTLS)
+        sessionDelegate = SessionDelegate(allowSelfSignedTLS: allowSelfSignedTLS, followsRedirects: followsRedirects)
         session = URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
     }
 
@@ -460,14 +465,16 @@ private final class StreamTask: TaskHandler {
     }
 }
 
-/// Session delegate: server trust for every task, and challenge/response/data/completion routing to each task's handler
+/// Session delegate: server trust for every task, whether a redirect is followed, and challenge/response/data/completion routing to each task's handler
 /// (`BufferedTask` for `data(for:)`, `StreamTask` for `stream(for:)`).
 private final class SessionDelegate: NSObject, URLSessionDataDelegate, Sendable {
     let allowSelfSignedTLS: Bool
+    let followsRedirects: Bool
     private let handlers = Mutex<[Int: any TaskHandler]>([:])
 
-    init(allowSelfSignedTLS: Bool) {
+    init(allowSelfSignedTLS: Bool, followsRedirects: Bool) {
         self.allowSelfSignedTLS = allowSelfSignedTLS
+        self.followsRedirects = followsRedirects
     }
 
     func register(_ handler: any TaskHandler, for task: URLSessionTask) {
@@ -494,6 +501,13 @@ private final class SessionDelegate: NSObject, URLSessionDataDelegate, Sendable 
             return
         }
         completionHandler(.performDefaultHandling, nil)
+    }
+
+    /// A redirect is followed (URLSession's own default: the request as it proposes it) unless the client refuses them: then the 3xx
+    /// response itself completes the task, and nothing is sent to the address it names.
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(followsRedirects ? request : nil)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,

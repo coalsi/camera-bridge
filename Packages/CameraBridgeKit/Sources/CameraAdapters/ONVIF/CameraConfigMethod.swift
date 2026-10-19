@@ -18,6 +18,9 @@ public enum CameraConfigMethod: String, Sendable, Codable, CaseIterable, Hashabl
     /// The IP camera web API (`IPCWebClient`): only the camera's own labels ("Clean picture") and its DNS servers (a `CameraDNSBackup`'s or
     /// `CameraDNSReading`'s method: its `LANConfig`) go this way, never the encoder or the clock.
     case ipcWebAPI
+    /// Dahua's CGI (`configManager.cgi`, Dahua, Amcrest and Lorex cameras): only the camera's DNS servers (a `CameraDNSBackup`'s or
+    /// `CameraDNSReading`'s method) go this way, never the encoder or the clock.
+    case dahuaCGI
 
     /// Short name for results ("ONVIF minimal: InvalidArgVal; ISAPI: unsupported").
     public var displayName: String {
@@ -27,6 +30,7 @@ public enum CameraConfigMethod: String, Sendable, Codable, CaseIterable, Hashabl
         case .onvifMinimal: "ONVIF minimal"
         case .onvifFull: "ONVIF full"
         case .ipcWebAPI: "web API"
+        case .dahuaCGI: "Dahua API"
         }
     }
 

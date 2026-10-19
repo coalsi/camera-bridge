@@ -71,6 +71,7 @@ import TestSupport
     static func setup(source: any MediaSource, hub: MediaHub = MediaHub(), talkback: FakeTalkbackSink? = nil, controllerTimeout: Duration = .seconds(30),
                       controllerWait: Duration = .seconds(1), leaseDelay: Duration = .zero, codecs: any MediaCodecs = AppleMediaCodecs(),
                       cameraAudioEnabled: Bool = true, loopbackOnly: Bool = true, overlay: TimestampOverlayControl? = nil,
+                      correction: PictureCorrectionControl? = nil,
                       interfaceAddresses: @escaping @Sendable () -> [InterfaceAddress] = StreamAddress.interfaceAddresses,
                       routeTable: @escaping @Sendable () -> [MacVPNDetector.InterfaceRoute] = StreamAddress.routeTable, strategyMemory: Duration = .seconds(3_600),
                       liveTimings: LiveStreamTimings? = nil,
@@ -86,11 +87,14 @@ import TestSupport
             if leaseDelay > .zero { await Task.detached { try? await Task.sleep(for: leaseDelay) }.value }
             return HubLease(hub: hub, isSubStream: false, release: { released.update { $0 += 1 } })
         }
-        let snapshots = SnapshotProvider(cameraSnapshot: nil, codecs: codecs, hub: hub, log: log)
+        let snapshots = CorrectedSnapshots(provider: SnapshotProvider(cameraSnapshot: nil, codecs: codecs, hub: hub, log: log),
+                                           correction: correction ?? PictureCorrectionControl(.off, supported: false), log: log) { jpeg, correction in
+            try codecs.correctJPEG(jpeg, correction: correction)
+        }
         let makeSink: (@Sendable () -> (any TalkbackSink)?)? = talkback.map { sink in { @Sendable in sink } }
         let context = LiveStreamPipeline.Context(codecs: codecs, cameraAudioEnabled: cameraAudioEnabled, talkback: makeSink,
                                                  controllerTimeout: controllerTimeout, controllerWait: controllerWait, log: log, overlay: overlay,
-                                                 timing: timing, cameraKeyframe: cameraKeyframe, subStreamSize: subStreamSize, selfCheck: selfCheck)
+                                                 correction: correction, timing: timing, cameraKeyframe: cameraKeyframe, subStreamSize: subStreamSize, selfCheck: selfCheck)
         let handler = StreamingHandler(hubs: provider, snapshots: snapshots, context: context, loopbackOnly: loopbackOnly,
                                       interfaceAddresses: interfaceAddresses, routeTable: routeTable, strategyMemory: strategyMemory, liveTimings: liveTimings,
                                       networkNotices: networkNotices, routeVerdictWait: routeVerdictWait)

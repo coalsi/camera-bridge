@@ -7,12 +7,17 @@
 // `stage` is either an element the caller owns and has put in the page, or an object `{ video, holdCanvas }` of elements the caller owns (the
 // watch screen layers its own). With an element, the cell appends a <video muted playsinline> and a hold <canvas> to it on its first request
 // (an idle cell has no media element) and removes them in destroy(); with the object it uses the two elements and leaves them in place. The
-// surface factory is given exactly `{ video, holdCanvas }` either way.
+// surface factory is given exactly `{ video, holdCanvas, holdFrom }` either way.
+//
+// A camera whose picture is straightened (its page's Straighten the picture): the video the cell made is drawn straightened on a canvas right
+// after it (js/live/straighten.js), under the hold canvas, by `getCorrection(cameraId)` when the video is made and by setCorrection() after
+// that; `holdFrom()` gives the surface that canvas, so the held picture is straightened too. A caller's own video is the caller's to straighten.
 //
 // A desire is { targetMs, precision: 'key' | 'exact', playing, epoch, priority? }.
 //   key    the nearest key picture: one request, the fastest way to show something while the pointer moves
 //   exact  the frame at the target: the GOP's parts from the key part up to the target, appended, then a seek
 // A request that was sent is never wasted: its bytes are appended and stay in the model whatever happened to the desire meanwhile.
+import { createStraightenedView, isOn } from '../live/straighten.js';
 import { realTimers } from './clock.js';
 import {
   DEFAULT_POLICY, MESSAGES, bufferSeconds, canSeekInChain, dedupeChains, extendChain, findChainPart, follows, heldRangeAt, keyStepLookup, lastChain,
@@ -38,7 +43,7 @@ const IDLE = Object.freeze({ kind: 'idle', next: null, message: null, epoch: 0, 
 
 export function createCell({
   cameraId, stage, catalog, fetcher, clock, createSurface, leadLimitBytes = 16 * 1_048_576, timers = realTimers, policy = DEFAULT_POLICY, marginMs = 700,
-  getPause = () => null,
+  getPause = () => null, getCorrection = () => null,
 }) {
   const margin = marginMs + MARGIN_SLACK_MS;      // what a direct seek needs after the target: the decoders' hold-back and a little for rounding
   const bytesKey = `cell:${cameraId}`;
@@ -49,6 +54,8 @@ export function createCell({
   let video = null;
   let holdCanvas = null;
   let created = false;                  // the cell made the media elements (and removes them)
+  let view = null;                      // the cell's video straightened: made the first time the correction is on (off, it draws nothing)
+  let correction = null;                // the camera's picture correction the video is drawn with
   let desire = null;
   let handledEpoch = -1;
   let restart = null;                   // a desire the worker handles next, made by the cell itself (the playhead drifted)
@@ -146,6 +153,27 @@ export function createCell({
     restart = { targetMs: clock.position(), precision: 'exact', playing: false, epoch: d.epoch, priority: d.priority ?? 0 };
   }
 
+  // MARK: The straightened picture
+
+  function readCorrection() {
+    try { return getCorrection(cameraId) ?? null; } catch { return null; }
+  }
+
+  /** Draws the video the cell made by `correction` (the view's canvas goes right after the video: under the hold). */
+  function straighten() {
+    if (!created || destroyed) return;
+    if (view) view.set(correction);
+    else if (isOn(correction)) view = createStraightenedView({ source: video, correction });
+  }
+
+  /** The picture the surface holds while it builds its buffer again: the straightened canvas, drawn now (a WebGL canvas can be copied only right
+   *  after a draw); null while there is none (the video's own frame is the picture on screen). */
+  function holdFrom() {
+    if (!view?.canvas) return null;
+    view.set(correction);
+    return view.canvas;
+  }
+
   // MARK: The model of what the surface holds
 
   const base = () => catalog.baseMs;
@@ -187,8 +215,10 @@ export function createCell({
       holdCanvas = doc.createElement('canvas');
       stage.append(video, holdCanvas);
       created = true;
+      correction = readCorrection();
+      straighten();
     }
-    surface = createSurface({ video, holdCanvas });
+    surface = createSurface({ video, holdCanvas, holdFrom });
     knownGeneration = surface.generation ?? 0;
     surfaceOff = surface.onEvent?.((event) => {
       if (event.type === 'error') { playerError = true; wakeUp(); }
@@ -681,6 +711,12 @@ export function createCell({
       wakeUp();
     },
     get coverage() { return coverage; },
+    /** The camera's picture correction changed (saved on its page): the video the cell made is drawn straightened by it from now on. */
+    setCorrection(next) {
+      if (destroyed) return;
+      correction = next ?? null;
+      straighten();
+    },
     onChange(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);
@@ -703,6 +739,8 @@ export function createCell({
       if (loadingTimer !== null) timers.clearTimeout(loadingTimer);
       surfaceOff?.();
       surface?.destroy();
+      view?.destroy();
+      view = null;
       if (created) {
         video?.remove();
         holdCanvas?.remove();

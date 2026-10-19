@@ -20,7 +20,7 @@ Interop/node/node_modules/
 .claude/
 Tools/captures/
 
-# Release output and secrets: never committed (Tools/release.sh writes to build/release)
+# Release output and secrets: never committed (Archive/mac-app/Tools/release.sh writes to build/release)
 *.dmg
 *.p12
 *.cer

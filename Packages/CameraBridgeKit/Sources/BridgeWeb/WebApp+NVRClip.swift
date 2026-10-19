@@ -1,6 +1,7 @@
 import BridgeSupport
 import BridgeEngine
 import Foundation
+import MediaCore
 
 // Saving a clip from the browser (export-clip design, section 6): what a clip of one camera would be (`GET /nvr/cameras/:id/clip-plan`) and the
 // clip itself as one MP4 download (`GET /nvr/cameras/:id/clip`). The planning and the writing are `ClipExporter`'s; this only parses the request,
@@ -116,10 +117,17 @@ extension WebApp {
             releaseArchiveSlot(address: address)
             throw APIError.notFound("The clip has no part \(part).")
         }
-        if ctx.request.queryValue("labels") == "1" {
-            // The bridge's label (name, date and time) burned into the clip.
-            return try await labelledClip(plan: plan, part: part, exporter: exporter, cameraID: request.camera, name: request.cameraName,
-                                          release: { [self] in releaseArchiveSlot(address: address) })
+        // Re-encoded for the bridge's label (name, date and time) burned in, and for the camera's picture correction when the person asked for
+        // the clip straightened and the correction is on; otherwise the recording's bytes as they are.
+        let labels = ctx.request.queryValue("labels") == "1"
+        var correction: PictureCorrection?
+        if ctx.request.queryValue("straighten") == "1",
+           let configured = await backend.overview().configurations.first(where: { $0.id == request.camera })?.pictureCorrection, !configured.isOff {
+            correction = configured
+        }
+        if labels || correction != nil {
+            return try await processedClip(plan: plan, part: part, exporter: exporter, cameraID: request.camera, name: request.cameraName, labels: labels,
+                                           correction: correction, release: { [self] in releaseArchiveSlot(address: address) })
         }
         let name = plan.parts[part - 1].fileName
         var headers = HTTPHeaders()

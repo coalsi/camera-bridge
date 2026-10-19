@@ -1,4 +1,6 @@
-# XcodeGen spec (XcodeGen 2.43). Regenerate with `xcodegen generate`; the generated project is committed.
+# ARCHIVED 2026-10-18 (see README.md in this folder). The Mac app lives in Archive/mac-app and is not built by CI. Every path below is
+# relative to this folder; the engine package is two levels up (../../Packages/CameraBridgeKit).
+# XcodeGen spec (XcodeGen 2.43). Regenerate with `cd Archive/mac-app && xcodegen generate`; the generated project is committed.
 # Adapted from research brief §6.3 (verified prototype): macOS 27, bundle ID com.coreysilvia.CameraBridge.
 name: CameraBridge
 options:
@@ -9,7 +11,7 @@ options:
 
 packages:
   CameraBridgeKit:
-    path: Packages/CameraBridgeKit
+    path: ../../Packages/CameraBridgeKit
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.10.0   # MIT; the app's updater (Check for Updates…), appcast at https://www.camera-bridge.app/appcast.xml. Pinned: bump on purpose.
@@ -88,11 +90,12 @@ targets:
         SUPublicEDKey: $(SPARKLE_PUBLIC_ED_KEY)
     postBuildScripts:
       # The go2rtc streaming helper (MIT) goes into Contents/Helpers and is signed there. Skipped, with a note, when
-      # Tools/fetch-go2rtc.sh has not put build/helpers/go2rtc in place (Docs: docs/integrations/go2rtc.md).
+      # the repository's Tools/fetch-go2rtc.sh has not put build/helpers/go2rtc in place at the repository root (Docs:
+      # docs/integrations/go2rtc-helper.md at the repository root). The script Tools/embed-go2rtc.sh is in this folder.
       - name: Embed go2rtc helper
         basedOnDependencyAnalysis: false
         inputFiles:
-          - $(SRCROOT)/build/helpers/go2rtc
+          - $(SRCROOT)/../../build/helpers/go2rtc
           - $(SRCROOT)/Tools/embed-go2rtc.sh
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/go2rtc

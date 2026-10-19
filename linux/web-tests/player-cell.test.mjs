@@ -5,6 +5,8 @@ import { ApiError } from '../web/js/api.js';
 import { DEFAULT_POLICY, MESSAGES, bufferSeconds, timestampOffsetSeconds } from '../web/js/nvr/planner.js';
 import { FILE_A, FILE_B, ORIGIN } from './player-fakes/fake-archive.mjs';
 import { createRig, defaultFiles, desirer, fakeElement } from './player-fakes/rig.mjs';
+import { installFakeBrowser } from './support/fake-browser.mjs';
+import { drawnFrom, givePicture, planCalls, recordingCanvases, siblingAfter } from './support/fake-picture.mjs';
 
 const PART = 2000;
 const at = (index, offsetMs = 0) => ORIGIN + index * PART + offsetMs;      // inside part `index` of file A
@@ -591,7 +593,7 @@ describe('suspend, resume, destroy', () => {
 });
 
 describe('the stage', () => {
-  it('on its first request the cell puts a muted video and a hold canvas in the stage, and gives the surface exactly those', async () => {
+  it('on its first request the cell puts a muted video and a hold canvas in the stage, and gives the surface exactly those and holdFrom', async () => {
     const { rig, cell, want, settle } = await ready();
     const stage = rig.stages.get('CAM-1');
     want(at(6, 500), 'key');
@@ -599,7 +601,8 @@ describe('the stage', () => {
     assert.deepEqual(stage.children.map((child) => child.tag), ['video', 'canvas']);
     const [video, canvas] = stage.children;
     assert.deepEqual([video.muted, video.playsInline, video.attributes.playsinline], [true, true, '']);
-    assert.deepEqual(Object.keys(rig.surface().elements).sort(), ['holdCanvas', 'video']);
+    assert.deepEqual(Object.keys(rig.surface().elements).sort(), ['holdCanvas', 'holdFrom', 'video']);
+    assert.equal(rig.surface().elements.holdFrom(), null, 'a picture that is not straightened: the hold is the video’s own frame');
     assert.equal(rig.surface().elements.video, video);
     assert.equal(rig.surface().elements.holdCanvas, canvas);
     want(at(8, 500), 'key');
@@ -656,5 +659,128 @@ describe('the init after a break', () => {
     assert.deepEqual(rig.surface().ops().filter((op) => op === 'appendInit'), ['appendInit'], 'one init for the one file');
     assert.deepEqual(rig.surface().appends().map((a) => `${a.id.split('.')[1]}${a.chainBreak ? '!' : ''}`), ['4!', '20!', '4!', '5', '6', '7']);
     assert.equal(cell.coverage.kind, 'recorded');
+  });
+});
+
+// MARK: Straightened pictures
+
+describe('straightening', () => {
+  const BACKYARD = { straighten: 0.4, level: 0.15 };
+  const OFF = { straighten: 0, level: 0 };
+  const tags = (stage) => stage.children.map((child) => `${child.localName}${child.className ? `.${child.className.split(' ').join('.')}` : ''}`);
+
+  /** The rig in a fake browser whose canvases record what is drawn on them (no WebGL: a view draws through the strip plan). */
+  async function inBrowser(run) {
+    const browser = installFakeBrowser();
+    recordingCanvases(browser.document);
+    try {
+      await run(await ready());
+    } finally {
+      browser.restore();
+    }
+  }
+
+  it('a playback cell of a corrected camera straightens its video and its hold picture', () => inBrowser(async ({ rig, settle }) => {
+    // the hold canvas is drawn from the straightened canvas, not the raw video
+    const stage = document.createElement('div');
+    const asked = [];
+    const cell = rig.makeCell('CAM-1', { stage, getCorrection: (id) => { asked.push(id); return BACKYARD; } });
+    desirer(cell)(at(6, 500), 'key');
+    await settle();
+    assert.deepEqual(asked, ['CAM-1'], 'the correction is read when the video is made');
+    assert.deepEqual(tags(stage), ['video.straighten-source', 'canvas.straightened', 'canvas'], 'the straightened canvas over the video, under the hold');
+    const [video, canvas, holdCanvas] = stage.children;
+    assert.equal(rig.surface().elements.holdCanvas, holdCanvas);
+    givePicture(video);
+
+    // What the surface copies when it builds its buffer again: the straightened canvas, drawn that moment (a WebGL canvas can only be
+    // copied right after a draw), so the tile never shows the bent picture while it waits.
+    const { holdFrom } = rig.surface().elements;
+    let from = canvas.getContext('2d').draws.length;
+    assert.equal(holdFrom(), canvas);
+    assert.deepEqual(drawnFrom(canvas, video, from), planCalls(BACKYARD, 640, 284));
+
+    // The camera's correction changes (saved on its page): the same canvas follows it.
+    const moved = { straighten: -0.2, level: 0.1 };
+    from = canvas.getContext('2d').draws.length;
+    cell.setCorrection(moved);
+    assert.equal(siblingAfter(video), canvas);
+    assert.deepEqual(drawnFrom(canvas, video, from), planCalls(moved, 640, 284));
+
+    cell.setCorrection(OFF);
+    assert.deepEqual(tags(stage), ['video', 'canvas'], 'off: the video as it is');
+    assert.equal(holdFrom(), null, 'and the hold copies the video');
+    cell.setCorrection(BACKYARD);
+    assert.deepEqual(tags(stage), ['video.straighten-source', 'canvas.straightened', 'canvas'], 'on again, under the hold');
+    assert.equal(holdFrom(), stage.children[1]);
+
+    cell.destroy();
+    assert.deepEqual(stage.children, [], 'the cell takes everything away with it');
+    cell.setCorrection(moved);
+    assert.deepEqual(stage.children, []);
+  }));
+
+  it('a camera that is not straightened gets nothing over its video, and a caller’s own video is the caller’s to straighten', () => inBrowser(async ({ rig, settle }) => {
+    const stage = document.createElement('div');
+    const plain = rig.makeCell('CAM-1', { stage, getCorrection: () => null });
+    desirer(plain)(at(6, 500), 'key');
+    await settle();
+    assert.deepEqual(tags(stage), ['video', 'canvas']);
+    assert.equal(rig.surface().elements.holdFrom(), null);
+    plain.destroy();
+
+    const own = { video: document.createElement('video'), holdCanvas: document.createElement('canvas') };
+    stage.append(own.video, own.holdCanvas);
+    const theirs = rig.makeCell('CAM-1', { stage: own, getCorrection: () => BACKYARD });
+    desirer(theirs)(at(6, 500), 'key');
+    await settle();
+    assert.equal(rig.surface().elements.video, own.video);
+    assert.deepEqual(tags(stage), ['video', 'canvas'], 'the watch screen layers its own picture');
+    theirs.destroy();
+  }));
+
+  it('the watch screen straightens a corrected camera\'s recording', async () => {
+    const browser = installFakeBrowser();
+    recordingCanvases(browser.document);
+    globalThis.ResizeObserver = class { observe() {} disconnect() {} };      // the timeline's
+    globalThis.Image = class { set src(value) { this.value = value; } get src() { return this.value; } };     // the preview's snapshots
+    const { store, putCamera } = await import('../web/js/store.js');
+    const { renderWatch } = await import('../web/js/screens/watch.js');
+    const id = 'AAAAAAAA-0000-4000-8000-00000000000A';
+    store.cameras.set(id, { id, name: 'Backyard', isEnabled: true, nvrEnabled: true, status: { connection: 'online' }, pictureCorrection: BACKYARD });
+    const page = renderWatch({ params: [id], navigate() {}, setTitle() {} });
+    try {
+      const stage = page.el.childNodes.find((node) => node.classList?.contains('watch-stage'));
+      const video = stage.childNodes.find((node) => node.localName === 'video');
+      const canvas = siblingAfter(video);
+      assert.equal(canvas.localName, 'canvas');
+      assert.equal(canvas.className, 'watch-video straightened', 'the video’s classes: the stage’s layers show it as they show the video');
+      assert.ok(video.classList.contains('straighten-source'));
+      assert.ok(siblingAfter(canvas).classList.contains('watch-hold'), 'under the hold picture');
+
+      givePicture(video);
+      const moved = { straighten: -0.2, level: 0.1 };
+      let from = canvas.getContext('2d').draws.length;
+      putCamera({ ...store.cameras.get(id), pictureCorrection: moved });      // saved on the camera's page
+      assert.equal(siblingAfter(video), canvas, 'the same canvas');
+      assert.deepEqual(drawnFrom(canvas, video, from).slice(0, planCalls(moved, 640, 284).length), planCalls(moved, 640, 284), 'drawn at once with it');
+      from = canvas.getContext('2d').draws.length;
+      putCamera({ ...store.cameras.get(id), status: { connection: 'online', summary: 'Recording' } });     // news that is not about it
+      assert.equal(canvas.getContext('2d').draws.length, from, 'news that leaves the correction alone draws nothing');
+
+      putCamera({ ...store.cameras.get(id), pictureCorrection: OFF });
+      assert.notEqual(siblingAfter(video)?.className, 'watch-video straightened', 'off: no canvas');
+      assert.equal(video.classList.contains('straighten-source'), false);
+      putCamera({ ...store.cameras.get(id), pictureCorrection: BACKYARD });
+      assert.equal(siblingAfter(video).className, 'watch-video straightened', 'on again');
+    } finally {
+      page.destroy();
+      store.cameras.delete(id);
+      delete globalThis.ResizeObserver;
+      delete globalThis.Image;
+      browser.restore();
+    }
+    const stage = page.el.childNodes.find((node) => node.classList?.contains('watch-stage'));
+    assert.deepEqual(stage.children.filter((node) => node.classList.contains('straightened')), [], 'leaving the screen takes it away');
   });
 });

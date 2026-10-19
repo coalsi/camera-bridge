@@ -126,6 +126,7 @@
 		5BCC24430A4DE252F68B2CE2 /* CameraBridgeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC8D5104DACB967A12CBEBA5 /* CameraBridgeService.swift */; };
 		5BF258EFE6704ADEFC88E891 /* TimeLimitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB9B49C1B437F6573DCB18B /* TimeLimitTests.swift */; };
 		5C483CDA65C7A5CCE27A664D /* NVRContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3422164EE0FBB055004F2B73 /* NVRContractTests.swift */; };
+		5D37D38A64355257DDEBBCD0 /* CameraBridgeLogo.svg in Resources */ = {isa = PBXBuildFile; fileRef = EE242092192FBFC62BC4E923 /* CameraBridgeLogo.svg */; };
 		5D8D6308FE79E2B3D1D77C8B /* DiagnosticsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E568067B6E8E7A264968A36 /* DiagnosticsModel.swift */; };
 		5E6354BE02EFECFE885C1D2C /* TimelineTicks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4FC48172C6734D340782408 /* TimelineTicks.swift */; };
 		5E6CFCFF35FE0D0F6B67435A /* CameraPageNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 137BB41ABAC553CF23274349 /* CameraPageNavigationTests.swift */; };
@@ -273,6 +274,7 @@
 		DF98C640FEDF593D2555F73B /* DiagnosticsFilterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 960E8CFC771E45A5CA55396B /* DiagnosticsFilterTests.swift */; };
 		E095A7A6810C76049A040AFB /* CameraConnectionEditorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12D565667D06721EC565220E /* CameraConnectionEditorTests.swift */; };
 		E3986CB541CCFA98222AD51B /* SettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A0D74657A248141D7A1D439 /* SettingsTab.swift */; };
+		E3C3913396D50EB726797A48 /* CameraBridgeLogoSmall.svg in Resources */ = {isa = PBXBuildFile; fileRef = 71FE51C5FC9D79A26DF9CBA1 /* CameraBridgeLogoSmall.svg */; };
 		E41C269D362E8A10A0F9FD78 /* TimelineModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 058238826B90B32250E75BD7 /* TimelineModel.swift */; };
 		E432D76CDFEEFA49C8B09A80 /* PairingBlocker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D4D44E8E3D66828066151B3 /* PairingBlocker.swift */; };
 		E4731100B7886952A24C90E5 /* ClipFakes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B547EE5B9B812C91954B52A4 /* ClipFakes.swift */; };
@@ -380,7 +382,7 @@
 		4F2DD7961DA5B673D4E599B7 /* AppModelNVRTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelNVRTests.swift; sourceTree = "<group>"; };
 		4F74E2E130D3993475D0391F /* SetupReportConsentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupReportConsentTests.swift; sourceTree = "<group>"; };
 		50A101B0D944CE641F55F5E0 /* FileClipSink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileClipSink.swift; sourceTree = "<group>"; };
-		50EFF3215E4596CB8C4DDC65 /* CameraBridgeKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CameraBridgeKit; path = Packages/CameraBridgeKit; sourceTree = SOURCE_ROOT; };
+		50EFF3215E4596CB8C4DDC65 /* CameraBridgeKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CameraBridgeKit; path = ../../Packages/CameraBridgeKit; sourceTree = SOURCE_ROOT; };
 		51B55667CCAC0D9CAD6F9406 /* StatusText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusText.swift; sourceTree = "<group>"; };
 		534CCF9B34A0934CE36A4C29 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
 		540C2852C36C15A4CCCE5852 /* CameraBridgeOutline.svg */ = {isa = PBXFileReference; path = CameraBridgeOutline.svg; sourceTree = "<group>"; };
@@ -411,6 +413,7 @@
 		708206BAC2D464A8DD0D0AF4 /* TimelineScrubber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineScrubber.swift; sourceTree = "<group>"; };
 		714EE6E60204F89D650B408E /* SensorsBridgeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorsBridgeView.swift; sourceTree = "<group>"; };
 		7177318986600EAA1F966FA7 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		71FE51C5FC9D79A26DF9CBA1 /* CameraBridgeLogoSmall.svg */ = {isa = PBXFileReference; path = CameraBridgeLogoSmall.svg; sourceTree = "<group>"; };
 		72C14B06655FC3D009012D2A /* CameraPageState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPageState.swift; sourceTree = "<group>"; };
 		7578E57B3AF9F863582014A0 /* DiagnosticsFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsFilter.swift; sourceTree = "<group>"; };
 		75EE07A941A4FA4D86F4EC6C /* ConfigurationBackupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationBackupTests.swift; sourceTree = "<group>"; };
@@ -510,6 +513,7 @@
 		ED259148185044D0FC3F7299 /* Acknowledgements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Acknowledgements.swift; sourceTree = "<group>"; };
 		ED33A3097DFDEB70F239EB35 /* SettingsRecordingTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsRecordingTab.swift; sourceTree = "<group>"; };
 		ED54E95C51EF7740CDA305F8 /* StatusMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMenu.swift; sourceTree = "<group>"; };
+		EE242092192FBFC62BC4E923 /* CameraBridgeLogo.svg */ = {isa = PBXFileReference; path = CameraBridgeLogo.svg; sourceTree = "<group>"; };
 		EE3FD79058AB00855BA1C215 /* QRCodeGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeGeneratorTests.swift; sourceTree = "<group>"; };
 		EE4E26892A69A44DADCBE766 /* SensorKind.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorKind.swift; sourceTree = "<group>"; };
 		EE99002E6B37F43B91BB7FFF /* SettingsBackupTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsBackupTab.swift; sourceTree = "<group>"; };
@@ -805,6 +809,8 @@
 		B1E275E425EC7B10B10474BF /* Brand */ = {
 			isa = PBXGroup;
 			children = (
+				EE242092192FBFC62BC4E923 /* CameraBridgeLogo.svg */,
+				71FE51C5FC9D79A26DF9CBA1 /* CameraBridgeLogoSmall.svg */,
 				D7323F85F5B15879D8614BC0 /* CameraBridgeMark.svg */,
 				4E95E50F2DFC18E8DB804AC7 /* CameraBridgeMenuBarMark.svg */,
 				540C2852C36C15A4CCCE5852 /* CameraBridgeOutline.svg */,
@@ -887,7 +893,7 @@
 			children = (
 				50EFF3215E4596CB8C4DDC65 /* CameraBridgeKit */,
 			);
-			path = Packages;
+			name = Packages;
 			sourceTree = "<group>";
 		};
 		C9B6CFC98583EF233FE09C5D /* Clips */ = {
@@ -1012,7 +1018,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				E900DA6F6337D4C2ECFDF7A4 /* XCRemoteSwiftPackageReference "Sparkle" */,
-				BB81E56E34136298BE5D465F /* XCLocalSwiftPackageReference "Packages/CameraBridgeKit" */,
+				5309F80B5AB596A2E73E4199 /* XCLocalSwiftPackageReference "../../Packages/CameraBridgeKit" */,
 			);
 			preferredProjectObjectVersion = 54;
 			projectDirPath = "";
@@ -1031,6 +1037,8 @@
 			files = (
 				4FC46B24AD70B7B170BF363E /* Acknowledgements.md in Resources */,
 				B59CF0C713FE423031215503 /* Assets.xcassets in Resources */,
+				5D37D38A64355257DDEBBCD0 /* CameraBridgeLogo.svg in Resources */,
+				E3C3913396D50EB726797A48 /* CameraBridgeLogoSmall.svg in Resources */,
 				B691CEB7AE15E2FC508E5791 /* CameraBridgeMark.svg in Resources */,
 				20358E4FE123C0D30E1712DF /* CameraBridgeMenuBarMark.svg in Resources */,
 				B6EE2C70524BE121121271B6 /* CameraBridgeOutline.svg in Resources */,
@@ -1051,7 +1059,7 @@
 			inputFileListPaths = (
 			);
 			inputPaths = (
-				"$(SRCROOT)/build/helpers/go2rtc",
+				"$(SRCROOT)/../../build/helpers/go2rtc",
 				"$(SRCROOT)/Tools/embed-go2rtc.sh",
 			);
 			name = "Embed go2rtc helper";
@@ -1617,9 +1625,9 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		BB81E56E34136298BE5D465F /* XCLocalSwiftPackageReference "Packages/CameraBridgeKit" */ = {
+		5309F80B5AB596A2E73E4199 /* XCLocalSwiftPackageReference "../../Packages/CameraBridgeKit" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/CameraBridgeKit;
+			relativePath = ../../Packages/CameraBridgeKit;
 		};
 /* End XCLocalSwiftPackageReference section */
 

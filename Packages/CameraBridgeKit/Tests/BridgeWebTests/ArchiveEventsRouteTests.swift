@@ -14,10 +14,11 @@ import Testing
         return "nvr/events?" + query.joined(separator: "&")
     }
 
-    private func event(_ rig: NVRRig, _ id: String, _ kind: String, at offsetMs: Int64, endsAfter: Int64? = nil, recorded: Bool = true, camera: UUID? = nil) -> ArchiveEvent {
+    private func event(_ rig: NVRRig, _ id: String, _ kind: String, at offsetMs: Int64, endsAfter: Int64? = nil, recorded: Bool = true, camera: UUID? = nil,
+                       description: EventDescription? = nil) -> ArchiveEvent {
         let start = Date(timeIntervalSince1970: Double(rig.ms(offsetMs)) / 1_000)
         return ArchiveEvent(id: id, camera: camera ?? rig.camera.id, kind: kind, start: start, end: endsAfter.map { start.addingTimeInterval(Double($0) / 1_000) },
-                            hadVideo: recorded, recorded: recorded)
+                            hadVideo: recorded, recorded: recorded, description: description)
     }
 
     @Test func theEventsOfTheRangeComeNewestFirstWithTheirEndsAndWhetherTheyAreRecorded() async throws {
@@ -39,13 +40,38 @@ import Testing
         #expect(abs(Double(answer.int("serverTime") ?? 0) / 1000 - before.timeIntervalSince1970) < 5)
         let events = answer.array("events")
         #expect(events.map { $0["id"] as? String } == ["c", "b", "a"])
-        #expect(Set(events[0].keys) == ["id", "cameraID", "kind", "start", "end", "recorded"])
+        #expect(Set(events[0].keys) == ["id", "cameraID", "kind", "start", "end", "recorded", "description"])
+        #expect(events.allSatisfy { $0["description"] is NSNull }, "no description: null, the key is always there")
         #expect(events[0]["cameraID"] as? String == rig.cameraID && events[0]["kind"] as? String == "Doorbell ring")
         #expect(jsonInt(events[2]["start"]) == rig.ms(1_000) && jsonInt(events[2]["end"]) == rig.ms(10_000))
         #expect(events[1]["end"] is NSNull && events[1]["recorded"] as? Bool == false && events[2]["recorded"] as? Bool == true)
         let call = try #require(archive.eventCalls.last)
         #expect(call.cameras == [rig.camera.id] && call.limit == 200, "200 when no limit is given")
         #expect(call.range == Date(timeIntervalSince1970: Double(rig.ms(0)) / 1_000)..<Date(timeIntervalSince1970: Double(rig.ms(3_600_000)) / 1_000))
+    }
+
+    @Test func theEventsRouteCarriesTheDescription() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        let described = EventDescription(summary: "A person in a red jacket at the door", kind: .person, concern: .unusual, model: "claude-haiku-4-5",
+                                         at: Date(timeIntervalSince1970: Double(rig.ms(5_000)) / 1_000))
+        let nothing = EventDescription(summary: EventDescription.nothingNotable, kind: .nothing, concern: .routine, model: "claude-haiku-4-5",
+                                       at: Date(timeIntervalSince1970: Double(rig.ms(65_000)) / 1_000))
+        archive.setEvents([
+            event(rig, "a", "Person", at: 1_000, description: described),
+            event(rig, "b", "Motion", at: 60_000, description: nothing),
+            event(rig, "c", "Motion", at: 120_000),
+        ])
+        let answer = await rig.get(path(rig))
+        #expect(answer.status == 200)
+        let events = answer.array("events")
+        #expect(events.map { $0["id"] as? String } == ["c", "b", "a"])
+        #expect(events[0]["description"] is NSNull)
+        let shown = try #require(events[2]["description"] as? [String: Any])
+        #expect(Set(shown.keys) == ["summary", "kind", "concern"], "the model and the time stay on the box")
+        #expect(shown["summary"] as? String == "A person in a red jacket at the door" && shown["kind"] as? String == "person" && shown["concern"] as? String == "unusual")
+        let quiet = try #require(events[1]["description"] as? [String: Any])
+        #expect(quiet["summary"] as? String == "Nothing notable" && quiet["kind"] as? String == "nothing" && quiet["concern"] as? String == "routine")
     }
 
     @Test func aLimitCutsTheOldestOffAndSaysThereIsMore() async throws {

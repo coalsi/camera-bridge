@@ -38,6 +38,11 @@ actor SnapshotProvider {
         var unauthorizedRetry: Duration = IngestSupervisor.Timing().unauthorizedRetry
         /// How long the snapshot decoder session is kept after its last use (a 4K session holds tens of MB).
         var decoderIdleLifetime: Duration = .seconds(60)
+
+        /// How long a request with this reason may take: `eventBudget` (at most `budget`) for an event snapshot, else `budget`.
+        func limit(for reason: SnapshotReason?) -> Duration {
+            reason == .event ? min(budget, eventBudget) : budget
+        }
     }
 
     enum Failure: Error, Equatable, CustomStringConvertible {
@@ -63,7 +68,8 @@ actor SnapshotProvider {
     private let keyframeJPEG: KeyframeJPEG
     private let newestJPEG: NewestJPEG?
     private let hub: MediaHub
-    private let timing: Timing
+    /// Also read by `CorrectedSnapshots`, whose straightening fits inside the same budget.
+    let timing: Timing
     private let log: Log
     private let now: @Sendable () -> ContinuousClock.Instant
     private let isOffline: @Sendable () -> Bool
@@ -134,7 +140,8 @@ actor SnapshotProvider {
     /// Requests for the same size that arrive while one is being answered wait for it (a Hikvision camera answers 503 to two
     /// snapshot requests at once), and requests of any size share one fetch from the camera's API.
     private var productions: [SizeKey: Task<Data, any Error>] = [:]
-    private var cameraFetch: Task<CameraOutcome, Never>?
+    /// The fetch from the camera's API under way, and when it began (the bridge's clock).
+    private var cameraFetch: (task: Task<CameraOutcome, Never>, started: Date)?
     private var lastStaleLog: ContinuousClock.Instant?
 
     func snapshot(_ request: SnapshotRequest) async throws -> Data {
@@ -150,7 +157,7 @@ actor SnapshotProvider {
             return stale(cache, width: width, height: height)
         }
         let started = now()
-        let budget = request.reason == .event ? min(timing.budget, timing.eventBudget) : timing.budget
+        let budget = timing.limit(for: request.reason)
         let key = SizeKey(width: width, height: height)
         let production: Task<Data, any Error>
         if let running = productions[key] {
@@ -183,6 +190,21 @@ actor SnapshotProvider {
             }
             return stale(cache, width: width, height: height)
         }
+    }
+
+    /// The camera's own JPEG as it sent it, and when it came (the bridge's clock), for the event picture of an AI description. It goes through
+    /// the one fetch Home's snapshots share (a fetch already running is joined, and a failing API is skipped as it is for them), and it never
+    /// reads or writes the caches nor stands the last picture in. A fetch it starts runs with Home's own limit for an event snapshot, so a Home
+    /// snapshot that joins it is served, and its failure counted, as if Home had started it; only this call stops waiting after `limit`. A
+    /// fetch that began before `earliest` (a picture the camera was asked for before the event) is not used, and no second one is started
+    /// beside it. nil when the camera has no snapshot API, is offline or skipped, or gives nothing in time. Nothing is resized or decoded here.
+    func cameraJPEG(within limit: Duration, startedAfter earliest: Date) async -> (jpeg: Data, at: Date)? {
+        guard limit > .zero, let cameraSnapshot, !isOffline(), cameraAPIRetryAt.map({ now() >= $0 }) ?? true else { return nil }
+        let fetch = sharedFetch(cameraSnapshot, limit: min(timing.cameraAPITimeout, timing.eventBudget))
+        guard fetch.started >= earliest else { return nil }
+        let task = fetch.task
+        guard let outcome = try? await withDeadline(limit, { await task.value }), case .jpeg(let jpeg) = outcome else { return nil }
+        return (jpeg, Date())
     }
 
     private func finished(_ key: SizeKey) {
@@ -231,14 +253,20 @@ actor SnapshotProvider {
 
     /// One fetch from the camera's API shared by every request that arrives while it runs; its failure is counted once.
     private func fetchFromCamera(_ fetch: @escaping CameraSnapshot, limit: Duration) async -> CameraOutcome {
-        if let running = cameraFetch { return await running.value }
+        await sharedFetch(fetch, limit: limit).task.value
+    }
+
+    /// The fetch under way, or a new one that gives up after `limit`; and when it began.
+    private func sharedFetch(_ fetch: @escaping CameraSnapshot, limit: Duration) -> (task: Task<CameraOutcome, Never>, started: Date) {
+        if let running = cameraFetch { return running }
         let task = Task { [self] () -> CameraOutcome in
             let outcome = await cameraOutcome(fetch, limit: limit)
             cameraFetch = nil
             return outcome
         }
-        cameraFetch = task
-        return await task.value
+        let started = (task: task, started: Date())
+        cameraFetch = started
+        return started
     }
 
     private func cameraOutcome(_ fetch: @escaping CameraSnapshot, limit: Duration) async -> CameraOutcome {

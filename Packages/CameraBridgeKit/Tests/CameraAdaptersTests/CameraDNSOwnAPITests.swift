@@ -15,6 +15,10 @@ import Testing
     private let bridge = "192.0.2.10"
     /// The read-back after a restart, short for the fakes (a camera gets 30 s).
     private let quick = DNSReadBackTiming(limit: .seconds(10), interval: .milliseconds(20))
+    /// The same for the IPCamera Web family's cameras, whose ONVIF keeps the second slot whatever it is sent: ONVIF reads the first form it
+    /// writes back for `limit` and each of the two others for `laterFormsLimit` before the page is used (1.2 s in all), and the page's
+    /// restart takes three reads of the same `limit`.
+    private let family = DNSReadBackTiming(limit: .seconds(1), interval: .milliseconds(20), laterFormsLimit: .milliseconds(100))
 
     final class Capture: LogSink {
         let entries = Box<[LogEntry]>([])
@@ -88,13 +92,13 @@ import Testing
                                          ownAPI: ["ondhcp": "1", "dns1": "1.1.1.1", "dns2": "8.8.8.8"]), "the page's DNS as it was")
         #expect(camera.web.writes("eth").isEmpty, "reading changes nothing")
 
-        #expect(try await service.applyDNS(server: bridge, readBack: quick) == CameraSetupOutcome(succeeded: true, detail: "via web API"))
+        #expect(try await service.applyDNS(server: bridge, readBack: family) == CameraSetupOutcome(succeeded: true, detail: "via web API"))
         #expect(camera.onvif.setDNSBodies.value.count == 3, "ONVIF first: it touches only the DNS")
         #expect(camera.web.writes("eth") == [ethWrite(dns: "0", bridge, bridge)])
         #expect(camera.web.signIns.count == 2, "signed in again after the restart")
         #expect(try await service.readDNS()?.pointsAt(bridge) == true)
 
-        #expect(try await service.restoreDNS(saved, readBack: quick) == CameraSetupOutcome(succeeded: true, detail: "via web API"))
+        #expect(try await service.restoreDNS(saved, readBack: family) == CameraSetupOutcome(succeeded: true, detail: "via web API"))
         #expect(camera.web.writes("eth").last == ethWrite(dns: "1", "1.1.1.1", "8.8.8.8"))
         #expect(camera.onvif.dns.value.fromDHCP)
         for text in ["192.168.77.22", "255.255.255.0", "TESTCAM", FakeIPCamWebCamera.password] {
@@ -106,7 +110,7 @@ import Testing
     @Test func aCameraWhoseONVIFTakesTheBridgeKeepsItsPageAsItIs() async throws {
         let camera = try await Family.start(slots: .asSent)
         defer { camera.stop() }
-        #expect(try await camera.service().applyDNS(server: bridge, readBack: quick) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(try await camera.service().applyDNS(server: bridge, readBack: family) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
         #expect(camera.web.writes("eth").isEmpty && camera.web.signIns.isEmpty)
     }
 
@@ -115,7 +119,7 @@ import Testing
         let camera = try await Family.start()
         defer { camera.stop() }
         camera.web.signInCode.set(531201)
-        let outcome = try await camera.service().applyDNS(server: bridge, readBack: quick)
+        let outcome = try await camera.service().applyDNS(server: bridge, readBack: family)
         #expect(!outcome.succeeded && outcome.detail.hasPrefix(Self.kept + "; the camera’s web API "), "\(outcome.detail)")
         #expect(camera.web.writes("eth").isEmpty && camera.web.signIns.count == 1)
     }
@@ -126,7 +130,7 @@ import Testing
         let camera = try await Family.start()
         defer { camera.stop() }
         camera.web.writeCode.set(IPCamWebCameraError.noPrivilege)
-        let outcome = try await camera.service().applyDNS(server: bridge, readBack: quick)
+        let outcome = try await camera.service().applyDNS(server: bridge, readBack: family)
         #expect(outcome == CameraSetupOutcome(succeeded: false, detail: Self.kept + "; the camera’s web API refused the change ("
                                               + CameraAdapterError.notPermittedReason + ")", notPermitted: true))
         #expect(!IPCamWebLatch.shared.isTripped(IPCamWebLatch.key(camera.endpoint)))
@@ -134,7 +138,7 @@ import Testing
         let signIn = try await Family.start()
         defer { signIn.stop() }
         signIn.web.signInCode.set(IPCamWebCameraError.noPrivilege)
-        let refused = try await signIn.service().applyDNS(server: bridge, readBack: quick)
+        let refused = try await signIn.service().applyDNS(server: bridge, readBack: family)
         #expect(refused == CameraSetupOutcome(succeeded: false, detail: Self.kept + "; the camera’s web API cannot be asked: "
                                               + IPCamWebUnavailable.noPrivilege.reason, notPermitted: true))
         #expect(signIn.web.writes("eth").isEmpty)
@@ -149,11 +153,11 @@ import Testing
                     FakeIPCamWebCamera.eth.replacingOccurrences(of: #"hostname="TESTCAM""#, with: #"hostname="TEST CAM""#),
                     #"<eth ondhcp="1" ip="192.168.77.22"/>"#] {
             camera.web.options.update { $0["eth"] = eth }
-            let outcome = try await service.applyDNS(server: bridge, readBack: quick)
+            let outcome = try await service.applyDNS(server: bridge, readBack: family)
             #expect(!outcome.succeeded && outcome.detail.hasPrefix(Self.kept + "; "), "\(outcome.detail)")
         }
         camera.web.options.update { $0["eth"] = nil }
-        let none = try await service.applyDNS(server: bridge, readBack: quick)
+        let none = try await service.applyDNS(server: bridge, readBack: family)
         #expect(none == CameraSetupOutcome(succeeded: false, detail: Self.kept + "; the camera’s web API shows no DNS servers"))
         #expect(camera.web.writes("eth").isEmpty)
     }
@@ -173,9 +177,9 @@ import Testing
         let camera = try await Family.start()
         defer { camera.stop() }
         let saved = try #require(try await camera.service().readInternetWatch(server: bridge).1)
-        #expect(try await camera.service().applyDNS(server: bridge, readBack: quick).succeeded)
+        #expect(try await camera.service().applyDNS(server: bridge, readBack: family).succeeded)
         IPCamWebLatch.shared.trip(IPCamWebLatch.key(camera.endpoint), credentials: camera.web.credentials)
-        #expect(try await camera.service().restoreDNS(saved, readBack: quick) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(try await camera.service().restoreDNS(saved, readBack: family) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
         #expect(camera.onvif.dns.value.fromDHCP && camera.web.writes("eth").count == 1)
     }
 
@@ -187,11 +191,11 @@ import Testing
         let service = camera.service()
         let saved = try #require(try await service.readInternetWatch(server: bridge).1)
         #expect(saved.ownAPI != nil)
-        #expect(try await service.applyDNS(server: bridge, readBack: quick).succeeded)
+        #expect(try await service.applyDNS(server: bridge, readBack: family).succeeded)
         camera.web.expireSessions.set(1)
         camera.web.signInCode.set(FakeIPCamWebCamera.wrongPasswordCode)
 
-        #expect(try await service.restoreDNS(saved, readBack: quick) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
+        #expect(try await service.restoreDNS(saved, readBack: family) == CameraSetupOutcome(succeeded: true, detail: "via ONVIF"))
         #expect(camera.onvif.dns.value.fromDHCP, "back on DHCP, as it was")
         #expect(camera.web.writes("eth").count == 1, "only Watch's write went to the page")
     }
@@ -248,7 +252,7 @@ import Testing
         let writes = reolink.sets.value.count
         let v6 = try await service.applyDNS(server: "2001:db8::10", readBack: quick)
         #expect(!v6.succeeded && v6.detail.contains("InvalidArgVal") && reolink.sets.value.count == writes, "\(v6)")
-        #expect(camera.setDNSBodies.value.count == 1)
+        #expect(camera.setDNSBodies.value.count == 3, "ONVIF is offered each of its three forms, and refuses each")
     }
 
     /// A backup saved through ONVIF by an earlier build is put back through `LocalLink` when it kept the camera's own values: exactly its

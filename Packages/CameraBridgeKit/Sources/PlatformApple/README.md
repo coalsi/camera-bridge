@@ -103,7 +103,7 @@ frame duration; `fps` is the level fit and the transcoder's `FrameRateLimiter`.
   AAC-LC + 960), re-primed after `flush()`; bit rates clamped into the encoder's applicable range; the Opus decoder
   takes variable packet durations (2.5–120 ms, codes 0–3); G.711/LPCM out in 20 ms chunks (the tail after `flush()`
   may be shorter). Silent AAC repeats one AU.
-- JPEG: CoreImage Lanczos + JPEG; `resizeJPEG` via ImageIO thumbnails (unchanged when it fits); aspect kept, never
+- JPEG: CoreImage Lanczos + JPEG; `resizeJPEG` via ImageIO thumbnails (unchanged when it fits; quality 0.8 unless one is asked); aspect kept, never
   upscaled. Synthetic source: real-time 420v pattern (bars, box, noise, counter) → H.264, keyframe first, optional
   440 Hz tone; `stop()` finishes the stream, and `samples()` ends the session it replaces (overlapping calls too).
   `grayThumbnail`: mean of every source pixel per block (8-bit luma via vDSP; 10-bit YCbCr; BT.601 from BGRA/ARGB),

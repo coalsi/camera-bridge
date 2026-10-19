@@ -1,0 +1,217 @@
+{
+  "helps" : {
+    "hikvisionWatch" : {
+      "current" : [
+        "192.168.77.1",
+        "192.0.2.53"
+      ],
+      "keep" : {
+        "address" : "192.168.77.120",
+        "gateway" : "192.168.77.1",
+        "mask" : "255.255.255.0"
+      },
+      "link" : {
+        "label" : "Open the camera’s web page",
+        "url" : "http://192.168.77.120/"
+      },
+      "places" : [
+        {
+          "action" : "Untick DHCP, keep the IPv4 address, subnet mask and default gateway as they are, and enter the Preferred DNS Server and the Alternate DNS Server below.",
+          "app" : "The camera’s web page",
+          "confirmed" : true,
+          "path" : [
+            "Configuration",
+            "Network",
+            "Basic Settings",
+            "TCP/IP"
+          ]
+        }
+      ],
+      "reserve" : {
+        "address" : "192.168.77.120",
+        "mac" : "02:00:00:00:00:21"
+      },
+      "router" : "Or have your router hand this camera 192.168.77.28 as its DNS server, with a DHCP reservation: OpenWrt, pfSense, OPNsense, MikroTik, ASUS and Pi-hole can do that for one device; UniFi, Synology and Firewalla only for a whole network (such as a separate one for the cameras); eero, Google/Nest Wifi, Deco and Orbi can’t, so change it on the camera. The router’s way works only while the camera takes its DNS from DHCP (automatic), and only from the camera’s next DHCP renewal or restart. Or block the camera’s internet in your router (see Keep this camera local). A DNS server from the router counts too, but it can change when the router renews the camera’s address.",
+      "then" : "Then press Check again on the camera’s Security card.",
+      "values" : [
+        {
+          "copy" : false,
+          "label" : "DNS",
+          "value" : "set by hand, not automatic"
+        },
+        {
+          "copy" : true,
+          "label" : "Preferred DNS server",
+          "value" : "192.168.77.28"
+        },
+        {
+          "copy" : true,
+          "label" : "Alternate DNS server",
+          "value" : "192.168.77.28"
+        }
+      ],
+      "warnings" : [
+        "Put Camera Bridge in both slots: with a public server, or none, as the second one, the camera can look names up without it.",
+        "If the camera asks to restart after you save, let it: it may keep its old DNS servers until then.",
+        "If the camera is plugged into a recorder’s own ports, the recorder runs its network: set its DNS on the recorder instead."
+      ],
+      "why" : "The camera didn’t take the change."
+    },
+    "ipcamWebCloud" : {
+      "current" : [
+
+      ],
+      "note" : "The maker’s VisionEye app then no longer reaches the camera away from home.",
+      "places" : [
+        {
+          "action" : "Turn off Enable Mobile Monitoring.",
+          "app" : "The camera’s web page",
+          "confirmed" : true,
+          "path" : [
+            "Configuration",
+            "Services Security",
+            "P2P"
+          ]
+        }
+      ],
+      "router" : "Or block the camera’s internet in your router (see Keep this camera local).",
+      "values" : [
+        {
+          "copy" : false,
+          "label" : "Enable Mobile Monitoring",
+          "value" : "off"
+        }
+      ],
+      "warnings" : [
+
+      ],
+      "why" : "The camera didn’t take the change."
+    },
+    "reolinkGuard" : {
+      "caveat" : "Menu names differ between models and firmware versions, so look for the closest match.",
+      "current" : [
+        "192.168.77.1",
+        "192.0.2.53"
+      ],
+      "link" : {
+        "label" : "Open the camera’s web page",
+        "url" : "http://192.168.77.31/"
+      },
+      "note" : "Battery cameras have no DNS setting.",
+      "places" : [
+        {
+          "action" : "Set the DNS by hand (not automatic) and enter the DNS servers below.",
+          "app" : "The Reolink app",
+          "confirmed" : false,
+          "path" : [
+            "Settings",
+            "(your camera)",
+            "Network Information"
+          ]
+        },
+        {
+          "action" : "Choose Static DNS instead of Auto DNS and enter the DNS servers below.",
+          "app" : "The Reolink Client (on a computer)",
+          "confirmed" : false,
+          "path" : [
+            "Device Settings",
+            "Network",
+            "Network Information",
+            "Network Settings"
+          ]
+        },
+        {
+          "action" : "Set the DNS by hand (not automatic) and enter the DNS servers below. On newer firmware it is under Device Settings › Network › Set up.",
+          "app" : "The camera’s web page",
+          "confirmed" : false,
+          "path" : [
+            "Settings (the gear)",
+            "Network Settings",
+            "Set Up"
+          ]
+        }
+      ],
+      "router" : "Or have your router hand this camera 192.168.77.28 as its DNS server, with a DHCP reservation: OpenWrt, pfSense, OPNsense, MikroTik, ASUS and Pi-hole can do that for one device; UniFi, Synology and Firewalla only for a whole network (such as a separate one for the cameras); eero, Google/Nest Wifi, Deco and Orbi can’t, so change it on the camera. The router’s way works only while the camera takes its DNS from DHCP (automatic), and only from the camera’s next DHCP renewal or restart. Or block the camera’s internet in your router (see Keep this camera local). A DNS server from the router counts too, but it can change when the router renews the camera’s address.",
+      "then" : "Then press Check again on the camera’s Security card.",
+      "values" : [
+        {
+          "copy" : false,
+          "label" : "DNS",
+          "value" : "set by hand, not automatic"
+        },
+        {
+          "copy" : true,
+          "label" : "Preferred DNS server",
+          "value" : "192.168.77.28"
+        },
+        {
+          "copy" : true,
+          "label" : "Alternate DNS server",
+          "value" : "192.168.77.28"
+        }
+      ],
+      "warnings" : [
+        "Put Camera Bridge in both slots: with a public server, or none, as the second one, the camera can look names up without it.",
+        "If the camera asks to restart after you save, let it: it may keep its old DNS servers until then.",
+        "If the camera is plugged into a recorder’s own ports, the recorder runs its network: set its DNS on the recorder instead."
+      ],
+      "why" : "The Internet guard sees a camera’s lookups only while its DNS asks Camera Bridge (192.168.77.28) and nothing else."
+    },
+    "tapoWatch" : {
+      "current" : [
+        "192.168.77.1",
+        "192.0.2.53"
+      ],
+      "keep" : {
+        "address" : "192.168.77.120",
+        "gateway" : "192.168.77.1",
+        "mask" : "255.255.255.0"
+      },
+      "note" : "Battery Tapo models, and the C100, C200, TC60 and TC70 at hardware versions 1 and 2, don’t have this setting.",
+      "places" : [
+        {
+          "action" : "Choose Static IP, keep the camera’s IP address, subnet mask and gateway as they are, and enter the DNS servers below.",
+          "app" : "The Tapo app",
+          "confirmed" : true,
+          "path" : [
+            "(your camera)",
+            "Device Settings",
+            "Advanced Settings",
+            "Network Settings",
+            "Static IP"
+          ]
+        }
+      ],
+      "reserve" : {
+        "address" : "192.168.77.120",
+        "mac" : "02:00:00:00:00:21"
+      },
+      "router" : "Or have your router hand this camera 192.168.77.28 as its DNS server, with a DHCP reservation: OpenWrt, pfSense, OPNsense, MikroTik, ASUS and Pi-hole can do that for one device; UniFi, Synology and Firewalla only for a whole network (such as a separate one for the cameras); eero, Google/Nest Wifi, Deco and Orbi can’t, so change it on the camera. The router’s way works only while the camera takes its DNS from DHCP (automatic), and only from the camera’s next DHCP renewal or restart. Or block the camera’s internet in your router (see Keep this camera local). A DNS server from the router counts too, but it can change when the router renews the camera’s address.",
+      "then" : "Then press Check again on the camera’s Security card.",
+      "values" : [
+        {
+          "copy" : false,
+          "label" : "DNS",
+          "value" : "set by hand, not automatic"
+        },
+        {
+          "copy" : true,
+          "label" : "Preferred DNS server",
+          "value" : "192.168.77.28"
+        },
+        {
+          "copy" : true,
+          "label" : "Alternate DNS server",
+          "value" : "192.168.77.28"
+        }
+      ],
+      "warnings" : [
+        "Put Camera Bridge in both slots: with a public server, or none, as the second one, the camera can look names up without it.",
+        "Check every number before you save: a wrong fixed address on a Tapo can need a factory reset.",
+        "If the camera asks to restart after you save, let it: it may keep its old DNS servers until then."
+      ],
+      "why" : "This camera doesn’t let Camera Bridge change this setting."
+    }
+  },
+  "note" : "Written by BridgeEngine's CameraManualHelpTests (CB_WRITE_WEB_FIXTURES=1 swift test --filter CameraManualHelpTests); theWebPagesFixturesAreTheTablesOwnWords checks every help against CameraManualHelpText."
+}

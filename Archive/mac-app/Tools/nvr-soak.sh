@@ -1,4 +1,6 @@
 #!/bin/bash
+# ARCHIVED with the Mac app (2026-10-18): this script lives in Archive/mac-app/Tools, and every `Tools/...` path below is relative to
+# Archive/mac-app. Not run since the archive.
 # Soaks and measures the Mac app's NVR against the real engine, without touching the installed app. Everything happens in a
 # measurement build (bundle identifier com.coreysilvia.CameraBridge.nvrtest, process name CameraBridgeNVRTest) that runs
 # `-isolatedEngine` (App/Sources/Model/IsolatedEngine.swift): demo cameras, throwaway data, loopback only, ports from 38100.
@@ -27,7 +29,8 @@ PRODUCT="CameraBridgeNVRTest"
 TEAM_ID="${TEAM_ID:-XL4RAH5J96}"
 DATA_VOLUME="/System/Volumes/Data"
 MIN_FREE_KB=$((40 * 1024 * 1024))
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # Archive/mac-app: project.yml, App/, Tools/nvr_soak_report.py
+REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"                     # the repository root: Packages/ is copied with the app
 
 die() { echo "nvr-soak: $*" >&2; exit 3; }
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*"; }
@@ -172,9 +175,10 @@ cmd_build() {
   # name and identifier cannot be overridden on the xcodebuild command line: the package targets would take them too).
   src="$ROOT/src"
   mkdir -p "$src"
+  local app_src="$src/${APP_ROOT#"$REPO_ROOT"/}"   # the copy of Archive/mac-app inside the copy of the repository
   rsync -a --delete --exclude .git --exclude .build --exclude build --exclude Reference --exclude Interop --exclude docs --exclude linux \
     --exclude Tools/captures --exclude CameraBridge.xcodeproj "$REPO_ROOT/" "$src/"
-  python3 -I - "$src/project.yml" <<'PY'
+  python3 -I - "$app_src/project.yml" <<'PY'
 import re, sys
 path = sys.argv[1]
 text = open(path).read()
@@ -187,11 +191,11 @@ for pattern, replacement in [(r"(PRODUCT_BUNDLE_IDENTIFIER: )com\.coreysilvia\.C
     assert count == 1, "project.yml: %s matched %d times" % (pattern, count)
 open(path, "w").write(text)
 PY
-  (cd "$src" && xcodegen generate >/dev/null)
+  (cd "$app_src" && xcodegen generate >/dev/null)
   rm -rf "$ROOT/dd/Build/Products/Release/$PRODUCT.app"   # a failed build must not leave the previous one to be taken for the new one
   # Release (optimised, so the numbers mean something) with DEBUG on for the app target only (the copy’s project.yml says so; a command line
   # override would also replace the compilation conditions that SwiftPM packages such as swift-crypto set for themselves).
-  xcodebuild build -project "$src/CameraBridge.xcodeproj" -scheme CameraBridge -configuration Release -destination 'platform=macOS' \
+  xcodebuild build -project "$app_src/CameraBridge.xcodeproj" -scheme CameraBridge -configuration Release -destination 'platform=macOS' \
     -derivedDataPath "$ROOT/dd" ${CB_SOAK_PACKAGES:+-clonedSourcePackagesDirPath "$CB_SOAK_PACKAGES" -disableAutomaticPackageResolution} \
     CODE_SIGN_STYLE=Manual "CODE_SIGN_IDENTITY=$sign" "DEVELOPMENT_TEAM=$([ "$sign" = "-" ] && echo "" || echo "$TEAM_ID")" \
     2>&1 | tee "$ROOT/build.log" | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
@@ -230,16 +234,16 @@ cmd_run() { # the soak
     # The footage lost at the kill, read 100 s after the relaunch (the repair is done; retention has not yet deleted the files around the kill).
     if [ "$relaunched" -gt 0 ] && [ "$measured_loss" = 0 ] && [ $(( $(date +%s) - relaunched )) -ge 100 ]; then
       measured_loss=1
-      python3 -I "$REPO_ROOT/Tools/nvr_soak_report.py" killloss "$FOLDER" "$(awk '$2=="kill-9"{print $1}' "$ROOT/events.log" | head -1)" > "$ROOT/kill-loss.txt" || true
+      python3 -I "$APP_ROOT/Tools/nvr_soak_report.py" killloss "$FOLDER" "$(awk '$2=="kill-9"{print $1}' "$ROOT/events.log" | head -1)" > "$ROOT/kill-loss.txt" || true
     fi
     sleep 30
   done
   echo "$(date +%s) end" >> "$ROOT/events.log"
   wait_gone 60 || { echo "$(date +%s) quit-hung" >> "$ROOT/events.log"; kill_ours; }
   sleep 70   # a file that was open when the process died is repaired once it has been quiet for 60 s
-  python3 -I "$REPO_ROOT/Tools/nvr_soak_report.py" soak "$ROOT"
+  python3 -I "$APP_ROOT/Tools/nvr_soak_report.py" soak "$ROOT"
   local kill_ts; kill_ts="$(awk '$2=="kill-9"{print $1}' "$ROOT/events.log" | head -1)"
-  python3 -I "$REPO_ROOT/Tools/nvr_soak_report.py" verify "$FOLDER" ${kill_ts:+--kill-ts "$kill_ts"} || true
+  python3 -I "$APP_ROOT/Tools/nvr_soak_report.py" verify "$FOLDER" ${kill_ts:+--kill-ts "$kill_ts"} || true
   [ -s "$ROOT/kill-loss.txt" ] && cat "$ROOT/kill-loss.txt"
 }
 
@@ -296,7 +300,7 @@ else:
     print("- viewer: the clock stood still while the drive was away: %s" % ("yes (moved %.2f s)" % moved if moved is not None and moved < 0.5 else "no (moved %s s)" % moved))
     print("- viewer: playing again: %s the drive came back (the 5 s probe: expect 5 to 10 s)" % after(resumed, replug))
 PY
-  python3 -I "$REPO_ROOT/Tools/nvr_soak_report.py" verify "$FOLDER" || true
+  python3 -I "$APP_ROOT/Tools/nvr_soak_report.py" verify "$FOLDER" || true
 }
 
 cmd_ui() { # the app with its manager window over nine demo cameras that record to the image, for the attended checks (CB_SOAK_UI_MINUTES, default 45)
@@ -351,7 +355,7 @@ cmd_probe() { # probe <scenarios>
   local deadline=$(( $(date +%s) + 3600 ))
   while [ -n "$(pid_of)" ] && [ "$(date +%s)" -lt "$deadline" ]; do sample || true; sleep 15; done
   wait_gone 20 || kill_ours
-  python3 -I "$REPO_ROOT/Tools/nvr_soak_report.py" budgets "$ROOT/data/probe"
+  python3 -I "$APP_ROOT/Tools/nvr_soak_report.py" budgets "$ROOT/data/probe"
 }
 
 cmd_external() { # external /Volumes/NAME [probe SCENARIOS]: the soak (or the probes) on a drive the owner named; one new folder on it, removed at the end

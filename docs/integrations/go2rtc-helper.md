@@ -24,11 +24,13 @@ go2rtc can run programs, read files, open tunnels and talk to Home Assistant. Ca
 
 For Ring, Wyze, Tuya (and Google Nest) go2rtc has pages where you sign in and get the source for each camera. **Open Sign-In Page** in the wizard starts a second, short-lived helper that serves only those pages (on `127.0.0.1`, a random port, closed after 20 minutes or when the wizard closes) and opens it in your browser. You type your account into **go2rtc's page, not Camera Bridge**; Camera Bridge only receives the source you paste back. (For Wyze, go2rtc's page writes the account's password into the page helper's own configuration file in a private temporary folder, which is deleted when the page closes.)
 
-## Building the app with the helper
+## Building the archived Mac app with the helper
+
+The Mac app is archived in `Archive/mac-app` (October 2026). These steps are for it.
 
 ```bash
 Tools/fetch-go2rtc.sh        # downloads the pinned release, checks its SHA-256, builds build/helpers/go2rtc (universal)
-xcodebuild … build           # the "Embed go2rtc helper" phase copies it to Contents/Helpers and signs it
+(cd Archive/mac-app && xcodebuild … build)   # the "Embed go2rtc helper" phase copies it to Contents/Helpers and signs it
 ```
 
 - `Tools/fetch-go2rtc.sh` takes go2rtc **only** from the official GitHub release of the pinned version and **refuses any file whose SHA-256 is not the pinned one** (a mirror can be named with `CB_GO2RTC_BASE_URL` but cannot change what is accepted). `--verify` checks the cache and the built binary without a network. `Tools/test-fetch-go2rtc.sh` tests it, including a corrupted download.

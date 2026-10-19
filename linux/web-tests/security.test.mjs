@@ -194,7 +194,7 @@ test('the legend says what each colour means in the owner’s words, best first,
   const meanings = all(legend, (node) => node.localName === 'dd').map((node) => node.textContent);
   assert.deepEqual(terms.slice(0, 4).map((node) => node.firstChild.dataset.level), ['gold', 'green', 'yellow', 'red']);
   assert.deepEqual(meanings.slice(0, 4), [
-    'Gold. Camera Bridge found no way in from outside, and its Internet guard saw it make no internet lookups for a full day.',
+    'Gold. Camera Bridge found no way in from outside, and its Internet guard saw it make no internet lookups for a full day and has seen at least one lookup from it.',
     'Green. Its cloud is off; something Camera Bridge can’t confirm remains.',
     'Yellow. Camera Bridge found nothing that lets it in from outside, but something needs work: its cloud is on but not linked, its video plays '
       + 'without a password on your network, it keeps looking up internet names, or Camera Bridge can’t read its cloud.',
@@ -244,6 +244,7 @@ const card = (security, options = {}) => {
     canSetUp: options.canSetUp ?? true,
     openSetup: options.openSetup === null ? null : () => { opened.push('setup'); return Promise.resolve('cancelled'); },
     routerHelp: options.routerHelp,
+    restart: options.restart,
     checks: sec.createSecurityChecks(bridge.deps),
     now: () => NOW,
     setTimer: options.setTimer,
@@ -393,9 +394,55 @@ test('watched and still trying: what it blocked today and in 24 hours, the names
   assert.deepEqual(names.map((node) => all(node, (child) => child.localName === 'code')[0].textContent),
     ['*.p2p.example.com', 'cloud.example.net', 'time.example.org', 'update.example.org']);
   assert.match(names[0].textContent, /290 times · last 4 minutes ago/);
-  assert.match(names[3].textContent, /3 times$/, 'a name never seen last has no time');
+  assert.equal(one(names[3], 'sec-name-when').textContent, '3 times', 'a name never seen last has no time');
   assert.match(guard.textContent, /sees lookups by name only/, 'what Watch can’t see is said');
   assert.ok(!visible(button(el, 'Set up for Camera Bridge (includes Watch)'), el), 'a watched camera is not offered Watch again');
+});
+
+test('each name says how often, first and last, and what it likely is; “was it you?” follows the list', () => {
+  const security = { ...SECURITY.yellow, guard: { ...SECURITY.yellow.guard, names: [
+    { name: '*.p2p.example.com', count: 290, first: ago(3 * 24 * 60), last: ago(4) },
+    { name: 'cloud.example.net', count: 1, first: ago(120), last: ago(120) },
+    { name: 'time.example.org', count: 21, first: ago(1300), last: ago(1200) },
+    { name: 'update.example.org', count: 3, first: null, last: null },
+    { name: 'a.example.com', count: 2, first: ago(29.3), last: ago(29) },
+  ] } };
+  const view = sec.securityView(camera(security)).guard;
+  assert.deepEqual(view.names.map((entry) => [entry.name, entry.first]),
+    [['*.p2p.example.com', NOW - 3 * 86_400_000], ['a.example.com', NOW - 29.3 * 60_000], ['cloud.example.net', NOW - 120 * 60_000],
+      ['time.example.org', NOW - 1300 * 60_000], ['update.example.org', null]], 'first is read like last (ms, null when the bridge does not say)');
+  const { el } = card(security, { camera: { vendor: 'reolink', manufacturer: 'Reolink' } });
+  const items = byClass(guardOf(el), 'sec-name');
+  const whenOf = (item) => one(item, 'sec-name-when').textContent;
+  const whatOf = (item) => one(item, 'sec-name-what').textContent;
+  assert.equal(whenOf(items[0]), '290 times · first 3 days ago · last 4 minutes ago');
+  assert.equal(whatOf(items[0]), 'Likely Reolink’s cloud or phone-app connection.', 'a cloud name without a maker in it is the camera maker’s');
+  assert.equal(whenOf(items[1]), '2 times · last 29 minutes ago', 'a first that reads the same as the last is said once');
+  assert.equal(whenOf(items[2]), '1 time · last 2 hours ago');
+  assert.equal(whenOf(items[3]), '21 times · first 22 hours ago · last 20 hours ago');
+  assert.equal(whatOf(items[3]), 'Likely a time server: the camera asks it for the time. Set up for Camera Bridge can point its clock at the bridge instead.');
+  assert.equal(whenOf(items[4]), '3 times', 'no times when the bridge does not say');
+  assert.equal(whatOf(items[4]), 'Likely a firmware or app update check.', 'an update name that names no maker is nobody’s in particular');
+  assert.equal(whatOf(items[1]), 'Not one Camera Bridge recognizes.');
+  const times = all(items[0], (node) => node.localName === 'time');
+  assert.deepEqual(times.map((node) => node.getAttribute('datetime')), [ago(3 * 24 * 60), ago(4)], 'each time has its full date for the tooltip');
+  const was = one(guardOf(el), 'sec-was-it-you');
+  assert.equal(was.textContent, 'Cameras look these up on their own, and also when you use the maker’s phone app or website with them. '
+    + 'If you used this camera’s app around one of these times, that may have been you.');
+  assert.equal(was.parentNode, items[0].parentNode.parentNode, 'under the list');
+
+  const rtsp = card(security, { canSetUp: false });
+  const timeItem = byClass(guardOf(rtsp.el), 'sec-name').find((item) => item.textContent.includes('time.example.org'));
+  assert.equal(one(timeItem, 'sec-name-what').textContent, 'Likely a time server: the camera asks it for the time.', 'no setup, no hint');
+  const clockSet = card(security, { camera: { setupState: { applied: ago(60), steps: [{ id: 'timeSource', status: 'done' }] } } });
+  const setItem = byClass(guardOf(clockSet.el), 'sec-name').find((item) => item.textContent.includes('time.example.org'));
+  assert.ok(!one(setItem, 'sec-name-what').textContent.includes('Set up for Camera Bridge'), 'its clock already comes from the bridge');
+  assert.equal(byClass(guardOf(card(SECURITY.gold).el), 'sec-was-it-you').length, 0, 'nothing blocked, nothing to ask');
+  const noCloud = { ...security, guard: { ...security.guard, names: security.guard.names.filter((entry) => !/p2p|cloud/.test(entry.name))
+    .concat({ name: 'push.apple.com', count: 4, first: ago(90), last: ago(80) }) } };
+  const quietCard = card(noCloud, { camera: { vendor: 'reolink', manufacturer: 'Reolink' } });
+  assert.equal(byClass(guardOf(quietCard.el), 'sec-name').length, 4);
+  assert.equal(byClass(guardOf(quietCard.el), 'sec-was-it-you').length, 0, 'only when a name is likely the maker’s cloud (a general service is not)');
 });
 
 test('watched and quiet says so, without names', () => {
@@ -456,6 +503,18 @@ test('the router help goes at the end of the guard’s section', () => {
   const handle = card(SECURITY.green, { routerHelp: (c) => { help.dataset.for = c.id; return help; } });
   assert.equal(one(handle.el, 'local-only'), help);
   assert.equal(help.dataset.for, ID);
+});
+
+test('“Restart the camera now” is on the card while the bridge says the camera waits for a restart, and goes once nothing waits', () => {
+  const made = [];
+  const restart = (c) => { made.push(c.id); const el = browser.document.createElement('div'); el.className = 'restart-camera'; return el; };
+  const waiting = card(SECURITY.green, { restart, camera: { restartOffered: true } });
+  assert.ok(one(waiting.el, 'restart-camera'));
+  waiting.update(camera(SECURITY.green, { restartOffered: true, name: 'Back Garden' }));
+  assert.deepEqual(made, [ID], 'kept in place as the card draws again (a confirmation under way stays)');
+  waiting.update(camera(SECURITY.green, { restartOffered: false }));
+  assert.equal(one(waiting.el, 'restart-camera'), undefined, 'gone once nothing waits for a restart');
+  assert.equal(one(card(SECURITY.green, { restart }).el, 'restart-camera'), undefined, 'not offered: none');
 });
 
 // MARK: The Monitor's dot

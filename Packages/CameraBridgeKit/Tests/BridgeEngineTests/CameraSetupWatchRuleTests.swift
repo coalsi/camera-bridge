@@ -76,6 +76,117 @@ import Testing
         #expect(BridgeEngine.refusal(CameraAdapterError.unauthorized) == CameraSetupOutcome(succeeded: false, detail: "the camera refused the login"))
     }
 
+    /// "Restart the camera now" is offered, and `restartCamera(id:)` restarts the camera, only while a step of the setup's last run waits for the
+    /// camera's restart (done "after the camera restarts": ISAPI `statusCode` 7); never for a refused or restored one. A reading is no proof of
+    /// a restart, not even one that finds the camera asking the bridge: the wait stays. The route's half: `CameraSetupRoutesTests`.
+    @Test func restartRequiredOffersTheButtonAndTheRoute() throws {
+        let now = Date(timeIntervalSince1970: 1_792_224_000), later = now.addingTimeInterval(600), bridge = "192.168.77.2"
+        var camera = CameraConfiguration(name: "Gate", kind: .camera, vendor: .hikvision, endpoint: CameraEndpoint(host: "192.168.77.21"), username: "admin")
+        #expect(!BridgeEngine.offersCameraRestart(camera), "never set up")
+        camera.setupState = CameraSetupState(started: now, applied: now, steps: [.init(id: .upnp, status: .done), .init(id: .cloud, status: .alreadyRight)])
+        #expect(!BridgeEngine.offersCameraRestart(camera), "nothing waits for a restart")
+        camera.setupState?.steps[0].needsRestart = true
+        #expect(BridgeEngine.offersCameraRestart(camera))
+        for status in [CameraSetupStepStatus.refused, .restored, .notRun] {
+            camera.setupState?.steps[0].status = status
+            #expect(!BridgeEngine.offersCameraRestart(camera), "\(status)")
+        }
+
+        // Watch taken "after the camera restarts": offered whatever its DNS reads, the old servers or already the bridge's.
+        let servers = ["8.8.8.8", "1.1.1.1"]
+        camera.setupState = CameraSetupState(started: now, applied: now, steps: [.init(id: .internetWatch, status: .done, needsRestart: true)],
+                                             watchedServer: bridge)
+        camera.setupBackup = CameraSetupBackup(version: 1, created: now, internetWatch: CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: servers))
+        #expect(BridgeEngine.offersCameraRestart(camera))
+        func reading(_ slots: [String]) -> CameraDNSReading {
+            CameraDNSReading(servers: Array(Set(slots)).sorted(), fromDHCP: false, method: .hikvisionISAPI,
+                             backup: CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: slots))
+        }
+        #expect(BridgeEngine.watchAfterReading(camera, reading(servers), server: bridge, takenAt: later) == nil, "not restarted yet: it waits")
+        #expect(BridgeEngine.watchAfterReading(camera, reading([bridge, bridge]), server: bridge, takenAt: later) == nil,
+                "it shows the bridge: still watched, and still waiting for its restart")
+        #expect(BridgeEngine.offersCameraRestart(camera) && BridgeEngine.internetWatchDone(camera))
+        camera.dnsWatch = CameraDNSWatch(server: bridge)   // a reading's own watch from before the setup: the record takes it over
+        let taken = try #require(BridgeEngine.watchAfterReading(camera, reading([bridge, bridge]), server: bridge, takenAt: later))
+        #expect(BridgeEngine.offersCameraRestart(taken), "a reading that changes the record leaves the wait")
+    }
+
+    /// "Fix its address so the DNS stays" is off by default: without it a run changes nothing the reading would not change, and the
+    /// preview's step carries the offer (the page's checkbox, unticked). Chosen where it is offered, "Watch its internet" changes the address
+    /// as it is and the DNS, keeping the address the preview showed; the backup records the address it fixes (without the hardware address,
+    /// which is never saved), so Restore puts DHCP back, and an earlier backup keeps its own. An ONVIF camera is offered it after a run whose
+    /// Watch it refused for its own reasons (not the account's rights).
+    @Test func offByDefault() {
+        let keeps = CameraAddressing(address: "192.168.77.21", subnetMask: "255.255.255.0", gateway: "192.168.77.1", hardwareAddress: "02:00:00:00:00:21")
+        let offer = CameraSetupFixAddress(addressing: keeps, changes: [
+            CameraSetupChange(label: "Address", now: "192.168.77.21 from the router (DHCP)", after: "192.168.77.21, fixed (mask 255.255.255.0, gateway 192.168.77.1)"),
+            CameraSetupChange(label: "DNS", now: "8.8.8.8 from the router (DHCP)", after: "the bridge (192.168.77.2)"),
+        ], method: .hikvisionISAPI)
+        var reading = CameraSetupReading.notSupported("the camera takes its address from DHCP")
+        reading.fixAddress = offer
+        let preview = BridgeEngine.previewStep(.internetWatch, reading)
+        #expect(preview.status == .notSupported && preview.fixAddress == offer && preview.fixedAddress == nil)
+        #expect(CameraSetupOptions() == CameraSetupOptions(fixAddress: false, shownAddress: nil))
+
+        var read = CameraSetupRead()
+        read.readings[.internetWatch] = reading
+        read.fresh.internetWatch = CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: true, servers: ["8.8.8.8", "0.0.0.0"])
+        func backup(_ read: CameraSetupRead, existing: CameraSetupBackup? = nil) -> CameraSetupBackup {
+            BridgeEngine.keepingFixedAddress(BridgeEngine.mergedSetupBackup(existing: existing, fresh: read.fresh, readings: read.readings, cleanPicture: nil,
+                                                                            optimization: nil), read: read)
+        }
+        var plain = read
+        BridgeEngine.chooseFixAddress(CameraSetupOptions(), read: &plain)
+        #expect(plain.readings == read.readings && plain.fixAddress == nil && plain.fixOffer == nil, "off: the step stays as the reading says")
+        #expect(backup(plain).internetWatch == nil, "nothing changes, nothing is saved")
+
+        var chosen = read
+        BridgeEngine.chooseFixAddress(CameraSetupOptions(fixAddress: true, shownAddress: keeps), read: &chosen)
+        #expect(chosen.readings[.internetWatch] == CameraSetupReading(state: .willChange, changes: offer.changes))
+        #expect(chosen.fixAddress == keeps && chosen.fixOffer == offer)
+        var saved = keeps
+        saved.hardwareAddress = nil
+        #expect(backup(chosen).internetWatch == CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: true, servers: ["8.8.8.8", "0.0.0.0"], fixedAddress: saved,
+                                                                fixedAddressMethod: .hikvisionISAPI))
+        var earlier = CameraSetupBackup(version: 1, created: Date(timeIntervalSince1970: 1_000),
+                                        internetWatch: CameraDNSBackup(method: .onvifMinimal, fromDHCP: true, servers: []))
+        // The earlier run read the DNS servers through ONVIF; this run fixes the address through ISAPI: Restore puts DHCP back through ISAPI
+        // (CameraDNSTests.restorePutsDHCPBackWhicheverWayTheDNSWasRead restores exactly this backup).
+        #expect(backup(chosen, existing: earlier).internetWatch == CameraDNSBackup(method: .onvifMinimal, fromDHCP: true, servers: [], fixedAddress: saved,
+                                                                                   fixedAddressMethod: .hikvisionISAPI),
+                "an earlier run's DNS backup gets the address it fixes, and the way")
+        earlier.internetWatch?.fixedAddress = CameraAddressing(address: "192.168.77.20", subnetMask: "255.255.255.0", gateway: "192.168.77.1")
+        #expect(backup(chosen, existing: earlier).internetWatch == earlier.internetWatch, "the oldest value wins")
+        var withoutShown = read
+        BridgeEngine.chooseFixAddress(CameraSetupOptions(fixAddress: true), read: &withoutShown)
+        #expect(withoutShown.fixAddress == keeps, "without the preview's address: the one the run reads")
+
+        // The preview showed another address than the camera has now: the run keeps that one, so the step refuses without writing, and
+        // nothing about the address is saved.
+        let shown = CameraAddressing(address: "192.168.77.20", subnetMask: "255.255.255.0", gateway: "192.168.77.1")
+        var moved = read
+        BridgeEngine.chooseFixAddress(CameraSetupOptions(fixAddress: true, shownAddress: shown), read: &moved)
+        #expect(moved.fixAddress == shown)
+        #expect(backup(moved).internetWatch?.fixedAddress == nil)
+        // Chosen where it is not offered: nothing changes.
+        var none = CameraSetupRead()
+        none.readings[.internetWatch] = CameraSetupReading(state: .willChange, changes: [CameraSetupChange(label: "DNS", now: "8.8.8.8", after: "the bridge")])
+        let before = none.readings
+        BridgeEngine.chooseFixAddress(CameraSetupOptions(fixAddress: true, shownAddress: keeps), read: &none)
+        #expect(none.readings == before && none.fixAddress == nil)
+
+        // The ONVIF rule: the last run's Watch refused, for the camera's own reasons.
+        let now = Date(timeIntervalSince1970: 1_792_224_000)
+        var camera = CameraConfiguration(name: "Porch", kind: .camera, vendor: .onvif, endpoint: CameraEndpoint(host: "192.168.77.22"), username: "admin")
+        #expect(!BridgeEngine.watchRefusedLastRun(camera))
+        camera.setupState = CameraSetupState(started: now, applied: now, steps: [.init(id: .internetWatch, status: .refused, detail: "the camera kept its own DNS servers")])
+        #expect(BridgeEngine.watchRefusedLastRun(camera))
+        camera.setupState?.steps[0].detail = CameraAdapterError.notPermittedReason
+        #expect(!BridgeEngine.watchRefusedLastRun(camera), "an account that may not change it would not be helped by a fixed address")
+        camera.setupState?.steps[0] = .init(id: .internetWatch, status: .done)
+        #expect(!BridgeEngine.watchRefusedLastRun(camera))
+    }
+
     @Test func aStepsLoginIsTheOneItsReadWentThrough() {
         var read = CameraSetupRead()
         read.fresh.timeZone = CameraTimeZoneBackup(method: .reolinkAPI, value: "1")

@@ -1,7 +1,9 @@
 // "Change it by hand" on the page (screens/manual-help.js): the bridge's help for a step of Set up for Camera Bridge the camera refused or does
 // not support (camera-setup.js) and for the Security card's findings, the Internet guard's "Not watched" among them (security.js). A menu path
-// the bridge does not call confirmed always shows "Menu names differ between models", in the fake browser.
+// the bridge does not call confirmed always shows "Menu names differ between models", in the fake browser. The helps drawn here are the
+// bridge's own (support/manual-help-fixtures.json, written and checked by BridgeEngine's CameraManualHelpTests), so they can't drift from it.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
 import { installFakeBrowser } from './support/fake-browser.mjs';
 
@@ -26,38 +28,40 @@ function all(root, match) {
 const byClass = (root, name) => all(root, (node) => node.classList.contains(name));
 const tag = (root, name) => all(root, (node) => node.localName === name);
 
+const FIXTURES = JSON.parse(readFileSync(new URL('./support/manual-help-fixtures.json', import.meta.url), 'utf8')).helps;
 const BRIDGE = '192.168.77.28';
-/** What the bridge sends for the Reolink doorbell's Watch (CameraManualHelpText): unconfirmed places, the router's way, Check again. */
-const WATCH = {
-  why: `The Internet guard sees a camera’s lookups only while its DNS asks Camera Bridge (${BRIDGE}) and nothing else.`,
-  places: [
-    { app: 'The Reolink app', path: ['Settings', '(your camera)', 'Network Information'], action: 'Set the DNS by hand (not automatic) to the servers below.', confirmed: false },
-    { app: 'The Reolink Client (on a computer)', path: ['Device Settings', 'Network', 'Network Information'], action: 'Set the DNS by hand (not automatic) to the servers below.', confirmed: false },
-  ],
-  values: [{ label: 'DNS', value: 'set by hand, not automatic' }, { label: 'Preferred DNS server', value: BRIDGE }, { label: 'Alternate DNS server', value: BRIDGE }],
-  router: `Or give the camera a fixed address (a DHCP reservation) and have your router hand that camera ${BRIDGE} as its DNS server.`,
-  then: 'Then press Check again on the camera’s Security card.',
-  caveat: 'Menu names differ between models and firmware versions, so look for the closest match.',
-};
+/** The Reolink doorbell's guard (CameraManualHelpText): unconfirmed places, its web page, the router's way, what it asks now, Check again. */
+const WATCH = FIXTURES.reolinkGuard;
+/** A Hikvision's Watch: its menu confirmed, its web page, what it asks now, and its address to keep and reserve. */
+const HIKVISION = FIXTURES.hikvisionWatch;
+/** A Tapo's Watch: the Tapo app's path, no web page. */
+const TAPO = FIXTURES.tapoWatch;
 /** A confirmed path (the IPCamera Web family's own page). */
-const CLOUD = {
-  why: 'The camera didn’t take the change.',
-  places: [{ app: 'The camera’s web page', path: ['Configuration', 'Services Security', 'P2P'], action: 'Turn off Enable Mobile Monitoring.', confirmed: true }],
-  values: [{ label: 'Enable Mobile Monitoring', value: 'off' }],
-};
+const CLOUD = FIXTURES.ipcamWebCloud;
+
+test('the fixtures are the bridge’s own helps', () => {
+  assert.match(WATCH.why, /^The Internet guard sees a camera’s lookups only while its DNS asks Camera Bridge \(192\.168\.77\.28\)/);
+  assert.equal(WATCH.places[0].app, 'The Reolink app');
+  assert.equal(HIKVISION.places[0].confirmed, true);
+  assert.equal(CLOUD.places[0].action, 'Turn off Enable Mobile Monitoring.');
+});
 
 test('the bridge’s help reads as why, where (each menu joined by ›), what to set, the router’s way and what to do next', () => {
   const view = help.manualHelpView(WATCH);
   assert.equal(view.why, WATCH.why);
-  assert.deepEqual(view.places.map((place) => place.path.join(' › ')), ['Settings › (your camera) › Network Information', 'Device Settings › Network › Network Information']);
+  assert.deepEqual(view.places.map((place) => place.path.join(' › ')),
+    ['Settings › (your camera) › Network Information', 'Device Settings › Network › Network Information › Network Settings', 'Settings (the gear) › Network Settings › Set Up']);
   const block = help.manualHelpBlock(view);
   assert.equal(block.localName, 'details');
   assert.ok(!block.open, 'closed until opened');
   assert.equal(tag(block, 'summary')[0].textContent, 'Change it by hand');
   assert.match(block.textContent, /The Reolink app: Settings › \(your camera\) › Network Information\. Set the DNS by hand/);
-  const values = tag(block, 'dd').map((node) => node.textContent);
+  const values = tag(block, 'dd').map((node) => byClass(node, 'manual-value')[0].textContent);
   assert.deepEqual(values, ['set by hand, not automatic', BRIDGE, BRIDGE], 'the bridge’s own address to type in');
-  assert.match(block.textContent, /On your router: Or give the camera a fixed address/);
+  assert.match(block.textContent, /On your router: Or have your router hand this camera 192\.168\.77\.28 as its DNS server/);
+  assert.equal(tag(tag(block, 'ol')[0], 'li').length, 3, 'the camera’s places are the steps; the router is another way, not a step');
+  const order = block.childNodes.map((node) => node.className || node.localName);
+  assert.ok(order.indexOf('manual-values') < order.indexOf('manual-router'), 'what to type on the camera comes right after where');
   assert.match(block.textContent, /Then press Check again/);
   assert.match(block.textContent, /Menu names differ between models/);
 });
@@ -78,10 +82,112 @@ test('nothing usable is no help; odd entries are left out, and nothing is drawn 
   for (const raw of [null, undefined, 'x', 3, {}, { places: 'no' }, { why: '  ' }]) assert.equal(help.manualHelpView(raw), null, JSON.stringify(raw));
   const view = help.manualHelpView({ why: 'Why.', places: [null, { app: 'A' }, { app: 'B', action: 'Do it.', path: ['x', 3, ' '] }], values: [{ label: 'L' }, { label: 'L', value: 'V' }] });
   assert.deepEqual(view.places, [{ app: 'B', path: ['x'], action: 'Do it.', confirmed: false }]);
-  assert.deepEqual(view.values, [{ label: 'L', value: 'V' }]);
+  assert.deepEqual(view.values, [{ label: 'L', value: 'V', copy: false }]);
   const block = help.manualHelpBlock(help.manualHelpView({ why: '<b>bold</b>.', places: [] , router: 'r.' }));
   assert.equal(tag(block, 'b').length, 0, 'text stays text');
   assert.equal(help.manualHelpBlock(null), null);
+});
+
+// MARK: Pointing the DNS at Camera Bridge by hand
+
+test('the camera’s own page opens from a button, in a new tab that can’t reach back; a camera without one has the app’s path instead', () => {
+  const view = help.manualHelpView(HIKVISION);
+  assert.deepEqual(view.link, { label: 'Open the camera’s web page', url: 'http://192.168.77.120/' });
+  const block = help.manualHelpBlock(view);
+  const links = byClass(block, 'manual-link');
+  assert.equal(links.length, 1);
+  assert.equal(links[0].localName, 'a');
+  assert.equal(links[0].textContent, 'Open the camera’s web page');
+  assert.equal(links[0].getAttribute('href'), 'http://192.168.77.120/');
+  assert.equal(links[0].getAttribute('target'), '_blank');
+  assert.equal(links[0].getAttribute('rel'), 'noopener noreferrer');
+  const tapo = help.manualHelpBlock(help.manualHelpView(TAPO));
+  assert.equal(byClass(tapo, 'manual-link').length, 0, 'a Tapo has no web page');
+  assert.match(tapo.textContent, /The Tapo app: \(your camera\) › Device Settings › Advanced Settings › Network Settings › Static IP\./);
+});
+
+test('only an http or https address with no one’s name or password in it is a link', () => {
+  for (const url of ['javascript:alert(1)', 'data:text/html,x', 'ftp://192.168.77.120/', 'http://admin:pw@192.168.77.120/', '//192.168.77.120/', 'not a url', 3, null]) {
+    assert.equal(help.manualHelpView({ ...HIKVISION, link: { label: 'Open the camera’s web page', url } }).link, null, String(url));
+  }
+  assert.equal(help.manualHelpView({ ...HIKVISION, link: 'http://192.168.77.120/' }).link, null);
+  assert.equal(help.manualHelpView({ ...HIKVISION, link: { url: 'https://192.168.77.120:8443/' } }).link.label, 'Open the camera’s web page', 'the page’s own words');
+});
+
+test('what it asks now and what to change: “Right now it asks A and B. Change both to C.”', () => {
+  const block = help.manualHelpBlock(help.manualHelpView(HIKVISION));
+  const line = byClass(block, 'manual-current')[0];
+  assert.equal(line.textContent, 'Right now it asks 192.168.77.1 and 192.0.2.53. Change both to 192.168.77.28.');
+  assert.equal(help.MANUAL_TEXT.current(['192.168.77.1'], BRIDGE), 'Right now it asks 192.168.77.1. Change both to 192.168.77.28.');
+  assert.equal(help.MANUAL_TEXT.current(['192.168.77.1', '192.0.2.53', '192.0.2.54'], BRIDGE),
+    'Right now it asks 192.168.77.1, 192.0.2.53 and 192.0.2.54. Change both to 192.168.77.28.');
+  const unread = help.manualHelpBlock(help.manualHelpView({ ...HIKVISION, current: [] }));
+  assert.equal(byClass(unread, 'manual-current').length, 0, 'not read: nothing said');
+});
+
+test('the addresses to type have Copy buttons: the clipboard where the browser has it', async () => {
+  const written = [];
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { writeText: async (text) => { written.push(text); } } }, configurable: true });
+  try {
+    const block = help.manualHelpBlock(help.manualHelpView(HIKVISION));
+    const buttons = byClass(block, 'manual-copy');
+    assert.equal(buttons.length, 2, 'the two DNS servers, not the mode');
+    assert.ok(buttons.every((button) => button.localName === 'button' && button.getAttribute('type') === 'button' && button.textContent === 'Copy'));
+    assert.equal(buttons[0].getAttribute('aria-label'), 'Copy Preferred DNS server');
+    buttons[0].click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(written, [BRIDGE]);
+    assert.equal(buttons[0].textContent, 'Copied');
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', saved);
+  }
+});
+
+test('without the clipboard (the box’s page is plain HTTP), Copy selects the value, and copies it where the browser still can', async () => {
+  const value = help.manualHelpBlock(help.manualHelpView(HIKVISION));
+  const target = byClass(value, 'manual-value')[1];
+  const selected = [];
+  const selection = { removeAllRanges() { selected.length = 0; }, addRange(range) { selected.push(range.node); } };
+  const range = () => ({ node: null, selectNodeContents(node) { this.node = node; } });
+  assert.equal(await help.copyText(BRIDGE, target, { clipboard: undefined, selection, range, exec: () => false }), 'selected');
+  assert.deepEqual(selected, [target], 'the value alone, ready to copy');
+  assert.equal(await help.copyText(BRIDGE, target, { clipboard: undefined, selection, range, exec: (command) => command === 'copy' }), 'copied');
+  const refused = { writeText: async () => { throw new Error('NotAllowedError'); } };
+  assert.equal(await help.copyText(BRIDGE, target, { clipboard: refused, selection, range, exec: () => false }), 'selected', 'a refused clipboard too');
+  assert.equal(await help.copyText(BRIDGE, target, { clipboard: undefined, selection: null, range, exec: () => false }), 'failed');
+  assert.equal(help.MANUAL_TEXT.copied, 'Copied');
+  assert.match(help.MANUAL_TEXT.selected, /^Selected/);
+});
+
+test('a camera whose DNS stays only with a fixed address: keep its address as it is, and reserve it in the router', () => {
+  const block = help.manualHelpBlock(help.manualHelpView(HIKVISION));
+  assert.equal(byClass(block, 'manual-keep')[0].textContent, 'Keep its address as it is: 192.168.77.120, mask 255.255.255.0, gateway 192.168.77.1.');
+  assert.equal(byClass(block, 'manual-reserve')[0].textContent,
+    'Reserve 192.168.77.120 for this camera in your router (its hardware address is 02:00:00:00:00:21).');
+  const bare = help.manualHelpView({ ...HIKVISION, keep: { address: '192.168.77.120' }, reserve: { address: '192.168.77.120' } });
+  assert.equal(byClass(help.manualHelpBlock(bare), 'manual-keep')[0].textContent, 'Keep its address as it is: 192.168.77.120.');
+  assert.equal(byClass(help.manualHelpBlock(bare), 'manual-reserve')[0].textContent, 'Reserve 192.168.77.120 for this camera in your router.');
+  const odd = help.manualHelpView({ ...HIKVISION, keep: { address: 'x', mask: '255.255.255.0' }, reserve: { address: '192.168.77.120', mac: 'nope' } });
+  assert.equal(odd.keep, null, 'not an address: no line');
+  assert.deepEqual(odd.reserve, { address: '192.168.77.120', mac: null });
+  assert.equal(byClass(help.manualHelpBlock(help.manualHelpView(WATCH)), 'manual-keep').length, 0, 'a Reolink keeps its DNS on DHCP');
+});
+
+test('the warnings that apply are listed', () => {
+  const block = help.manualHelpBlock(help.manualHelpView(TAPO));
+  const items = tag(byClass(block, 'manual-warnings')[0], 'li').map((node) => node.textContent);
+  assert.deepEqual(items, TAPO.warnings);
+  assert.ok(items.some((text) => /factory reset/.test(text)));
+});
+
+test('nothing the bridge sends for the DNS help becomes markup', () => {
+  const evil = '<img src=x onerror=alert(1)>';
+  const block = help.manualHelpBlock(help.manualHelpView({ ...HIKVISION, current: [evil], warnings: [evil], link: { label: evil, url: 'http://192.168.77.120/' },
+    reserve: { address: '192.168.77.120', mac: evil }, values: [{ label: evil, value: evil, copy: true }] }));
+  assert.equal(tag(block, 'img').length, 0);
+  assert.ok(block.textContent.includes(evil), 'shown as text');
+  assert.equal(byClass(block, 'manual-link')[0].textContent, evil);
 });
 
 // MARK: Set up for Camera Bridge
@@ -129,6 +235,9 @@ test('not watched: the guard’s section says how to point the camera’s DNS at
   assert.match(blocks[0].textContent, new RegExp(BRIDGE.replaceAll('.', '\\.')));
   assert.match(blocks[0].textContent, /Menu names differ between models/);
   assert.match(blocks[0].textContent, /Then press Check again/);
+  assert.equal(byClass(blocks[0], 'manual-link')[0].getAttribute('href'), 'http://192.168.77.31/', 'the doorbell’s own page');
+  assert.match(blocks[0].textContent, /Right now it asks 192\.168\.77\.1 and 192\.0\.2\.53\. Change both to 192\.168\.77\.28\./);
+  assert.equal(byClass(blocks[0], 'manual-copy').length, 2);
   const cant = securityCard(security([NOT_WATCHED]), { canSetUp: false });
   assert.equal(byClass(byClass(cant.el, 'sec-guard')[0], 'manual-help').length, 1, 'also where the setup does not work with the camera');
 });

@@ -5,10 +5,11 @@
 import { get, getBytes } from '../api.js';
 import { h, replace, svg } from '../dom.js';
 import { icon } from '../icons.js';
-import { cameraList, subscribe } from '../store.js';
+import { cameraList, store, subscribe } from '../store.js';
 import { stampText } from '../stamp.js';
 import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
 import { createZoom } from '../live/zoom.js';
+import { createStraightenedView, isOn } from '../live/straighten.js';
 import { createPanTiltPad } from '../live/pan-tilt.js';
 import { createMonitorSide, createNightVisionButtons } from './night-vision.js';
 import { drawSecurityDot } from './security.js';
@@ -73,6 +74,9 @@ function setText(el, text) {
   if (el.textContent !== text) el.textContent = text;
 }
 
+/** A picture correction as text, to tell when it changed ('' while off). */
+const correctionText = (c) => (isOn(c) ? `${Number(c.straighten) || 0},${Number(c.level) || 0}` : '');
+
 export function renderNVR({ params, navigate, setTitle }) {
   setTitle('Monitor');
   const initialMs = parseEpochMs(params?.[0]);
@@ -111,11 +115,13 @@ export function renderNVR({ params, navigate, setTitle }) {
   // status.nvr.pause of a camera, from the page's store (kept up to date by the camera events): 'folderMissing' tells the cell that a 410 means
   // the recordings drive is gone, not that retention removed a part (T08 D.6), so the tile keeps its picture and probes for the drive.
   const pauseOf = (id) => cameraList().find((camera) => camera.id === id)?.status?.nvr?.pause ?? null;
+  // The camera's picture correction (its page's Straighten the picture), as the page's store has it.
+  const correctionOf = (id) => store.cameras.get(id)?.pictureCorrection ?? null;
 
   function makeCell(cameraId) {
     const cell = createCell({
       cameraId, stage: stageFor(cameraId), catalog, fetcher, clock: playbackClock,
-      createSurface: (options) => new MseSurface(options), leadLimitBytes: GRID_LEAD_LIMIT_BYTES, getPause: pauseOf,
+      createSurface: (options) => new MseSurface(options), leadLimitBytes: GRID_LEAD_LIMIT_BYTES, getPause: pauseOf, getCorrection: correctionOf,
     });
     return budgetedCell(cell, { id: cameraId, dispatcher, onRequest: () => controller?.noteRequest() });
   }
@@ -127,7 +133,8 @@ export function renderNVR({ params, navigate, setTitle }) {
   // Saving a clip: the playhead is the end (the newest recorded moment while live or on snapshots). On the wall the person ticks the cameras (any
   // of every page); with one camera filling the wall, the clip is that camera's.
   const clip = createClip({
-    cameras: () => cameraList().filter((camera) => soloId === null || camera.id === soloId).map((camera) => ({ id: camera.id, name: camera.name })),
+    cameras: () => cameraList().filter((camera) => soloId === null || camera.id === soloId)
+      .map((camera) => ({ id: camera.id, name: camera.name, pictureCorrection: camera.pictureCorrection })),
     endMs: () => { const t = controller?.view().transport; return !t || t.mode === 'snapshots' || t.mode === 'live' ? catalog.serverNow() : t.positionMs; },
     onChange: () => { if (controller) render(); },
   });
@@ -219,7 +226,35 @@ export function renderNVR({ params, navigate, setTitle }) {
       setSolo(soloId === tile.id ? null : tile.id);
     });
     return { el, media, snaps, front: 0, snapshotLoaded: false, link, chip, note, title, detail, retry, busy, caption, summary, look: null,
-      liveVideo, flag, battery, batteryKey: '', label, sound, player: null, alertTimer: null, snapshotMs: null, nameSlot, placed: '' };
+      liveVideo, flag, battery, batteryKey: '', label, sound, player: null, alertTimer: null, snapshotMs: null, nameSlot, placed: '',
+      correction: null, straightened: null, straightenedAs: null };
+  }
+
+  /**
+   * The tile's picture straightened as the camera's page says (js/live/straighten.js), followed in place when it is saved there (in this
+   * browser or another), and drawn again when the wall's Fit or Fill changes (a canvas takes the picture's fit when it is drawn, and a paused
+   * picture brings no frame): the live video's (straightenLive) and the recording's (the cell's). Nothing at all for a camera that is never
+   * straightened. The snapshots come straightened from the bridge.
+   */
+  function drawCorrection(parts, camera) {
+    const correction = camera?.pictureCorrection ?? null;
+    const key = `${correctionText(correction)}|${grid.dataset.fit}`;
+    if (key === parts.straightenedAs) return;
+    parts.straightenedAs = key;
+    parts.correction = correction;
+    straightenLive(parts);
+    session.cell(parts.el.dataset.id)?.setCorrection(correction);
+  }
+
+  /**
+   * The live video straightened while a live player feeds it: its canvas sits right after the video with its classes, so the wall's rules
+   * for the live video are the canvas's. Without a player the live video is hidden (the tile shows a picture or a recording), and the view
+   * gives back its canvas and WebGL context (a page gets only so many).
+   */
+  function straightenLive(parts) {
+    const correction = parts.player ? parts.correction : null;
+    if (parts.straightened) parts.straightened.set(correction);
+    else if (isOn(correction)) parts.straightened = createStraightenedView({ source: parts.liveVideo, correction });
   }
 
   /**
@@ -264,15 +299,20 @@ export function renderNVR({ params, navigate, setTitle }) {
     drawLabel(parts);
     drawSound(parts);
     drawBattery(parts);
-    drawNameMarks(parts, cameraList().find((camera) => camera.id === tile.id) ?? null);
+    const camera = cameraList().find((candidate) => candidate.id === tile.id) ?? null;
+    drawNameMarks(parts, camera);
+    drawCorrection(parts, camera);
     setText(parts.summary, tile.summary);
   }
 
   function renderTiles(view) {
     const wanted = new Set(view.tiles.map((tile) => tile.id));
     for (const [id, parts] of tileParts) {
-      if (!wanted.has(id)) { parts.player?.destroy(); clearTimeout(parts.alertTimer); parts.el.remove(); tileParts.delete(id); stages.delete(id); }
+      if (!wanted.has(id)) { parts.player?.destroy(); parts.straightened?.destroy(); clearTimeout(parts.alertTimer); parts.el.remove(); tileParts.delete(id); stages.delete(id); }
     }
+    if (soloId !== null && !wanted.has(soloId)) { soloId = null; zoom?.destroy(); zoom = null; }   // the camera left the page
+    // Fit or Fill before the tiles: a straightened picture is drawn again when it changes (drawCorrection) and takes it then.
+    setData(grid, 'fit', pictureFit({ solo: soloId !== null, mosaic, chosen: fit }));
     view.tiles.forEach((tile, index) => {
       let parts = tileParts.get(tile.id);
       if (!parts) { parts = buildTile(tile); tileParts.set(tile.id, parts); }
@@ -280,7 +320,6 @@ export function renderNVR({ params, navigate, setTitle }) {
       updateTile(parts, tile, view.transport.mode !== 'snapshots');
       setData(parts.el, 'sleeps', String(sleeps(tile.id) && soloId !== tile.id));
     });
-    if (soloId !== null && !wanted.has(soloId)) { soloId = null; zoom?.destroy(); zoom = null; }   // the camera left the page
     for (const [id, parts] of tileParts) parts.el.hidden = soloId !== null && id !== soloId;
     drawShape(view);
     setData(grid, 'solo', String(soloId !== null));
@@ -578,8 +617,9 @@ export function renderNVR({ params, navigate, setTitle }) {
     if (!parts) return;
     zoom = createZoom({
       host: parts.media,
-      // The picture on screen: a recording in its stage while one plays, else the live video.
+      // The picture on screen: a recording in its stage while one plays, else the live video; zoomed straightened as the camera's page says.
       getVideo: () => (parts.el.dataset.video === 'true' ? stageFor(id).querySelector('video') : parts.liveVideo),
+      getCorrection: () => correctionOf(id),
       onActive: (zoomed) => setData(parts.el, 'zoomed', String(zoomed)),
     });
   }
@@ -607,6 +647,7 @@ export function renderNVR({ params, navigate, setTitle }) {
       parts.player?.destroy();
       parts.player = null;
       setData(parts.el, 'livevideo', 'false');
+      straightenLive(parts);
     }
   }
 
@@ -620,6 +661,7 @@ export function renderNVR({ params, navigate, setTitle }) {
         onProblem: () => { setData(parts.el, 'livevideo', 'false'); },
       });
       parts.player.setMuted(parts.el.dataset.id !== audibleId);
+      straightenLive(parts);
     }
     const audio = audibleId !== null && ids.includes(audibleId) ? [audibleId] : [];
     const request = openLive(ids, {
@@ -895,7 +937,7 @@ export function renderNVR({ params, navigate, setTitle }) {
       stopLive();
       events.destroy();
       side.destroy();
-      for (const parts of tileParts.values()) clearTimeout(parts.alertTimer);
+      for (const parts of tileParts.values()) { clearTimeout(parts.alertTimer); parts.straightened?.destroy(); }
       stopRendering();
       if (typeof stopModel === 'function') stopModel();
       controller.destroy();

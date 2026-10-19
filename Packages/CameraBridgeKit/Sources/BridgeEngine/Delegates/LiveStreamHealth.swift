@@ -307,11 +307,13 @@ struct TranscodeFailureLadder: Sendable {
     }
 }
 
-/// Blocking codec work (a VideoToolbox session's creation or teardown) off Swift concurrency's cooperative threads, which a
+/// Blocking codec work (a VideoToolbox session's creation or teardown, an ffmpeg child's snapshot straightening) off Swift concurrency's cooperative threads, which a
 /// wedged call would otherwise take for good: with as many wedged calls as the Mac has cores the whole runtime, HomeKit's
 /// handlers included, stops. A call that overruns its deadline is abandoned, left to finish on its own thread.
 enum CodecOffload {
-    private static let queue = DispatchQueue(label: "CameraBridge.LiveCodecOffload", qos: .userInitiated, attributes: .concurrent)
+    /// The label of the queue (its threads are named after it in a backtrace; tests read it to see where a call ran).
+    static let queueLabel = "CameraBridge.LiveCodecOffload"
+    private static let queue = DispatchQueue(label: queueLabel, qos: .userInitiated, attributes: .concurrent)
 
     /// `work` on its own thread; throws `DeadlineExceeded` once `deadline` passes, however long `work` goes on.
     /// `discard` receives what `work` returns after the deadline passed (nobody uses it: tear it down).

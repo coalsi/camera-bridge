@@ -26,10 +26,13 @@ enum FFmpegOneShot {
     }
 }
 
-/// JPEG snapshots and resizing with ffmpeg's mjpeg encoder. Sizes keep the aspect ratio within the bounds and never upscale
-/// (the rule of `PlatformApple.JPEGSnapshot`).
+/// JPEG snapshots, resizing and straightening with ffmpeg's mjpeg encoder. Sizes keep the aspect ratio within the bounds and never
+/// upscale (the rule of `PlatformApple.JPEGSnapshot`).
 enum FFmpegPictures {
     static let timeout = Duration.seconds(15)
+    /// A straightening child's limit (the engine's, `PictureCorrection.snapshotTimeout`): it runs on a thread of its own, and a snapshot
+    /// gives up waiting for it within its own budget anyway (`CorrectedSnapshots`).
+    static let straightenTimeout = PictureCorrection.snapshotTimeout
 
     /// The largest size within the bounds with the source aspect ratio (rounded, at least 1); nil or non-positive bounds are ignored.
     static func fittedSize(width: Int, height: Int, maxWidth: Int?, maxHeight: Int?) -> (width: Int, height: Int) {
@@ -53,14 +56,31 @@ enum FFmpegPictures {
         return data
     }
 
-    /// Downscales a JPEG (or PNG) to fit the bounds as JPEG; returns the input unchanged when it already fits.
-    static func resize(_ data: Data, maxWidth: Int?, maxHeight: Int?, runtime: FFmpegRuntime) throws -> Data {
+    /// Downscales a JPEG (or PNG) to fit the bounds as JPEG (at `quality`, else mjpeg's `-q:v 5`); returns the input unchanged when it already fits.
+    static func resize(_ data: Data, maxWidth: Int?, maxHeight: Int?, quality: Double? = nil, runtime: FFmpegRuntime) throws -> Data {
         guard let size = imageSize(data), size.width > 0, size.height > 0 else { throw MediaCodecError.unsupported("not an image") }
         let target = fittedSize(width: size.width, height: size.height, maxWidth: maxWidth, maxHeight: maxHeight)
         if target.width == size.width && target.height == size.height { return data }
         let output = try FFmpegOneShot.run(runtime: runtime, label: "snapshot resize", arguments: FFmpegArguments.resizeImage(width: max(1, target.width),
-                                                                                                                              height: max(1, target.height)),
+                                                                                                                              height: max(1, target.height),
+                                                                                                                              quality: quality),
                                            input: data, timeout: timeout)
+        guard output.count > 4, output.prefix(2) == Data([0xFF, 0xD8]) else { throw MediaCodecError.noFrame }
+        return output
+    }
+
+    /// Straightens a JPEG (or PNG) by `correction` as a JPEG of the same size ("Straighten the picture": snapshots); an off
+    /// correction hands it back as it is. The four maps of the per-plane warp are `maps`' (made once for each picture size and
+    /// correction, in a private temporary directory, and used again by the next snapshot of the same), and one ffmpeg child does the
+    /// rest (`FFmpegArguments.correctImage`). The warp needs an even width, so a picture of an odd width is warped one pixel wider.
+    static func correctJPEG(_ data: Data, correction: PictureCorrection, runtime: FFmpegRuntime, maps: SnapshotMapCache) throws -> Data {
+        guard let size = imageSize(data), size.width > 0, size.height > 0 else { throw MediaCodecError.unsupported("not an image") }
+        if correction.isOff { return data }
+        let output = try maps.withMaps(for: correction, width: size.width + size.width % 2, height: size.height) { stage in
+            try FFmpegOneShot.run(runtime: runtime, label: "snapshot straighten",
+                                  arguments: FFmpegArguments.correctImage(stage, width: size.width, height: size.height), input: data,
+                                  timeout: straightenTimeout)
+        }
         guard output.count > 4, output.prefix(2) == Data([0xFF, 0xD8]) else { throw MediaCodecError.noFrame }
         return output
     }

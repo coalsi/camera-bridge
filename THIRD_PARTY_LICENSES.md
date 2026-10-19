@@ -2,12 +2,12 @@
 
 Camera Bridge itself is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). It contains, links to or is
 built with the third-party software below, each under its own license. This file is the index; the **full license texts**
-are in [`App/Resources/Acknowledgements.md`](App/Resources/Acknowledgements.md), which is bundled in the app and shown
-under *About > Acknowledgements*. Attribution notices that licenses require are in [NOTICE](NOTICE).
+are in [`Archive/mac-app/App/Resources/Acknowledgements.md`](Archive/mac-app/App/Resources/Acknowledgements.md), which was
+bundled in the Mac app (archived in October 2026) and shown under *About > Acknowledgements*. Attribution notices that licenses require are in [NOTICE](NOTICE).
 
 The PolyForm license applies to Camera Bridge's own code only. It does not change the terms of anything listed here.
 
-## Shipped in the macOS app
+## Shipped in the macOS app (archived October 2026)
 
 | Component | Version | License | Where it is used | Full text |
 |---|---|---|---|---|
@@ -15,10 +15,10 @@ The PolyForm license applies to Camera Bridge's own code only. It does not chang
 | [swift-crypto](https://github.com/apple/swift-crypto) | 3.15.1 | Apache-2.0 | Cryptography (`Crypto`; on macOS this re-exports Apple CryptoKit). | Acknowledgements.md, "swift-crypto" (with its NOTICE) |
 | [swift-asn1](https://github.com/apple/swift-asn1) | 1.7.3 | Apache-2.0 | Dependency of swift-crypto. | Acknowledgements.md, "swift-asn1" (with its NOTICE) |
 | [BigInt](https://github.com/attaswift/BigInt) | 5.7.0 | MIT | Arbitrary-precision integers for SRP pair-setup. | Acknowledgements.md, "BigInt" |
-| [Sparkle](https://github.com/sparkle-project/Sparkle) | 2.10.0 | MIT, plus bundled components under BSD-2-Clause-style, MIT and zlib-style licenses (bsdiff, sais-lite, orlp/ed25519, SUSignatureVerifier) | Software updates (`App/Sources/Updates`). Embedded as `Sparkle.framework`. | Acknowledgements.md, "Sparkle" |
+| [Sparkle](https://github.com/sparkle-project/Sparkle) | 2.10.0 | MIT, plus bundled components under BSD-2-Clause-style, MIT and zlib-style licenses (bsdiff, sais-lite, orlp/ed25519, SUSignatureVerifier) | Software updates (`Archive/mac-app/App/Sources/Updates`). Embedded as `Sparkle.framework`. | Acknowledgements.md, "Sparkle" |
 | [go2rtc](https://github.com/AlexxIT/go2rtc) | 1.9.14 | MIT (built from Go modules under their own permissive licenses, listed in its `go.mod`) | Helper program for cloud cameras and consoles (Ring, Nest, Wyze, Tuya, UniFi RTSPS). Bundled unmodified as `Contents/Helpers/go2rtc` and run as a separate process; fetched and checksum-verified by `Tools/fetch-go2rtc.sh`. | Acknowledgements.md, "go2rtc"; [docs/third-party/go2rtc.md](docs/third-party/go2rtc.md) |
 
-Versions are those pinned in `Packages/CameraBridgeKit/Package.resolved`, `project.yml` and `Tools/fetch-go2rtc.sh` (Camera Bridge OS: `linux/os/fetch-go2rtc.sh`, `linux/helpers/wyze-lake/go.mod`, `linux/helpers/eufy-bridge/pins.env` and `package-lock.json`).
+Versions are those pinned in `Packages/CameraBridgeKit/Package.resolved`, `Archive/mac-app/project.yml` and `Tools/fetch-go2rtc.sh` (Camera Bridge OS: `linux/os/fetch-go2rtc.sh`, `linux/helpers/wyze-lake/go.mod`, `linux/helpers/eufy-bridge/pins.env` and `package-lock.json`).
 
 Apple's system frameworks (CryptoKit, Network, VideoToolbox, AVFoundation, SwiftUI and others) and the `dns_sd`
 (Bonjour) API are used through their public interfaces under Apple's SDK terms; none of their code is copied.
@@ -103,5 +103,5 @@ Protocol independently and is not part of Apple's MFi Program; it is not affilia
 
 ## Updating this file
 
-When a dependency is added or its version changes, update the table, `App/Resources/Acknowledgements.md` (and its
-fallback in `App/Sources/Model/Acknowledgements.swift`) and, where the license asks for it, `NOTICE`.
+When a dependency is added or its version changes, update the table and, where the license asks for it, `NOTICE`. The Mac
+app's own notices (`Archive/mac-app/App/Resources/Acknowledgements.md`) are archived with it and are not kept up to date.

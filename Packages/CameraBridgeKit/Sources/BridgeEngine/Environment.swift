@@ -171,17 +171,22 @@ public struct GuardReport: Codable, Sendable, Equatable {
         public var last24h: Int
         /// The names it asked for in the last 7 days, most asked first (at most 50).
         public var names: [Lookup]
+        /// Its questions that never leave the home network in the last 7 days (its own network's names, reverse lookups of its addresses,
+        /// questions about the DNS server): counted, never named, and not among `today`, `last24h` and `names`. They show the camera asks
+        /// the box, which gold needs (`GuardEvidence.lookupSeen`). 0 when the box does not say (one built before 2026-10-19).
+        public var local: Int
 
-        public init(address: String, level: GuardLevel?, since: Date? = nil, today: Int, last24h: Int, names: [Lookup]) {
+        public init(address: String, level: GuardLevel?, since: Date? = nil, today: Int, last24h: Int, names: [Lookup], local: Int = 0) {
             self.address = address
             self.level = level
             self.since = since
             self.today = today
             self.last24h = last24h
             self.names = names
+            self.local = local
         }
 
-        private enum CodingKeys: String, CodingKey { case address, level, since, today, last24h, names }
+        private enum CodingKeys: String, CodingKey { case address, level, since, today, last24h, names, local }
 
         public init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -195,6 +200,7 @@ public struct GuardReport: Codable, Sendable, Equatable {
             today = GuardReport.count(container, .today)
             last24h = GuardReport.count(container, .last24h)
             names = GuardReport.elements(container, .names)
+            local = GuardReport.count(container, .local)
         }
     }
 

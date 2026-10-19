@@ -1,10 +1,11 @@
 // "Set up for Camera Bridge": one camera made right for the bridge in one step, with a look before any change, one backup and a way back
 // (docs/superpowers/specs/2026-10-16-camera-setup-design.md). The page never runs it by itself: the person presses the button, sees every
-// change, and confirms. Each POST is sent once and never retried.
+// change, and confirms. Each POST is sent once and never retried. "Restart the camera now" (in the setup's result and on the Security card)
+// is there only while the camera waits for a restart to apply a change it took, and restarts it only once pressed and confirmed.
 import { api } from '../api.js';
 import { h, modal, replace, spinner } from '../dom.js';
 import { icon } from '../icons.js';
-import { manualHelpBlock, manualHelpView } from './manual-help.js';
+import { MANUAL_TEXT, manualHelpBlock, manualHelpView } from './manual-help.js';
 import { GUARD_TEXT } from './security.js';
 
 /** Every name the setup shows, in one table, so it can be renamed in one place. */
@@ -19,7 +20,8 @@ export const SETUP_TEXT = {
   watchNote: `“${GUARD_TEXT.watchStep}” points the camera’s internet lookups at Camera Bridge, which blocks every one, so the maker’s app stops working `
     + 'away from home. Camera Bridge, Apple Home and your recordings keep working.',
   /** What Restore writes back. */
-  restoreWhat: `its streams, its own labels, its clock, its internet lookups (${GUARD_TEXT.watch}), its video password and extra services, and its cloud and UPnP`,
+  restoreWhat: `its streams, its own labels, its clock, its internet lookups (${GUARD_TEXT.watch}) and any address it fixed (back on DHCP), its video password `
+    + 'and extra services, and its cloud and UPnP',
 };
 
 /** The cameras the setup works with (the bridge reaches them through their own API or ONVIF). */
@@ -27,6 +29,87 @@ export const SETUP_VENDORS = new Set(['hikvision', 'onvif', 'reolink', 'amcrest'
 
 export const SETUP_READ_TIMEOUT_MS = 60_000;
 export const SETUP_TIMEOUT_MS = 180_000;
+/** The camera answers a restart before it goes offline. */
+export const RESTART_TIMEOUT_MS = 30_000;
+
+/** "Restart the camera now": its words, in one table. */
+export const RESTART_TEXT = {
+  button: 'Restart the camera now',
+  why: 'The camera says some changes apply after it restarts.',
+  confirm: (name) => `Restart it now? “${name}” goes offline for about a minute: no live view and no recording until it is back.`,
+  yes: 'Restart',
+  cancel: 'Cancel',
+  working: 'Asking the camera to restart…',
+  sent: 'The camera is restarting. It is back in about a minute.',
+  failed: 'The camera wasn’t restarted. Try again.',
+};
+
+/** "Fix its address so the DNS stays": its words, in one table. `a` is the camera's address as the bridge read it (`address`, `subnetMask`,
+ *  `gateway`, and `hardwareAddress` when the camera showed one). */
+export const FIX_ADDRESS_TEXT = {
+  choice: (address) => `Fix its address so the DNS stays (keeps ${address})`,
+  keeps: (a) => `Keeps its address ${a.address}, mask ${a.subnetMask} and gateway ${a.gateway} as they are, instead of taking them from the router `
+    + `(DHCP), so its DNS stays pointed at Camera Bridge. “${SETUP_TEXT.restore}” puts DHCP back.`,
+  reserve: (a) => MANUAL_TEXT.reserve(a.address, a.hardwareAddress),
+};
+
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const MAC = /^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$/i;
+const isIPv4 = (text) => typeof text === 'string' && IPV4.test(text) && text.split('.').every((part) => Number(part) <= 255);
+
+/** An address the bridge read (`CameraAddressing`) as the page may show it: an IPv4 address, mask and gateway, and a hardware address only
+ *  when it is one; null for anything else. */
+function addressing(value) {
+  if (!value || !isIPv4(value.address)) return null;
+  const mask = isIPv4(value.subnetMask) ? value.subnetMask : null;
+  const gateway = isIPv4(value.gateway) ? value.gateway : null;
+  const hardwareAddress = typeof value.hardwareAddress === 'string' && MAC.test(value.hardwareAddress) ? value.hardwareAddress : null;
+  return { address: value.address, subnetMask: mask, gateway, hardwareAddress };
+}
+
+/** A preview step's "Fix its address so the DNS stays" offer (its address whole, and what changes with it), or null where the bridge does
+ *  not offer it. */
+function fixAddressOffer(step) {
+  const keeps = addressing(step?.fixAddress?.addressing);
+  if (!keeps?.subnetMask || !keeps.gateway) return null;
+  const changes = Array.isArray(step.fixAddress.changes) ? step.fixAddress.changes.filter((c) => c && c.label) : [];
+  return { keeps, changes };
+}
+
+/** The preview with the person's choice: where the bridge offers it and it is chosen, "Watch its internet" will change the camera's address
+ *  (kept as it is) and its DNS, as the offer says. Without the choice the report is as the bridge sent it. */
+export function withFixAddress(report, chosen) {
+  if (!chosen || !Array.isArray(report?.steps)) return report;
+  return { ...report, steps: report.steps.map((step) => {
+    const offer = fixAddressOffer(step);
+    return offer ? { ...step, status: 'willChange', changes: offer.changes, detail: null, manualHelp: null } : step;
+  }) };
+}
+
+/** The preview's heading and first sentence for `camera` (`name`): what changes; with only "Fix its address so the DNS stays" on offer and not
+ *  chosen, that nothing changes unless it is; else that nothing is to change. `open` says the dialog offers something to apply or choose. */
+export function previewText(report, chosen, name) {
+  const info = summarize(withFixAddress(report, chosen));
+  const offered = (report?.steps || []).some((step) => fixAddressOffer(step));
+  if (info.toChange) {
+    return { title: `${SETUP_TEXT.button}?`, open: true,
+      text: `Here is what changes on “${name}”. Nothing has changed yet. The current settings are saved first, so “${SETUP_TEXT.restore}” can put every one back.` };
+  }
+  if (offered) {
+    return { title: `${SETUP_TEXT.button}?`, open: true,
+      text: `Nothing changes on “${name}” unless you choose “Fix its address so the DNS stays” below. The current settings are saved first, so “${SETUP_TEXT.restore}” can put every one back.` };
+  }
+  return { title: 'Nothing to change', open: false, text: `“${name}” is already set up the way Camera Bridge wants it, or the camera can’t change the rest.` };
+}
+
+/** The run's request: confirmed, and with the choice the camera's address as the preview showed it (the bridge changes nothing if the camera
+ *  has another one by then). */
+export function setupRequest(report, chosen) {
+  const offer = chosen ? (report?.steps || []).map(fixAddressOffer).find(Boolean) : null;
+  if (!offer) return { confirm: true };
+  const { address, subnetMask, gateway } = offer.keeps;
+  return { confirm: true, fixAddress: true, keeps: { address, subnetMask, gateway } };
+}
 
 const STATUS = {
   willChange: ['Will change', 'info'],
@@ -62,8 +145,9 @@ export function describeStep(step) {
   let detail = typeof step?.detail === 'string' && step.detail ? step.detail : null;
   if (step?.status === 'notSupported' && detail === 'not supported by this camera') detail = null;   // the status says it
   if (step?.status === 'done' && detail && /^via /.test(detail)) detail = null;                         // how is not news
+  const fixed = addressing(step?.fixedAddress);
   return { id: step?.id, title: step?.title || '', statusText, tone, lines, detail: detail ? sentence(detail) : null, needsRestart: step?.needsRestart === true,
-    manual: manualHelpView(step?.manualHelp) };
+    manual: manualHelpView(step?.manualHelp), fix: fixAddressOffer(step), reserve: fixed ? FIX_ADDRESS_TEXT.reserve(fixed) : null };
 }
 
 /** The dialog's heading after a run or a restore. A step refused without stopping the run (the streams step when the camera still sends
@@ -89,6 +173,8 @@ export function summarize(report) {
     watchAfterStop: Boolean(report?.stoppedAt) && report.stoppedAt !== 'internetWatch'
       && steps.some((s) => s.id === 'internetWatch' && (s.status === 'done' || s.status === 'refused')),
     needsRestart: steps.some((s) => s.needsRestart === true),
+    // A run's change the camera takes "after it restarts" (a restore's result has none waiting on the bridge: nothing to restart from here).
+    restartWaits: steps.some((s) => s.status === 'done' && s.needsRestart === true),
     canRestore: report?.canRestore === true,
     streamRestarted: report?.streamRestarted === true,
     reenable: report?.mayNeedRecordingReEnabled === true,
@@ -113,16 +199,89 @@ function sentence(text) {
   return /[.!?)]$/.test(first) ? first : `${first}.`;
 }
 
-/** The dialog's list of steps: each with its changes, why, and "Change it by hand" under a step the camera refused or does not support. */
-export function stepList(report) {
+/** The dialog's list of steps: each with its changes, why, and "Change it by hand" under a step the camera refused or does not support; the
+ *  router reservation under a step that fixed the camera's address. A preview passes `fixAddress: {chosen, onChange}`: a step the bridge offers
+ *  "Fix its address so the DNS stays" then has its checkbox (off unless chosen). */
+export function stepList(report, { fixAddress = null } = {}) {
   const steps = (report?.steps || []).map(describeStep);
   return h('ul', { class: 'events setup-steps' }, steps.map((step) => h('li', null,
     h('div', null, h('div', { class: 'title' }, step.title),
       step.lines.map((line) => h('div', { class: 'change' }, line)),
       step.detail ? h('div', { class: 'change' }, step.detail) : null,
       step.needsRestart ? h('div', { class: 'change' }, 'Applies after the camera restarts.') : null,
+      step.reserve ? h('div', { class: 'change' }, step.reserve) : null,
+      fixAddress && step.fix ? fixAddressChoice(step.fix, fixAddress) : null,
       manualHelpBlock(step.manual)),
     h('span', { class: `pill ${step.tone}` }, step.statusText))));
+}
+
+/** The checkbox "Fix its address so the DNS stays (keeps <address>)", with what it keeps. */
+function fixAddressChoice(offer, { chosen, onChange }) {
+  const input = h('input', { type: 'checkbox', id: 'fix-address', checked: chosen === true, onchange: (event) => onChange?.(event.target.checked === true) });
+  return h('label', { class: 'check-row fix-address', for: 'fix-address' }, input,
+    h('span', { class: 'text' }, h('span', { class: 'title' }, FIX_ADDRESS_TEXT.choice(offer.keeps.address)),
+      h('span', { class: 'desc' }, FIX_ADDRESS_TEXT.keeps(offer.keeps))));
+}
+
+/** Whether the bridge offers "Restart the camera now" for `camera`: its word (`restartOffered` on the camera resource,
+ *  `BridgeEngine.offersCameraRestart`), never worked out here. */
+export function restartOffered(camera) {
+  return camera?.restartOffered === true;
+}
+
+/**
+ * "Restart the camera now": null unless `offered` (the camera resource's `restartOffered`, or a setup run's result in its dialog). Pressing it
+ * asks first, in place: the camera goes offline for about a minute. Only "Restart" sends `POST cameras/:id/restart`, once, never retried;
+ * `onRestarted()` runs once the camera took it. `send(path)` is for tests.
+ */
+export function restartControl(camera, {
+  offered = restartOffered(camera),
+  send = (path) => api('POST', path, undefined, { timeoutMs: RESTART_TIMEOUT_MS }),
+  onRestarted = null,
+} = {}) {
+  if (!offered || !camera?.id) return null;
+  const host = h('div', { class: 'restart-camera' });
+  let state = 'idle';   // idle, asking, sending, sent
+  let problem = '';
+  const small = (text) => h('p', { class: 'small' }, text);
+  const btn = (text, onclick, extra = '') => h('button', { class: `btn small${extra}`, type: 'button', onclick }, text);
+
+  function draw(focus) {
+    host.dataset.state = state;
+    const main = btn(RESTART_TEXT.button, () => { state = 'asking'; problem = ''; draw('cancel'); });
+    const cancel = btn(RESTART_TEXT.cancel, () => { state = 'idle'; draw('main'); });
+    // While it is sent and once it is, no button is left: the keyboard waits on the line that says what happens.
+    const working = h('span', { tabindex: '-1' }, RESTART_TEXT.working);
+    const sent = h('p', { class: 'small', role: 'status', tabindex: '-1' }, RESTART_TEXT.sent);
+    replace(host,
+      state === 'sent' ? sent : small(RESTART_TEXT.why),
+      state === 'idle' ? h('div', { class: 'row' }, main) : null,
+      state === 'asking' ? [small(RESTART_TEXT.confirm(camera.name || 'The camera')), h('div', { class: 'row' }, cancel, btn(RESTART_TEXT.yes, restart, ' danger'))] : null,
+      state === 'sending' ? h('div', { class: 'row' }, spinner(), working) : null,
+      problem ? h('div', { class: 'banner error', role: 'alert' }, icon('alert'), h('div', { class: 'text' }, problem)) : null);
+    // The keyboard stays with the control as its buttons change.
+    const target = { cancel, main, working, sent }[focus];
+    target?.focus?.();
+  }
+
+  async function restart() {
+    if (state !== 'asking') return;
+    state = 'sending';
+    draw('working');
+    try {
+      await send(`cameras/${camera.id}/restart`);
+      state = 'sent';
+      onRestarted?.();
+      draw('sent');
+    } catch (error) {
+      state = 'idle';
+      problem = (typeof error?.message === 'string' && error.message.trim()) || RESTART_TEXT.failed;
+      draw('main');
+    }
+  }
+
+  draw();
+  return host;
 }
 
 /** One sentence for whatever went wrong. */
@@ -176,22 +335,28 @@ export function cameraSetupDialog(camera, { restore = false } = {}) {
       }
     }
 
-    function preview(report) {
+    // "Fix its address so the DNS stays": off unless the person ticks it in the preview.
+    let fixChosen = false;
+
+    function preview(report, { focusChoice = false } = {}) {
       lock(false);
-      const info = summarize(report);
+      const shown = withFixAddress(report, fixChosen);
+      const info = summarize(shown);
+      const words = previewText(report, fixChosen, camera.name);
       replace(box,
-        h('h2', null, info.toChange ? `${SETUP_TEXT.button}?` : 'Nothing to change'),
-        h('p', null, info.toChange
-          ? `Here is what changes on “${camera.name}”. Nothing has changed yet. The current settings are saved first, so “${SETUP_TEXT.restore}” can put every one back.`
-          : `“${camera.name}” is already set up the way Camera Bridge wants it, or the camera can’t change the rest.`),
-        stepList(report),
+        h('h2', null, words.title),
+        h('p', null, words.text),
+        stepList(shown, { fixAddress: { chosen: fixChosen, onChange: (value) => { fixChosen = value; preview(report, { focusChoice: true }); } } }),
         info.streamsWillChange ? h('p', { class: 'small muted' }, 'The camera restarts its stream, so recording has a short gap.') : null,
         info.watchWillChange ? h('p', { class: 'small muted' }, SETUP_TEXT.watchNote) : null,
-        h('p', { class: 'small muted' }, 'Camera Bridge never changes the camera’s address, ports, users or passwords, and never restarts it.'),
+        h('p', { class: 'small muted' }, 'Camera Bridge never changes the camera’s address unless you choose to fix it as it is, never changes its ports, users '
+          + 'or passwords, and never restarts it unless you ask.'),
         buttons(
           report?.canRestore ? button(`${SETUP_TEXT.restore}…`, () => confirmRestore(), { danger: true }) : null,
-          button(info.toChange ? 'Cancel' : 'Close', () => close(state.outcome), { autofocus: true }),
-          info.toChange ? button('Apply changes', apply, { primary: true }) : null));
+          button(words.open ? 'Cancel' : 'Close', () => close(state.outcome), { autofocus: !focusChoice }),
+          info.toChange ? button('Apply changes', () => apply(setupRequest(report, fixChosen)), { primary: true }) : null));
+      // The keyboard stays on the choice as the preview redraws.
+      if (focusChoice) box.querySelector?.('#fix-address')?.focus?.();
     }
 
     function result(report, { restored = false } = {}) {
@@ -204,7 +369,8 @@ export function cameraSetupDialog(camera, { restore = false } = {}) {
         restored && info.refused ? h('div', { class: 'banner warning' }, icon('alert'), h('div', { class: 'text' },
           'The saved values the camera didn’t take back are kept, so you can try again.')) : null,
         stepList(report),
-        info.needsRestart ? h('p', { class: 'small muted' }, 'The camera says some changes apply after it restarts. Restart it from its own web page when it suits you; Camera Bridge doesn’t restart cameras.') : null,
+        info.restartWaits ? restartControl(camera, { offered: true }) : info.needsRestart
+          ? h('p', { class: 'small muted' }, 'The camera says some changes apply after it restarts. Restart it from its own web page when it suits you.') : null,
         info.streamRestarted ? h('p', { class: 'small muted' }, 'The camera’s stream restarted, so recording had a short gap.') : null,
         info.reenable ? h('p', { class: 'small muted' }, 'Home recording may need to be turned off and on again for this camera in the Home app.') : null,
         buttons(
@@ -212,10 +378,10 @@ export function cameraSetupDialog(camera, { restore = false } = {}) {
           button('Done', () => close(state.outcome), { primary: true, autofocus: true })));
     }
 
-    async function apply() {
+    async function apply(request) {
       working('Changing the camera’s settings…', 'Don’t close this page. It can take up to a minute.');
       try {
-        const report = await api('POST', `cameras/${camera.id}/setup`, { confirm: true }, { timeoutMs: SETUP_TIMEOUT_MS });
+        const report = await api('POST', `cameras/${camera.id}/setup`, request, { timeoutMs: SETUP_TIMEOUT_MS });
         state.outcome = summarize(report).done ? 'applied' : state.outcome;
         result(report);
       } catch (error) {

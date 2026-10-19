@@ -3,14 +3,15 @@ import Foundation
 
 /// The camera's DNS servers before the internet guard pointed them at the bridge (Watch), as `restoreDNS(_:)` puts them back.
 public struct CameraDNSBackup: Sendable, Codable, Equatable {
-    /// `.hikvisionISAPI`, `.onvifMinimal`, `.reolinkAPI` (a Reolink, read through its `LocalLink`), or `.ipcWebAPI` (a camera that speaks
-    /// the IP camera web API, read through its `LANConfig`).
+    /// `.hikvisionISAPI`, `.onvifMinimal`, `.reolinkAPI` (a Reolink, read through its `LocalLink`), `.ipcWebAPI` (a camera that speaks
+    /// the IP camera web API, read through its `LANConfig`), or `.dahuaCGI` (a Dahua, Amcrest or Lorex camera, read through its
+    /// `Network` configuration).
     public var method: CameraConfigMethod
-    /// The camera took its DNS servers from DHCP. Always false through ISAPI.
+    /// The camera took its DNS servers from DHCP. Through ISAPI: its address is DHCP's (`addressingType` dynamic), its DNS servers with it.
     public var fromDHCP: Bool
     /// ONVIF: the servers set by hand (`DNSManual`), in order (a camera on DHCP may have none). ISAPI: the `PrimaryDNS` and `SecondaryDNS`
     /// addresses as the camera had them, "0.0.0.0" included. Reolink: its `dns1` and `dns2` as it had them. The IP camera web API: its
-    /// `DNS1` and `DNS2` as it had them.
+    /// `DNS1` and `DNS2` as it had them. Dahua's CGI: the interface's `DnsServers[0]`, `[1]` as the camera had them, "0.0.0.0" included.
     public var servers: [String]
     /// ONVIF: the search domains, written back with the servers (nil: none known).
     public var searchDomains: [String]?
@@ -23,15 +24,29 @@ public struct CameraDNSBackup: Sendable, Codable, Equatable {
     /// that API (`method` `.ipcWebAPI`): Restore writes `DNS1` and `DNS2` back through it, with the rest of `LANConfig` as the camera has it
     /// then (`CameraSettingsService.restoreIPCWebDNS`). nil: none read (another camera, or a backup saved before 2026-10-18).
     public var ipcWebAPI: [String: String]?
+    /// Dahua's CGI (`method` `.dahuaCGI`): the network interface (`eth0`, `eth2` on a Wi-Fi model) whose `DnsServers` `servers` are, the one
+    /// Restore writes them back to. nil: another method.
+    public var dahuaInterface: String?
+    /// The address "Fix its address so the DNS stays" fixed (the camera had it from DHCP, the choice kept it exactly): Restore puts DHCP
+    /// back while the camera still has this fixed address, then nothing about the address is left to put back. Saved before the run changes
+    /// anything, without the hardware address. nil: Watch left the camera's address as it was (and a backup saved before 2026-10-18).
+    public var fixedAddress: CameraAddressing?
+    /// The way `fixedAddress` was fixed, and Restore puts DHCP back (`.hikvisionISAPI`, `.ipcWebAPI`, `.onvifMinimal`): it can differ from
+    /// `method`, the way an earlier run read the DNS servers (a Jennov's backup an older build saved through ONVIF). nil: `method`.
+    public var fixedAddressMethod: CameraConfigMethod?
 
     public init(method: CameraConfigMethod, fromDHCP: Bool, servers: [String], searchDomains: [String]? = nil, ownAPI: [String: String]? = nil,
-                ipcWebAPI: [String: String]? = nil) {
+                ipcWebAPI: [String: String]? = nil, dahuaInterface: String? = nil, fixedAddress: CameraAddressing? = nil,
+                fixedAddressMethod: CameraConfigMethod? = nil) {
         self.method = method
         self.fromDHCP = fromDHCP
         self.servers = servers
         self.searchDomains = searchDomains
         self.ownAPI = ownAPI
         self.ipcWebAPI = ipcWebAPI
+        self.dahuaInterface = dahuaInterface
+        self.fixedAddress = fixedAddress
+        self.fixedAddressMethod = fixedAddressMethod
     }
 }
 
@@ -43,7 +58,7 @@ public struct CameraDNSReading: Sendable, Equatable {
     /// The camera takes them from DHCP (the router's): whoever points them at the bridge there, the router can change them when it renews
     /// the camera's address.
     public var fromDHCP: Bool
-    /// `.hikvisionISAPI`, `.onvifMinimal`, `.reolinkAPI` or `.ipcWebAPI`.
+    /// `.hikvisionISAPI`, `.onvifMinimal`, `.reolinkAPI`, `.ipcWebAPI` or `.dahuaCGI`.
     public var method: CameraConfigMethod
     public var backup: CameraDNSBackup
     /// The camera takes its servers from DHCP, but which ones is not known: a Reolink on automatic DNS (`LocalLink.dns.auto` 1) whose ONVIF
@@ -51,13 +66,19 @@ public struct CameraDNSReading: Sendable, Equatable {
     /// not from DHCP). `servers` is then empty and `pointsAt` false, and the Internet guard takes the reading as unreadable: it changes
     /// nothing (owner decision, 2026-10-18). False for a reading that knows its servers, none included ("no servers").
     public var serversUnknown: Bool
+    /// The camera's IPv4 address whole (and its hardware address) where the answer its servers were read from shows it: ISAPI's address
+    /// document, the IP camera web API's `LANConfig`; nil otherwise (nothing more is asked for it). For BridgeEngine's "Change it by hand"
+    /// (keep the address, reserve it in the router); never logged or saved.
+    public var addressing: CameraAddressing?
 
-    public init(servers: [String], fromDHCP: Bool, method: CameraConfigMethod, backup: CameraDNSBackup, serversUnknown: Bool = false) {
+    public init(servers: [String], fromDHCP: Bool, method: CameraConfigMethod, backup: CameraDNSBackup, serversUnknown: Bool = false,
+                addressing: CameraAddressing? = nil) {
         self.servers = servers
         self.fromDHCP = fromDHCP
         self.method = method
         self.backup = backup
         self.serversUnknown = serversUnknown
+        self.addressing = addressing
     }
 
     /// The camera asks `server` and no other (an IPv6 address matches however it is written), wherever it has its servers from: set by hand
@@ -75,33 +96,55 @@ public struct CameraDNSReading: Sendable, Equatable {
     }
 }
 
-/// How long a write that restarts the camera's network service (the IPCamera Web family's `set=eth`, Reolink's `SetLocalLink`) is read
-/// back for: every `interval`, until `limit` has passed.
-struct DNSReadBackTiming: Sendable {
+/// How long a write that restarts the camera's network service (the IPCamera Web family's `set=eth`, Reolink's `SetLocalLink`, ONVIF's
+/// `SetDNS`) is read back for: every `interval`, until `limit` has passed.
+struct DNSReadBackTiming: Sendable, Equatable {
     var limit: Duration = .seconds(30)
     var interval: Duration = .seconds(2)
+    /// ONVIF tries up to three forms of `SetDNS`; the first one the camera accepts is read back for the whole `limit`, a camera that applies
+    /// it slowly needs that, and each later accepted form for at most this long (ruling D2: the setup dialog gives the whole run 180 s, and a
+    /// camera that keeps its second slot would otherwise spend 3 x `limit` on the three forms).
+    var laterFormsLimit: Duration = .seconds(6)
+
+    /// The timing for a form after the first one the camera accepted: read at once and every `interval`, for `laterFormsLimit` at most.
+    var forLaterForms: DNSReadBackTiming {
+        var timing = self
+        timing.limit = min(limit, laterFormsLimit)
+        return timing
+    }
 }
 
 /// The internet guard's Watch, the camera's side (docs/superpowers/specs/2026-10-17-internet-guard-design.md): every DNS server the camera
 /// asks pointed at the bridge, so the bridge sees every name it looks up and answers none. Hikvision through ISAPI
-/// (`/ISAPI/System/Network/interfaces/1/ipAddress`, `HikvisionISAPI+DNS.swift`, both slots); a Reolink through its own API (`GetLocalLink` /
+/// (`/ISAPI/System/Network/interfaces/1/ipAddress`, `HikvisionISAPI+DNS.swift`, both slots), with a fixed address only (on DHCP its DNS would
+/// go back to the router's at the next renewal: `hikvisionDHCPRefusal`); a Reolink through its own API (`GetLocalLink` /
 /// `SetLocalLink`: it refuses ONVIF's writes to its ONVIF user), and through ONVIF only when it does not show its `LocalLink`; an ONVIF camera
 /// that speaks the IP camera web API through that API's `LANConfig` (`IPCWebDNS.swift`: its ONVIF reports DNS changes it does not keep), and
-/// through ONVIF only when that API does not speak or shows no `LANConfig`; other cameras through ONVIF (`SetDNS`), and where ONVIF leaves a
-/// server the bridge is not, through the IPCamera Web family's page (`CameraSettingsService+IPCamWeb.swift`). Each write is read back, and a
-/// refusal says what the camera kept; DNS changes nothing about how the home network reaches the camera.
+/// through ONVIF only when that API does not speak or shows no `LANConfig`; a Dahua, Amcrest or Lorex camera (vendor `.amcrest`) through its
+/// CGI (`AmcrestDNS.swift`: its ONVIF `SetDNS` is unreliable), and through ONVIF only when its answer is not Dahua's; other cameras through
+/// ONVIF (`SetDNS`), and where ONVIF leaves a server the bridge is not, through the IPCamera Web family's page
+/// (`CameraSettingsService+IPCamWeb.swift`). Each write is read back, and a refusal says what the camera kept; DNS changes nothing about how
+/// the home network reaches the camera.
 extension CameraSettingsService {
     static let dnsIPv4Only = "this camera takes an IPv4 address for its DNS server"
+
+    /// Why Watch neither offers nor writes a Hikvision's DNS while the camera takes its address from DHCP (`addressingType` dynamic): its DNS
+    /// servers come with the address, and one set on the camera goes back to the router's at the next renewal (research §2.1). The words name
+    /// the setup's choice that fixes the camera's address as it is, and the way by hand.
+    static let hikvisionDHCPRefusal = "the camera takes its address from DHCP, so its DNS would go back to the router’s at the next renewal: "
+        + "choose “Fix its address so the DNS stays”, or set it by hand with a fixed address"
 
     /// The camera's DNS servers; nil when it does not show them (no ISAPI document, no `LocalLink` for a Reolink, no ONVIF device service or
     /// `GetDNS`). A Reolink is read through its `LocalLink` (`dns.auto` 1: from DHCP), which is what its app sets; from DHCP, the servers in use
     /// are ONVIF's (`reolinkDHCPServers`), and when ONVIF does not say, the reading says it does not know them (`serversUnknown`). An ONVIF
     /// camera that speaks the IP camera web API is read through its `LANConfig` (`readIPCWebDNS`), what the camera keeps; while that API
-    /// cannot be asked, `IPCWebUnavailable` is thrown (its ONVIF is not asked: the reading is unreadable). Throws the camera's login refusal.
+    /// cannot be asked, `IPCWebUnavailable` is thrown (its ONVIF is not asked: the reading is unreadable). A Dahua, Amcrest or Lorex camera
+    /// is read through its CGI (`readDahuaDNS`), and through ONVIF when the CGI is not Dahua's. Throws the camera's login refusal.
     public func readDNS() async throws -> CameraDNSReading? {
-        if vendor == .hikvision, let (_, servers) = try await isapiDNSDocument() {
-            let backup = CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: servers.slots)
-            return CameraDNSReading(servers: servers.servers, fromDHCP: false, method: .hikvisionISAPI, backup: backup)
+        if vendor == .hikvision, let (document, servers) = try await isapiDNSDocument() {
+            var reading = Self.isapiReading(servers)
+            reading.addressing = HikvisionISAPI.address(in: document)?.addressing
+            return reading
         }
         if vendor == .reolink, let link = try await ownAPIRead({ try await reolinkLink() }) {
             var reading = Self.reolinkReading(link.dns)
@@ -112,48 +155,77 @@ extension CameraSettingsService {
             }
             return reading
         }
+        if vendor == .amcrest, let reading = try await readDahuaDNS() { return reading }
         if vendor == .onvif, let reading = try await readIPCWebDNS() { return reading }
         if let client = await client(), let dns = try await onvifDNS(client) { return Self.onvifReading(dns) }
         return nil
     }
 
     /// Points every DNS server of the camera at `server` (the bridge's address), then reads it back. Through ISAPI, the IPCamera Web family's
-    /// page, Reolink's API and the IP camera web API an IPv4 address only.
-    public func applyDNS(server: String) async throws -> CameraSetupOutcome {
-        try await applyDNS(server: server, readBack: DNSReadBackTiming())
+    /// page, Reolink's API, the IP camera web API and Dahua's CGI an IPv4 address only (an IPv6 one goes through ONVIF on a Dahua).
+    ///
+    /// `cameraAddress` is the address Camera Bridge knows the camera by (the guard's): an ONVIF camera on DHCP whose DNS set by hand does not
+    /// stay is then refused in words that say the next run can fix its address, when that run would offer it (`fixedAddressNextTime`).
+    public func applyDNS(server: String, cameraAddress: String? = nil) async throws -> CameraSetupOutcome {
+        try await applyDNS(server: server, readBack: dnsReadBack, cameraAddress: cameraAddress)
     }
 
-    func applyDNS(server: String, readBack: DNSReadBackTiming) async throws -> CameraSetupOutcome {
+    func applyDNS(server: String, readBack: DNSReadBackTiming, cameraAddress: String? = nil) async throws -> CameraSetupOutcome {
         guard ONVIFClient.isIPv4(server) || ONVIFClient.isIPv6(server) else { return .refused("the DNS server must be an address") }
-        if vendor == .hikvision, try await isapiDNSDocument() != nil {
+        if vendor == .hikvision, let (_, current) = try await isapiDNSDocument() {
             guard ONVIFClient.isIPv4(server) else { return .refused(Self.dnsIPv4Only) }
+            if current.fromDHCP {
+                // The router hands it the bridge: right as it is. Anything set on the camera would not last.
+                if Self.isapiReading(current).pointsAt(server) { return CameraSetupOutcome(succeeded: true, detail: "via ISAPI") }
+                return .refused(Self.hikvisionDHCPRefusal)
+            }
             return try await writeISAPIDNS([server, server], failure: { Self.kept($0, server: server) }) { $0.pointsAt(server) }
         }
         if vendor == .reolink, ONVIFClient.isIPv4(server), let outcome = try await setReolinkDNS(server: server, readBack: readBack) { return outcome }
+        // A Dahua camera's own API first; ONVIF follows when it is not Dahua's or did not make the change (what it said is kept for a refusal).
+        var dahuaWhy: String?
+        if vendor == .amcrest, ONVIFClient.isIPv4(server) {
+            switch try await applyDahuaDNS(server: server, readBack: readBack) {
+            case .outcome(let outcome): return outcome
+            case .notDahua: break
+            case .declined(let why):
+                dahuaWhy = why
+                log.info("\(why): trying ONVIF")
+            }
+        }
         if vendor == .onvif, let outcome = try await applyIPCWebDNS(server: server, readBack: readBack) { return outcome }
         guard let client = await client(), let current = try await onvifDNS(client) else {
             if vendor == .reolink, !ONVIFClient.isIPv4(server), try await ownAPIRead({ try await reolinkLink() }) != nil {
                 return .refused(Self.dnsIPv4Only)
             }
-            return .refused("the camera does not show its DNS servers")
+            return Self.afterDahuaRefusal(.refused("the camera does not show its DNS servers"), dahuaWhy)
         }
-        let onvif = try await writeONVIFBridge(client, server: server, searchDomains: current.searchDomains)
-        guard !onvif.succeeded, vendor == .onvif else { return onvif }
+        let (onvif, keptDHCP) = try await onvifBridgeWrite(client, server: server, searchDomains: current.searchDomains, readBack: readBack)
+        // A camera on DHCP that keeps no DNS set by hand (it refused every form, or still takes DHCP's): the next preview offers to fix its
+        // address (`needsFixedAddress`: its DNS is read through ONVIF, not a Dahua's CGI or a Reolink's API), and the words say so.
+        let onDHCP = current.fromDHCP && vendor != .reolink && dahuaWhy == nil && keptDHCP != false
+        guard !onvif.succeeded, vendor == .onvif else {
+            return try await offeringFixedAddress(Self.afterDahuaRefusal(onvif, dahuaWhy), onDHCP: onDHCP, server: server, cameraAddress: cameraAddress)
+        }
         // ONVIF left a server that is not the bridge (or refused): the family's page, which sets both of its slots.
-        return try await setIPCamWebDNS(server: server, onvif: client, failed: onvif, readBack: readBack)
+        let page = try await setIPCamWebDNS(server: server, onvif: client, failed: onvif, readBack: readBack)
+        return try await offeringFixedAddress(page, onDHCP: onDHCP, server: server, cameraAddress: cameraAddress)
     }
 
     /// Puts the camera's DNS servers back as the backup has them, then reads them back.
     public func restoreDNS(_ backup: CameraDNSBackup) async throws -> CameraSetupOutcome {
-        try await restoreDNS(backup, readBack: DNSReadBackTiming())
+        try await restoreDNS(backup, readBack: dnsReadBack)
     }
 
     func restoreDNS(_ backup: CameraDNSBackup, readBack: DNSReadBackTiming) async throws -> CameraSetupOutcome {
+        if let fixed = backup.fixedAddress { return try await restoreFixedAddress(backup, fixed: fixed, readBack: readBack) }
         switch backup.method {
         case .hikvisionISAPI:
             return try await writeISAPIDNS(backup.servers, failure: { _ in Self.notTakenBack }) { Self.same($0.backup.servers, backup.servers) }
         case .reolinkAPI:
             return try await restoreReolinkDNS(backup, readBack: readBack) ?? .refused("the camera no longer shows its DNS servers")
+        case .dahuaCGI:
+            return try await restoreDahuaDNS(backup, readBack: readBack) ?? .refused("the camera no longer shows its DNS servers")
         default:
             // The family's page, and a Reolink's `LocalLink`, put the camera's own two slots back exactly, whenever they can be asked; a
             // Reolink's backup an earlier build saved through ONVIF goes back through `LocalLink` too, as the run's change did.
@@ -166,6 +238,18 @@ extension CameraSettingsService {
     }
 
     static let notTakenBack = "the camera did not take its old DNS servers back"
+
+    /// An ONVIF refusal of a camera on DHCP with `fixedAddressNextTime` after its words, only where the next preview would offer the
+    /// choice: the camera's lease is whole, it is `cameraAddress`, and the bridge (`server`) is on its network (`addressToFix`, as
+    /// `readInternetWatch` reads it). A change the account may not make (no fixed address helps) and anything done are left as they are.
+    private func offeringFixedAddress(_ outcome: CameraSetupOutcome, onDHCP: Bool, server: String, cameraAddress: String?) async throws -> CameraSetupOutcome {
+        guard onDHCP, !outcome.succeeded, !outcome.notPermitted, let cameraAddress,
+              let addressing = try await ownAPIRead({ try await self.addressToFix(.onvifMinimal, cameraAddress: cameraAddress) }),
+              addressing.contains(server) else { return outcome }
+        var said = outcome
+        said.detail = "\(outcome.detail). \(Self.fixedAddressNextTime)"
+        return said
+    }
 
     /// What a camera that does not ask the bridge alone kept, in words: "the camera asks Camera Bridge first but kept 8.8.8.8 as its other
     /// DNS server", or "the camera kept its own DNS servers" when it does not ask the bridge at all.
@@ -182,11 +266,14 @@ extension CameraSettingsService {
 
     /// Reads the camera back after a write that restarts its network service, every `interval` until `limit`: `check` tells whether it
     /// shows what was written. A read that fails while the camera restarts (no answer, a timeout, an HTTP or vendor error, a session gone)
-    /// is no answer yet; a login refusal ends the wait (thrown), as does a cancellation.
-    func readBackAfterRestart(_ timing: DNSReadBackTiming, _ check: () async throws -> Bool) async throws -> Bool {
+    /// is no answer yet; a login refusal ends the wait (thrown), as does a cancellation. The first read comes after one `interval`, or at
+    /// once with `immediately` (for a write that many cameras have applied by the time they answer it).
+    func readBackAfterRestart(_ timing: DNSReadBackTiming, immediately: Bool = false, _ check: () async throws -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + timing.limit
+        var wait = !immediately
         repeat {
-            try await Task.sleep(for: timing.interval)
+            if wait { try await Task.sleep(for: timing.interval) }
+            wait = true
             do {
                 if try await check() { return true }
             } catch let error as CameraAdapterError where error.isLoginRefusal {
@@ -239,35 +326,75 @@ extension CameraSettingsService {
         return CameraDNSReading(servers: servers, fromDHCP: dns.fromDHCP, method: .onvifMinimal, backup: backup)
     }
 
-    /// `SetDNS` with the bridge alone; then, for a camera with fixed slots that took it but kept another server set by hand ("Patio New"
-    /// kept 8.8.8.8 in its second slot), the bridge in two slots, and then the bridge with an empty second slot (for a camera that refuses
-    /// one address twice). Each write is read back; the refusal says what the camera kept. A camera that refuses the first write takes no
-    /// DNS servers through ONVIF: its words are the refusal.
-    private func writeONVIFBridge(_ client: ONVIFClient, server: String, searchDomains: [String]) async throws -> CameraSetupOutcome {
+    /// `SetDNS` with the bridge in both slots (a slot left empty, or with a server the camera had, can send its lookups elsewhere: a Dahua
+    /// with an empty second slot asked Google DNS); then the bridge alone (for a camera that refuses one address twice); then the bridge
+    /// with an empty second slot (for a camera that refuses both). The later forms are also sent to a camera that took an earlier one but
+    /// kept another server beside the bridge: `[bridge, ""]` after an accepted `[bridge, bridge]` is intended (the spec,
+    /// `docs/superpowers/specs/2026-10-18-camera-dns-design.md`: then the other forms).
+    ///
+    /// Each write the camera accepts is read back at once and then every `readBack.interval` (`onvifReadBack`), since some cameras show a
+    /// change only after their network restarts: the first accepted write until `readBack.limit` (30 s), the later ones until
+    /// `readBack.laterFormsLimit` (6 s, ruling D2). A write the camera answers with a fault is not read back; the next form follows at
+    /// once. The refusal says what the camera kept. A camera that refuses every form takes no DNS servers through ONVIF: its words for the
+    /// last form are the refusal. A camera whose account may not change them (`.notPermitted`) is refused at the first such answer, in the
+    /// administrator words and marked `notPermitted`, as no other form would be let through.
+    func writeONVIFBridge(_ client: ONVIFClient, server: String, searchDomains: [String],
+                          readBack: DNSReadBackTiming) async throws -> CameraSetupOutcome {
+        try await onvifBridgeWrite(client, server: server, searchDomains: searchDomains, readBack: readBack).outcome
+    }
+
+    /// `writeONVIFBridge`, and whether the camera still takes its DNS servers from DHCP after it: true or false as the last reading after a
+    /// write the camera took showed it; nil when it took none (every form answered with a fault); false when it never showed them again.
+    private func onvifBridgeWrite(_ client: ONVIFClient, server: String, searchDomains: [String],
+                                  readBack: DNSReadBackTiming) async throws -> (outcome: CameraSetupOutcome, keptDHCP: Bool?) {
         var after: CameraDNSReading?
-        for servers in [[server], [server, server], [server, ""]] {
+        var acceptedAForm = false
+        var refusal: (any Error)?   // the last form's fault; a `.notPermitted` one ends the loop, so it is never replaced
+        for servers in [[server, server], [server], [server, ""]] {
             if let after, after.fromDHCP || !after.servers.contains(where: { ONVIFClient.sameAddress($0, server) }) { break }
             do {
                 try await client.setDNS(fromDHCP: false, servers: servers, searchDomains: searchDomains)
             } catch let error as CameraAdapterError where !error.isLoginRefusal {
-                guard after != nil else { return .refused(error) }
+                refusal = error
+                if CameraAdapterError.isNotPermitted(error) { break }
                 continue
             }
-            guard let dns = try await onvifDNS(client) else { return .refused("the camera no longer shows its DNS servers") }
-            let reading = Self.onvifReading(dns)
+            let timing = acceptedAForm ? readBack.forLaterForms : readBack
+            acceptedAForm = true
+            guard let reading = try await onvifReadBack(client, server: server, timing) else {
+                // A later form's short window can pass without one answer: say what the earlier form's reading showed.
+                if let after { return (.refused(Self.kept(after, server: server)), after.fromDHCP) }
+                return (.refused("the camera no longer shows its DNS servers"), false)
+            }
             if reading.pointsAt(server) {
                 log.info("Set the camera's DNS servers through ONVIF")
-                return CameraSetupOutcome(succeeded: true, detail: "via ONVIF")
+                return (CameraSetupOutcome(succeeded: true, detail: "via ONVIF"), reading.fromDHCP)
             }
             after = reading
         }
-        return .refused(after.map { Self.kept($0, server: server) } ?? "the camera kept its own DNS servers")
+        if let after { return (.refused(Self.kept(after, server: server)), after.fromDHCP) }
+        guard let refusal else { return (.refused("the camera kept its own DNS servers"), nil) }
+        return (.refused(refusal), nil)
+    }
+
+    /// `GetDNS` after a `SetDNS`: at once, then every `timing.interval` until `timing.limit`, until the camera asks the bridge alone (a
+    /// camera that applies the change only after its network restarts shows the old servers, or answers nothing, meanwhile). The last
+    /// reading, whether or not it points at `server`; nil when the camera never showed its DNS servers again.
+    private func onvifReadBack(_ client: ONVIFClient, server: String, _ timing: DNSReadBackTiming) async throws -> CameraDNSReading? {
+        var last: CameraDNSReading?
+        _ = try await readBackAfterRestart(timing, immediately: true) {
+            guard let dns = try await self.onvifDNS(client) else { return false }
+            let reading = Self.onvifReading(dns)
+            last = reading
+            return reading.pointsAt(server)
+        }
+        return last
     }
 
     /// `SetDNS` with the backup's servers (or DHCP), read back. A camera with fixed slots that kept a server in a slot the write did not name
     /// (the bridge, after Watch put it in both) gets those slots emptied, so it asks exactly the servers it had. Empty slots (0.0.0.0, ::)
     /// are no servers on either side: a camera that shows an emptied slot as 0.0.0.0 has its old servers back all the same.
-    private func restoreONVIFDNS(_ client: ONVIFClient, _ backup: CameraDNSBackup, searchDomains: [String]) async throws -> CameraSetupOutcome {
+    func restoreONVIFDNS(_ client: ONVIFClient, _ backup: CameraDNSBackup, searchDomains: [String]) async throws -> CameraSetupOutcome {
         var servers = backup.servers
         let wanted = Self.usedSlots(backup.servers)
         for attempt in 0..<2 {
@@ -298,17 +425,31 @@ extension CameraSettingsService {
 
     // MARK: ISAPI
 
+    /// The servers in use, from DHCP when the camera's address is (`ISAPIDNSServers.fromDHCP`); the backup keeps both slots as they are.
+    static func isapiReading(_ dns: ISAPIDNSServers) -> CameraDNSReading {
+        CameraDNSReading(servers: dns.servers, fromDHCP: dns.fromDHCP, method: .hikvisionISAPI,
+                         backup: CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: dns.fromDHCP, servers: dns.slots))
+    }
+
+    /// Why "Watch its internet" is not offered for a reading through ISAPI that does not ask the bridge: the camera is on DHCP
+    /// (`hikvisionDHCPRefusal`). nil otherwise.
+    static func hikvisionWatchRefusal(_ reading: CameraDNSReading) -> String? {
+        reading.method == .hikvisionISAPI && reading.fromDHCP ? hikvisionDHCPRefusal : nil
+    }
+
     /// The interface's address document and its DNS servers; nil when the camera does not have it or it holds no DNS servers.
-    private func isapiDNSDocument() async throws -> (document: String, servers: ISAPIDNSServers)? {
+    func isapiDNSDocument() async throws -> (document: String, servers: ISAPIDNSServers)? {
         guard let document = try await isapi().document(HikvisionISAPI.ipAddressPath),
               let servers = HikvisionISAPI.dnsServers(in: document) else { return nil }
         return (document, servers)
     }
 
     /// Writes `servers` into the document as the camera has it now and reads it back; a camera that shows no document afterwards is a
-    /// refusal (nothing to check the write against), one that shows other servers is refused in `failure`'s words. ISAPI `statusCode` 7 is
-    /// noted (the camera may show the old servers until it restarts, and Camera Bridge never restarts it): the step is done, waiting for the
-    /// restart, and the security check reads the camera's DNS again before the guard counts the camera as watched (`GuardEvidence.asksBridge`).
+    /// refusal (nothing to check the write against), one that shows other servers is refused in `failure`'s words, and an account that may
+    /// not change them (HTTP 403) in the administrator words (`notPermitted`). ISAPI `statusCode` 7 is noted (the camera may show the old
+    /// servers until it restarts, which Camera Bridge does only when the person presses "Restart the camera now"): the step is done, waiting
+    /// for the restart, and the security check reads the camera's DNS again before the guard counts the camera as watched
+    /// (`GuardEvidence.asksBridge`).
     private func writeISAPIDNS(_ servers: [String], failure: (CameraDNSReading) -> String,
                                verify: (CameraDNSReading) -> Bool) async throws -> CameraSetupOutcome {
         guard let (document, _) = try await isapiDNSDocument() else { return .refused("the camera no longer shows its DNS servers") }
@@ -319,11 +460,12 @@ extension CameraSettingsService {
                 restart = try await isapi().write(HikvisionISAPI.ipAddressPath, document: edited) == .rebootRequired
             } catch let refusal as ISAPIRefusal {
                 return .refused(refusal.words)
+            } catch CameraAdapterError.notPermitted {
+                return .notPermittedRefusal
             }
         }
         guard let (_, after) = try await isapiDNSDocument() else { return .refused("the camera no longer shows its DNS servers") }
-        let reading = CameraDNSReading(servers: after.servers, fromDHCP: false, method: .hikvisionISAPI,
-                                       backup: CameraDNSBackup(method: .hikvisionISAPI, fromDHCP: false, servers: after.slots))
+        let reading = Self.isapiReading(after)
         guard verify(reading) || restart else { return .refused(failure(reading)) }
         log.info("Set the camera's DNS servers through ISAPI")
         return CameraSetupOutcome(succeeded: true, needsRestart: restart, detail: "via ISAPI")
@@ -547,8 +689,13 @@ extension CameraSettingsService {
     /// router can change them); the backup is the camera's value now, with its own API's DNS values when it has an API Camera Bridge writes
     /// them through (the IPCamera Web family's page, Reolink's `LocalLink`; the IP camera web API's `LANConfig`, which the reading itself
     /// comes from). Not supported, saying why, when the IP camera web API cannot be asked now or the camera is on DHCP there (its page sets
-    /// DNS servers only in Mode Static).
-    public func readInternetWatch(server: String) async throws -> (CameraSetupReading, CameraDNSBackup?) {
+    /// DNS servers only in Mode Static), and for a Hikvision on DHCP (its DNS would go back to the router's: `hikvisionDHCPRefusal`).
+    ///
+    /// Where the camera's DNS only stays with a fixed address (`needsFixedAddress`: those two on DHCP, and an ONVIF camera on DHCP that
+    /// refused its DNS set by hand, `refusedBefore`), the reading offers "Fix its address so the DNS stays" (`CameraSetupReading.fixAddress`,
+    /// the person's choice, off unless chosen): only when the camera shows its whole address, and that address is `cameraAddress` (the one
+    /// Camera Bridge knows the camera by; nil: none is offered). The reading itself writes nothing.
+    public func readInternetWatch(server: String, cameraAddress: String? = nil, refusedBefore: Bool = false) async throws -> (CameraSetupReading, CameraDNSBackup?) {
         let read: CameraDNSReading?
         do {
             read = try await readDNS()
@@ -562,11 +709,17 @@ extension CameraSettingsService {
         if vendor == .reolink, dns.method == .reolinkAPI, try await reolinkMayNotChange("localLink") {
             return (.notSupported(CameraAdapterError.notPermittedReason), backup)
         }
-        if let refusal = Self.ipcWebWatchRefusal(dns) { return (.notSupported(refusal), backup) }
         let servers = CameraSetupText.list(dns.servers)
         let now = dns.fromDHCP ? (dns.servers.isEmpty ? "from the router (DHCP)" : "\(servers) from the router (DHCP)")
             : dns.servers.isEmpty ? "none set" : servers
-        return (CameraSetupReading(state: .willChange, changes: [.init(label: "DNS", now: now, after: "the bridge (\(server))")]), backup)
+        let change = CameraSetupChange(label: "DNS", now: now, after: "the bridge (\(server))")
+        var reading = (Self.ipcWebWatchRefusal(dns) ?? Self.hikvisionWatchRefusal(dns)).map { CameraSetupReading.notSupported($0) }
+            ?? CameraSetupReading(state: .willChange, changes: [change])
+        if let cameraAddress, Self.needsFixedAddress(dns, vendor: vendor, refusedBefore: refusedBefore),
+           let addressing = try await ownAPIRead({ try await self.addressToFix(dns.method, cameraAddress: cameraAddress) }), addressing.contains(server) {
+            reading.fixAddress = CameraSetupFixAddress(addressing: addressing, changes: [Self.fixedAddressChange(addressing), change], method: dns.method)
+        }
+        return (reading, backup)
     }
 
     /// The DNS values of the camera's own API, for the backup: the IPCamera Web family's page, Reolink's `LocalLink`; nil for other

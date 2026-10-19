@@ -39,7 +39,7 @@ enum RecordingAudioPlan: Equatable, Sendable {
 /// jitter allowance (min(5 %, 50 ms): a fragment is one GOP at least, and research brief §3.9 caps fragments at
 /// fragmentLength; callers pass the longest recent GOP so smart-codec GOPs that only average out are caught; an unknown
 /// GOP counts as fitting). Everything else is transcoded to the selection.
-enum MediaFit {
+public enum MediaFit {
     static let dimensionTolerance = 1.02
     static let frameRateTolerance = 1.10
     /// Live keyframe interval when transcoding (plan: "keyframe every 2 s").
@@ -71,6 +71,10 @@ enum MediaFit {
     /// every picture goes through the Mac's video encoder.
     static let timestampOverlayReason = "timestamp overlay"
 
+    /// Why passthrough is refused while the camera's picture is straightened ("Straighten the picture"): the correction is applied to
+    /// decoded pictures, so every picture goes through the video encoder. When the overlay is on too, its reason is the one given.
+    static let pictureCorrectionReason = "straightened picture"
+
     /// Why passthrough is refused for a camera that sends B-frames.
     static let bFramesReason = "the camera sends B-frames (turn them off in its video settings)"
 
@@ -80,11 +84,13 @@ enum MediaFit {
     /// default mode (docs/CONTRACT_CHANGES.md 2026-10-01).
     ///
     /// `timestampOverlay` (`CameraConfiguration.timestampOverlay.enabled`) always transcodes: the overlay is drawn on
-    /// decoded pictures (docs/CONTRACT_CHANGES.md 2026-10-02).
+    /// decoded pictures (docs/CONTRACT_CHANGES.md 2026-10-02). So does `pictureCorrection` (`PictureCorrectionControl.isOn`): the
+    /// picture is straightened before it is encoded.
     static func recording(source: VideoFormat, frameRate: Double?, gop: Duration?, bFrames: Bool = false,
                           configuration: CameraRecordingConfiguration, qualityMode: RecordingQualityMode = .matchHubRequest,
-                          timestampOverlay: Bool = false) -> VideoPath {
+                          timestampOverlay: Bool = false, pictureCorrection: Bool = false) -> VideoPath {
         if timestampOverlay { return .transcode(timestampOverlayReason) }
+        if pictureCorrection { return .transcode(pictureCorrectionReason) }
         if qualityMode == .originalWhenPossible {
             guard source.codec == .h264 else { return .transcode("the source is \(source.codec.rawValue), not H.264") }
             if bFrames { return .transcode(bFramesReason) }
@@ -119,10 +125,12 @@ enum MediaFit {
     /// the setting is to ignore a smaller or more conservative request and send the camera's own H.264 untouched) but
     /// still falls back to transcoding for HEVC or B-frame sources (docs/CONTRACT_CHANGES.md 2026-10-01).
     ///
-    /// `timestampOverlay` always transcodes (see `recording`).
+    /// `timestampOverlay` and `pictureCorrection` always transcode (see `recording`).
     static func live(source: VideoFormat, frameRate: Double?, bFrames: Bool = false, requested: SelectedVideoParameters,
-                     qualityMode: LiveQualityMode = .matchHomeKitRequest, timestampOverlay: Bool = false) -> VideoPath {
+                     qualityMode: LiveQualityMode = .matchHomeKitRequest, timestampOverlay: Bool = false,
+                     pictureCorrection: Bool = false) -> VideoPath {
         if timestampOverlay { return .transcode(timestampOverlayReason) }
+        if pictureCorrection { return .transcode(pictureCorrectionReason) }
         if qualityMode == .originalQuality {
             guard source.codec == .h264 else { return .transcode("the source is \(source.codec.rawValue), not H.264") }
             if bFrames { return .transcode(bFramesReason) }
@@ -189,16 +197,17 @@ enum MediaFit {
                                     expectedFrameRate: expectedFrameRate(selected: resolution.fps, source: sourceFrameRate))
     }
 
-    /// The encoder for a live stream that transcodes only because the timestamp overlay asked for it while the camera's
-    /// original quality was wanted: the camera's own size (even), the measured frame rate and a bit rate its pictures need
-    /// at that size (never below what the controller asked for), the level left to the encoder. Otherwise the requested one
-    /// (`encoderSettings(for:sourceFrameRate:)`).
+    /// The encoder for a live stream that transcodes only because the timestamp overlay or the picture correction asked for it
+    /// (`timestampOverlay`: either is on) while the camera's original quality was wanted: the camera's own size (even, and at most
+    /// `maximumOutputWidth` wide: `originalSize`), the measured frame rate and a bit rate its pictures need at that size (never below
+    /// what the controller asked for), the level left to the encoder. Otherwise the requested one (`encoderSettings(for:sourceFrameRate:)`).
     static func liveEncoderSettings(for requested: SelectedVideoParameters, source: VideoFormat, sourceFrameRate: Double?,
                                     qualityMode: LiveQualityMode, timestampOverlay: Bool) -> VideoEncoderSettings {
         guard timestampOverlay, qualityMode == .originalQuality else { return encoderSettings(for: requested, sourceFrameRate: sourceFrameRate) }
         let fps = originalFrameRate(sourceFrameRate, fallback: requested.resolution.fps)
-        return VideoEncoderSettings(width: max(2, source.width & ~1), height: max(2, source.height & ~1), fps: fps,
-                                    bitrateKbps: max(max(50, requested.maxBitrateKbps), originalBitrateKbps(source, fps: fps)),
+        let size = originalSize(of: source)
+        return VideoEncoderSettings(width: size.width, height: size.height, fps: fps,
+                                    bitrateKbps: max(max(50, requested.maxBitrateKbps), originalBitrateKbps(width: size.width, height: size.height, fps: fps)),
                                     profile: encoderProfile(requested.profile), level: .auto, keyframeInterval: liveKeyframeInterval, realtime: true,
                                     expectedFrameRate: nil)
     }
@@ -209,10 +218,11 @@ enum MediaFit {
         guard timestampOverlay, qualityMode == .originalWhenPossible else { return encoderSettings(for: configuration, sourceFrameRate: sourceFrameRate) }
         var settings = encoderSettings(for: configuration, sourceFrameRate: sourceFrameRate)
         let fps = originalFrameRate(sourceFrameRate, fallback: configuration.resolution.fps)
-        settings.width = max(2, source.width & ~1)
-        settings.height = max(2, source.height & ~1)
+        let size = originalSize(of: source)
+        settings.width = size.width
+        settings.height = size.height
         settings.fps = fps
-        settings.bitrateKbps = max(settings.bitrateKbps, originalBitrateKbps(source, fps: fps))
+        settings.bitrateKbps = max(settings.bitrateKbps, originalBitrateKbps(width: size.width, height: size.height, fps: fps))
         settings.level = .auto
         settings.expectedFrameRate = nil
         return settings
@@ -224,8 +234,31 @@ enum MediaFit {
     }
 
     /// About 0.07 bit per pixel per frame (good H.264 quality for a security camera's picture), 500…12 000 kbit/s.
-    private static func originalBitrateKbps(_ source: VideoFormat, fps: Int) -> Int {
-        min(12_000, max(500, Int(Double(source.width * source.height) * Double(fps) * 0.07 / 1000)))
+    private static func originalBitrateKbps(width: Int, height: Int, fps: Int) -> Int {
+        min(12_000, max(500, Int(Double(width * height) * Double(fps) * 0.07 / 1000)))
+    }
+
+    // MARK: Sizes
+
+    /// The widest picture Camera Bridge converts at a camera's own size, and the widest saved clip it writes: the H.264 encoder's limit is
+    /// 4096 wide (a wider picture makes a hardware encoder fail, which turns VA-API off for every camera on the box), and a warp or a label on
+    /// a bigger picture costs more than the box's four cores have.
+    public static let maximumOutputWidth = 3840
+
+    /// The size a `width × height` picture is converted to: at most `maximumOutputWidth` wide and even (4:2:0), the height in proportion and
+    /// even, as ffmpeg's `scale='min(iw\,3840)':-2` makes it (the nearest even height). Shared by the live and recording transcoders at the
+    /// camera's own size (`originalSize`) and by saved clips (`WebApp.processedClip`).
+    public static func cappedEvenSize(width: Int, height: Int) -> (width: Int, height: Int) {
+        let shown = max(2, min(width, maximumOutputWidth) & ~1)
+        guard width > 0, height > 0 else { return (shown, max(2, height & ~1)) }
+        return (shown, max(2, (shown * height + width) / (2 * width) * 2))
+    }
+
+    /// The camera's own size for a transcode that keeps it (Original quality): even, and a source wider than `maximumOutputWidth` capped
+    /// there by `cappedEvenSize`. A source at or below that width only has each side made even.
+    static func originalSize(of source: VideoFormat) -> (width: Int, height: Int) {
+        guard source.width > maximumOutputWidth else { return (max(2, source.width & ~1), max(2, source.height & ~1)) }
+        return cappedEvenSize(width: source.width, height: source.height)
     }
 
     // MARK: Private

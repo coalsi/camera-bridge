@@ -2,10 +2,12 @@
 # Xcode build phase: puts the go2rtc helper into the app bundle (Contents/Helpers/go2rtc) and signs it. Skips with a note when the
 # helper was not fetched (Tools/fetch-go2rtc.sh): the app then builds and runs without it, and cloud cameras say the helper is missing.
 #
-# Reads from Xcode's build settings; set CB_GO2RTC_BINARY to use a binary from elsewhere.
+# Reads from Xcode's build settings; set CB_GO2RTC_BINARY to use a binary from elsewhere. The default is build/helpers/go2rtc at the
+# repository root (where the repository's Tools/fetch-go2rtc.sh puts it); this script lives in Archive/mac-app/Tools, so SRCROOT is
+# Archive/mac-app and the repository root is two levels up.
 set -eu
 
-SOURCE="${CB_GO2RTC_BINARY:-${SRCROOT:?}/build/helpers/go2rtc}"
+SOURCE="${CB_GO2RTC_BINARY:-${SRCROOT:?}/../../build/helpers/go2rtc}"
 DESTINATION_DIRECTORY="${TARGET_BUILD_DIR:?}/${CONTENTS_FOLDER_PATH:?}/Helpers"
 DESTINATION="$DESTINATION_DIRECTORY/go2rtc"
 

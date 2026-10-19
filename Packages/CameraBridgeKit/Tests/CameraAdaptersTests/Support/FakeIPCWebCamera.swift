@@ -45,17 +45,21 @@ final class FakeIPCWebCamera: Sendable {
             + #"<TitleOverlay PosX="0" PosY="0" PosType="0" TitleType="0" TitleUtf8="43616d657261" Title="43616d657261" /></Overlay>"#
     }
 
+    /// The camera's hardware address as its `LANConfig` shows it (made up).
+    static let hardwareAddress = "02:00:00:00:00:20"
+
     /// `getNetworkConfig`'s `LANConfig`, attributes over several lines. `ip` is by default the address the fake is reached at (the camera's
     /// own address, as its page shows it).
-    static func lan(dhcp: Int = 0, ip: String = "127.0.0.1", dns1: String = "8.8.8.8", dns2: String = "1.1.1.1") -> String {
+    static func lan(dhcp: Int = 0, ip: String = "127.0.0.1", dns1: String = "8.8.8.8", dns2: String = "1.1.1.1", netmask: String = "255.255.255.0",
+                    gateway: String = "192.0.2.1", mac: String = hardwareAddress) -> String {
         """
-        <LANConfig MacAddress="00:00:5e:00:53:20"
+        <LANConfig MacAddress="\(mac)"
         DHCP="\(dhcp)"
         dhcpOffTime="255"
         ALLNET="0"
         IPAddress="\(ip)"
-        Netmask="255.255.255.0"
-        Gateway="192.0.2.1"
+        Netmask="\(netmask)"
+        Gateway="\(gateway)"
         DNS1="\(dns1)"
         DNS2="\(dns2)"
         hostname="TESTCAM"

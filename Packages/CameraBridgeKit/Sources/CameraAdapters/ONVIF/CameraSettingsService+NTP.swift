@@ -164,6 +164,8 @@ extension CameraSettingsService {
             }
         } catch let refusal as ISAPIRefusal {
             return .refused(refusal.words)
+        } catch CameraAdapterError.notPermitted {
+            return .notPermittedRefusal
         }
         guard let (timeAfter, ntpAfter) = try await isapiTimeDocuments() else { return CameraSetupOutcome(succeeded: true, needsRestart: restart, detail: "via ISAPI") }
         guard verify(Self.isapiTimeBackup(time: timeAfter, ntp: ntpAfter)) || restart else { return .refused("the camera kept its own time source") }

@@ -4,6 +4,7 @@ import { get, getBytes } from '../api.js';
 import { h, replace, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { store, subscribe } from '../store.js';
+import { createStraightenedView, isOn } from '../live/straighten.js';
 import { createCatalog } from '../nvr/catalog.js';
 import { createCell } from '../nvr/cell.js';
 import { LIVE_SNAP_MS, PlaybackClock } from '../nvr/clock.js';
@@ -27,11 +28,18 @@ const CATALOG_GRACE_MS = 3000;          // without a catalog answer or a `phase`
 const HASH_EVERY_MS = 2000;
 const LEAD_LIMIT_BYTES = 16 * 1024 * 1024;
 
+/** A picture correction as text, to tell when it changed ('' while off). */
+const correctionText = (c) => (isOn(c) ? `${Number(c.straighten) || 0},${Number(c.level) || 0}` : '');
+
 function debugEnabled() {
   try { return globalThis.localStorage.getItem('cb.nvr.debug') === '1'; } catch { return false; }
 }
 
-export function renderWatch({ params, navigate, setTitle }) {
+/**
+ * `player`: the player's pieces, replaceable by a test ({ createCell, Surface }; the cell of nvr/cell.js and the MseSurface of nvr/surface.js).
+ */
+export function renderWatch({ params, navigate, setTitle, player = {} }) {
+  const { createCell: newCell = createCell, Surface = MseSurface } = player;
   const id = params[0];
   const startMs = params[1] && /^\d{10,15}$/.test(params[1]) ? Number(params[1]) : null;
   let camera = store.cameras.get(id);
@@ -80,9 +88,9 @@ export function renderWatch({ params, navigate, setTitle }) {
   const stage = { video, holdCanvas };
   // The one place that knows how a cell is built for this screen; the session asks for it once per camera.
   // getPause: status.nvr.pause of this camera as the page's store has it; 'folderMissing' makes a 410 mean "the recordings drive is gone" (T08 D.6).
-  const makeCell = () => createCell({
+  const makeCell = () => newCell({
     cameraId: id, stage, catalog, fetcher, clock, leadLimitBytes: LEAD_LIMIT_BYTES, getPause: () => camera.status?.nvr?.pause ?? null,
-    createSurface: ({ video: v, holdCanvas: c }) => new MseSurface({ video: v, holdCanvas: c }),
+    createSurface: ({ video: v, holdCanvas: c }) => new Surface({ video: v, holdCanvas: c, holdFrom }),
   });
   const session = createSession({ catalog, fetcher, clock, createCell: makeCell, tileCap: 1 });
   catalog.start();
@@ -98,6 +106,30 @@ export function renderWatch({ params, navigate, setTitle }) {
   const stageEl = h('div', { class: 'watch-stage', dataset: { nvr: 'stage', layer: 'preview' } },
     preview.el, video, holdCanvas, h('div', { class: 'watch-badges' }, badge, loadingPill), overlayEl);
 
+  // The recording straightened as the camera's page says (js/live/straighten.js): a canvas right after the video, under the hold, with the
+  // video's classes, so the stage's layers show it as they would the video. Made the first time the correction is on; it follows the store.
+  let straightened = null;
+  let straightenedAs = null;
+  function straighten() {
+    const correction = camera.pictureCorrection ?? null;
+    if (correctionText(correction) === straightenedAs) return;
+    straightenedAs = correctionText(correction);
+    if (straightened) straightened.set(correction);
+    else if (isOn(correction)) straightened = createStraightenedView({ source: video, correction });
+  }
+  straighten();
+
+  /**
+   * The picture the player holds on screen while it builds its buffer again (nvr/surface.js): the straightened canvas, drawn now with the
+   * camera's correction (a WebGL canvas can be copied only right after a draw), so the hold never flashes the camera's original picture; null
+   * while the picture is not straightened (the video's own frame is then what the person sees). The stage's own video is this screen's to
+   * straighten, so the cell's `holdFrom` (for the video it makes itself) has nothing to give.
+   */
+  function holdFrom() {
+    straightened?.set(camera.pictureCorrection ?? null);
+    return straightened?.canvas ?? null;
+  }
+
   const captionText = h('span', { class: 'watch-caption-text muted small' });
   const nudgeButton = h('button', { class: 'btn small', type: 'button', hidden: true, onclick: turnOnRecord }, 'Turn on Record');
   const captionRow = h('div', { class: 'watch-caption row' }, captionText, nudgeButton);
@@ -109,7 +141,7 @@ export function renderWatch({ params, navigate, setTitle }) {
   const recordSlot = h('div', { class: 'watch-record' });
   // Saving a clip: the playhead is the end (the newest recorded moment while live).
   const clip = createClip({
-    cameras: () => [{ id, name: camera.name }],
+    cameras: () => [{ id, name: camera.name, pictureCorrection: camera.pictureCorrection }],
     endMs: () => (session.mode === 'live' ? catalog.serverNow() : session.position),
     onChange: () => update(),
   });
@@ -324,7 +356,7 @@ export function renderWatch({ params, navigate, setTitle }) {
   const stopStore = subscribe((kind, detail) => {
     if (destroyed) return;
     if (kind === 'removed' && detail === id) { toast('This camera was removed.'); navigate('/'); return; }
-    if (kind === 'camera' && detail?.id === id) { camera = detail; renderHead(); scheduleUpdate(); }
+    if (kind === 'camera' && detail?.id === id) { camera = detail; straighten(); renderHead(); scheduleUpdate(); }
   });
   const stopSession = session.onChange(scheduleUpdate);
   const stopCatalog = catalog.onChange(() => {
@@ -364,6 +396,7 @@ export function renderWatch({ params, navigate, setTitle }) {
       fetcher.destroy();
       preview.destroy();
       bannerHost.destroy();
+      straightened?.destroy();
       video.removeAttribute('src');
       if (globalThis.__cbWatch?.session === session) delete globalThis.__cbWatch;
     },

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Renders every Camera Bridge brand asset from the primary logo, App/Resources/Brand/CameraBridgeLogo.svg (the Golden Gate seen
+# Renders every Camera Bridge brand asset from the primary logo, Archive/mac-app/App/Resources/Brand/CameraBridgeLogo.svg (the Golden Gate seen
 # through a camera lens; covered-bridge red #9E2B20; 200 x 200 viewBox). Brand guide: docs/brand/BRAND.md. The older artwork
 # (CameraBridgeOutline.svg, CameraBridgeMark.svg) stays in the repo but is no longer used for any icon.
 #
@@ -16,8 +16,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-BRAND=App/Resources/Brand
-ASSETS=App/Resources/Assets.xcassets
+# The brand sources and the asset catalog moved with the Mac app when it was archived (2026-10-18); they are still written there.
+BRAND=Archive/mac-app/App/Resources/Brand
+ASSETS=Archive/mac-app/App/Resources/Assets.xcassets
 ICONS="$ASSETS/AppIcon.appiconset"
 MENUBAR="$ASSETS/MenuBarIcon.imageset"
 BRANDMARK="$ASSETS/BrandMark.imageset"

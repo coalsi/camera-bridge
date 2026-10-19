@@ -14,12 +14,15 @@ import Foundation
 ///   holds every attribute the page writes, each once, and its `IPAddress` is the address Camera Bridge reaches the camera at: anything else
 ///   could change the camera's address, and is refused rather than written (`ipcWebLANWrite`).
 /// - The page disables its DNS fields in Mode DHCP (and sends them as read): a camera on DHCP is refused (`ipcWebDHCPRefusal`), and its mode
-///   is never switched (that would fix its address).
+///   is switched only when the person chooses "Fix its address so the DNS stays" (`fixIPCWebAddress`: `DHCP` 0 with the camera's address,
+///   mask and gateway as they are; Restore sets `DHCP` back).
 /// - The camera may restart its network service after the write: it is read back through the same API for up to `DNSReadBackTiming.limit`;
 ///   a request that gets no answer meanwhile (a transport error, a timeout) is no refusal, and nor is a write it did not answer. A refusal
 ///   (an HTTP error, a SOAP fault) pauses the web API (`IPCWebClient`) and is said so.
 /// - The answer also holds the camera's other passwords (Wi-Fi, e-mail, FTP), and `LANConfig` its address, MAC and host name: only
-///   `LANConfig` is looked at, nothing of it is logged, and only `DHCP`, `DNS1` and `DNS2` are kept (`CameraDNSBackup.ipcWebAPI`).
+///   `LANConfig` is looked at, nothing of it is logged, and only `DHCP`, `DNS1` and `DNS2` are kept (`CameraDNSBackup.ipcWebAPI`), with the
+///   address, mask and gateway "Fix its address so the DNS stays" fixed (`CameraDNSBackup.fixedAddress`); the MAC is shown in the setup's
+///   preview and result only.
 extension CameraSettingsService {
     static let ipcLANWrite = "setNetworkLANConfig"
     /// The attributes the camera's page writes with `setNetworkLANConfig`, in its settings export's order.
@@ -28,10 +31,10 @@ extension CameraSettingsService {
     static let ipcDNSKeys = ["DHCP", "DNS1", "DNS2"]
     static let ipcWebDone = "via web API"
 
-    /// Why a camera on DHCP is not written: its page sets DNS servers only in Mode Static. Where to change it is in the words (the engine's
-    /// "Change it by hand" help says the rest).
+    /// Why a camera on DHCP is not written: its page sets DNS servers only in Mode Static. The words name the setup's choice that fixes the
+    /// camera's address as it is, and where to change it by hand (the engine's "Change it by hand" help says the rest).
     static let ipcWebDHCPRefusal = "the camera takes its address from DHCP, and its own page sets DNS servers only in Mode Static "
-        + "(Network › Basic, TCP/IP), which Camera Bridge doesn’t switch to: that would fix the camera’s address"
+        + "(Network › Basic, TCP/IP): choose “Fix its address so the DNS stays”, or set it there by hand"
     /// Restore on a camera switched to DHCP since Watch.
     static let ipcWebRestoreOnDHCP = "the camera now takes its address from DHCP, and its own page sets DNS servers only in Mode Static "
         + "(Network › Basic, TCP/IP), so Camera Bridge left them as they are"
@@ -54,7 +57,7 @@ extension CameraSettingsService {
 
     /// `ipcWebLAN` for the DNS steps: no answer, an answer without `NetworkConfig`, or a refusal (which pauses the web API) is
     /// `IPCWebUnavailable` (never ONVIF's answers instead); a login refusal and a cancellation are thrown.
-    private func ipcWebLANRead(_ client: IPCWebClient) async throws -> String? {
+    func ipcWebLANRead(_ client: IPCWebClient) async throws -> String? {
         do {
             return try await ipcWebLAN(client)
         } catch is CancellationError {
@@ -107,7 +110,9 @@ extension CameraSettingsService {
             throw IPCWebUnavailable(reason: why)
         case .speaks(let client, _):
             guard let lan = try await ipcWebLANRead(client), let values = Self.ipcWebDNSValues(in: lan) else { return nil }
-            return Self.ipcWebReading(values)
+            var reading = Self.ipcWebReading(values)
+            reading.addressing = Self.ipcWebAddressing(in: lan)
+            return reading
         }
     }
 
@@ -119,18 +124,135 @@ extension CameraSettingsService {
 
     // MARK: Writing
 
-    /// `lan` (`LANConfig` as the camera wrote it) with only `DNS1` and `DNS2` replaced, every other character as it was: what
-    /// `setNetworkLANConfig` takes. nil (refused rather than written) when the camera is not in Mode Static (`DHCP` 0), an attribute the page
+    /// `lan` (`LANConfig` as the camera wrote it) with only `DNS1` and `DNS2` replaced (and `DHCP` with `dhcp`), every other character as
+    /// it was: what `setNetworkLANConfig` takes. nil (refused rather than written) when the camera is not in Mode Static (`DHCP` 0) and no
+    /// `dhcp` is given (the mode "Fix its address so the DNS stays" sets, 0, or the one Restore puts back: digits only), an attribute the page
     /// writes is missing or one appears twice, `IPAddress` is not `host` (the address Camera Bridge reaches the camera at, when that is an IPv4
     /// address: another interface's settings, or ones that would move the camera), or a server is neither an IPv4 address nor empty. What the
-    /// page does not write (another attribute, a child) goes back as the camera wrote it, as the family's other writes do.
-    static func ipcWebLANWrite(_ lan: String, dns1: String, dns2: String, host: String) -> String? {
+    /// page does not write (another attribute, a child) goes back as the camera wrote it, as the family's other writes do; the camera's
+    /// address, mask and gateway always do.
+    static func ipcWebLANWrite(_ lan: String, dns1: String, dns2: String, host: String, dhcp: String? = nil) -> String? {
         let names = IPCWebXML.attributes(of: lan).map(\.name)
         guard Set(names).count == names.count, Set(ipcLANAttributes).isSubset(of: names),
-              IPCWebXML.attribute("DHCP", of: lan)?.trimmingCharacters(in: .whitespaces) == "0",
+              dhcp != nil || IPCWebXML.attribute("DHCP", of: lan)?.trimmingCharacters(in: .whitespaces) == "0",
+              dhcp.map({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }) ?? true,
               [dns1, dns2].allSatisfy({ $0.isEmpty || ONVIFClient.isIPv4($0) }) else { return nil }
         if ONVIFClient.isIPv4(host), IPCWebXML.attribute("IPAddress", of: lan)?.trimmingCharacters(in: .whitespaces) != host { return nil }
-        return IPCWebXML.replacingAttributes(["DNS1": dns1, "DNS2": dns2], in: lan)
+        var values = ["DNS1": dns1, "DNS2": dns2]
+        if let dhcp { values["DHCP"] = dhcp }
+        return IPCWebXML.replacingAttributes(values, in: lan)
+    }
+
+    // MARK: Fix its address so the DNS stays
+
+    /// `LANConfig`'s own address as the choice keeps it (`IPAddress`, `Netmask`, `Gateway`), with `MacAddress` for the router reservation;
+    /// nil when not whole.
+    static func ipcWebAddressing(in lan: some StringProtocol) -> CameraAddressing? {
+        func value(_ name: String) -> String? { IPCWebXML.attribute(name, of: lan)?.trimmingCharacters(in: .whitespaces) }
+        return CameraAddressing.whole(address: value("IPAddress"), mask: value("Netmask"), gateway: value("Gateway"),
+                                      hardwareAddress: CameraAddressing.hardwareAddress(value("MacAddress")))
+    }
+
+    /// The camera is in Mode DHCP (`DHCP` anything but 0, as its page takes it).
+    static func ipcWebOnDHCP(_ lan: some StringProtocol) -> Bool { IPCWebXML.attribute("DHCP", of: lan)?.trimmingCharacters(in: .whitespaces) != "0" }
+
+    /// In Mode Static with exactly `addressing`'s address, mask and gateway.
+    static func ipcWebFixed(_ lan: some StringProtocol, at addressing: CameraAddressing) -> Bool {
+        !ipcWebOnDHCP(lan) && ipcWebAddressing(in: lan)?.sameAddress(as: addressing) == true
+    }
+
+    /// The address of a camera that speaks the IP camera web API, for the choice: in Mode DHCP, whole, and `cameraAddress`; nil otherwise.
+    func ipcWebAddressToFix(cameraAddress: String) async throws -> CameraAddressing? {
+        guard case .speaks(let client, _) = try await ipcWeb(), let lan = try await ipcWebLANRead(client), Self.ipcWebOnDHCP(lan),
+              let addressing = Self.ipcWebAddressing(in: lan), addressing.address == cameraAddress else { return nil }
+        return addressing
+    }
+
+    /// "Fix its address so the DNS stays" through the IP camera web API: `LANConfig` read again, then written back as the camera wrote it with
+    /// `DHCP` 0 (Mode Static) and the bridge in `DNS1` and `DNS2`, its address, mask and gateway as they are (they are `expected`, or nothing is
+    /// written: `addressChangedRefusal`), and read back while the camera restarts its network service. nil when the camera does not speak that
+    /// API or shows no `LANConfig` (ONVIF then); a camera of the family whose web API cannot be asked now is refused with why.
+    func fixIPCWebAddress(server: String, expected: CameraAddressing, readBack: DNSReadBackTiming) async throws -> CameraSetupOutcome? {
+        let client: IPCWebClient
+        switch try await ipcWeb() {
+        case .none: return nil
+        case .unavailable(let why): return .refused(why).untouched
+        case .speaks(let speaking, _): client = speaking
+        }
+        let lan: String
+        do {
+            guard let read = try await ipcWebLANRead(client) else { return nil }
+            lan = read
+        } catch let unavailable as IPCWebUnavailable {
+            return .refused(unavailable.reason).untouched
+        }
+        guard Self.ipcWebOnDHCP(lan), Self.ipcWebAddressing(in: lan)?.sameAddress(as: expected) == true else {
+            return .refused(Self.addressChangedRefusal(expected)).untouched
+        }
+        guard let edited = Self.ipcWebLANWrite(lan, dns1: server, dns2: server, host: endpoint.host, dhcp: "0") else {
+            return .refused(Self.ipcWebLANLeftAlone).untouched
+        }
+        if let refusal = try await writeIPCWebLAN(edited, client) { return refusal.untouched }   // refused: nothing changed
+        var last: String?
+        let done: Bool
+        do {
+            done = try await ipcWebReadBack(client, readBack) { lan in
+                last = lan
+                return Self.ipcWebFixed(lan, at: expected) && Self.ipcWebDNSValues(in: lan).map { Self.ipcWebReading($0).pointsAt(server) } == true
+            }
+        } catch let unavailable as IPCWebUnavailable {
+            return .refused(Self.ipcWebNotAskedAgain(unavailable))
+        }
+        if done {
+            log.info("Fixed the camera's address as it was and set its DNS servers through its web API")
+            return CameraSetupOutcome(succeeded: true, detail: Self.ipcWebDone, addressFixed: true)
+        }
+        guard let last else { return .refused(Self.keptAfterRestart(nil, server: server)) }
+        guard Self.ipcWebFixed(last, at: expected) else { return .refused(Self.addressNotFixed) }
+        return CameraSetupOutcome(succeeded: false, detail: Self.keptAfterRestart(Self.ipcWebDNSValues(in: last).map(Self.ipcWebReading), server: server),
+                                  addressFixed: true)
+    }
+
+    /// Restore after the choice through the IP camera web API: while the camera still has the fixed address, `LANConfig` with `DHCP` as it
+    /// was (1 when the backup does not say) and `DNS1` and `DNS2` as they were when they were read this way (else as they are: on DHCP the
+    /// camera takes DHCP's), read back by its mode. nil when it is in Mode DHCP already; one whose address was changed by hand since is left
+    /// as it is, said so. A camera that no longer speaks the API, or shows no `LANConfig`, is refused (its address is set there only).
+    func restoreIPCWebFixedAddress(_ plain: CameraDNSBackup, fixed: CameraAddressing, readBack: DNSReadBackTiming) async throws -> CameraSetupOutcome? {
+        let client: IPCWebClient
+        switch try await ipcWeb() {
+        case .none: return .refused("the camera no longer shows its network settings")
+        case .unavailable(let why): return .refused(why)
+        case .speaks(let speaking, _): client = speaking
+        }
+        let lan: String
+        do {
+            guard let read = try await ipcWebLANRead(client) else { return .refused("the camera no longer shows its network settings") }
+            lan = read
+        } catch let unavailable as IPCWebUnavailable {
+            return .refused(unavailable.reason)
+        }
+        if Self.ipcWebOnDHCP(lan) { return nil }
+        guard Self.ipcWebFixed(lan, at: fixed) else { return .refused(Self.addressChangedSinceFixed(fixed)) }
+        let saved = plain.method == .ipcWebAPI ? plain.ipcWebAPI ?? [:] : [:]
+        let dhcp = saved["DHCP"].flatMap { $0 == "0" || $0.isEmpty ? nil : $0 } ?? "1"
+        let now = Self.ipcWebDNSValues(in: lan) ?? [:]
+        func slot(_ key: String) -> String {
+            if let value = saved[key], value.isEmpty || ONVIFClient.isIPv4(value) { return value }
+            return now[key] ?? ""
+        }
+        guard let edited = Self.ipcWebLANWrite(lan, dns1: slot("DNS1"), dns2: slot("DNS2"), host: endpoint.host, dhcp: dhcp) else {
+            return .refused(Self.ipcWebLANLeftAlone)
+        }
+        if let refusal = try await writeIPCWebLAN(edited, client) { return refusal }
+        do {
+            guard try await ipcWebReadBack(client, readBack, { IPCWebXML.attribute("DHCP", of: $0)?.trimmingCharacters(in: .whitespaces) == dhcp }) else {
+                return .refused(Self.addressNotBackOnDHCP)
+            }
+        } catch let unavailable as IPCWebUnavailable {
+            return .refused(Self.ipcWebNotAskedAgain(unavailable))
+        }
+        log.info("Put the camera back on DHCP through its web API")
+        return CameraSetupOutcome(succeeded: true, detail: Self.ipcWebDone)
     }
 
     /// Points every DNS server of a camera that speaks the IP camera web API at `server` (`applyDNS`): both slots the bridge, in Mode Static
@@ -161,7 +283,8 @@ extension CameraSettingsService {
         var last: CameraDNSReading?
         let done: Bool
         do {
-            done = try await ipcWebReadBack(client, readBack) { values in
+            done = try await ipcWebReadBack(client, readBack) { lan in
+                guard let values = Self.ipcWebDNSValues(in: lan) else { return false }
                 let now = Self.ipcWebReading(values)
                 last = now
                 return now.pointsAt(server)
@@ -208,7 +331,7 @@ extension CameraSettingsService {
         }
         if let refusal = try await writeIPCWebLAN(edited, client) { return refusal }
         do {
-            guard try await ipcWebReadBack(client, readBack, target.matches) else { return .refused(Self.notTakenBack) }
+            guard try await ipcWebReadBack(client, readBack, { Self.ipcWebDNSValues(in: $0).map(target.matches) == true }) else { return .refused(Self.notTakenBack) }
         } catch let unavailable as IPCWebUnavailable {
             return .refused(Self.ipcWebNotAskedAgain(unavailable))
         }
@@ -258,14 +381,14 @@ extension CameraSettingsService {
     }
 
     /// Reads `LANConfig` back every `timing.interval` until `timing.limit` has passed, while the camera restarts its network service: `check`
-    /// tells whether its values show what was written. A read that gets no answer (a transport error, a timeout) is no answer yet; a refusal,
+    /// tells whether it shows what was written. A read that gets no answer (a transport error, a timeout) is no answer yet; a refusal,
     /// which pauses the web API, throws `IPCWebUnavailable.paused` (nothing more would be sent); a login refusal and a cancellation are thrown.
-    private func ipcWebReadBack(_ client: IPCWebClient, _ timing: DNSReadBackTiming, _ check: ([String: String]) -> Bool) async throws -> Bool {
+    private func ipcWebReadBack(_ client: IPCWebClient, _ timing: DNSReadBackTiming, _ check: (String) -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + timing.limit
         repeat {
             try await Task.sleep(for: timing.interval)
             do {
-                if let lan = try await ipcWebLAN(client), let values = Self.ipcWebDNSValues(in: lan), check(values) { return true }
+                if let lan = try await ipcWebLAN(client), check(lan) { return true }
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as CameraAdapterError where error.isLoginRefusal {

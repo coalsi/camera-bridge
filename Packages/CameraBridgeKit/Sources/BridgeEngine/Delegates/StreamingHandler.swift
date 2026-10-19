@@ -26,7 +26,8 @@ import RTP
 ///   of its video (`.controllerNotReceiving`) moves that controller to the next strategy for its next session; the choice
 ///   is remembered for an hour and forgotten on a network change (`networkChanged()`).
 /// - Two-way audio: one `TalkbackBridge` per camera, shared by every session (cameras have one talkback channel).
-/// - `snapshot` goes to the `SnapshotProvider` (not serialised with stream operations).
+/// - `snapshot` goes to the `CorrectedSnapshots` (the `SnapshotProvider`'s picture, straightened while the camera's correction is on;
+///   not serialised with stream operations).
 actor StreamingHandler: CameraStreamingDelegate {
     enum Failure: Error, Equatable, CustomStringConvertible {
         case unknownSession
@@ -69,7 +70,7 @@ actor StreamingHandler: CameraStreamingDelegate {
     }
 
     private let hubs: HubProvider
-    private let snapshots: SnapshotProvider
+    private let snapshots: CorrectedSnapshots
     private let context: LiveStreamPipeline.Context
     private let loopbackOnly: Bool
     private let interfaceAddresses: @Sendable () -> [InterfaceAddress]
@@ -105,7 +106,7 @@ actor StreamingHandler: CameraStreamingDelegate {
     private var dualSubnetReports: [String: ContinuousClock.Instant] = [:]
 
     /// `interfaceAddresses`: the machine's interface addresses (`StreamAddress.interfaceAddresses`; tests inject).
-    init(hubs: @escaping HubProvider, snapshots: SnapshotProvider, context: LiveStreamPipeline.Context, loopbackOnly: Bool,
+    init(hubs: @escaping HubProvider, snapshots: CorrectedSnapshots, context: LiveStreamPipeline.Context, loopbackOnly: Bool,
          streamMode: LiveStreamMode = .automatic, maxBitrateOverride: MaxBitrateOverride = .auto,
          interfaceAddresses: @escaping @Sendable () -> [InterfaceAddress] = StreamAddress.interfaceAddresses,
          routeTable: @escaping @Sendable () -> [MacVPNDetector.InterfaceRoute] = StreamAddress.routeTable,
@@ -145,6 +146,12 @@ actor StreamingHandler: CameraStreamingDelegate {
 
     var runningSessionCount: Int {
         sessions.values.filter { if case .running = $0 { true } else { false } }.count
+    }
+
+    /// The camera's picture correction was turned on or off: each running live view decides again whether it transcodes
+    /// (`LiveStreamPipeline.pictureCorrectionSwitched`).
+    func pictureCorrectionSwitched() {
+        for case .running(let pipeline) in sessions.values { pipeline.pictureCorrectionSwitched() }
     }
 
     /// The pipeline of a running session (tests).

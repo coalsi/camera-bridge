@@ -2,9 +2,10 @@
 // click puts the playhead, and the battery badge of a tile. No DOM and no globals, so Node tests run it as is.
 //
 // Where the events come from:
-//   - the archive's event log (GET nvr/events?cameras=&from=&to=&limit=): every event the bridge saw, kept beside the recordings, with its end
-//     and whether the recordings hold it (`recorded`). createEventArchive loads it for the timeline's range: newest first, a page at a time,
-//     the newer part again while the timeline follows live, older pages when the range grows or on "Show more".
+//   - the archive's event log (GET nvr/events?cameras=&from=&to=&limit=): every event the bridge saw, kept beside the recordings, with its end,
+//     whether the recordings hold it (`recorded`) and the AI service's sentence once it wrote one (`description`, a few seconds after the
+//     event). createEventArchive loads it for the timeline's range: newest first, a page at a time, the newer part again while the timeline
+//     follows live (which brings the descriptions written since), older pages when the range grows or on "Show more".
 //   - status.recentEvents of every camera: [{ name, date }], the newest 20 rising edges per camera ("Motion", "Person", "Doorbell ring", …),
 //     stamped by the bridge (server time). In memory on the bridge, and all there is while no place for recordings is chosen.
 //   - the live events this page saw (wall-events.js history): motion (with its end, so a duration), doorbell rings, detections. Stamped with
@@ -37,12 +38,40 @@ function finite(value) {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+const NOTHING_NOTABLE = 'Nothing notable';
+const CONCERN_ORDER = ['nothing', 'routine', 'unusual', 'alarm'];   // how much a description matters, least first
+
 /**
- * Every event known, merged, oldest first: [{ at, endAt, cameraId, cameraName, label, level, recorded }].
+ * What an AI service said of an event (the archive's `description`: { summary, kind, concern }), as the page shows it: { text, concern }
+ * with concern 'alarm', 'unusual', 'routine' or 'nothing' (it saw nothing worth saying: the text is then always "Nothing notable"), or null.
+ * The words are the model's: put them in with textContent only.
+ */
+export function eventDescription(description) {
+  if (!description || typeof description !== 'object') return null;
+  if (description.kind === 'nothing') return { text: NOTHING_NOTABLE, concern: 'nothing' };
+  const text = typeof description.summary === 'string' ? description.summary.trim() : '';
+  if (!text) return null;
+  return { text, concern: ['alarm', 'unusual'].includes(description.concern) ? description.concern : 'routine' };
+}
+
+/** The word for how much a description matters, for those that get a mark: 'Alarm', 'Unusual', or null. */
+export function concernWord(concern) {
+  return concern === 'alarm' ? 'Alarm' : concern === 'unusual' ? 'Unusual' : null;
+}
+
+/** The one of two descriptions (either may be null) that matters more; the first when they matter the same. */
+function weightier(a, b) {
+  if (!a || !b) return a ?? b;
+  return CONCERN_ORDER.indexOf(b.concern) > CONCERN_ORDER.indexOf(a.concern) ? b : a;
+}
+
+/**
+ * Every event known, merged, oldest first: [{ at, endAt, cameraId, cameraName, label, level, recorded, description }].
  *   cameras   the camera resources (store.js cameraList()); status.recentEvents is read defensively
  *   live      wall-events.js history: [{ at, endAt?, id, name, text, level }]
- *   archived  the archive's events (GET nvr/events): [{ id, cameraID, kind, start, end, recorded }]
- * `endAt` is null when the event's end is not known; `recorded` is the archive's word (true or false), null when it did not say.
+ *   archived  the archive's events (GET nvr/events): [{ id, cameraID, kind, start, end, recorded, description }]
+ * `endAt` is null when the event's end is not known; `recorded` is the archive's word (true or false), null when it did not say;
+ * `description` is eventDescription() of the archive's, null when there is none (the bridge's and the live events never have one).
  */
 export function gatherEvents({ cameras = [], live = [], archived = [] } = {}) {
   const names = new Map(cameras.map((camera) => [camera.id, camera.name]));
@@ -53,7 +82,7 @@ export function gatherEvents({ cameras = [], live = [], archived = [] } = {}) {
     if (cameraId === undefined || !finite(record.start)) continue;
     raw.push({
       at: record.start, endAt: finite(record.end) && record.end >= record.start ? record.end : null, cameraId, ...eventKind(record.kind),
-      recorded: typeof record.recorded === 'boolean' ? record.recorded : null, source: 'archive',
+      recorded: typeof record.recorded === 'boolean' ? record.recorded : null, description: eventDescription(record.description), source: 'archive',
     });
   }
   for (const camera of cameras) {
@@ -61,18 +90,18 @@ export function gatherEvents({ cameras = [], live = [], archived = [] } = {}) {
     for (const record of recent) {
       const at = Date.parse(record?.date);
       if (!finite(at)) continue;
-      raw.push({ at, endAt: null, cameraId: camera.id, ...eventKind(record.name), recorded: null, source: 'bridge' });
+      raw.push({ at, endAt: null, cameraId: camera.id, ...eventKind(record.name), recorded: null, description: null, source: 'bridge' });
     }
   }
   for (const entry of live) {
     if (!entry || !finite(entry.at) || !names.has(entry.id)) continue;
     const kind = entry.level === 'doorbell' ? { label: 'Doorbell', level: 'doorbell' } : eventKind(entry.text);
-    raw.push({ at: entry.at, endAt: finite(entry.endAt) && entry.endAt >= entry.at ? entry.endAt : null, cameraId: entry.id, ...kind, recorded: null, source: 'live' });
+    raw.push({ at: entry.at, endAt: finite(entry.endAt) && entry.endAt >= entry.at ? entry.endAt : null, cameraId: entry.id, ...kind, recorded: null, description: null, source: 'live' });
   }
   raw.sort((a, b) => a.at - b.at);
 
   // One event per camera and kind within MERGE_MS: the archive's stamp wins, then the bridge's (both are the server's own), the end comes from
-  // whichever knows it, and whether it is recorded from the archive.
+  // whichever knows it, whether it is recorded from the archive, and the description that matters most from any of them.
   const rank = { archive: 2, bridge: 1, live: 0 };
   const merged = [];
   const lastOf = new Map();   // camera|label -> the merged event it would join
@@ -83,6 +112,7 @@ export function gatherEvents({ cameras = [], live = [], archived = [] } = {}) {
       if (rank[event.source] > rank[last.source]) { last.at = event.at; last.source = event.source; }
       if (event.endAt !== null && (last.endAt === null || event.endAt > last.endAt)) last.endAt = event.endAt;
       if (event.recorded !== null && (last.recorded === null || event.source === 'archive')) last.recorded = event.recorded;
+      last.description = weightier(last.description, event.description);
       continue;
     }
     const next = { ...event, cameraName: names.get(event.cameraId) ?? '' };

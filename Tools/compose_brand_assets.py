@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Composes the HTML/SVG sources that Tools/render_brand_assets.sh renders with headless Chrome.
 
-Input (App/Resources/Brand): CameraBridgeLogo.svg (the primary logo: the Golden Gate seen through a camera lens, 200 x 200),
+Input (Archive/mac-app/App/Resources/Brand): CameraBridgeLogo.svg (the primary logo: the Golden Gate seen through a camera lens, 200 x 200),
 CameraBridgeLogoSmall.svg (the simplified variant for 64 px and below) and CameraBridgeMenuBarMark.svg (the single-colour
 menu bar template). The older CameraBridgeOutline.svg and CameraBridgeMark.svg stay in the repo but are no longer used.
 Output (into the directory given as argv[2]):

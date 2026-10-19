@@ -8,8 +8,9 @@ By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before you write code
 
-- **Bugs:** open an issue with the *Bug report* form and attach a diagnostics export (File ▸ Export Diagnostics… in the
-  app). Read it first: it can contain IP addresses and camera names.
+- **Bugs:** open an issue with the *Bug report* form, give the Camera Bridge OS build number (shown on About in the web
+  interface), and attach a diagnostics export (*Download diagnostics* under Settings ▸ Troubleshooting). Read it first: it
+  can contain IP addresses and camera names.
 - **A camera that does not work or is missing:** use the *Camera support request* form. A good report says which standards
   the camera speaks (RTSP, ONVIF) and includes its stream URL with the password removed.
 - **Features:** open a *Feature request* issue and wait for a reply before building anything big. Small fixes need no
@@ -34,17 +35,17 @@ you send. If you contribute for an employer, read section 6 of the CLA first.
 
 ```sh
 cd Packages/CameraBridgeKit && swift test      # engine tests; they need Swift 6.4 (Xcode 27). A few timing-sensitive tests can flake under load: re-run them alone
-cd ../.. && xcodegen generate                  # project.yml is the source of truth; the generated project is committed
-xcodebuild -project CameraBridge.xcodeproj -scheme CameraBridge -configuration Debug test
+cd ../.. && sh Tools/linux-test.sh             # the same tests on Linux, in a Swift container (Docker or OrbStack)
+sh linux/web-tests/run.sh                      # the web interface's tests (Node; no install)
 ```
 
-CI runs the package tests and an unsigned app build on every pull request (`.github/workflows/ci.yml`).
+CI runs the package tests on macOS and on Linux on every pull request (`.github/workflows/ci.yml`).
 
 ## Guidelines
 
 - Keep changes small and focused; one idea per pull request. Say what changed and why, and how you tested it.
-- Add or update tests with the change. The engine's logic lives in `Packages/CameraBridgeKit`; the app's view-model logic in
-  `App/Sources/Model` is unit-tested, and views stay thin.
+- Add or update tests with the change. The engine's logic lives in `Packages/CameraBridgeKit`; the web interface is in `linux/web`, with its
+  tests in `linux/web-tests`. The Mac app is archived in `Archive/mac-app` (October 2026): please do not send changes to it.
 - **Portability rule:** engine modules are portable Swift. Apple-only frameworks belong in `PlatformApple`
   (see `Packages/CameraBridgeKit/Tests/PortabilityTests`).
 - Swift 6 language mode, strict concurrency. No force unwraps without a documented reason. Follow the style of the

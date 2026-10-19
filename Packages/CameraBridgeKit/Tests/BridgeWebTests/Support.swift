@@ -18,6 +18,16 @@ final class FakeBackend: BridgeBackend {
         var configurations: [CameraConfiguration] = []
         var settings = BridgeSettings()
         var pluginSecrets: [String: Data] = [:]
+        /// The AI service's key, as the engine keeps it in the secret store.
+        var aiKey: String?
+        /// What saving or deleting the AI key throws, when set.
+        var aiKeyError: (any Error)?
+        /// The describer's state, as `GET settings` shows it (nil: none described, and a folder is needed unless one is chosen).
+        var aiStatus: AIStatus?
+        /// What Try it answers, after `aiTryDelay`, and the cameras it was asked for.
+        var aiTry: Result<EventDescription, any Error> = .failure(AIDescriberError.noService)
+        var aiTryDelay: Duration = .zero
+        var aiTries: [UUID] = []
         /// What `portAnswer` says for "host:port" (default `.silent`).
         var ports: [String: PortAnswer] = [:]
         var webhookProblem: String?
@@ -28,8 +38,13 @@ final class FakeBackend: BridgeBackend {
         var integrationProbe: Result<CameraProbeResult, any Error> = .success(FakeBackend.sampleProbe)
         var protectCameras: [UnifiProtectCamera] = []
         var snapshot: Data? = Data([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0xFF, 0xD9])
+        /// `original` of every `snapshotJPEG` call, in order.
+        var snapshotOriginals: [Bool] = []
         var addError: (any Error)?
         var updateError: (any Error)?
+        /// Runs inside `updateCamera`, once the camera is stored, with the state and the configuration that was written: what the owner does
+        /// to the bridge while a write is under way.
+        var afterUpdate: (@Sendable (inout State, CameraConfiguration) -> Void)?
         var statusOverrides: [UUID: CameraStatus] = [:]
         var calls: [String] = []
         var passwords: [UUID: String] = [:]
@@ -45,8 +60,12 @@ final class FakeBackend: BridgeBackend {
         /// What the camera setup's three calls answer.
         var setup: Result<CameraSetupReport, any Error> = .failure(EngineError.cameraNotRunning)
         var setupGate: AsyncGate?
+        /// The choices the last run was asked with.
+        var setupOptions: CameraSetupOptions?
         /// What a security check answers.
         var security: Result<CameraSecurity, any Error> = .failure(EngineError.cameraNotRunning)
+        /// What "Restart the camera now" throws (nil: the camera took it).
+        var restartError: (any Error)?
     }
 
     let box = Mutex(State())
@@ -108,6 +127,7 @@ final class FakeBackend: BridgeBackend {
             state.configurations[index] = configuration
             state.calls.append("update")
             if let password { state.passwords[configuration.id] = password }
+            state.afterUpdate?(&state, configuration)
         }
     }
 
@@ -130,9 +150,29 @@ final class FakeBackend: BridgeBackend {
         }
     }
 
-    func snapshotJPEG(cameraID: UUID) async -> Data? { read { $0.snapshot } }
+    func snapshotJPEG(cameraID: UUID, original: Bool) async -> Data? {
+        box.withLock { state in
+            state.snapshotOriginals.append(original)
+            return state.snapshot
+        }
+    }
     func pluginSecret(id: String) async throws -> Data? { read { $0.pluginSecrets[id] } }
     func setPluginSecret(id: String, _ data: Data?) async throws { write { $0.pluginSecrets[id] = data } }
+    func aiKeyStatus() async -> (saved: Bool, hint: String?) {
+        read { state in (state.aiKey != nil, state.aiKey.flatMap { $0.count >= 8 ? String($0.suffix(4)) : nil }) }
+    }
+    func setAIKey(_ key: String?) async throws {
+        if let error = read({ $0.aiKeyError }) { throw error }
+        write { $0.aiKey = key }
+    }
+    func aiStatus() async -> AIStatus {
+        read { $0.aiStatus ?? AIStatus(needsRecordingsFolder: $0.settings.nvrFolder == nil) }
+    }
+    func tryAIDescription(cameraID: UUID) async throws -> EventDescription {
+        write { $0.aiTries.append(cameraID) }
+        try await Task.sleep(for: read { $0.aiTryDelay })
+        return try read { $0.aiTry }.get()
+    }
     func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer { read { $0.ports["\(host):\(port)"] ?? .silent } }
     func localIPv4Addresses() async -> [String] { ["192.0.2.10"] }
     func triggerTestMotion(cameraID: UUID) async { write { $0.calls.append("motion") } }
@@ -177,7 +217,11 @@ final class FakeBackend: BridgeBackend {
     }
 
     func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
-        write { $0.calls.append("setupApply") }
+        try await applyCameraSetup(cameraID: cameraID, options: CameraSetupOptions())
+    }
+
+    func applyCameraSetup(cameraID: UUID, options: CameraSetupOptions) async throws -> CameraSetupReport {
+        write { $0.calls.append("setupApply"); $0.setupOptions = options }
         if let gate = read({ $0.setupGate }) { await gate.wait() }
         return try read { $0.setup }.get()
     }
@@ -190,6 +234,11 @@ final class FakeBackend: BridgeBackend {
     func checkCameraSecurity(cameraID: UUID) async throws -> CameraSecurity {
         write { $0.calls.append("checkSecurity") }
         return try read { $0.security }.get()
+    }
+
+    func restartCamera(cameraID: UUID) async throws {
+        write { $0.calls.append("restartCamera") }
+        if let error = read({ $0.restartError }) { throw error }
     }
 }
 

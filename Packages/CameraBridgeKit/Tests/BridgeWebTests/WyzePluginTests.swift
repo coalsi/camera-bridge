@@ -183,6 +183,50 @@ final class FakeWyzeServer: WyzeTransport, Sendable {
         #expect(unknown.status == 400)
     }
 
+    /// Final review M4: the plugin finds that added cameras moved and writes each whole camera back with its new address, one after another
+    /// (each write can restart a camera, so they take a while). A switch the owner turned off meanwhile ("Describe events with AI") must not be
+    /// written back on from the copy that was read before.
+    @Test func aMovedCameraIsWrittenWithTheAISwitchAsItIsNow() async throws {
+        let devices = #"""
+        {"code":"1","msg":"","data":{"device_list":[
+          {"mac":"D03F27A1B2C3","enr":"E1","nickname":"Front Yard","product_model":"HL_CAM4","product_type":"Camera","firmware_ver":"4.52.17.19",
+           "conn_state":1,"device_params":{"p2p_id":"P2PUID1234567890ABCD","p2p_type":4,"ip":"192.0.2.41","dtls":1}},
+          {"mac":"D03F27A1B2C4","enr":"E2","nickname":"Back Yard","product_model":"HL_CAM4","product_type":"Camera","firmware_ver":"4.52.17.19",
+           "conn_state":1,"device_params":{"p2p_id":"P2PUID1234567890ABCE","p2p_type":4,"ip":"192.0.2.42","dtls":1}}
+        ]}}
+        """#
+        let server = FakeWyzeServer(["/api/user/login": (Self.login, 200), "/app/v2/home_page/get_object_list": (devices, 200)])
+        func added(_ name: String, mac: String, host: String) -> CameraConfiguration {
+            var camera = CameraConfiguration(name: name, kind: .camera, vendor: .rtsp, endpoint: CameraEndpoint(host: host), username: "admin")
+            camera.integration = IntegrationSettings(service: .wyze, details: [IntegrationSettings.Key.wyzeMAC: mac, IntegrationSettings.Key.wyzeWay: "rtsp"])
+            camera.mainStreamURL = WyzePlugin.rtspURL(host: host, path: "/stream0")
+            camera.subStreamURL = WyzePlugin.rtspURL(host: host, path: "/stream1")
+            camera.aiDescriptions = true
+            return camera
+        }
+        let front = added("Front Yard", mac: "D03F27A1B2C3", host: "192.0.2.90"), back = added("Back Yard", mac: "D03F27A1B2C4", host: "192.0.2.91")
+        let backend = FakeBackend()
+        backend.write {
+            $0.configurations = [front, back]
+            // The owner turns the second camera's switch off while the first one's new address is being written.
+            $0.afterUpdate = { state, written in
+                guard written.id == front.id, let index = state.configurations.firstIndex(where: { $0.id == back.id }) else { return }
+                state.configurations[index].aiDescriptions = false
+            }
+        }
+        let plugin = WyzePlugin(backend: backend, cloud: WyzeCloud(transport: server), neighbors: { nil })
+        _ = try await plugin.signIn(email: "someone@example.com", password: "Hunter2-Secret!", keys: WyzeAPIKeys(keyID: "KEYID-1", apiKey: "APIKEY-SECRET"))
+        _ = try await plugin.cameras(refresh: true)
+        await plugin.followAddresses()
+        try await plugin.signOut()
+
+        let after = backend.read { $0.configurations }
+        #expect(after.map(\.endpoint.host) == ["192.0.2.41", "192.0.2.42"], "both cameras follow their new addresses")
+        #expect(after[0].aiDescriptions, "an untouched switch stays as it was")
+        #expect(!after[1].aiDescriptions, "a switch turned off between the read and the write stays off")
+        #expect(backend.read { $0.calls.filter { $0 == "update" }.count } == 2)
+    }
+
     @Test func theSweepCoversTheBridgesOwnPrivateNetworks() {
         let hosts = LocalSubnets.sweepTargets(addresses: ["192.168.77.20", "127.0.0.1", "10.42.0.1", "203.0.113.5"])
         #expect(hosts.count == 253)

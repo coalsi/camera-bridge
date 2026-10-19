@@ -75,6 +75,12 @@ public final class BridgeEngine {
     /// The synthetic streams the preview engine's `liveVideo` serves.
     @ObservationIgnored let previewLive = PreviewLiveSources()
     @ObservationIgnored let log = Log(category: "Engine")
+    /// Set while the last read of the AI key failed, so one failure is logged once (`aiKeyStatus()`).
+    @ObservationIgnored private var aiKeyReadFailed = false
+    /// The AI descriptions of events (`aiDescriber`), made at first use.
+    @ObservationIgnored private var describer: EventDescriber?
+    /// Bumped by every change of the describer's service: a read of the key that a newer change overtook is not applied.
+    @ObservationIgnored private var aiServiceGeneration = 0
     @ObservationIgnored private var loaded = false
     @ObservationIgnored private(set) var runtimes: [UUID: CameraRuntime] = [:]
     /// The pre-optimization encoder/smart-codec values `optimizeForHomeKit` can still undo, per camera.
@@ -450,19 +456,34 @@ public final class BridgeEngine {
                 throw Self.webhookCannotListen(settings.webhookPort, error)
             }
         }
+        let sameService = settings.ai.keepsKey(from: old.ai)
+        var removedKey = false, keyDeleted = false
         do {
+            // A saved key is for one service: before the settings name another, it goes (a failure to delete it stops the change). The card
+            // then asks for the key of the new service, and the old one is never sent there.
+            if !sameService {
+                removedKey = try await forgetAIKey()
+                keyDeleted = true
+            }
             try await save(BridgeConfiguration(settings: settings, cameras: configurations))
         } catch {
             if isActive, webhookChanged {
                 await stopWebhook()
                 await startWebhookReporting(old)
             }
+            // The settings stay as they were, but the key is gone: the describer must not go on sending it.
+            if keyDeleted { await refreshAIService(fresh: true) }
             throw error
         }
+        if removedKey { log.notice("The AI key was removed: the AI service changed to \(settings.ai.serviceForLog)") }
         storedSettings = settings
         Self.applyTimeZone(settings.timeZone)
         if old.timeZone != settings.timeZone { BridgeTime.use(settings.timeZone) }
         if old.logLevel != settings.logLevel { applyLogLevel() }
+        // Every change to the AI settings starts a new generation of the describer: the last error was about what was in use before, and a
+        // call under way for it is not kept as the current one nor sent again (a new model included). Whether the key goes (`sameService`,
+        // above) is a separate rule.
+        if old.ai != settings.ai { await refreshAIService(fresh: true) }
         guard isActive else { return }
         await nvr.settingsChanged(from: old, to: settings)   // a new folder reloads the catalog, new limits run the janitor
         if old.keepMacAwake != settings.keepMacAwake { power.setKeepAwake(settings.keepMacAwake) }
@@ -564,6 +585,9 @@ public final class BridgeEngine {
                     }
                     if old.timestampOverlay != camera.timestampOverlay || old.name != camera.name, let runtime = runtimes[camera.id] {
                         runtime.updateTimestampOverlay(camera.timestampOverlay, cameraName: camera.name)
+                    }
+                    if old.pictureCorrection != camera.pictureCorrection, let runtime = runtimes[camera.id] {
+                        await runtime.updatePictureCorrection(camera.pictureCorrection)
                     }
                 }
             }
@@ -706,6 +730,159 @@ public final class BridgeEngine {
     /// Stores (or with nil deletes) a plugin's secret.
     public func setPluginSecret(id: String, _ data: Data?) throws {
         try environment.platform.secrets.write(data, account: try Self.pluginAccount(id))
+    }
+
+    // MARK: The AI key
+
+    /// The secret store account of the AI service's key: never `config.json`, logs, diagnostics, errors or any answer of the web API.
+    static let aiKeyAccount = "ai.key"
+
+    /// Saves the key of the AI service (`BridgeSettings.ai`) in the platform `SecretStore`, trimmed of the spaces, tabs and line breaks a paste
+    /// brings along (`AIDescriptionSettings.cleanedKey`); nil or an empty string deletes it. Throws `EngineError.invalidSettings` for a key that
+    /// is not 1 to `AIDescriptionSettings.maximumKeyLength` characters of visible ASCII once trimmed (a space or a control character inside it,
+    /// anything that is not ASCII, only blanks), and then changes nothing. The key is write-only: the engine hands it to the describer's
+    /// service and nobody else (`aiKey()`); everything the page can know of it is `aiKeySaved` and `aiKeyHint`. The describer takes the new key
+    /// at once, and a pause after a refused key ends.
+    public func setAIKey(_ key: String?) throws {
+        guard let key, !key.isEmpty else {
+            try environment.platform.secrets.write(nil, account: Self.aiKeyAccount)
+            log.notice("The AI key was removed")
+            setAIService(key: nil, fresh: true)
+            return
+        }
+        guard let cleaned = AIDescriptionSettings.cleanedKey(key) else {
+            throw EngineError.invalidSettings("the key must be 1 to \(AIDescriptionSettings.maximumKeyLength) characters of letters, digits and punctuation, with no spaces")
+        }
+        try environment.platform.secrets.write(Data(cleaned.utf8), account: Self.aiKeyAccount)
+        log.notice("An AI key was saved")
+        setAIService(key: cleaned, fresh: true)
+    }
+
+    /// The saved key; nil when none. For the engine and the describer only: not part of the web API.
+    func aiKey() throws -> String? {
+        try environment.platform.secrets.read(account: Self.aiKeyAccount).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// Whether a key is saved (one that cannot be read counts as none).
+    public var aiKeySaved: Bool { (try? aiKey()) != nil }
+
+    /// The last four characters of the saved key, so the page can say which key is there; nil when none is saved, or the key is too short
+    /// (under eight characters) for four of them to hide the rest.
+    public var aiKeyHint: String? { (try? aiKey()).flatMap(AIDescriptionSettings.hint(forKey:)) }
+
+    /// Whether a key is saved and its hint (`aiKeyHint`), from one read of the secret store made off the main actor: what the web API asks on
+    /// every settings answer. A read that fails counts as no key, and is logged once (by the name of the secret, `ai.key`, never its value) until
+    /// a read works again.
+    public func aiKeyStatus() async -> (saved: Bool, hint: String?) {
+        let secrets = environment.platform.secrets, account = Self.aiKeyAccount
+        do {
+            let data = try await Self.offMain { try secrets.read(account: account) }
+            aiKeyReadFailed = false
+            guard let data else { return (false, nil) }
+            return (true, AIDescriptionSettings.hint(forKey: String(decoding: data, as: UTF8.self)))
+        } catch {
+            if !aiKeyReadFailed {
+                aiKeyReadFailed = true
+                log.warning("The AI key (\(account)) could not be read from the secret store")
+            }
+            return (false, nil)
+        }
+    }
+
+    /// Deletes the saved key, off the main actor; whether there was one (as far as a read could tell). The key is for the service it was saved
+    /// for (`keepsKey(from:)`). A key that cannot be read is deleted all the same: a failing read must not keep the settings on the old service,
+    /// nor the key for the new one. Only a failure to delete throws.
+    private func forgetAIKey() async throws -> Bool {
+        let secrets = environment.platform.secrets, account = Self.aiKeyAccount
+        return try await Self.offMain {
+            let had = (try? secrets.read(account: account)) != nil
+            try secrets.write(nil, account: account)
+            return had
+        }
+    }
+
+    // MARK: AI descriptions
+
+    /// The describer of camera events (`EventDescriber`), made at first use: the engine starts and stops it with the bridge, hands it the
+    /// events the event log began, and sets its service from the settings and the key whenever either changes.
+    var aiDescriber: EventDescriber {
+        if let describer { return describer }
+        let nvr = nvr
+        let made = EventDescriber(usageFile: environment.dataDirectory.appending(path: "ai/usage.json", directoryHint: .notDirectory),
+                                  cameras: { [weak self] ids in await self?.describedCameras(ids) ?? [:] },
+                                  record: { description, event in nvr.recordDescription(description, for: event) },
+                                  now: tuning.aiNow)
+        describer = made
+        return made
+    }
+
+    /// What the Settings card shows of the AI descriptions: the day's and the week's counts, the limit, the last failure, and whether a
+    /// recordings folder is needed first (without one no event is kept, so none is described).
+    public func aiStatus() async -> AIStatus {
+        guard !isPreview else { return AIStatus() }
+        var status = await aiDescriber.status
+        status.needsRecordingsFolder = storedSettings.nvrFolder == nil
+        return status
+    }
+
+    /// Try it: describes the pictures around now of the camera `cameraID` with the chosen service and stores nothing (it counts toward the
+    /// day). Throws `EngineError.unknownCamera`, `AIDescriberError` (no service, the limit, a camera that does not run, no picture) or the
+    /// service's `AIProviderError`; both have a `sentence` for the page.
+    public func tryAIDescription(cameraID: UUID) async throws -> EventDescription {
+        guard !isPreview else { throw AIDescriberError.noService }
+        guard configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+        return try await aiDescriber.tryNow(cameraID: cameraID)
+    }
+
+    /// The running cameras among `ids`, with their names and switches, for the describer.
+    private func describedCameras(_ ids: Set<UUID>) -> [UUID: EventDescriber.Camera] {
+        var described: [UUID: EventDescriber.Camera] = [:]
+        for camera in configurations where ids.contains(camera.id) {
+            guard let runtime = runtimes[camera.id] else { continue }
+            described[camera.id] = EventDescriber.Camera(name: camera.name, describes: camera.aiDescriptions, frames: runtime)
+        }
+        return described
+    }
+
+    /// The service the settings name with `key`: Claude (which needs a key) or an OpenAI-compatible service (whose key may be none); nil when
+    /// none is chosen or Claude has no key.
+    nonisolated static func aiService(_ settings: AIDescriptionSettings, key: String?, transport: any AITransport,
+                                      now: @escaping @Sendable () -> Date) -> (any AIVisionDescribing)? {
+        switch settings.provider {
+        case nil:
+            return nil
+        case .anthropic:
+            guard let key, !key.isEmpty else { return nil }
+            return AnthropicVision(key: key, model: settings.model, transport: transport, now: now)
+        case .openAICompatible:
+            guard let address = settings.baseURL, let url = URL(string: address) else { return nil }
+            return OpenAICompatibleVision(baseURL: url, key: key, model: settings.model, transport: transport, now: now)
+        }
+    }
+
+    /// Gives the describer the service the settings name, with the key read again (off the main actor). `fresh`: the AI settings, the service or
+    /// its key changed (`EventDescriber.setService`).
+    private func refreshAIService(fresh: Bool) async {
+        aiServiceGeneration &+= 1
+        let generation = aiServiceGeneration
+        let secrets = environment.platform.secrets, account = Self.aiKeyAccount
+        let key: String?
+        do {
+            key = try await Self.offMain { try secrets.read(account: account) }.map { String(decoding: $0, as: UTF8.self) }
+        } catch {
+            log.warning("The AI key (\(account)) could not be read; no event is described until it can be")
+            key = nil
+        }
+        guard generation == aiServiceGeneration else { return }   // a key saved meanwhile already gave the describer its service
+        setAIService(key: key, fresh: fresh)
+    }
+
+    /// Gives the describer the service the settings name with `key`, and the day's limit.
+    private func setAIService(key: String?, fresh: Bool) {
+        aiServiceGeneration &+= 1
+        let settings = storedSettings.ai
+        let service = Self.aiService(settings, key: key, transport: tuning.aiTransport ?? URLSessionAITransport(), now: tuning.aiNow)
+        aiDescriber.setService(service, dailyLimit: settings.dailyLimit, fresh: fresh)
     }
 
     static func pluginAccount(_ id: String) throws -> String {
@@ -1475,9 +1652,11 @@ public final class BridgeEngine {
         cameras[index].appViewers = max(0, cameras[index].appViewers + delta)
     }
 
-    public func snapshot(cameraID: UUID) async -> Data? {
+    /// A 1280×720 snapshot of the camera, straightened by its picture correction unless `original` (the camera's own picture: the
+    /// web's camera page straightens that itself while its sliders move).
+    public func snapshot(cameraID: UUID, original: Bool = false) async -> Data? {
         guard !isPreview, let runtime = runtimes[cameraID] else { return nil }
-        return await runtime.snapshot(width: 1280, height: 720)
+        return await runtime.snapshot(width: 1280, height: 720, original: original)
     }
 
     /// How long `checkLocalNetworkAccess(host:)` waits for the answer to the system's Local Network alert.
@@ -1593,8 +1772,11 @@ public final class BridgeEngine {
             registry.apply(output)
             changes.notify()
         }
-        let nvr = nvr
-        await router.setEdgeHandler { edges in nvr.recordEvents(edges) }   // the event log beside the recordings
+        let nvr = nvr, describer = aiDescriber
+        await describer.start()
+        await refreshAIService(fresh: false)
+        // The event log beside the recordings, and the events it began to the describer (it returns at once).
+        await router.setEdgeHandler { edges in describer.eventsStarted(nvr.recordEvents(edges)) }
         startStatusLoop()
         await startSensorsBridge()
         await startWebhookReporting(storedSettings)
@@ -1621,6 +1803,7 @@ public final class BridgeEngine {
         pendingReconnect?.task.cancel()   // monitoring stopped (pause, stop); one that began finds the bridge inactive
         pendingReconnect = nil
         cancelAccessoryRetries()
+        await describer?.stop()   // before the runtimes it gathers pictures from
         await stopWebhook()
         webhookProblem = nil
         await nvr.detachAll()   // recorders flush and close while the hubs still deliver (`stopServices` clears `runtimes` without `stopRuntime`)
@@ -2585,6 +2768,9 @@ public final class BridgeEngine {
         if let folder = settings.nvrFolder, !BridgeSettings.isValidNVRFolder(folder) {
             throw EngineError.invalidSettings("the recordings folder must be a full path")
         }
+        if let problem = settings.ai.validationProblem {
+            throw EngineError.invalidSettings(problem.message)
+        }
     }
 
     /// A delayed piece of work that either begins or is cancelled, never both (`begin()` / `cancel()` race safely).
@@ -2612,9 +2798,10 @@ public final class BridgeEngine {
     }
 
     /// Whether a configuration change needs the camera's runtime restarted. The sensors and the motion hold do not
-    /// (router and sensors bridge), soft motion's sensitivity is applied in place, and a paired camera's name does not
-    /// either (Home keeps its own; the accessory takes the new one at its next start). The camera detail form sends
-    /// every pause in typing or dragging: each restart would cut live views and HKSV recordings.
+    /// (router and sensors bridge), soft motion's sensitivity, the timestamp overlay's look and the picture correction are
+    /// applied in place, and a paired camera's name does not either (Home keeps its own; the accessory takes the new one at
+    /// its next start). The camera detail form sends every pause in typing or dragging: each restart would cut live views and
+    /// HKSV recordings and close the camera's NVR file.
     static func needsRestart(_ old: CameraConfiguration, _ new: CameraConfiguration, paired: Bool) -> Bool {
         var comparable = new
         comparable.sensors = old.sensors
@@ -2622,6 +2809,8 @@ public final class BridgeEngine {
         comparable.motionSensitivity = old.motionSensitivity
         // The overlay's look is applied in place; turning it on or off changes the video path (passthrough or transcode).
         if comparable.timestampOverlay.enabled == old.timestampOverlay.enabled { comparable.timestampOverlay = old.timestampOverlay }
+        // Applied in place (`updatePictureCorrection`): a restart would close the camera's NVR file.
+        comparable.pictureCorrection = old.pictureCorrection
         comparable.hiddenCameraClock = old.hiddenCameraClock
         comparable.cleanPictureBackup = old.cleanPictureBackup
         comparable.setupBackup = old.setupBackup
@@ -2629,6 +2818,7 @@ public final class BridgeEngine {
         comparable.dnsWatch = old.dnsWatch
         comparable.nvrEnabled = old.nvrEnabled               // Record and Record sound are applied in place (`setNVR`): never a restart
         comparable.nvrRecordSound = old.nvrRecordSound
+        comparable.aiDescriptions = old.aiDescriptions       // the describer reads the switch when an event starts: never a restart
         if paired { comparable.name = old.name }
         return comparable != old
     }

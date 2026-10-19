@@ -116,6 +116,9 @@ expect "names lowercased, most asked first, with first and last" "$(status '.cam
 expect "every internet name it asked for, other cameras', old ones and local questions left out" "$(status '[.cameras[0].names[].name]')" \
     '["p2p.example.com","cloud.example.net","tcp.example.org","weird\"name\\032x.example.com"]'
 expect "an IPv6 camera's lookups are matched in the log's form" "$(status '.cameras[1].names | map([.name, .count])')" '[["ntp.example.org",1]]'
+expect "local questions are counted, never named" "$(status '[.cameras[] | .local]')" '[2,0]'
+expect "the history keeps no local name" \
+    "$(grep -c -F -e '1.77.168.192.in-addr.arpa' -e 'version.bind' "$root/srv/system/guard/history.json" || true)" '0'
 expect "today is counted in the kept time zone" "$(status '[.timeZone, .todayStart, .updatedAt, .state]')" \
     '["UTC","2026-10-17T00:00:00Z","2026-10-17T18:00:00Z","ok"]'
 expect "the log was read and taken away" "$(find "$root/run/camera-bridge/guard/log" -type f | wc -l | tr -d ' ')" "0"
@@ -132,7 +135,7 @@ guard collect
 expect "yesterday is not today, but still within 24 hours" "$(status '.cameras[0] | [.today, .last24h, (.names | length)]')" '[0,8,4]'
 now=$(at "2026-10-25 18:00:00")
 guard collect
-expect "after 7 days a lookup is forgotten" "$(status '.cameras[0] | [.today, .last24h, (.names | length)]')" '[0,0,0]'
+expect "after 7 days a lookup is forgotten" "$(status '.cameras[0] | [.today, .last24h, (.names | length), .local]')" '[0,0,0,0]'
 
 echo 'not json' >"$root/srv/system/guard/history.json"
 printf 'Oct 25 17:59:00 dnsmasq[18]: query[A] again.example.com from 192.168.77.21\n' | log_lines
@@ -149,7 +152,7 @@ guard set "$tmp/body.json" >/dev/null 2>&1
 expect "a camera no longer watched is forgotten" "$(jq -c '.cameras | keys' "$root/srv/system/guard/history.json") $(status '.cameras | length')" '[] 1'
 
 # Questions that never leave the home network (names of the local network, reverse lookups of its addresses, questions about the DNS server
-# itself) are not internet lookups: neither counted nor named.
+# itself) are not internet lookups: not among them, never named, only counted as local questions (proof the camera asks the box).
 fresh '{"cameras": [{"address": "192.168.77.21", "level": "watch"}], "timeZone": "UTC"}' "2026-10-17 18:00:00"
 zeros=$(printf '0.%.0s' $(seq 29))
 for name in router nas.local printer.lan box.home.arpa nvr.localdomain cam.internal localhost version.bind hostname.bind id.server \
@@ -162,8 +165,25 @@ for name in router nas.local printer.lan box.home.arpa nvr.localdomain cam.inter
 done | log_lines
 guard collect
 expect "local questions are not internet lookups" "$(status '.cameras[0] | [.today, .last24h]')" '[6,6]'
+expect "every local question is counted" "$(status '.cameras[0].local')" '21'
+printf 'Oct 17 17:20:00 dnsmasq[18]: query[A] router from 192.168.77.21\n' | log_lines
+guard collect
+expect "a later collection adds to the count" "$(status '.cameras[0] | [.local, .today]')" '[22,6]'
+expect "no local name is kept or shown" "$(grep -c -F -e '"router"' -e '"nas.local"' -e '"printer.lan"' -e '"box.home.arpa"' -e '"version.bind"' \
+    -e '"2.77.168.192.in-addr.arpa"' "$root/srv/system/guard/history.json" "$root/run/camera-bridge/status/guard.json" | awk -F: '{n += $NF} END {print n}')" '0'
 expect "only the internet names are shown" "$(status '[.cameras[0].names[].name]')" \
     '["1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa","1.0.0.11.in-addr.arpa","5.0.32.172.in-addr.arpa","8.8.8.8.in-addr.arpa","cloud.lan.example.net","nas.local.example.com"]'
+
+# A history an older cb-guard kept (its hours without "q") is read as it is: no local questions until one comes.
+fresh '{"cameras": [{"address": "192.168.77.21", "level": "watch"}], "timeZone": "UTC"}' "2026-10-17 18:00:00"
+hour=$(at "2026-10-17 16:00:00")
+printf '{"v": 1, "cameras": {"192.168.77.21": {"%s": {"n": {"old.example.com": {"c": 2, "f": %s, "l": %s}}, "o": 0}}}}\n' "$hour" "$hour" "$hour" \
+    >"$root/srv/system/guard/history.json"
+guard collect || bad "collect ran on an older history"
+expect "an older history collects, with no local questions" "$(status '.cameras[0] | [.local, .last24h, [.names[].name]]')" '[0,2,["old.example.com"]]'
+printf 'Oct 17 17:59:00 dnsmasq[18]: query[A] printer.lan from 192.168.77.21\n' | log_lines
+guard collect || bad "collect ran"
+expect "and counts the next one" "$(status '.cameras[0] | [.local, .last24h]')" '[1,2]'
 
 # How long each camera has been watched without a break: from when its address was put on the list (a list sent again keeps it), from when
 # the history started again, and from when the DNS last started answering, whichever is latest.

@@ -9,8 +9,8 @@ name: Camera Bridge OS image
 # Releases and keeps the newest two (linux/os/prune-betas.sh); their git tags stay, and each one's package list and source offer are
 # first copied to the release os-sources (the source offer in every image promises them for three years). It only lists what it
 # would remove until the repository variable PRUNE_OS_BETAS is "on" (Settings > Secrets and variables > Actions > Variables). From
-# 1.0 on (no leading "0."), releases are normal numbered full releases and are never removed. No OS release is ever "Latest": that is
-# the Mac app's newest v* release, which the site's "Download for Mac" opens.
+# 1.0 on (no leading "0."), releases are normal numbered full releases, are never removed, and the newest is GitHub's "Latest" (the Mac
+# app's v* releases, which held "Latest", are archived pre-releases since 2026-10-18).
 #
 # Needed once, as repository secrets (see docs/linux/BUILDING.md, "Release signing"):
 #   MINISIGN_SECRET_KEY   content of the minisign secret key file (create it without a password, or also set the next one)
@@ -252,13 +252,12 @@ jobs:
             out/cb-os_"$VERSION"_amd64_root.raw.zst
           )
           printf '%s\n' "${FILES[@]#out/}" > release-files.txt   # the next step checks each one on the published release
-          # --latest=false: "Latest" belongs to the Mac app (its v* releases). GitHub would make a full release such as os-v1.0 Latest, and
-          # the site's "Download for Mac" (releases/latest) would then open Camera Bridge OS.
+          # A beta is a pre-release, so it never becomes "Latest"; a full release such as os-v1.0 does (the Mac app, which held "Latest",
+          # is archived since 2026-10-18).
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" \
             --notes-file notes.md \
-            --latest=false \
             "${PRERELEASE[@]}" \
             "${FILES[@]}"
       - name: Check the published release
@@ -268,8 +267,7 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           # Older betas are removed only after this passes: the release is there and not a draft, a beta is a pre-release, every file is on
-          # it with the size it has here, the signed list on the release is ours and verifies with the key the boxes use, and the release
-          # did not take "Latest" from the Mac app.
+          # it with the size it has here, and the signed list on the release is ours and verifies with the key the boxes use.
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,assets > published.json
           beta=false; case "$VERSION" in 0.*) beta=true ;; esac
           jq -e --arg tag "$TAG" --argjson beta "$beta" '.tagName == $tag and .isDraft == false and .isPrerelease == $beta' published.json >/dev/null \
@@ -283,8 +281,6 @@ jobs:
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published --pattern SHA256SUMS --pattern SHA256SUMS.sig
           cmp published/SHA256SUMS out/SHA256SUMS
           minisign -V -q -p linux/os/mkosi.extra/usr/share/camera-bridge/update-key.pub -m published/SHA256SUMS -x published/SHA256SUMS.sig
-          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
-          [ "$latest" != "$TAG" ] || { echo "::error::$TAG became the repository's Latest release, which is the Mac app's. Mark the newest v* release Latest again."; exit 1; }
           echo "$TAG is published with its $(wc -l < release-files.txt) files and a good signature."
       - name: Remove older betas (the newest two stay, git tags stay; only listed until PRUNE_OS_BETAS is on)
         env:

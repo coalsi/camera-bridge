@@ -121,27 +121,78 @@ final class MockONVIFCamera: Sendable {
     let refuseDNSChanges = Box(false)
     /// `SetDNS` answers success and changes nothing while set.
     let ignoreDNSChanges = Box(false)
+    /// The subcodes of the faults successive `SetDNS` requests are answered with, in order ("InvalidArgVal"; "NotAuthorized" is the account
+    /// that may not change the DNS once it signed in); once used up, `SetDNS` is answered as `refuseDNSChanges` and the slots say.
+    let dnsFaults = Box<[String]>([])
     /// The device has no `GetDNS` (answers `ActionNotSupported`).
     let noDNS = Box(false)
     /// How `GetDNS` shows a slot set by hand that is empty: left out (nil, by default), or as this address ("0.0.0.0", as ISAPI shows one).
     let emptySlotShownAs = Box<String?>(nil)
     /// Raw bodies of successive `SetDNS` requests.
     let setDNSBodies = Box<[String]>([])
-    /// The `GetNetworkDefaultGateway` and `GetNetworkInterfaces` answers: camera A's (addresses changed to documentation ones, its MAC to
-    /// a documentation one, RFC 7042).
-    static let gatewayAnswer = """
-    <tds:GetNetworkDefaultGatewayResponse><tds:NetworkGateway><tt:IPv4Address>192.168.77.1</tt:IPv4Address></tds:NetworkGateway>\
-    </tds:GetNetworkDefaultGatewayResponse>
-    """
-    static let documentationMAC = "00:00:5e:00:53:22"
-    static let interfacesAnswer = """
-    <tds:GetNetworkInterfacesResponse><tds:NetworkInterfaces token="eth0"><tt:Enabled>true</tt:Enabled><tt:Info><tt:Name>eth0</tt:Name>\
-    <tt:HwAddress>\(documentationMAC)</tt:HwAddress><tt:MTU>1400</tt:MTU></tt:Info><tt:IPv4><tt:Enabled>true</tt:Enabled><tt:Config>\
-    <tt:LinkLocal><tt:Address>192.168.77.22</tt:Address><tt:PrefixLength>24</tt:PrefixLength></tt:LinkLocal><tt:FromDHCP>\
-    <tt:Address>192.168.77.22</tt:Address><tt:PrefixLength>24</tt:PrefixLength></tt:FromDHCP><tt:DHCP>true</tt:DHCP></tt:Config></tt:IPv4>\
-    </tds:NetworkInterfaces></tds:GetNetworkInterfacesResponse>
-    """
-    let interfaces = Box(MockONVIFCamera.interfacesAnswer)
+    /// A camera that applies `SetDNS` only after its network restarts: while set, the write is answered at once but kept pending, and shown
+    /// by `GetDNS` once `GetDNS` has been asked this many times since (a read-back every 2 s: 5 is 10 s). Until then `GetDNS` shows the old
+    /// servers. nil (by default): the write applies at once.
+    let applyDNSAfterReads = Box<Int?>(nil)
+    /// While a write is pending (`applyDNSAfterReads`), `GetDNS` answers HTTP 503 instead of the old servers (the camera is restarting its
+    /// network service).
+    let silentWhileApplying = Box(false)
+    /// A `SetDNS` the camera has answered but not applied yet: the `GetDNS` reads still to pass before it shows, and what it does to the DNS.
+    private struct PendingDNS: Sendable {
+        var readsLeft: Int
+        let apply: @Sendable (inout DNS) -> Void
+    }
+    private let pendingDNS = Box<PendingDNS?>(nil)
+    /// The `GetNetworkDefaultGateway` and `GetNetworkInterfaces` answers: camera A's (addresses changed to made-up ones, its MAC too).
+    static let gatewayAnswer = MockONVIFCamera.gatewayAnswer(["192.168.77.1"])
+    static let hardwareAddress = "02:00:00:00:00:22"
+    static let interfacesAnswer = MockONVIFCamera.interfacesAnswer(IPv4())
+
+    /// The device's network interface `eth0`, its IPv4 settings as `GetNetworkInterfaces` shows them and `SetNetworkInterfaces` sets them: by
+    /// default camera A's, on DHCP (the lease shown as `FromDHCP` and `LinkLocal`). Fixed (`dhcp` false), the address is shown as `Manual`.
+    struct IPv4: Sendable, Equatable {
+        var dhcp = true
+        var address = "192.168.77.22"
+        var prefixLength = 24
+    }
+    let ipv4 = Box(IPv4())
+    /// The default gateways `GetNetworkDefaultGateway` shows and `SetNetworkDefaultGateway` sets (IPv4 ones; empty: none).
+    let gateways = Box(["192.168.77.1"])
+    /// `GetNetworkInterfaces` shows no hardware address while set.
+    let hidesHardwareAddress = Box(false)
+    /// `GetNetworkInterfaces` answers this body instead of `ipv4`'s while set (an interface shown in another shape).
+    let interfacesOverride = Box<String?>(nil)
+    /// `SetNetworkInterfaces` answers `RebootNeeded` true while set: the change is taken and shown only after the camera restarts, which
+    /// never happens here (its old settings stay shown).
+    let networkRebootNeeded = Box(false)
+    /// `SetNetworkInterfaces` answers success and changes nothing while set.
+    let ignoreNetworkChanges = Box(false)
+    /// `SetNetworkInterfaces` answers a fault with this subcode while set ("InvalidArgVal": a body it does not take; "ActionNotSupported").
+    let networkInterfacesFault = Box<String?>(nil)
+    /// `SetNetworkInterfaces` applies the change and answers 200 with a body that is not its answer while set.
+    let networkInterfacesUnreadable = Box(false)
+    /// A fixed address drops the gateway DHCP gave (`gateways` empty), and DHCP gives it back, while set.
+    let dropsGatewayWhenFixed = Box(false)
+    /// `SetNetworkDefaultGateway` answers success and changes nothing while set.
+    let ignoreGatewayChanges = Box(false)
+    /// Raw bodies of successive `SetNetworkInterfaces` and `SetNetworkDefaultGateway` requests.
+    let setNetworkInterfacesBodies = Box<[String]>([])
+    let setGatewayBodies = Box<[String]>([])
+
+    static func gatewayAnswer(_ ipv4: [String]) -> String {
+        "<tds:GetNetworkDefaultGatewayResponse><tds:NetworkGateway>" + ipv4.map { "<tt:IPv4Address>\($0)</tt:IPv4Address>" }.joined()
+            + "</tds:NetworkGateway></tds:GetNetworkDefaultGatewayResponse>"
+    }
+
+    static func interfacesAnswer(_ ipv4: IPv4, hardwareAddress: String? = MockONVIFCamera.hardwareAddress) -> String {
+        let prefixed = "<tt:Address>\(ipv4.address)</tt:Address><tt:PrefixLength>\(ipv4.prefixLength)</tt:PrefixLength>"
+        let config = ipv4.dhcp ? "<tt:LinkLocal>\(prefixed)</tt:LinkLocal><tt:FromDHCP>\(prefixed)</tt:FromDHCP><tt:DHCP>true</tt:DHCP>"
+            : "<tt:Manual>\(prefixed)</tt:Manual><tt:DHCP>false</tt:DHCP>"
+        let mac = hardwareAddress.map { "<tt:HwAddress>\($0)</tt:HwAddress>" } ?? ""
+        return "<tds:GetNetworkInterfacesResponse><tds:NetworkInterfaces token=\"eth0\"><tt:Enabled>true</tt:Enabled><tt:Info><tt:Name>eth0</tt:Name>"
+            + "\(mac)<tt:MTU>1400</tt:MTU></tt:Info><tt:IPv4><tt:Enabled>true</tt:Enabled><tt:Config>\(config)</tt:Config></tt:IPv4>"
+            + "</tds:NetworkInterfaces></tds:GetNetworkInterfacesResponse>"
+    }
 
     /// One `IPAddress` entry (`DNSManual`, `DNSFromDHCP`) in the device's answer.
     private static func addressEntry(_ element: String, _ address: String) -> String {
@@ -400,6 +451,14 @@ final class MockONVIFCamera: Sendable {
             return self.envelope("<tds:SetNTPResponse/>")
         case "GetDNS":
             if noDNS.value { return fault("ActionNotSupported", "GetDNS is not supported") }
+            let restarting = pendingDNS.update { pending -> Bool in
+                guard let waiting = pending else { return false }
+                guard waiting.readsLeft == 0 else { pending?.readsLeft -= 1; return true }
+                dns.update(waiting.apply)
+                pending = nil
+                return false
+            }
+            if restarting && silentWhileApplying.value { return .status(503) }
             let state = dns.value
             let search = state.searchDomains.map { "<tt:SearchDomain>\($0)</tt:SearchDomain>" }.joined()
             let fromDHCP = state.fromDHCP ? state.dhcpServers.map { Self.addressEntry("DNSFromDHCP", $0) }.joined() : ""
@@ -410,6 +469,7 @@ final class MockONVIFCamera: Sendable {
                 + "</tds:DNSInformation></tds:GetDNSResponse>")
         case "SetDNS":
             setDNSBodies.update { $0.append(request.bodyText) }
+            if let subcode = dnsFaults.update({ $0.isEmpty ? nil : $0.removeFirst() }) { return fault(subcode, "the DNS settings can not be changed") }
             if refuseDNSChanges.value { return fault("InvalidArgVal", "the DNS settings can not be changed") }
             if ignoreDNSChanges.value { return self.envelope("<tds:SetDNSResponse/>") }
             let set = envelope.firstDescendant("SetDNS")
@@ -420,7 +480,7 @@ final class MockONVIFCamera: Sendable {
             let slots = dnsSlots.value
             let named = servers.filter { !$0.isEmpty }
             if slots == .twoRefusingDuplicates, Set(named).count < named.count { return fault("InvalidArgVal", "a DNS server is named twice") }
-            dns.update { state in
+            let apply: @Sendable (inout DNS) -> Void = { state in
                 state.fromDHCP = fromDHCP
                 state.searchDomains = search
                 guard slots != .asSent else { state.manualServers = servers; return }
@@ -428,9 +488,42 @@ final class MockONVIFCamera: Sendable {
                 for (index, server) in servers.prefix(2).enumerated() where !(slots == .twoKeepingSecond && index == 1) { kept[index] = server }
                 state.manualServers = kept
             }
+            if let reads = applyDNSAfterReads.value {
+                pendingDNS.set(PendingDNS(readsLeft: reads, apply: apply))
+            } else {
+                dns.update(apply)
+            }
             return self.envelope("<tds:SetDNSResponse/>")
-        case "GetNetworkDefaultGateway": return self.envelope(Self.gatewayAnswer)
-        case "GetNetworkInterfaces": return self.envelope(interfaces.value)
+        case "GetNetworkDefaultGateway": return self.envelope(Self.gatewayAnswer(gateways.value))
+        case "GetNetworkInterfaces":
+            return self.envelope(interfacesOverride.value ?? Self.interfacesAnswer(ipv4.value, hardwareAddress: hidesHardwareAddress.value ? nil : Self.hardwareAddress))
+        case "SetNetworkInterfaces":
+            setNetworkInterfacesBodies.update { $0.append(request.bodyText) }
+            if let subcode = networkInterfacesFault.value { return fault(subcode, "the network interface settings can not be changed") }
+            let set = envelope.firstDescendant("SetNetworkInterfaces")
+            guard set?.string("InterfaceToken") == "eth0", let config = set?.child("NetworkInterface")?.child("IPv4"),
+                  let dhcp = config.child("DHCP").flatMap({ ONVIFNotification.parseBool($0.text) }) else {
+                return fault("InvalidArgVal", "the network interface settings are not valid")
+            }
+            let manual = config.child("Manual")
+            let reboot = networkRebootNeeded.value
+            if !reboot, !ignoreNetworkChanges.value {
+                if dropsGatewayWhenFixed.value { gateways.set(dhcp ? ["192.168.77.1"] : []) }
+                ipv4.update { state in
+                    state.dhcp = dhcp
+                    if !dhcp, let address = manual?.string("Address"), let prefix = manual?.string("PrefixLength").flatMap({ Int($0) }) {
+                        state.address = address
+                        state.prefixLength = prefix
+                    }
+                }
+            }
+            if networkInterfacesUnreadable.value { return self.envelope("<tds:Unexpected/>") }
+            return self.envelope("<tds:SetNetworkInterfacesResponse><tds:RebootNeeded>\(reboot)</tds:RebootNeeded></tds:SetNetworkInterfacesResponse>")
+        case "SetNetworkDefaultGateway":
+            setGatewayBodies.update { $0.append(request.bodyText) }
+            if ignoreGatewayChanges.value { return self.envelope("<tds:SetNetworkDefaultGatewayResponse/>") }
+            gateways.set((envelope.firstDescendant("SetNetworkDefaultGateway")?.children("IPv4Address") ?? []).map(\.text))
+            return self.envelope("<tds:SetNetworkDefaultGatewayResponse/>")
         case "GetImagingSettings": return .soap(template("GetImagingSettingsResponse.xml"))
         case "GetOptions": return .soap(template("GetImagingOptionsResponse.xml"))
         case "SetImagingSettings":

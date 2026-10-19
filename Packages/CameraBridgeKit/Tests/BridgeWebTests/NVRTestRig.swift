@@ -130,7 +130,7 @@ final class CountingBackend: BridgeBackend {
     func removeCamera(id: UUID) async { await base.removeCamera(id: id) }
     func resetPairing(cameraID: UUID) async throws { try await base.resetPairing(cameraID: cameraID) }
     func resetSensorsBridgePairing() async throws { try await base.resetSensorsBridgePairing() }
-    func snapshotJPEG(cameraID: UUID) async -> Data? { await base.snapshotJPEG(cameraID: cameraID) }
+    func snapshotJPEG(cameraID: UUID, original: Bool) async -> Data? { await base.snapshotJPEG(cameraID: cameraID, original: original) }
     func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription {
         try await base.liveVideo(cameraID: cameraID, stream: stream, displayWidth: displayWidth)
     }
@@ -145,9 +145,14 @@ final class CountingBackend: BridgeBackend {
     func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer { await base.portAnswer(host: host, port: port, timeout: timeout) }
     func localIPv4Addresses() async -> [String] { await base.localIPv4Addresses() }
     func setPluginSecret(id: String, _ data: Data?) async throws { try await base.setPluginSecret(id: id, data) }
+    func aiKeyStatus() async -> (saved: Bool, hint: String?) { await base.aiKeyStatus() }
+    func setAIKey(_ key: String?) async throws { try await base.setAIKey(key) }
     func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange { try await base.setCleanPicture(cameraID: cameraID, clean: clean) }
     func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport { try await base.cameraSetupPreview(cameraID: cameraID) }
     func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.applyCameraSetup(cameraID: cameraID) }
+    func applyCameraSetup(cameraID: UUID, options: CameraSetupOptions) async throws -> CameraSetupReport {
+        try await base.applyCameraSetup(cameraID: cameraID, options: options)
+    }
     func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport { try await base.restoreCameraSetup(cameraID: cameraID) }
     func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws { try await base.panTilt(cameraID: cameraID, pan: pan, tilt: tilt, zoom: zoom) }
     func setNightVision(cameraID: UUID, mode: NightVisionMode?, light: Bool?) async throws { try await base.setNightVision(cameraID: cameraID, mode: mode, light: light) }

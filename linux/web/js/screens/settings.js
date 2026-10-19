@@ -1,10 +1,12 @@
 // Bridge-wide settings, in sections: General (name, time zone, password, sign out), Video and recording (one label on every camera,
-// recording), Apple Home and other systems (ports, webhook), Troubleshooting (the log). The appearance is the menu's button.
+// recording), Apple Home and other systems (ports, webhook), AI (descriptions of events), Troubleshooting (the log). The appearance is the
+// menu's button.
 import { get, patch, post } from '../api.js';
 import { confirmDialog, h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { loadNVR } from '../nvr/lite.js';
 import { cameraList, store } from '../store.js';
+import { createAISettingsCard } from './ai-settings.js';
 import { field, inlineError, selectField, switchRow } from './common.js';
 import { importMacCard } from './import-mac.js';
 
@@ -13,9 +15,10 @@ export function renderSettings({ params, setTitle }) {
   const recordingHost = h('div', { id: 'recording' });
   const importCard = importMacCard();
   let recording = null;   // the Recording card: { el, refresh, destroy }, made once and put back by every draw()
+  let aiCard = null;      // the AI descriptions card: { el, update }, made once (it keeps what is being typed and Try it's answer)
   let settings = null;
   let destroyed = false;
-  let wantsRecording = params?.[0] === 'recording';   // the address #/settings/recording scrolls to the card
+  let wanted = params?.[0] ?? null;   // the address #/settings/recording or #/settings/ai scrolls to that card
 
   async function load() {
     try {
@@ -181,31 +184,39 @@ export function renderSettings({ params, setTitle }) {
     recording = nvr ? nvr.storageCard() : null;
     replace(recordingHost, recording ? recording.el
       : h('div', { class: 'card' }, h('h2', null, 'Recording'), inlineError('The recording settings could not load. Reload the page to try again.')));
-    showRecording();
+    showWanted();
   }
 
-  /** Scrolls to the Recording card once, when both it and the other settings are on the page. */
-  function showRecording() {
-    if (!wantsRecording || !settings || !recordingHost.firstChild || !recordingHost.isConnected) return;
-    wantsRecording = false;
-    recordingHost.scrollIntoView({ block: 'start' });
-    recordingHost.querySelector('h2')?.focus({ preventScroll: true });
+  /**
+   * Scrolls to the card the address names (Recording, AI descriptions) once, when both it and the other settings are on the page. The AI
+   * card also waits for the Recording card, which loads on demand above it and would push it down (mountRecording asks again).
+   */
+  function showWanted() {
+    const host = wanted === 'recording' ? recordingHost : wanted === 'ai' ? aiCard?.el : null;
+    if (!host || !settings || !host.firstChild || !host.isConnected) return;
+    if (wanted === 'ai' && !recordingHost.firstChild) return;
+    wanted = null;
+    host.scrollIntoView({ block: 'start' });
+    host.querySelector('h2')?.focus({ preventScroll: true });
   }
 
   function draw() {
     const section = (title, ...cards) => h('section', { class: 'settings-section' }, h('h2', { class: 'section-title' }, title), h('div', { class: 'card-columns' }, cards));
+    if (aiCard) aiCard.update(settings);
+    else aiCard = createAISettingsCard(settings, { onSettings: (next) => { settings = next; } });
     replace(root,
       // Bringing cameras over from the Mac app is a first-day step: offered while the bridge has none.
       section('General', nameCard(), timeZoneCard(), cameraList().length ? null : importCard, passwordCard(), accountCard()),
       section('Video and recording', labelsCard(), recordingHost),
       section('Apple Home and other systems', portsCard(), webhookCard()),
+      section('AI', aiCard.el),
       section('Troubleshooting', diagnosticsCard()));
-    showRecording();
+    showWanted();
   }
 
   replace(root, h('div', { class: 'checking' }, spinner()));
   load();
   mountRecording();
-  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Settings')), root), destroy() { destroyed = true; recording?.destroy(); } };
+  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Settings')), root), destroy() { destroyed = true; recording?.destroy(); aiCard?.destroy(); } };
 }
 

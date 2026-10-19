@@ -5,12 +5,15 @@
 // with its own mark, and the level's word) on the Cameras page with a legend under the table, beside the camera's name, as a dot beside each
 // name on the Monitor, and as the camera page's Security card: the findings in plain words, "Check again" (POST cameras/:id/security/check,
 // at most once a minute), "Fix with Set up for Camera Bridge" for what the setup can change, "Change it by hand" (manual-help.js) under what
-// it can't, and the Internet guard (Watch: what it blocked today and in 24 hours; how to point the camera's DNS at Camera Bridge by hand while
-// it is not watched) with the router help. Colour is never alone: the level's word is always shown or read out. Nothing here checks a camera
-// by itself.
+// it can't, "Restart the camera now" while the camera waits for a restart (camera-setup.js restartControl), and the Internet guard (Watch:
+// what it blocked today and in 24 hours; how to point the camera's DNS at Camera Bridge by hand while it is not watched; each name it blocked
+// with how often, first and last, and what it likely is, guard-names.js) with the router help. The banner's "See what <camera> tried" opens
+// the card (#/camera/<id>/security). Colour is never alone: the level's word is always shown or read out. Nothing here checks a camera by
+// itself.
 import { api } from '../api.js';
 import { h, replace, svg } from '../dom.js';
 import { timeAgo } from '../format.js';
+import { describeGuardName } from '../guard-names.js';
 import { putCamera, store } from '../store.js';
 import { inlineError } from './common.js';
 import { MANUAL_TEXT, manualHelpBlock, manualHelpView } from './manual-help.js';
@@ -25,7 +28,7 @@ export const SECURITY_TEXT = {
   colours: { red: 'Red', yellow: 'Yellow', green: 'Green', gold: 'Gold' },
   /** What each colour means (the owner's words, 2026-10-17). */
   meanings: {
-    gold: 'Camera Bridge found no way in from outside, and its Internet guard saw it make no internet lookups for a full day.',
+    gold: 'Camera Bridge found no way in from outside, and its Internet guard saw it make no internet lookups for a full day and has seen at least one lookup from it.',
     green: 'Its cloud is off; something Camera Bridge can’t confirm remains.',
     yellow: 'Camera Bridge found nothing that lets it in from outside, but something needs work: its cloud is on but not linked, its video plays '
       + 'without a password on your network, it keeps looking up internet names, or Camera Bridge can’t read its cloud.',
@@ -48,6 +51,8 @@ export const SECURITY_TEXT = {
   fix: 'Fix with Set up for Camera Bridge…',
   fixDesc: 'Shows each change first, and can put everything back.',
   failed: 'The check didn’t finish. Try again.',
+  /** Said while the camera's AI switch is on and its service is not on the home network: the guard's level is about the camera's own traffic. */
+  aiLeaves: (service) => `Its event pictures go to ${service} for AI descriptions.`,
 };
 
 /** The Internet guard's words, in one table (the bridge's InternetGuardText, BridgeEngine/Security/InternetGuard.swift, and the page's own). */
@@ -73,6 +78,10 @@ export const GUARD_TEXT = {
   blocked: (today, day) => `Blocked ${today} lookup${today === 1 ? '' : 's'} today, ${day} in the last 24 hours.`,
   names: 'The internet names it looked up (last 7 days)',
   times: (count) => `${count} time${count === 1 ? '' : 's'}`,
+  /** Under the names when one of them is likely the maker's cloud: the guard sees names and times only, not who caused them, so the
+   *  person can weigh their own use of the maker's app. */
+  wasItYou: 'Cameras look these up on their own, and also when you use the maker’s phone app or website with them. If you used this camera’s '
+    + 'app around one of these times, that may have been you.',
   cantWatch: 'Camera Bridge can’t change this camera’s settings, so it can’t watch it. Your router can keep it off the internet (below).',
   router: 'Your router can keep it off the internet (below).',
   cloudOnly: 'This camera needs its maker’s cloud to work with Camera Bridge, so it can’t be kept off the internet.',
@@ -83,6 +92,8 @@ export const SECURITY_CHECK_TIMEOUT_MS = 60_000;
 
 const count = (value) => (Number.isFinite(value) && value > 0 ? Math.floor(value) : 0);
 
+const readTime = (value) => (Number.isFinite(Date.parse(value)) ? Date.parse(value) : null);
+
 /** The guard's part of the view: on a bridge without it (`guard` null) nothing is watched. Names newest first, one never seen last at the end. */
 function guardView(guard, finding) {
   const sentence = typeof finding?.sentence === 'string' && finding.sentence ? finding.sentence : null;
@@ -92,7 +103,7 @@ function guardView(guard, finding) {
   }
   const names = (Array.isArray(guard.names) ? guard.names : [])
     .filter((entry) => entry && typeof entry.name === 'string' && entry.name)
-    .map((entry, index) => ({ name: entry.name, count: count(entry.count), last: Number.isFinite(Date.parse(entry.last)) ? Date.parse(entry.last) : null, index }))
+    .map((entry, index) => ({ name: entry.name, count: count(entry.count), first: readTime(entry.first), last: readTime(entry.last), index }))
     .sort((a, b) => (b.last ?? -Infinity) - (a.last ?? -Infinity) || a.index - b.index)
     .map(({ index, ...entry }) => entry);
   const watched = guard.watched === true;
@@ -108,7 +119,8 @@ function guardView(guard, finding) {
  *   findings   the camera's, worst first as the bridge sent them, without the guard's: { feature, state, level, sentence, canChange, fixable,
  *              manual } (fixable: Set up for Camera Bridge can change it and it is not right yet; manual: the bridge's "Change it by hand",
  *              manual-help.js, or null); `fixable` lists those
- *   guard      { onBridge, watched, today, last24h, names: [{ name, count, last }] newest first, sentence (the guard's finding), running,
+ *   guard      { onBridge, watched, today, last24h, names: [{ name, count, first, last }] newest first (times in ms, null when the bridge
+ *              does not say), sentence (the guard's finding), running,
  *              manual (how to point its DNS at Camera Bridge by hand while it is not watched, or null) }
  */
 export function securityView(camera) {
@@ -136,6 +148,35 @@ export function securityView(camera) {
 /** The integrations whose cameras work only through their maker's cloud (the bridge's CloudDependentModels, by integration): blocking
  *  their internet would stop them in Camera Bridge too. */
 const CLOUD_ONLY_SERVICES = new Set(['wyze', 'eufy', 'ring', 'nest', 'tuya']);
+
+/**
+ * Whether `host` (a URL's host name) is on the home network: a private (10/8, 172.16/12, 192.168/16), loopback (127/8) or link-local
+ * (169.254/16) IPv4 address, the IPv6 loopback or link-local address, `localhost`, or a `.local` or `.lan` name.
+ */
+export function isHomeNetworkHost(host) {
+  const name = String(host ?? '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!name) return false;
+  const four = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(name);
+  if (four) {
+    const [a, b, c, d] = four.slice(1).map(Number);
+    if ([a, b, c, d].some((part) => part > 255)) return false;
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  if (name.includes(':')) return name === '::1' || /^fe[89ab][0-9a-f]?:/.test(name);
+  return name === 'localhost' || name.endsWith('.local') || name.endsWith('.lan');
+}
+
+/**
+ * Where a camera's event pictures go for AI descriptions when that is away from home: "Claude", or the host of an OpenAI-compatible
+ * service that is not on the home network; null when no service is chosen, its address cannot be read, or it is at home. `ai` is GET settings' `ai`.
+ */
+export function picturesGoTo(ai) {
+  if (ai?.provider === 'anthropic') return 'Claude';
+  if (ai?.provider !== 'openAICompatible' || typeof ai.baseURL !== 'string') return null;
+  let host;
+  try { host = new URL(ai.baseURL).hostname; } catch { return null; }
+  return host && !isHomeNetworkHost(host) ? host : null;
+}
 
 /** Whether `camera` reaches Camera Bridge only through its maker's cloud, so the page never tells anyone to block its internet. */
 export function needsMakersCloud(camera) {
@@ -286,27 +327,40 @@ function findingItem(entry, canSetUp, help = (_key, view) => manualHelpBlock(vie
       help(`${entry.feature}|${entry.sentence}`, entry.manual)));
 }
 
-function nameItem(entry, now) {
+/**
+ * A name the guard blocked: the name, how many times, first and last (the first left out when it reads the same as the last), and what it
+ * likely is (`explain(name)`, guard-names.js describeGuardName: { text, hint }).
+ */
+export function nameItem(entry, now, explain = (name) => describeGuardName(name)) {
+  const what = explain(entry.name);
+  const last = entry.last !== null ? timeAgo(entry.last, now) : null;
+  const first = entry.first !== null && timeAgo(entry.first, now) !== last ? entry.first : null;
   return h('li', { class: 'sec-name' }, h('code', null, entry.name),
-    h('span', { class: 'muted' }, GUARD_TEXT.times(entry.count), entry.last !== null ? [' · last ', when(entry.last, now)] : null));
+    h('span', { class: 'muted sec-name-when' }, GUARD_TEXT.times(entry.count), first !== null ? [' · first ', when(first, now)] : null,
+      entry.last !== null ? [' · last ', when(entry.last, now)] : null),
+    h('span', { class: 'sec-name-what' }, what.text, what.hint ? [' ', h('span', { class: 'muted' }, what.hint)] : null));
 }
 
 /**
  * The camera page's Security card: the level and its summary, when it was checked with "Check again", the findings, "Fix with Set up for
  * Camera Bridge" for what the setup can change, and the Internet guard (watching or not, what it blocked, "Watch its internet") ending with
  * `routerHelp(camera)` (camera-setup.js localOnlyCard; none for a camera that needs its maker's cloud). `canSetUp`: the setup works with this
- * camera; `openSetup()` opens its dialog. It follows the camera in place (`update(camera)`), its buttons kept (they keep the keyboard), hidden
- * for the demo camera. Returns { el, update, destroy }.
+ * camera; `openSetup()` opens its dialog. `restart(camera)` draws "Restart the camera now" (camera-setup.js restartControl) while the bridge
+ * says the camera waits for a restart (`restartOffered`), made once and kept while it does. `aiSettings` (GET settings, or a promise of it)
+ * lets the card say, while the camera's AI switch is on and the AI service is not on the home network, where its event pictures go; the
+ * guard's badge and level are not changed by it. It follows the camera in place (`update(camera)`), its buttons kept (they keep the
+ * keyboard), hidden for the demo camera. Returns { el, heading (its "Security", which can take the focus), update, destroy }.
  */
 export function createSecurityCard(camera, {
-  canSetUp = false, openSetup = null, routerHelp = null, checks = createSecurityChecks(), now = () => Date.now(),
-  setTimer = (fn, ms) => setTimeout(fn, ms),
+  canSetUp = false, openSetup = null, routerHelp = null, restart = null, checks = createSecurityChecks(), now = () => Date.now(),
+  setTimer = (fn, ms) => setTimeout(fn, ms), aiSettings = null,
 } = {}) {
   let current = camera;
   let problem = '';
   let problemAt = 0;          // when the check that failed was asked: a result newer than this clears the problem
   let problemTimer = null;
   let announced = '';         // "Checked: Local only." once a check on demand finished
+  let aiAway = null;          // where Settings says event pictures go when that is away from home (picturesGoTo), once Settings answered
   let drawn = '';
   let destroyed = false;
   const openHelp = new Set();   // the "Change it by hand" disclosures the person opened: the card draws again every minute and on each new status
@@ -317,6 +371,7 @@ export function createSecurityCard(camera, {
 
   const badge = h('span', { class: 'sec-card-badge' });
   const summary = h('p', { class: 'desc' });
+  const aiNote = h('p', { class: 'small sec-ai-note', hidden: true });
   const checked = h('span', { class: 'small muted' });
   const checkButton = h('button', { class: 'btn small', type: 'button', onclick: () => checkNow() });
   const state = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' });
@@ -325,6 +380,8 @@ export function createSecurityCard(camera, {
   const fixRow = h('div', { class: 'row sec-fix' },
     h('button', { class: 'btn small primary', type: 'button', onclick: () => openSetup?.() }, SECURITY_TEXT.fix),
     h('span', { class: 'small muted' }, SECURITY_TEXT.fixDesc));
+  const restartHost = h('div', { class: 'sec-restart' });
+  let restartEl = null;   // made once while the camera waits for a restart, so a confirmation under way survives the card's redraws
   const guardPill = h('span', { class: 'pill' });
   const guardText = h('div', { class: 'sec-guard-text' });
   const watchRow = h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', onclick: () => openSetup?.() }, `${GUARD_TEXT.watchWithSetup}…`),
@@ -333,9 +390,11 @@ export function createSecurityCard(camera, {
   const guardHelp = h('div', { class: 'sec-guard-help' });   // "Point its DNS at Camera Bridge yourself", after the setup's button
   const guard = h('div', { class: 'sec-guard' },
     h('div', { class: 'row spread' }, h('h3', { class: 'section-title' }, GUARD_TEXT.name), guardPill), guardText, watchRow, guardHelp, names);
+  // The heading takes the focus when the banner's "See what <camera> tried" brings the card into view (camera.js).
+  const heading = h('h2', { tabindex: '-1' }, SECURITY_TEXT.title);
   const el = h('div', { class: 'card sec-card' },
-    h('div', { class: 'row spread' }, h('h2', null, SECURITY_TEXT.title), badge),
-    summary, h('div', { class: 'row sec-checked' }, checked, checkButton, state), problemHost, findings, fixRow, guard,
+    h('div', { class: 'row spread' }, heading, badge),
+    summary, aiNote, h('div', { class: 'row sec-checked' }, checked, checkButton, state), problemHost, findings, fixRow, restartHost, guard,
     routerHelp && !cloudOnly ? routerHelp(camera) : null);
 
   function drawGuard(view, at) {
@@ -367,19 +426,31 @@ export function createSecurityCard(camera, {
     const said = g.sentence ?? (tried ? null : GUARD_TEXT.quiet);
     replace(guardText, said ? line(said) : null, tried ? line(GUARD_TEXT.blocked(g.today, g.last24h)) : null,
       h('p', { class: 'small muted' }, GUARD_TEXT.limit));
-    if (g.names.length) replace(names, h('p', { class: 'small muted' }, GUARD_TEXT.names), h('ul', { class: 'events' }, g.names.map((entry) => nameItem(entry, at))));
+    const described = new Map(g.names.map((entry) => [entry.name, describeGuardName(entry.name, { camera: current, canSetUp: setUp })]));
+    const makersCloud = [...described.values()].some((what) => what.kind === 'cloud');
+    if (g.names.length) {
+      replace(names, h('p', { class: 'small muted' }, GUARD_TEXT.names),
+        h('ul', { class: 'events' }, g.names.map((entry) => nameItem(entry, at, (name) => described.get(name)))),
+        makersCloud ? h('p', { class: 'small muted sec-was-it-you' }, GUARD_TEXT.wasItYou) : null);
+    }
   }
 
   function draw() {
     const view = securityView(current);
     const busy = checks.busy(current.id);
     const at = now();
-    const key = JSON.stringify([view, busy, problem, announced, current.isEnabled, current.vendor, Math.floor(at / 60_000)]);
+    // What the names' explanations read of the camera (its maker, its setup's clock step) is part of what is drawn, and where its AI
+    // pictures go while its switch is on.
+    const leaving = current.aiDescriptions === true ? aiAway : null;
+    const key = JSON.stringify([view, busy, problem, announced, current.isEnabled, current.vendor, current.manufacturer, current.setupState?.steps,
+      leaving, current.restartOffered === true, Math.floor(at / 60_000)]);
     if (key === drawn) return;
     drawn = key;
     el.hidden = current.vendor === 'demo';
     replace(badge, view ? securityBadge(view.level) : null);
     summary.textContent = view ? view.summary : current.isEnabled ? SECURITY_TEXT.notCheckedCard : SECURITY_TEXT.turnedOff;
+    aiNote.hidden = !leaving;
+    aiNote.textContent = leaving ? SECURITY_TEXT.aiLeaves(leaving) : '';
     replace(checked, view?.checkedAt !== null && view?.checkedAt !== undefined ? ['Checked ', when(view.checkedAt, at), '.'] : null);
     checkButton.textContent = view ? SECURITY_TEXT.checkAgain : SECURITY_TEXT.checkNow;
     checkButton.hidden = !current.isEnabled;
@@ -391,6 +462,10 @@ export function createSecurityCard(camera, {
     replace(findings, (view?.findings ?? []).map((entry) => findingItem(entry, setUp, help)));
     findings.hidden = !view?.findings.length;
     fixRow.hidden = !(setUp && view?.fixable.length);
+    if (current.restartOffered !== true) restartEl = null;
+    else if (!restartEl && typeof restart === 'function') restartEl = restart(current);
+    if (restartHost.firstChild !== restartEl) replace(restartHost, restartEl);
+    restartHost.hidden = !restartEl;
     drawGuard(view, at);
   }
 
@@ -424,8 +499,15 @@ export function createSecurityCard(camera, {
   }
 
   draw();
+  if (aiSettings) {
+    Promise.resolve(aiSettings).then((answer) => {
+      aiAway = picturesGoTo(answer?.ai);
+      if (!destroyed) draw();
+    }, () => { /* Settings could not be read: no line */ });
+  }
   return {
     el,
+    heading,
     update(next) {
       if (destroyed || !next || next.id !== current.id) return;
       current = next;

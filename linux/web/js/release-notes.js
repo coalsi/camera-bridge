@@ -15,6 +15,31 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.113',
+    date: '2026-10-19',
+    title: 'Straighten the picture, AI descriptions of events, and the Internet guard on more cameras',
+    items: [
+      'Straighten the picture: a new card on a camera’s page for a camera whose horizon bends, such as a panorama camera pointed at the sky. Straighten flattens the curve, Level tips the picture, and Reset puts both back. The preview bends as you drag, and a guide line shows where the horizon lands.',
+      'The correction shows everywhere that camera is seen: live view, the Monitor, playback, the Watch screen, zoom, snapshots, Apple Home’s live view and HomeKit Secure Video.',
+      'Recordings on the box keep the camera’s original picture, so nothing is lost and you can change the setting or turn it off at any time. Changing it never restarts the camera or cuts a recording.',
+      'Apple Home: while a camera is straightened, the box converts its video for Apple Home instead of passing the camera’s own stream through, which uses more of the box’s processor.',
+      'A very wide camera in Original quality is sent to Home at most 3840 wide while it is straightened or labelled.',
+      'Saved clips are straightened by default. The clip bar has a “Straightened” checkbox for a camera with the correction on; unticked, the clip is saved as recorded, which is quicker.',
+      'Camera Bridge can now write one short sentence about an event, such as “A delivery driver leaves a package at the front door”. You see it under the event on the Monitor and on the camera’s page.',
+      'It is off until you turn it on. In Settings, choose Claude or another AI service, paste your own key, and press Try it. Then switch on “Describe events with AI” on the page of each camera you want described.',
+      'You need your own key from the AI service, and you pay the service whatever it charges. A daily limit, 200 by default, keeps the cost down.',
+      'For each event, up to five small still pictures go to the service you chose. No video, no sound, and nothing from a camera whose switch is off, except when you press Try it. A model on your own network, such as Ollama, keeps the pictures at home.',
+      'An event the service rates unusual gets an amber dot on the Monitor, and an alarm gets a red one. “Nothing notable” means it saw nothing worth saying.',
+      'Watch its internet now puts Camera Bridge in both of a camera’s DNS slots first, and gives a slow camera up to 30 seconds to take the change.',
+      'Dahua, Amcrest and Lorex cameras: their DNS is changed in the camera’s own settings first, then through ONVIF.',
+      'A Hikvision that gets its address from your router (DHCP) is no longer shown as watched on a DNS setting the router would undo.',
+      'New, off unless you tick it: “Fix its address so the DNS stays”, for cameras that drop a DNS server set by hand otherwise. It keeps the camera’s address, mask and gateway exactly as they are and turns DHCP off on the camera. Reserve that address in your router afterwards; Restore original settings puts DHCP back.',
+      'A camera that needs a restart to use its new settings shows “Restart the camera now”. Camera Bridge restarts a camera only when you press it.',
+      'Setting the DNS by hand: the help has a button that opens the camera’s web page, says what the camera asks now and what to change it to, has Copy buttons for the addresses, and shows the menus of the camera’s maker (Hikvision, Dahua, Axis, Hanwha, Uniview, Foscam, VIGI and more). It warns when the camera has IPv6 on.',
+      '“Local only” now needs at least one lookup seen from the camera. A camera that never asks Camera Bridge anything may have a DNS server of its own built in, so it stays at Good and says so.',
+    ],
+  },
+  {
     version: '0.1.112',
     date: '2026-10-18',
     title: 'IPCamera Web cameras sign in, and Jennov cameras keep their DNS',

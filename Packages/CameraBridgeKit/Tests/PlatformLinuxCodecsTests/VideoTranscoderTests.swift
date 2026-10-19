@@ -261,6 +261,62 @@ import Testing
         #expect(zip(plain.pixels, notDrawn.pixels).filter { abs(Int($0) - Int($1)) > 6 }.count < plain.pixels.count / 200)
     }
 
+    @Test func aCorrectedTranscoderMakesVideoOfTheRequestedSize() async throws {
+        let codecs = FFmpegTesting.makeCodecs()
+        let source = try FFmpegTesting.sourceFrames(width: 320, height: 180, fps: 25, seconds: 2, gop: 25)
+        let correction = StaticPictureCorrection(PictureCorrection(straighten: 0.4, level: 0.15))
+        let transcoder = try codecs.makeVideoTranscoder(output: settings(bitrate: 800), overlay: nil, correction: correction)
+        defer { transcoder.invalidate() }
+        let out = try await feed(transcoder, source)
+        // Every picture comes out (the map images are read once and kept for the whole stream), a keyframe first, at the asked size.
+        #expect(out.count == source.count, "\(out.count) of \(source.count)")
+        let first = try #require(out.first)
+        #expect(first.isKeyframe && first.format.width == 320 && first.format.height == 180)
+        let times = Set(source.map(\.pts))
+        #expect(out.allSatisfy { times.contains($0.pts) } && zip(out, out.dropFirst()).allSatisfy { $0.pts < $1.pts })
+        let pictures = try await decode(out)
+        #expect(pictures.count >= out.count - 1 && pictures.allSatisfy { $0.width == 320 && $0.height == 180 })
+        // The picture is the formula's: the first picture is much closer to the uncorrected one warped by the formula (bilinear,
+        // vertical only) than to the uncorrected one itself.
+        let plainTranscoder = try codecs.makeVideoTranscoder(output: settings(bitrate: 800))
+        defer { plainTranscoder.invalidate() }
+        let plain = try #require(try await decode(try await feed(plainTranscoder, Array(source[0..<5]))).first)
+        let warped = try #require(pictures.first)
+        let formula = try #require(correction.current)
+        func luma(_ picture: RawVideoFrame, _ column: Int, _ row: Int) -> Double { Double(picture.pixels[min(179, max(0, row)) * 320 + column]) }
+        var toFormula = 0.0, toPlain = 0.0
+        for row in 0..<180 {
+            for column in 0..<320 {
+                let source = formula.sourceFraction(across: (Double(column) + 0.5) / 320, down: (Double(row) + 0.5) / 180) * 180 - 0.5
+                let above = Int(source.rounded(.down)), weight = source - Double(above)
+                let expected = luma(plain, column, above) * (1 - weight) + luma(plain, column, above + 1) * weight
+                toFormula += abs(luma(warped, column, row) - expected)
+                toPlain += abs(luma(warped, column, row) - luma(plain, column, row))
+            }
+        }
+        toFormula /= 320 * 180
+        toPlain /= 320 * 180
+        #expect(toFormula < 3 && toFormula < toPlain / 2, "mean difference \(toFormula) from the formula's picture, \(toPlain) from the uncorrected one")
+        // The colour planes (160 × 90, warped on their own) follow the same formula at their own size.
+        for plane in 0..<2 {
+            let offset = 320 * 180 + plane * 160 * 90
+            func chroma(_ picture: RawVideoFrame, _ column: Int, _ row: Int) -> Double { Double(picture.pixels[offset + min(89, max(0, row)) * 160 + column]) }
+            var toFormula = 0.0, toPlain = 0.0
+            for row in 0..<90 {
+                for column in 0..<160 {
+                    let source = formula.sourceFraction(across: (Double(column) + 0.5) / 160, down: (Double(row) + 0.5) / 90) * 90 - 0.5
+                    let above = Int(source.rounded(.down)), weight = source - Double(above)
+                    let expected = chroma(plain, column, above) * (1 - weight) + chroma(plain, column, above + 1) * weight
+                    toFormula += abs(chroma(warped, column, row) - expected)
+                    toPlain += abs(chroma(warped, column, row) - chroma(plain, column, row))
+                }
+            }
+            toFormula /= 160 * 90
+            toPlain /= 160 * 90
+            #expect(toFormula < 3 && toFormula < toPlain / 2, "plane \(plane + 1): \(toFormula) from the formula's picture, \(toPlain) from the uncorrected one")
+        }
+    }
+
     @Test func killingFFmpegSurfacesAnErrorAndTheNextKeyframeRecovers() async throws {
         let source = try FFmpegTesting.sourceFrames(width: 320, height: 180, fps: 25, seconds: 4, gop: 25)
         let transcoder = try FFmpegTesting.makeCodecs().makeVideoTranscoder(output: settings(bitrate: 744))

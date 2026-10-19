@@ -4,9 +4,12 @@
 // and small text come back without halos), else drawn plainly with the browser's best smoothing.
 //
 // The view is a rectangle of the video in its own normalized coordinates (0..1 across and down). It always keeps the shape of the tile, so the
-// zoomed area fills it.
+// zoomed area fills it. A camera whose picture is straightened (its page's Straighten the picture, js/live/straighten.js) is zoomed in the
+// straightened picture: the view is a rectangle of that picture (the same size as the video's), and every point of it is sampled from the
+// video where the formula says, so a straight horizon stays straight however far in.
 import { h, replace } from '../dom.js';
 import { icon } from '../icons.js';
+import { GLSL_STRAIGHTEN, stripPlan } from './straighten.js';
 
 const MAX_ZOOM = 12;
 const DRAG_MIN_PX = 8;          // a drag shorter than this is a click
@@ -17,15 +20,24 @@ const VERTEX = `attribute vec2 p; varying vec2 uv; uniform vec4 view; void main(
   uv = view.xy + (p * 0.5 + 0.5) * view.zw; gl_Position = vec4(p.x, -p.y, 0.0, 1.0); }`;
 
 // Contrast-adaptive sharpening on the source's own pixel grid: the 3x3 neighbourhood (cross) decides how much the centre is pushed away from
-// its neighbours, less where the area is already contrasty, so flat areas and edges are sharpened without ringing.
-const FRAGMENT = `precision mediump float; varying vec2 uv; uniform sampler2D tex; uniform vec2 texel; uniform float amount;
+// its neighbours, less where the area is already contrasty, so flat areas and edges are sharpened without ringing. `uv` is a point of the
+// straightened picture; pick() samples the video where it comes from (`straighten` is (0, 0) for a picture that is not straightened: the
+// identity). highp where the graphics have it: mediump (16-bit on phones) cannot address every row of a tall picture.
+const FRAGMENT = `#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 uv; uniform sampler2D tex; uniform vec2 texel; uniform float amount;
+${GLSL_STRAIGHTEN}
+vec3 pick(vec2 at) { return texture2D(tex, vec2(at.x, sourceDown(at.x, at.y))).rgb; }
 void main() {
-  vec3 e = texture2D(tex, uv).rgb;
+  vec3 e = pick(uv);
   if (amount <= 0.0) { gl_FragColor = vec4(e, 1.0); return; }
-  vec3 b = texture2D(tex, uv + vec2(0.0, -texel.y)).rgb;
-  vec3 d = texture2D(tex, uv + vec2(-texel.x, 0.0)).rgb;
-  vec3 f = texture2D(tex, uv + vec2(texel.x, 0.0)).rgb;
-  vec3 hh = texture2D(tex, uv + vec2(0.0, texel.y)).rgb;
+  vec3 b = pick(uv + vec2(0.0, -texel.y));
+  vec3 d = pick(uv + vec2(-texel.x, 0.0));
+  vec3 f = pick(uv + vec2(texel.x, 0.0));
+  vec3 hh = pick(uv + vec2(0.0, texel.y));
   vec3 mn = min(min(min(d, e), min(f, b)), hh);
   vec3 mx = max(max(max(d, e), max(f, b)), hh);
   vec3 amp = sqrt(clamp(min(mn, 2.0 - mx) / max(mx, vec3(0.0001)), 0.0, 1.0));
@@ -38,10 +50,14 @@ function readEnhance() {
   try { return localStorage.getItem(STORE_KEY) !== '0'; } catch { return true; }
 }
 
-/** A WebGL drawer of a video area with sharpening; null when the browser has no WebGL. */
+/**
+ * A WebGL drawer of a video area with sharpening; null when the browser has no WebGL, or its shaders do not compile or link (the context is
+ * then given back; the canvas has had it, so it can have no 2D context: the zoom draws on a new one).
+ */
 function createGLDrawer(canvas) {
   const gl = canvas.getContext('webgl', { alpha: false, antialias: false, preserveDrawingBuffer: false });
   if (!gl) return null;
+  const giveBack = () => gl.getExtension('WEBGL_lose_context')?.loseContext();
   function shader(type, text) {
     const s = gl.createShader(type);
     gl.shaderSource(s, text);
@@ -55,8 +71,11 @@ function createGLDrawer(canvas) {
     gl.attachShader(program, shader(gl.VERTEX_SHADER, VERTEX));
     gl.attachShader(program, shader(gl.FRAGMENT_SHADER, FRAGMENT));
     gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
-  } catch { return null; }
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'link');
+  } catch {
+    giveBack();
+    return null;
+  }
   gl.useProgram(program);
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -73,9 +92,15 @@ function createGLDrawer(canvas) {
   const uView = gl.getUniformLocation(program, 'view');
   const uTexel = gl.getUniformLocation(program, 'texel');
   const uAmount = gl.getUniformLocation(program, 'amount');
+  const uStraighten = gl.getUniformLocation(program, 'straighten');
+  const largest = gl.getParameter(gl.MAX_TEXTURE_SIZE);
   return {
-    /** Draws `view` of `video` into `rect` (canvas pixels: x, y, w, h), the rest black. */
-    draw(video, view, rect, amount) {
+    /**
+     * Draws `view` of `video` straightened by `correction` into `rect` (canvas pixels: x, y, w, h), the rest black; false when WebGL cannot
+     * (a lost context, a picture larger than its largest texture, which it would draw black, or a picture it refuses).
+     */
+    draw(video, view, rect, amount, correction) {
+      if (gl.isContextLost() || !(video.videoWidth <= largest && video.videoHeight <= largest)) return false;
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -84,22 +109,61 @@ function createGLDrawer(canvas) {
       gl.uniform4f(uView, view.x, view.y, view.w, view.h);
       gl.uniform2f(uTexel, 1 / video.videoWidth, 1 / video.videoHeight);
       gl.uniform1f(uAmount, amount);
+      gl.uniform2f(uStraighten, Number(correction?.straighten) || 0, Number(correction?.level) || 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       return true;
     },
+    /** Frees the context at once (a page gets only so many: the Monitor's straightened pictures have theirs too). */
     destroy() {
-      gl.deleteTexture(texture);
-      gl.deleteBuffer(buffer);
-      gl.deleteProgram(program);
+      if (!gl.isContextLost()) {
+        gl.deleteTexture(texture);
+        gl.deleteBuffer(buffer);
+        gl.deleteProgram(program);
+      }
+      giveBack();
     },
   };
 }
 
+/** stripPlan, kept while the correction and the size stay the same: the zoom draws every display frame. */
+function keptPlan() {
+  let key = null;
+  let plan = null;
+  return (correction, width, height) => {
+    const next = `${Number(correction?.straighten) || 0},${Number(correction?.level) || 0},${width},${height}`;
+    if (next !== key) { key = next; plan = stripPlan(correction, width, height); }
+    return plan;
+  };
+}
+
 /**
- * Zoom over `host` (the tile's picture box). `getVideo()` gives the <video> on screen now (live or a recording). `onActive(zoomed)` runs when the
- * picture goes from whole to zoomed and back. -> { el, reset(), zoomed(), destroy() }
+ * The 2D path's pieces of the area `view` (normalized) of the straightened picture: `plan` is the strip plan of the picture at `pw` × `ph`
+ * (the video is `vw` × `vh`), and each of its pieces that shows is cut to the view, with its rectangle in the video's pixels and in `rect`
+ * (canvas pixels). Off, the plan is one piece: the area, as it always was. -> [[sx, sy, sw, sh, dx, dy, dw, dh]]
  */
-export function createZoom({ host, getVideo, onActive = () => {} }) {
+function viewPieces(plan, pw, ph, vw, vh, view, rect) {
+  const kx = vw / pw, ky = vh / ph;
+  const left = view.x * pw, top = view.y * ph, width = view.w * pw, height = view.h * ph;
+  const fx = rect.w / width, fy = rect.h / height;
+  const pieces = [];
+  for (const r of plan) {
+    const x0 = Math.max(r.dx, left), x1 = Math.min(r.dx + r.dw, left + width);
+    const y0 = Math.max(r.dy, top), y1 = Math.min(r.dy + r.dh, top + height);
+    if (x1 <= x0 || y1 <= y0) continue;
+    // A piece is one straight stretch, so the part of it that shows comes from the same part of its source rectangle.
+    const sx = r.sw / r.dw, sy = r.sh / r.dh;
+    pieces.push([(r.sx + (x0 - r.dx) * sx) * kx, (r.sy + (y0 - r.dy) * sy) * ky, (x1 - x0) * sx * kx, (y1 - y0) * sy * ky,
+      rect.x + (x0 - left) * fx, rect.y + (y0 - top) * fy, (x1 - x0) * fx, (y1 - y0) * fy]);
+  }
+  return pieces;
+}
+
+/**
+ * Zoom over `host` (the tile's picture box). `getVideo()` gives the <video> on screen now (live or a recording); `getCorrection()` the camera's
+ * picture correction now (null or off: the picture as the camera sends it), read at every picture, so a correction saved meanwhile shows at
+ * once. `onActive(zoomed)` runs when the picture goes from whole to zoomed and back. -> { el, reset(), zoomed(), destroy() }
+ */
+export function createZoom({ host, getVideo, getCorrection = () => null, onActive = () => {} }) {
   let view = { x: 0, y: 0, w: 1, h: 1 };
   let enhance = readEnhance();
   let destroyed = false;
@@ -108,7 +172,7 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
   const pointers = new Map();   // pointer id -> {x, y}, for a pinch
   let pinch = null;
 
-  const canvas = h('canvas', { class: 'zoom-canvas', hidden: true, 'aria-hidden': 'true' });
+  let canvas = h('canvas', { class: 'zoom-canvas', hidden: true, 'aria-hidden': 'true' });
   const box = h('div', { class: 'zoom-box', hidden: true });
   const surface = h('div', { class: 'zoom-surface' });
   const level = h('span', { class: 'zoom-level', 'aria-live': 'polite' });
@@ -134,8 +198,38 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
   });
   host.append(el);
 
+  /** A new canvas takes this one's place: one that had a WebGL context can have no other kind. -> its 2D context */
+  function replaceCanvas() {
+    const fresh = h('canvas', { class: 'zoom-canvas', hidden: canvas.hidden, 'aria-hidden': 'true' });
+    canvas.after(fresh);
+    canvas.remove();
+    canvas = fresh;
+    return canvas.getContext('2d');
+  }
+
   let gl = createGLDrawer(canvas);
-  const ctx2d = gl ? null : canvas.getContext('2d');
+  let ctx2d = gl ? null : canvas.getContext('2d');
+  if (!gl && !ctx2d) ctx2d = replaceCanvas();     // WebGL took the canvas and then failed (its shaders): draw on a new one
+  if (gl) canvas.addEventListener('webglcontextlost', flatten);
+  const enhanceTitle = () => (gl ? 'Sharpens the zoomed picture on this computer’s graphics' : 'This browser has no WebGL: the picture is only smoothed');
+
+  /**
+   * WebGL draws no more (the browser took its context back, as it does when a page has too many, or it refused a picture, or the picture is
+   * larger than its largest texture): a new canvas takes the WebGL one's place and the zoom goes on in 2D (a canvas that had a WebGL context
+   * can have no other).
+   */
+  function flatten() {
+    if (!gl) return;
+    const old = gl;
+    gl = null;
+    canvas.removeEventListener('webglcontextlost', flatten);
+    old.destroy();
+    if (destroyed) return;
+    ctx2d = replaceCanvas();
+    enhanceButton.title = enhanceTitle();
+  }
+  const areaPlan = keptPlan();      // the 2D path's
+  const mapPlan = keptPlan();       // the overview's
 
   const isZoomed = () => view.w < 0.999 || view.h < 0.999;
 
@@ -218,7 +312,7 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
     try { localStorage.setItem(STORE_KEY, on ? '1' : '0'); } catch { /* not kept */ }
     replace(enhanceButton, icon('bolt'), on ? 'Enhance on' : 'Enhance off');
     enhanceButton.setAttribute('aria-pressed', String(on));
-    enhanceButton.title = gl ? 'Sharpens the zoomed picture on this computer’s graphics' : 'This browser has no WebGL: the picture is only smoothed';
+    enhanceButton.title = enhanceTitle();
     draw();
   }
 
@@ -233,29 +327,39 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
     if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
     const f = fitted(view, size.vw, size.vh);
     const rect = { x: f.x * ratio, y: f.y * ratio, w: f.w * ratio, h: f.h * ratio };
+    const correction = getCorrection();
     let drawn = false;
-    if (gl) drawn = gl.draw(size.video, view, rect, enhance ? 0.6 : 0);
+    if (gl) drawn = gl.draw(size.video, view, rect, enhance ? 0.6 : 0, correction);
     if (!drawn) {
-      // Without WebGL (or a frame WebGL refused): the browser's own scaling.
-      if (gl) { gl.destroy(); gl = null; }
-      const c = ctx2d ?? canvas.getContext('2d');
+      // Without WebGL (or a frame WebGL refused): the browser's own scaling, through the strip plan of the picture at about the size the canvas
+      // shows it (a strip of two columns is then two canvas pixels, or two of the video's when zoomed in further).
+      flatten();
+      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+      const c = ctx2d;
       if (c) {
         c.fillStyle = '#000';
         c.fillRect(0, 0, cw, ch);
         c.imageSmoothingEnabled = true;
         c.imageSmoothingQuality = 'high';
-        try { c.drawImage(size.video, view.x * size.vw, view.y * size.vh, view.w * size.vw, view.h * size.vh, rect.x, rect.y, rect.w, rect.h); } catch { /* not ready */ }
+        const scale = Math.min(1, rect.w / (view.w * size.vw));
+        const pw = Math.max(1, Math.round(size.vw * scale)), ph = Math.max(1, Math.round(size.vh * scale));
+        try {
+          for (const piece of viewPieces(areaPlan(correction, pw, ph), pw, ph, size.vw, size.vh, view, rect)) c.drawImage(size.video, ...piece);
+        } catch { /* not ready */ }
       }
     }
-    drawMap(size);
+    drawMap(size, correction);
   }
 
-  function drawMap(size) {
+  function drawMap(size, correction) {
     const c = minimap.getContext('2d');
     if (!c) return;
     const mh = Math.round(minimap.width * size.vh / size.vw);
     if (minimap.height !== mh) minimap.height = mh;
-    try { c.drawImage(size.video, 0, 0, minimap.width, minimap.height); } catch { return; }
+    const kx = size.vw / minimap.width, ky = size.vh / minimap.height;
+    try {
+      for (const r of mapPlan(correction, minimap.width, minimap.height)) c.drawImage(size.video, r.sx * kx, r.sy * ky, r.sw * kx, r.sh * ky, r.dx, r.dy, r.dw, r.dh);
+    } catch { return; }
     c.fillStyle = 'rgb(0 0 0 / 0.45)';
     const r = { x: view.x * minimap.width, y: view.y * minimap.height, w: view.w * minimap.width, h: view.h * minimap.height };
     c.fillRect(0, 0, minimap.width, r.y);
@@ -382,6 +486,7 @@ export function createZoom({ host, getVideo, onActive = () => {} }) {
       destroyed = true;
       resize.disconnect();
       if (frame !== null) cancelAnimationFrame(frame);
+      canvas.removeEventListener('webglcontextlost', flatten);
       gl?.destroy();
       el.remove();
     },

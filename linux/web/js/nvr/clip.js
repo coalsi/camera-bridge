@@ -33,17 +33,29 @@ export function durationText(ms) {
   return hours > 0 ? `${hours}:${two(minutes)}:${two(seconds)}` : `${minutes}:${two(seconds)}`;
 }
 
-export function clipUrl(cameraId, fromMs, toMs, part, zone, labels = false) {
-  return `/api/v1/nvr/cameras/${cameraId}/clip?from=${Math.round(fromMs)}&to=${Math.round(toMs)}&tz=${encodeURIComponent(zone)}&part=${part}${labels ? '&labels=1' : ''}`;
+export function clipUrl(cameraId, fromMs, toMs, part, zone, labels = false, straighten = false) {
+  return `/api/v1/nvr/cameras/${cameraId}/clip?from=${Math.round(fromMs)}&to=${Math.round(toMs)}&tz=${encodeURIComponent(zone)}&part=${part}`
+    + `${labels ? '&labels=1' : ''}${straighten ? '&straighten=1' : ''}`;
 }
 
-function readLabels() {
-  try { return localStorage.getItem('cb.clip.labels') !== '0'; } catch { return true; }
+/** A choice of the clip bar kept in this browser (`key` is '1' or '0'); on unless it was turned off. */
+function readChoice(key) {
+  try { return localStorage.getItem(key) !== '0'; } catch { return true; }
+}
+
+function keepChoice(key, on) {
+  try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* not kept */ }
+}
+
+/** The camera's picture is straightened (its picture correction is on): its clips can be saved straightened. */
+function straightened(camera) {
+  const correction = camera?.pictureCorrection;
+  return Boolean(correction && (Number(correction.straighten) || Number(correction.level)));
 }
 
 /**
  * createClip({ cameras, endMs, startNowMs, onChange, download })
- *   cameras()   -> [{ id, name }]: every camera a clip can be made of, in order
+ *   cameras()   -> [{ id, name, pictureCorrection }]: every camera a clip can be made of, in order
  *   endMs()     -> the playhead in epoch ms (the newest recorded moment while live)
  *   onChange()  -> called when the bar or the tile marks need drawing again
  *   download(url) -> starts one download (default: a hidden link)
@@ -65,7 +77,9 @@ export function createClip({ cameras, endMs, onChange = () => {}, download = sta
   const el = h('div', { class: 'nvr-clipbar', role: 'group', 'aria-label': 'Save a clip', hidden: true });
 
   // The bridge's label (name, date and time) burned into the saved clip: on by default; off saves the camera's video untouched (faster).
-  let labels = readLabels();
+  let labels = readChoice('cb.clip.labels');
+  // A camera whose picture is straightened saves its clip straightened, as it is seen, by default; off saves it as recorded (faster).
+  let straighten = readChoice('cb.clip.straighten');
   const choosing = () => startMs !== null;
   const list = () => cameras();
   const single = () => list().length === 1;
@@ -183,10 +197,11 @@ export function createClip({ cameras, endMs, onChange = () => {}, download = sta
         h('span', { class: 'nvr-clip-spacer' }),
         cams.length === 1 ? h('span', { class: 'muted small' }, cams[0].name) : null,
         h('label', { class: 'nvr-clip-labels', title: 'Burns the camera’s name and the date and time into the clip, the way the Monitor shows them. Takes longer to save.' },
-          h('input', { type: 'checkbox', checked: labels, onchange: (event) => {
-            labels = event.target.checked;
-            try { localStorage.setItem('cb.clip.labels', labels ? '1' : '0'); } catch { /* not kept */ }
-          } }), ' Name and time on the clip'),
+          h('input', { type: 'checkbox', checked: labels, onchange: (event) => { labels = event.target.checked; keepChoice('cb.clip.labels', labels); } }),
+          ' Name and time on the clip'),
+        selected().some(straightened) ? h('label', { class: 'nvr-clip-labels', title: 'Saves the clip straightened, as you see it. Takes longer to save; unchecked saves it as recorded.' },
+          h('input', { type: 'checkbox', checked: straighten, onchange: (event) => { straighten = event.target.checked; keepChoice('cb.clip.straighten', straighten); } }),
+          ' Straightened') : null,
         h('button', { class: 'btn small', type: 'button', onclick: cancel, title: 'Stop choosing a clip (Esc)' }, 'Cancel'),
         h('button', { class: 'btn small primary', type: 'button', disabled: !canExport, onclick: exportClip, title: 'Save the clip (Return)' }, 'Export clip')),
       cams.length > 1 ? h('div', { class: 'nvr-clip-cams', role: 'group', 'aria-label': 'Cameras in the clip' },
@@ -205,7 +220,7 @@ export function createClip({ cameras, endMs, onChange = () => {}, download = sta
     for (const camera of selected()) {
       const planned = plans.get(camera.id);
       if (!planned?.ok) continue;
-      for (const part of planned.plan.parts) files.push(clipUrl(camera.id, r.from, r.to, part.index, zone, labels));
+      for (const part of planned.plan.parts) files.push(clipUrl(camera.id, r.from, r.to, part.index, zone, labels, straighten && straightened(camera)));
     }
     if (files.length === 0) return;
     status = { kind: 'saving', text: files.length === 1 ? 'Saving the clip. Your browser shows the download.' : `Saving ${files.length} clips. Your browser may ask to allow several downloads.` };

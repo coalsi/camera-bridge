@@ -8,14 +8,16 @@ import MediaCore
 /// |---|---|
 /// | decode H.264/HEVC | `FFmpegVideoDecoder`: one child per decoder, FLV in, raw `yuv420p` out |
 /// | encode H.264 | `FFmpegVideoEncoder`: raw in, FLV out; libx264 `-preset veryfast -tune zerolatency`, or `h264_vaapi` when `/dev/dri/renderD128` exists and a probe encode works |
-/// | transcode, scale, overlay | `FFmpegVideoTranscoder`: decode → rate limit → scale → `drawtext` → encode in one child |
+/// | transcode, scale, straighten, overlay | `FFmpegVideoTranscoder`: decode → rate limit → scale → `remap` (Straighten the picture) → `drawtext` → encode in one child |
 /// | audio | `FFmpegAudioTranscoder`: AAC/AAC-ELD/Opus/G.711/PCM in; Opus (`libopus`), AAC-LC (`aac`), G.711, PCM out. No AAC-ELD encoder without non-free `libfdk_aac` |
-/// | JPEG | one-shot child (`mjpeg`) from a raw picture; `resizeJPEG` likewise |
+/// | JPEG | one-shot child (`mjpeg`) from a raw picture; `resizeJPEG` and `correctJPEG` (Straighten the picture) likewise |
 ///
 /// Every object owns its child processes and kills them in `invalidate()` and `deinit`. The ffmpeg program and what it supports are
 /// found on first use; without ffmpeg every `make…` throws `MediaCodecError.unsupported`.
 public final class FFmpegMediaCodecs: MediaCodecs {
     let runtime: FFmpegRuntime
+    /// The maps of the snapshots' straightening, kept between snapshots (`FFmpegPictures.correctJPEG`) and removed with these codecs.
+    let snapshotMaps: SnapshotMapCache
 
     public convenience init(configuration: FFmpegCodecsConfiguration = FFmpegCodecsConfiguration()) {
         self.init(configuration: configuration, launcher: SystemFFmpegLauncher())
@@ -24,6 +26,7 @@ public final class FFmpegMediaCodecs: MediaCodecs {
     init(configuration: FFmpegCodecsConfiguration, launcher: any FFmpegProcessLaunching, executable: URL? = nil,
          deviceExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) {
         runtime = FFmpegRuntime(launcher: launcher, configuration: configuration, executable: executable ?? configuration.resolveExecutable(), deviceExists: deviceExists)
+        snapshotMaps = SnapshotMapCache(parent: configuration.scratchDirectory)
     }
 
     /// Whether an ffmpeg program was found.
@@ -45,7 +48,8 @@ public final class FFmpegMediaCodecs: MediaCodecs {
         let audio = ["Opus": capabilities.hasOpus, "AAC-LC": capabilities.encoders.contains("aac") || capabilities.encoders.contains("libfdk_aac"),
                      "AAC-ELD": capabilities.hasAACELDEncoder].filter(\.value).keys.sorted().joined(separator: ", ")
         return "ffmpeg \(capabilities.version); H.264 encoder \(video); audio encoders \(audio.isEmpty ? "none" : audio) (G.711 and PCM always); "
-            + "timestamp overlay \(runtime.overlayFont() != nil ? "available" : "unavailable")"
+            + "timestamp overlay \(runtime.overlayFont() != nil ? "available" : "unavailable"); "
+            + "picture correction \(runtime.pictureCorrectionAvailable() ? "available" : "unavailable")"
     }
 
     // MARK: Video
@@ -81,6 +85,16 @@ public final class FFmpegMediaCodecs: MediaCodecs {
         try FFmpegVideoTranscoder(runtime: runtime, output: output, overlay: overlay)
     }
 
+    /// Whether ffmpeg has the warp's filters (`remap`, `extractplanes`, `mergeplanes`, all built into libavfilter: Debian's and
+    /// Homebrew's ffmpeg have them). Asks ffmpeg on first use, like the other capabilities (`prepare()` does it at start-up); without
+    /// them the correction is off everywhere, logged once.
+    public var supportsPictureCorrection: Bool { runtime.pictureCorrectionAvailable() }
+
+    public func makeVideoTranscoder(output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?,
+                                    correction: (any PictureCorrectionProviding)?) throws -> any VideoTranscoding {
+        try FFmpegVideoTranscoder(runtime: runtime, output: output, overlay: overlay, correction: correction)
+    }
+
     // MARK: Audio
 
     public func makeAudioTranscoder(input: AudioFormat, output: AudioEncoderSettings) throws -> any AudioTranscoding {
@@ -101,6 +115,20 @@ public final class FFmpegMediaCodecs: MediaCodecs {
 
     public func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?) throws -> Data {
         try FFmpegPictures.resize(jpeg, maxWidth: maxWidth, maxHeight: maxHeight, runtime: runtime)
+    }
+
+    /// One child with the warp's maps, kept between snapshots in a private temporary directory per picture size and correction
+    /// (`SnapshotMapCache`, `FFmpegPictures.correctJPEG`). Throws
+    /// `MediaCodecError.unsupported` when this ffmpeg cannot straighten (`supportsPictureCorrection` is false).
+    public func correctJPEG(_ jpeg: Data, correction: PictureCorrection) throws -> Data {
+        guard correction.isOff || runtime.pictureCorrectionAvailable() else {
+            throw MediaCodecError.unsupported("this ffmpeg cannot straighten the picture")
+        }
+        return try FFmpegPictures.correctJPEG(jpeg, correction: correction, runtime: runtime, maps: snapshotMaps)
+    }
+
+    public func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data {
+        try FFmpegPictures.resize(jpeg, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality, runtime: runtime)
     }
 
     public func makeSyntheticSource(displayName: String, width: Int, height: Int, fps: Int, keyframeInterval: Duration,

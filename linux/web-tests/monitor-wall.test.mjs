@@ -8,7 +8,8 @@ import {
   gridShape, layoutMosaicPage, packMosaic, packingBox, pictureAspect, pictureFit, readWallPrefs, wallCells, writeWallPref,
 } from '../web/js/screens/nvr-layout.js';
 import { PAGE_SIZES } from '../web/js/screens/nvr-model.js';
-import { makeStorage } from './support/fake-browser.mjs';
+import { installFakeBrowser, makeStorage } from './support/fake-browser.mjs';
+import { drawnFrom, fakeGL, givePicture, planCalls, recordingCanvases, siblingAfter, uniform2 } from './support/fake-picture.mjs';
 
 const WIDE = 16 / 9;
 
@@ -296,4 +297,239 @@ test('blocked storage: the wall opens with the defaults and a choice simply is n
   const { read, write } = storageFns(makeStorage({ broken: true }));
   assert.equal(writeWallPref(write, 'quality', 'sub'), 'sub');
   assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, minWidth: 320, fit: 'fit', quality: 'main' });
+});
+
+// MARK: Straightened pictures
+
+const BACKYARD = { straighten: 0.4, level: 0.15 };
+const OFF = { straighten: 0, level: 0 };
+const BACKYARD_ID = 'AAAAAAAA-0000-4000-8000-00000000000A';
+const GARAGE_ID = 'BBBBBBBB-0000-4000-8000-00000000000B';
+const monitorCamera = (id, name, pictureCorrection) => ({ id, name, isEnabled: true, status: { connection: 'online' }, pictureCorrection });
+
+const reply = (status, data) => ({
+  status, ok: status < 400, json: async () => data, text: async () => JSON.stringify(data),
+  headers: { get: (name) => (name.toLowerCase() === 'content-type' ? 'application/json' : null) },
+});
+
+/** Every element under `root` (depth first) that `match` accepts. */
+function elementsUnder(root, match) {
+  const out = [];
+  const walk = (node) => { for (const child of node.childNodes ?? []) { if (child.tagName && match(child)) out.push(child); walk(child); } };
+  walk(root);
+  return out;
+}
+const straightenedCanvases = (root) => elementsUnder(root, (node) => node.localName === 'canvas' && node.classList.contains('straightened'));
+
+/** Waits until `check()` is true (the wall is drawn a moment after the store or the bridge answered). */
+async function until(check, what = 'it never happened') {
+  for (let tries = 0; tries < 200; tries += 1) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(what);
+}
+
+/**
+ * The Monitor in the fake browser with `cameras` in the page's store: the bridge answers the recordings' catalog and a tile's plan (nothing
+ * recorded), keeps the live request open without a byte until it is closed, and answers nothing else; the browser has Media Source Extensions (so the wall plays
+ * live); the canvases record what is drawn on them (WebGL only for the zoom's own canvas, when `zoomWebGL`); a picture's object-fit is what
+ * monitor.css gives it (cover while the wall fills, contain otherwise). -> { page, tile(id), store, update(id, change), key(event), close() }
+ * A tile is { el, media, video (its live video) }.
+ */
+async function openMonitor(cameras, { zoomWebGL = false } = {}) {
+  const browser = installFakeBrowser();
+  recordingCanvases(browser.document, { webgl: zoomWebGL ? (canvas) => (canvas.className === 'zoom-canvas' ? fakeGL(canvas) : null) : null });
+  const create = browser.document.createElement;
+  browser.document.createElement = (tag) => {
+    const el = create(tag);
+    // A snapshot fails at once, as one the bridge has no picture for does (a picture that never answered would hold the page's guard).
+    let src = '';
+    if (tag === 'img') Object.defineProperty(el, 'src', { get: () => src, set: (value) => { src = value; queueMicrotask(() => el.onerror?.()); } });
+    return el;
+  };
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };     // the zoom's
+  window.MediaSource = class { static isTypeSupported() { return true; } };
+  globalThis.getComputedStyle = (el) => ({
+    get objectFit() {
+      for (let node = el; node; node = node.parentNode) if (node.classList?.contains('nvr-grid')) return node.dataset.fit === 'fill' ? 'cover' : 'contain';
+      return 'contain';
+    },
+    objectPosition: '50% 50%',
+    getPropertyValue: () => '',
+  });
+  globalThis.fetch = async (url, init = {}) => {
+    if (url === '/api/v1/nvr/cameras') return reply(200, { serverTime: Date.now(), catalogVersion: 1, cameras: [] });
+    const asked = /^\/api\/v1\/nvr\/cameras\/[^/]+\/fragments\?at=(\d+)/.exec(url);           // a tile's plan: nothing is recorded
+    if (asked) return reply(200, { serverTime: Date.now(), found: false, at: Number(asked[1]), reason: 'empty', next: null, newest: null });
+    if (url.startsWith('/api/v1/live?')) {
+      return new Promise((resolve, reject) => init.signal?.addEventListener('abort', () => reject(new DOMException('The request was stopped.', 'AbortError'))));
+    }
+    return reply(404, { error: 'not_found', message: 'There is nothing here.' });
+  };
+  const { store, putCamera } = await import('../web/js/store.js');
+  const { renderNVR } = await import('../web/js/screens/nvr.js');
+  store.cameras = new Map(cameras.map((camera) => [camera.id, camera]));
+  const page = renderNVR({ params: [], navigate() {}, setTitle() {} });
+  const tile = (id) => {
+    const el = elementsUnder(page.el, (node) => node.localName === 'article' && node.dataset.id === id)[0];
+    if (!el) return null;
+    const media = el.childNodes.find((node) => node.classList?.contains('nvr-media'));
+    return { el, media, video: media.childNodes.find((node) => node.localName === 'video') };
+  };
+  await until(() => cameras.every((camera) => tile(camera.id)), 'the tiles were never drawn');
+  let closed = false;
+  return {
+    page, tile, store,
+    /** The camera `id` as the store has it, with `change` (what another browser saved arrives so). */
+    update: (id, change) => putCamera({ ...store.cameras.get(id), ...change }),
+    /** A key pressed on the page (not in a field). */
+    key: (event) => document.dispatchEvent({ type: 'keydown', target: null, preventDefault() {}, stopImmediatePropagation() {}, ...event }),
+    close() {
+      if (closed) return;
+      closed = true;
+      page.destroy();
+      store.cameras = new Map();
+      delete globalThis.ResizeObserver;
+      delete globalThis.getComputedStyle;
+      browser.restore();
+    },
+  };
+}
+
+/** The last picture `canvas` drew of `video` straightened by `c` (a 640 × 284 picture in a box of its size): the strip plan's calls. */
+const lastPicture = (canvas, video, c) => drawnFrom(canvas, video).slice(-planCalls(c, 640, 284).length);
+
+test('a corrected camera\'s tile draws through a straightened view; others do not', async () => {
+  const monitor = await openMonitor([monitorCamera(BACKYARD_ID, 'Backyard', BACKYARD), monitorCamera(GARAGE_ID, 'Garage', null)]);
+  let backyard;
+  try {
+    backyard = monitor.tile(BACKYARD_ID);
+    const garage = monitor.tile(GARAGE_ID);
+    const canvas = siblingAfter(backyard.video);
+    assert.equal(canvas?.localName, 'canvas', 'a canvas right after the live video');
+    assert.equal(canvas.className, 'nvr-live straightened', 'with its classes: the wall’s rules for the live video (shown, hidden, Fit or Fill) are the canvas’s');
+    assert.equal(canvas.getAttribute('aria-hidden'), 'true');
+    assert.ok(backyard.video.classList.contains('straighten-source'), 'the video itself is unseen');
+    givePicture(backyard.video);
+    givePicture(garage.video);
+    await until(() => drawnFrom(canvas, backyard.video).length > 0, 'the live picture was never drawn');
+    assert.deepEqual(lastPicture(canvas, backyard.video, BACKYARD), planCalls(BACKYARD, 640, 284), 'the live video straightened');
+
+    assert.equal(garage.video.className, 'nvr-live', 'the other camera’s video is shown as it is');
+    assert.deepEqual(straightenedCanvases(garage.el), [], 'with nothing over it');
+    assert.equal(straightenedCanvases(monitor.page.el).length, 1, 'one straightened canvas for the one corrected camera');
+  } finally {
+    monitor.close();
+  }
+  assert.deepEqual(straightenedCanvases(backyard.el), [], 'leaving the Monitor takes it away');
+  assert.equal(backyard.video.classList.contains('straighten-source'), false);
+});
+
+test('a correction saved on the camera page reaches an open Monitor', async () => {
+  // store update of the camera → the tile's view.set() called with the new value, no tile rebuild
+  const monitor = await openMonitor([monitorCamera(BACKYARD_ID, 'Backyard', BACKYARD), monitorCamera(GARAGE_ID, 'Garage', OFF)]);
+  try {
+    const backyard = monitor.tile(BACKYARD_ID);
+    const garage = monitor.tile(GARAGE_ID);
+    const canvas = siblingAfter(backyard.video);
+    givePicture(backyard.video);
+    givePicture(garage.video);
+    // From here a picture comes only when the test says (none does): what is drawn after this is drawn because of the store.
+    for (const video of [backyard.video, garage.video]) Object.assign(video, { requestVideoFrameCallback: () => 1, cancelVideoFrameCallback() {} });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const drawn = canvas.getContext('2d').draws.length;
+    monitor.update(BACKYARD_ID, { status: { connection: 'online', summary: 'Recording' } });     // news that is not about the picture
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(canvas.getContext('2d').draws.length, drawn, 'news that leaves the correction alone draws nothing');
+
+    const moved = { straighten: -0.2, level: 0.1 };
+    monitor.update(BACKYARD_ID, { pictureCorrection: moved });
+    await until(() => JSON.stringify(lastPicture(canvas, backyard.video, moved)) === JSON.stringify(planCalls(moved, 640, 284)), 'the new correction was never drawn');
+    assert.equal(monitor.tile(BACKYARD_ID).el, backyard.el, 'the same tile');
+    assert.equal(monitor.tile(BACKYARD_ID).video, backyard.video, 'the same video');
+    assert.equal(siblingAfter(backyard.video), canvas, 'the same canvas');
+
+    monitor.update(GARAGE_ID, { pictureCorrection: BACKYARD });          // a camera turned on elsewhere
+    await until(() => straightenedCanvases(garage.el).length === 1, 'the other camera was never straightened');
+    const garageCanvas = siblingAfter(garage.video);
+    await until(() => drawnFrom(garageCanvas, garage.video).length > 0, 'its picture was never drawn');
+    assert.deepEqual(lastPicture(garageCanvas, garage.video, BACKYARD), planCalls(BACKYARD, 640, 284));
+    assert.equal(monitor.tile(GARAGE_ID).el, garage.el);
+
+    monitor.update(BACKYARD_ID, { pictureCorrection: OFF });
+    await until(() => straightenedCanvases(backyard.el).length === 0, 'turned off, its canvas stayed');
+    assert.equal(backyard.video.classList.contains('straighten-source'), false, 'the video is shown again');
+    assert.equal(monitor.tile(BACKYARD_ID).el, backyard.el);
+    assert.equal(straightenedCanvases(monitor.page.el).length, 1);
+  } finally {
+    monitor.close();
+  }
+});
+
+test('one camera on its own zooms through its correction, and follows it', async () => {
+  const monitor = await openMonitor([monitorCamera(BACKYARD_ID, 'Backyard', BACKYARD), monitorCamera(GARAGE_ID, 'Garage', null)], { zoomWebGL: true });
+  try {
+    const backyard = monitor.tile(BACKYARD_ID);
+    givePicture(backyard.video);
+    Object.assign(backyard.media, { clientWidth: 640, clientHeight: 284 });
+    const link = elementsUnder(backyard.el, (node) => node.localName === 'a' && node.classList.contains('nvr-open'))[0];
+    link.dispatchEvent({ type: 'click', target: link, button: 0, preventDefault() { this.defaultPrevented = true; } });     // fills the wall
+    const zoomCanvas = await (async () => {
+      let found = null;
+      await until(() => { found = elementsUnder(backyard.media, (node) => node.className === 'zoom-canvas')[0]; return Boolean(found); }, 'no zoom');
+      return found;
+    })();
+    const zoomIn = elementsUnder(backyard.media, (node) => node.getAttribute('aria-label') === 'Zoom in')[0];
+    zoomIn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    const gl = zoomCanvas.getContext('webgl');
+    assert.deepEqual(uniform2(gl, 'straighten').at(-1), [0.4, 0.15], 'the zoomed area is a part of the straightened picture');
+    monitor.update(BACKYARD_ID, { pictureCorrection: OFF });
+    zoomIn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    assert.deepEqual(uniform2(gl, 'straighten').at(-1), [0, 0], 'it follows what the camera’s page saved');
+  } finally {
+    monitor.close();
+  }
+});
+
+test('a corrected camera’s live video holds a straightened view only while the wall plays live', async () => {
+  // Without a live player the live video is hidden (a recording plays in the stage, or the wall shows pictures): its view gives back its
+  // canvas and WebGL context, of which a page gets only so many.
+  const monitor = await openMonitor([monitorCamera(BACKYARD_ID, 'Backyard', BACKYARD), monitorCamera(GARAGE_ID, 'Garage', null)]);
+  try {
+    const backyard = monitor.tile(BACKYARD_ID);
+    const live = () => siblingAfter(backyard.video)?.classList.contains('straightened') === true;
+    assert.equal(live(), true, 'live: straightened');
+    monitor.key({ key: 'ArrowLeft', shiftKey: true });                 // 10 s back: the wall plays the recordings
+    await until(() => !live(), 'the live view kept its canvas while the recordings played');
+    assert.equal(backyard.video.classList.contains('straighten-source'), false);
+    assert.equal(straightenedCanvases(monitor.page.el).length, 0, 'no straightened canvas left over the live videos');
+    monitor.key({ key: 'l' });                                         // back to live
+    await until(live, 'back at live the picture was not straightened again');
+    assert.equal(straightenedCanvases(monitor.page.el).length, 1);
+  } finally {
+    monitor.close();
+  }
+});
+
+test('a straightened picture takes the wall’s Fit or Fill at once, even while no frame comes', async () => {
+  const monitor = await openMonitor([monitorCamera(BACKYARD_ID, 'Backyard', BACKYARD), monitorCamera(GARAGE_ID, 'Garage', null)]);
+  try {
+    const backyard = monitor.tile(BACKYARD_ID);
+    const canvas = siblingAfter(backyard.video);
+    givePicture(backyard.video);
+    // No frame comes from here on (a paused picture): only a redraw can bring the canvas the picture's new fit.
+    Object.assign(backyard.video, { requestVideoFrameCallback: () => 1, cancelVideoFrameCallback() {} });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(canvas.style.objectFit, 'contain');
+    const fitSelect = elementsUnder(monitor.page.el, (node) => node.localName === 'select' && node.classList.contains('mon-fit'))[0];
+    fitSelect.value = 'fill';
+    fitSelect.dispatchEvent({ type: 'change', target: fitSelect });
+    assert.equal(canvas.style.objectFit, 'cover', 'Fill: the canvas covers its tile as the video would');
+    fitSelect.value = 'fit';
+    fitSelect.dispatchEvent({ type: 'change', target: fitSelect });
+    assert.equal(canvas.style.objectFit, 'contain', 'and Fit again');
+  } finally {
+    monitor.close();
+  }
 });

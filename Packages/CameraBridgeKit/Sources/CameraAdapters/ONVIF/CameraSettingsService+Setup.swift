@@ -43,11 +43,15 @@ public struct CameraSetupReading: Sendable, Equatable {
     public var changes: [CameraSetupChange]
     /// A sentence about part of the step that is not offered ("Sub stream: not offered, …").
     public var note: String?
+    /// "Watch its internet": "Fix its address so the DNS stays", offered as the person's choice (off unless chosen) for a camera whose DNS
+    /// only stays with a fixed address; nil where it is not offered.
+    public var fixAddress: CameraSetupFixAddress?
 
-    public init(state: State, changes: [CameraSetupChange] = [], note: String? = nil) {
+    public init(state: State, changes: [CameraSetupChange] = [], note: String? = nil, fixAddress: CameraSetupFixAddress? = nil) {
         self.state = state
         self.changes = changes
         self.note = note
+        self.fixAddress = fixAddress
     }
 
     public static func notSupported(_ reason: String = "not supported by this camera") -> CameraSetupReading { .init(state: .notSupported(reason)) }
@@ -58,7 +62,8 @@ public struct CameraSetupReading: Sendable, Equatable {
 /// What applying or restoring a step did.
 public struct CameraSetupOutcome: Sendable, Equatable {
     public var succeeded: Bool
-    /// The camera took the change and says it applies after it restarts (ISAPI `statusCode` 7). Camera Bridge never restarts it.
+    /// The camera took the change and says it applies after it restarts (ISAPI `statusCode` 7). Camera Bridge restarts it only when the
+    /// person presses "Restart the camera now" (`BridgeEngine.restartCamera(id:)`).
     public var needsRestart: Bool
     /// "via ISAPI", or the camera's words when it refused.
     public var detail: String
@@ -68,12 +73,28 @@ public struct CameraSetupOutcome: Sendable, Equatable {
     /// the family's own words for a sign-in refused so (`IPCamWebUnavailable.noPrivilege`, which says to use an administrator account too),
     /// after ONVIF's for "Watch its internet".
     public var notPermitted: Bool
+    /// "Watch its internet" with "Fix its address so the DNS stays": the camera took the fixed address (its address as it was, now set by
+    /// hand), whether or not the rest of the step was done; the router reservation is then worth making, and Restore puts DHCP back.
+    public var addressFixed: Bool
+    /// "Fix its address so the DNS stays" was refused before anything about the camera's address was changed: before its first write, or
+    /// at it (the camera refused that write). The run then keeps no fixed address to put back. False whenever that is not known for sure.
+    public var addressUntouched: Bool
 
-    public init(succeeded: Bool, needsRestart: Bool = false, detail: String, notPermitted: Bool = false) {
+    public init(succeeded: Bool, needsRestart: Bool = false, detail: String, notPermitted: Bool = false, addressFixed: Bool = false,
+                addressUntouched: Bool = false) {
         self.succeeded = succeeded
         self.needsRestart = needsRestart
         self.detail = detail
         self.notPermitted = notPermitted
+        self.addressFixed = addressFixed
+        self.addressUntouched = addressUntouched
+    }
+
+    /// The same refusal, marked `addressUntouched`.
+    var untouched: CameraSetupOutcome {
+        var copy = self
+        copy.addressUntouched = true
+        return copy
     }
 
     static func refused(_ words: String) -> CameraSetupOutcome { .init(succeeded: false, detail: words) }
@@ -300,13 +321,21 @@ extension CameraSettingsService {
                 : .refused("the camera did not take its old time zone back")
         case .ipcWebAPI:
             return .refused("the time zone was not saved through the web API")
+        case .dahuaCGI:
+            return .refused("the time zone was not saved through Dahua’s API")
         }
     }
 
     private func writeISAPITimeZone(_ value: String, document: String) async throws -> CameraSetupOutcome {
         guard let edited = HikvisionISAPI.settingElement("timeZone", to: value, in: document) else { return .refused("no time zone in the clock settings") }
         let answer: ISAPIWriteAnswer
-        do { answer = try await isapi().write(HikvisionISAPI.timePath, document: Self.withoutLocalTime(edited)) } catch let refusal as ISAPIRefusal { return .refused(refusal.words) }
+        do {
+            answer = try await isapi().write(HikvisionISAPI.timePath, document: Self.withoutLocalTime(edited))
+        } catch let refusal as ISAPIRefusal {
+            return .refused(refusal.words)
+        } catch CameraAdapterError.notPermitted {
+            return .notPermittedRefusal
+        }
         guard let after = try await isapi().document(HikvisionISAPI.timePath), let now = HikvisionISAPI.elementText("timeZone", in: after) else {
             return CameraSetupOutcome(succeeded: true, needsRestart: answer == .rebootRequired, detail: "via ISAPI")
         }

@@ -18,4 +18,12 @@ public struct ClipExporter: ClipExporting {
     public func export(_ plan: ClipPlan, part: Int, to sink: any ClipSink, progress: @Sendable (Int64) -> Void) async throws {
         try await writer.write(plan, part: part, to: sink, progress: progress)
     }
+
+    /// The picture size of part `part` of `plan` (counted from 1), as the part's recordings say it (their init segment): what a converter
+    /// that re-encodes the part (a straightened clip) is given. Throws `notReady` for a part the plan has no tables for (a fake's plan).
+    public func pictureSize(_ plan: ClipPlan, part: Int) async throws -> (width: Int, height: Int) {
+        guard plan.tables.indices.contains(part - 1) else { throw ClipError.notReady }
+        let tables = plan.tables[part - 1]
+        return (tables.width, tables.height)
+    }
 }

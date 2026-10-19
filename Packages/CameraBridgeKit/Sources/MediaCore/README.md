@@ -29,12 +29,31 @@ and `VideoTranscoding.preferSoftwareDecoding()` (defaults: nothing known, nothin
 Recording (NVR, 2026-10-10, docs/CONTRACT_CHANGES.md): `MediaHub.discontinuityCount` (how many times `discontinuity()` was called; readable from any thread, so a
 recorder that sees it change knows the source reconnected).
 
+AI descriptions (2026-10-18, docs/CONTRACT_CHANGES.md): `MediaHub.recentKeyframes()` (every keyframe the ring holds, oldest first, read without subscribing
+or changing anything; the pictures from before an event come from it); `MediaCodecs.resizeJPEG(_:maxWidth:maxHeight:quality:)` (a requirement with a
+default that ignores `quality`; the Apple and ffmpeg implementations encode at it, and an image that already fits still comes back unchanged).
+
 Timestamp overlay (2026-10-02, docs/CONTRACT_CHANGES.md): `OverlayPosition`, `OverlaySize`, `TimestampOverlaySettings`
 (Codable; every key defaults when missing or unreadable), `TimestampOverlayText` (the words: `make(at:settings:cameraName:locale:timeZone:)`,
 `uses24Hour(locale:)`, `systemUses24Hour`), `OverlayClock` with `PictureWallClock`, `FixedOverlayClock` and `OffsetOverlayClock`,
 `TimestampOverlay`, `TimestampOverlayProviding` and `StaticTimestampOverlay`; `MediaCodecs.makeVideoTranscoder(output:overlay:)`
 (a protocol requirement with a default that ignores the overlay); `MediaHub.wallClockOffset` (the Mac's clock minus a source's
 `wallClock`: the smallest recent arrival lag of its video frames).
+
+Straighten the picture (2026-10-18, docs/superpowers/specs/2026-10-18-straighten-the-picture-design.md): `PictureCorrection` (Codable value:
+`straighten` -0.60...0.60 and `level` -0.40...0.40, clamped and rounded to 0.01, both 0 = `.off`; decoding fills every missing or unreadable key
+with 0), the one copy of the correction's formula in Swift (`horizon(across:)`, `landing`, `sourceFraction(across:down:)`, `largestStretch`;
+resolution-free: columns and rows are fractions of the picture, pixel i's centre is (i + 0.5) / size), `PictureCorrectionProviding` and
+`StaticPictureCorrection` (nil = off), `PictureCorrection.snapshotTimeout` (6 s: the longest `MediaCodecs.correctJPEG` may take; the engine
+runs the call on a thread of its own and gives up on it a second later). The JavaScript copy and the ffmpeg maps are pinned to it by
+`Tests/MediaCoreTests/Fixtures/picture-correction-vectors.json`, generated from the spec's formula by `Tools/picture-correction-vectors.py`.
+The ffmpeg side (`PictureCorrection+Remap.swift`): `remapSupersample` (2), `remapMaps(width:height:)` (four 16-bit PGM maps for `remap`:
+x and y for the luma plane of the picture made twice as tall, W × 2H; chroma x and chroma y for its two colour planes, W/2 × H, the
+picture's width halved and its height as it is) and `ffmpegRemapChain(input:width:height:xMap:yMap:chromaXMap:chromaYMap:output:)` (warp each 4:2:0 plane as grey at twice
+the height, merge, then shrink with `area`; ruling R6: half the CPU of a 4:4:4 warp on the box's N150 at the same quality);
+`MediaCodecs.supportsPictureCorrection` (default false) and `MediaCodecs.makeVideoTranscoder(output:overlay:correction:)` (a requirement
+with a default that ignores the correction and calls `makeVideoTranscoder(output:overlay:)`); `MediaCodecs.correctJPEG(_:correction:)`
+(snapshots: the JPEG straightened at its own size; a requirement with a default that throws `MediaCodecError.unsupported`).
 
 `VideoEncoderSettings.expectedFrameRate` (+ `init` parameter, default nil) and `inputFrameRate` (review W4 round 3: the
 input's expected rate is a rate-control hint; `fps` stays the output's limit, so a rate measured low drops nothing).

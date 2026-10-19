@@ -325,24 +325,53 @@ IP camera web API's `LANConfig` `DHCP`, `DNS1`, `DNS2`, below), `CameraDNSReadin
 `fromDHCP`, `method`, `backup`, `pointsAt(_:)`: the camera asks that address and no other, an IPv6 address matching however it is written;
 since 2026-10-18 wherever it has its servers from, the router's DHCP included (`fromDHCP` says so, and the Watch step's note that the
 router can change them), and a slot holding 0.0.0.0 or :: is an empty slot, not a server, in readings and in Restore's comparison;
-`serversUnknown` since 2026-10-18: a Reolink on automatic DNS whose ONVIF did not say which servers DHCP gives, below),
+`serversUnknown` since 2026-10-18: a Reolink on automatic DNS whose ONVIF did not say which servers DHCP gives, below; `addressing` since
+2026-10-19: the camera's `CameraAddressing` where the answer its servers came from shows it whole, ISAPI's address document or the IP camera
+web API's `LANConfig` with its `MacAddress`, nil otherwise and nothing more asked for it, for BridgeEngine's "Change it by hand"),
 `CameraSettingsService.readDNS()` (nil when the camera does not show its DNS servers; throws a login refusal),
 `CameraSettingsService.applyDNS(server:)` (every server the camera asks set to that one address, read back; a refusal says what the camera
 kept: "the camera asks Camera Bridge first but kept 8.8.8.8 as its other DNS server", or "the camera kept its own DNS servers") and
 `CameraSettingsService.restoreDNS(_:)` (read back). Hikvision through ISAPI: `/ISAPI/System/Network/interfaces/1/ipAddress`, a
 read-modify-write of the whole document in which only the `ipAddress` inside `PrimaryDNS` and `SecondaryDNS` changes (both set to the
 bridge, and the read-back needs both: a camera that keeps its second server is refused, naming it; the camera's own address,
-`addressingType` and gateway stay as they are; a missing `SecondaryDNS` is not added; IPv4 only; `statusCode` 7 noted, never acted on: the
-step is done, waiting for the camera's restart, and the security check reads the DNS again before the guard counts the camera as watched; a
-camera that shows no document after the write is a refusal). The ISAPI document is built from the ISAPI 2.0 schema's shape and is not yet
-checked on a real camera. Other cameras, and a Hikvision without that document, through ONVIF: `GetDNS` / `SetDNS` (`DNSManual` entries,
-IPv4 and IPv6; the search domains are written back as the camera had them), checked against two real cameras' answers (one on DHCP, one
-set by hand). `SetDNS` names the bridge alone first; a camera with fixed slots that took it but kept another server set by hand (the
-owner's "Patio New" kept 8.8.8.8 as its second) is then sent the bridge twice, then the bridge and an empty entry (an empty `IPv4Address`,
-for a camera that refuses one address twice), each read back. Restore writes the old servers (or DHCP), and empties a slot its write did
-not name when the camera kept the bridge there. Tapo, Dahua/Amcrest and every other ONVIF camera go this way (one that speaks the IP camera
-web API, a Jennov, through that API instead: below); a camera whose ONVIF refuses `SetDNS` is refused in its words, and one without `GetDNS`
-is not supported (router help).
+`addressingType` and gateway stay as they are; a missing `SecondaryDNS` is not added; IPv4 only; `statusCode` 7 noted: the step is done,
+waiting for the camera's restart, which Camera Bridge starts only when the person presses "Restart the camera now" (BridgeEngine's README),
+and the security check reads the DNS again before the guard counts the camera as watched; a camera that shows no document after the write
+is a refusal). Since 2026-10-18 a Hikvision on DHCP (`addressingType` dynamic) is read `fromDHCP` (its DNS servers come with its address)
+and its DNS is not written, as it would go back to the router's at the next renewal: the step is refused in words that name "Fix its
+address so the DNS stays" (internal `hikvisionDHCPRefusal`; already right when the router hands it the bridge), and an ISAPI write answered
+HTTP 403 is `CameraAdapterError.notPermitted`, not a refused login. The ISAPI document is built from the ISAPI 2.0 schema's shape and is not
+yet checked on a real camera. Other cameras, and a Hikvision without that document, through ONVIF: `GetDNS` / `SetDNS` (`DNSManual`
+entries, IPv4 and IPv6; the search domains are written back as the camera had them), checked against two real cameras' answers (one on
+DHCP, one set by hand). Since 2026-10-18 `SetDNS` names the bridge in both slots first (a slot left empty, or one holding a server the
+camera had, can send its lookups elsewhere: the owner's "Patio New" kept 8.8.8.8 as its second when sent the bridge alone), then the bridge
+alone (for a camera that refuses one address twice), then the bridge and an empty entry (an empty `IPv4Address`, for a camera that refuses
+both). A form answered with a fault is followed by the next at once, and so is one the camera took while it kept another server beside
+the bridge. Each form the camera takes is read back at once and every 2 s: the first for up to 30 s (`DNSReadBackTiming`: a camera that
+applies DNS slowly, or after its network restarts, still shows its old servers meanwhile), each later one for up to 6 s (ruling D2: the
+setup dialog gives the whole run 180 s). Restore writes the old servers (or DHCP), and empties a slot its write did not name when the camera
+kept the bridge there. Tapo and every other ONVIF camera go this way (a Dahua, Amcrest or Lorex through its CGI first, one that speaks the
+IP camera web API, a Jennov, through that API instead: below); a camera whose ONVIF refuses `SetDNS` is refused in its words (the last
+form's, or the account's), and one without `GetDNS` is not supported (router help).
+
+`CameraSettingsService.readIPv6()` (2026-10-19): whether the camera has IPv6 on, as ONVIF's `GetNetworkInterfaces` shows it (true when an
+interface that is on has its IPv6 enabled, false when none has or none shows an IPv6 section, nil when the camera has no ONVIF device
+service or does not answer; throws a refused login). A camera with IPv6 on can take DNS servers from the router's advertisements or DHCPv6
+beside the IPv4 ones (research §5). One read, nothing written; BridgeEngine's security check asks it of a camera whose DNS it read through
+ONVIF, for the DNS help's warning, and the guard's own reads never do.
+
+- **Dahua, Amcrest and Lorex** (vendor `.amcrest`, 2026-10-18; docs/integrations/amcrest-dahua.md; `Amcrest/AmcrestDNS.swift`): through
+  the camera's own `configManager.cgi`, before ONVIF (their ONVIF `SetDNS` is known to be unreliable). `readDNS()` reads
+  `getConfig&name=Network`: `table.Network.DefaultInterface` and that interface's `DnsServers[0]` and `[1]` (`method`
+  `CameraConfigMethod.dahuaCGI`; the backup's `servers` the two slots as the camera had them, "0.0.0.0" included, and
+  `CameraDNSBackup.dahuaInterface` the interface, init parameter, default nil); `applyDNS(server:)` sends `setConfig` with the bridge in
+  both slots of that interface and no other key (IPv4 only; the slots can be changed on DHCP too), read back for up to 30 s; Restore writes
+  the two slots back. An answer that is not Dahua's `table.` text (a login page, other HTML, a 404) leaves the camera to ONVIF. A write
+  refused for any reason but the account's rights or the login, or answered "OK" while the read-back shows none of the bridge's servers,
+  falls through to ONVIF for that run (rulings D3 and D4: no worse than before), and so does Restore; HTTP 403 is `notPermitted`, and a
+  refused login is thrown (the login guard is ONVIF's, shared). The query's brackets go out encoded (`DnsServers%5B0%5D`), pinned by a test;
+  not yet checked on a real camera. Internal: `AmcrestAPI.networkDNS(interface:)`, `setNetworkDNS(interface:servers:)`, `readDahuaDNS()`,
+  `applyDahuaDNS`, `restoreDahuaDNS`.
 
 - **The IP camera web API** (docs/integrations/ip-camera-web-api.md, 2026-10-18; `IPCWeb/IPCWebDNS.swift`): an ONVIF camera whose web API
   speaks (`ipcWeb()` `.speaks`) is read, set and restored through its own network settings before and instead of ONVIF, because its ONVIF
@@ -352,9 +381,9 @@ is not supported (router help).
   `ipcWebAPI` the three values as text. `applyDNS(server:)` writes `setNetworkLANConfig` with `LANConfig` as the camera wrote it and only
   `DNS1` and `DNS2` the bridge (IPv4), refused rather than written unless it holds every attribute the page writes (`MacAddress`, `DHCP`,
   `dhcpOffTime`, `ALLNET`, `IPAddress`, `Netmask`, `Gateway`, `DNS1`, `DNS2`, `hostname`, `MTU`), each once, with `IPAddress` the address
-  Camera Bridge reaches the camera at (internal `ipcWebLANWrite(_:dns1:dns2:host:)`); a camera on DHCP is refused, its mode never switched
-  (the page sets DNS servers only in Mode Static: `ipcWebDHCPRefusal`, naming Network › Basic (TCP/IP), Mode Static), and the preview says
-  it is not supported. It is read back through the same call for up to 30 s (`DNSReadBackTiming`): a dropped connection or a timeout
+  Camera Bridge reaches the camera at (internal `ipcWebLANWrite(_:dns1:dns2:host:dhcp:)`); a camera on DHCP is refused, its mode switched
+  only by the person's "Fix its address so the DNS stays" (below; the page sets DNS servers only in Mode Static: `ipcWebDHCPRefusal`,
+  naming Network › Basic (TCP/IP), Mode Static, and the choice), and the preview says it is not supported without that choice. It is read back through the same call for up to 30 s (`DNSReadBackTiming`): a dropped connection or a timeout
   meanwhile, and a write the camera did not answer, are no refusal; a refusal pauses the web API (`IPCWebClient.isPaused`) and says so.
   `restoreDNS(_:)` writes the backup's `DNS1` and `DNS2` back the same way (nothing written when the camera has them; refused on a camera
   switched to DHCP since); a backup an earlier build saved through ONVIF goes back through this API too, one server in both slots, in Mode
@@ -398,9 +427,30 @@ at the bridge too (the guard's own read; a Reolink's guard read is its `LocalLin
 The backup keeps the own API's DNS values (`ownAPI`: the family's `ondhcp`, `dns1`, `dns2`; Reolink's `auto`, `dns1`, `dns2`), read by
 `readInternetWatch(server:)` before anything is written; a backup saved before 2026-10-18 has none and restores through ONVIF (a
 Reolink's through `LocalLink`, above).
-Internal, read only until Seal: `ONVIFClient.defaultGateway()` (`GetNetworkDefaultGateway`) and `networkInterfaces()`
-(`GetNetworkInterfaces`: DHCP or fixed, the addresses with their prefix lengths; never the MAC address). The IP camera web API's own
-network settings are used for the DNS only (`LANConfig`, above).
+"Fix its address so the DNS stays" (2026-10-18, `ONVIF/CameraSettingsService+FixedAddress.swift`): the person's choice in the setup's
+preview, off by default, for a camera whose DNS only stays with a fixed address (a Hikvision on DHCP, a camera that speaks the IP camera
+web API on DHCP, an ONVIF camera on DHCP whose last run refused its DNS set by hand). `readInternetWatch(server:cameraAddress:refusedBefore:)`
+offers it (`CameraSetupReading.fixAddress`: `CameraSetupFixAddress`, the camera's `CameraAddressing`, the change rows and the `method` it
+is fixed through) only when the camera shows its whole address (an IPv4 address, a mask of contiguous bits, a gateway that is not 0.0.0.0
+and is on that network; an ONVIF camera's lease as DHCP gave it), that address is `cameraAddress` and the bridge is on its network; never a
+guess. An ONVIF camera on DHCP whose `SetDNS` did not stay is refused in words that say so (`fixedAddressNextTime`), only where the next
+preview would offer the choice (`applyDNS(server:cameraAddress:)`, the engine passing the guard's address). A fix refused before or at its
+first write changed nothing (`CameraSetupOutcome.addressUntouched`): only a definite refusal of that write counts (a SOAP fault, the
+account's rights, an HTTP status that is not 2xx, a request Camera Bridge did not send: `refusedOutright`); a 2xx answer the client can't
+read may be one the camera applied, so its address stays in the backup for Restore. `applyDNS(server:fixingAddress:)` reads the address again first and writes
+nothing when it is not the one the preview showed (`addressChangedRefusal`); then ISAPI's address document with `addressingType` static
+(the same `ipAddress`, `subnetMask`, `DefaultGateway`) and both DNS servers the bridge; `LANConfig` with `DHCP` 0 and `DNS1`, `DNS2` the
+bridge; or ONVIF `SetNetworkInterfaces` (IPv4 on, `Manual` the address and prefix it has, `DHCP` false), `SetNetworkDefaultGateway` as it
+was, then `SetDNS`, each read back (`CameraSetupOutcome.addressFixed`). "Reboot Required" and `RebootNeeded` make the step done waiting for
+a restart, which only the person starts. The backup records the fixed address and the way it was fixed (`CameraDNSBackup.fixedAddress`,
+never the hardware address, and `fixedAddressMethod`, which can differ from the way an earlier run read the DNS servers); `restoreDNS(_:)`
+puts DHCP back that way with the DNS servers as they were while the camera still has that fixed address (`restoreFixedAddress`; ONVIF:
+only the address and prefix `SetNetworkInterfaces` wrote are compared, the DNS first and DHCP last, also after a refused DNS part and
+when a change waits for a restart; when the interface already shows DHCP and the DHCP-on write faults, Restore counts the DNS part alone as
+done), and leaves one changed by hand since as it is. Internal: `ONVIFClient.setNetworkInterface(token:manual:dhcp:)` (its
+body `setNetworkInterfaceBody`), `setDefaultGateway(_:)`, `defaultGateway()`, `networkInterfaces()` (now with `Info`'s `HwAddress`, for
+the router reservation only: never logged or saved), `HikvisionISAPI.address(in:)`, `settingAddressing(_:dns:in:)`, `hardwareAddress(in:)`
+(`/ISAPI/System/Network/interfaces/1`'s `MACAddress`), `ipcWebAddressing(in:)`, `fixIPCWebAddress`. Not yet run against a real camera.
 
 The setup step "Watch its internet" (`CameraSetupStepID.internetWatch`, the last step; the engine offers it only where the bridge has
 the guard: BridgeEngine's README): `CameraSettingsService.readInternetWatch(server:)` reads the DNS servers against the bridge's address for

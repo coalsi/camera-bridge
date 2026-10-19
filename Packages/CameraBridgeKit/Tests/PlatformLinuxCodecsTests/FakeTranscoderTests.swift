@@ -1,3 +1,4 @@
+import BridgeSupport
 import Foundation
 import MediaCore
 import Synchronization
@@ -55,7 +56,7 @@ final class ScriptedVideoFFmpeg: @unchecked Sendable {
     }
 
     static func skipThreshold(in arguments: [String]) -> Double? {
-        guard let index = arguments.firstIndex(of: "-vf"), index + 1 < arguments.count else { return nil }
+        guard let index = arguments.firstIndex(where: { $0 == "-vf" || $0 == "-filter_complex" }), index + 1 < arguments.count else { return nil }
         let chain = arguments[index + 1]
         guard let range = chain.range(of: "if(gte(t,") else { return nil }
         let rest = chain[range.upperBound...]
@@ -357,6 +358,140 @@ final class ScriptedVideoFFmpeg: @unchecked Sendable {
         #expect(rig.transcoderChildren[0].arguments.allSatisfy { !$0.contains("drawtext") })
     }
 
+    @Test func aRunningTranscoderRestartsOnceWhenTheCorrectionChanges() async throws {
+        let rig = rig()
+        let correction = MutableCorrection(nil)
+        let transcoder = try FFmpegVideoTranscoder(runtime: rig.codecs.runtime, output: settings(), overlay: nil, correction: correction, minimumRunTime: .zero)
+        defer { transcoder.invalidate() }
+        var out: [EncodedVideoFrame] = []
+        for index in 0..<4 { out += try await transcoder.transcode(TestFormats.frame(index, key: index == 0)) }
+        #expect(rig.transcoderChildren.count == 1)
+        #expect(rig.transcoderChildren[0].arguments.allSatisfy { !$0.contains("remap") })
+        // Turned on between two GOPs: the next keyframe starts one new child that warps.
+        correction.set(PictureCorrection(straighten: 0.4, level: 0.15))
+        for index in 4..<8 { out += try await transcoder.transcode(TestFormats.frame(index, key: index == 4)) }
+        #expect(rig.transcoderChildren.count == 2)
+        #expect(rig.transcoderChildren[0].terminated)
+        let second = rig.transcoderChildren[1].arguments
+        let graph = try #require(second.firstIndex(of: "-filter_complex").map { second[$0 + 1] })
+        #expect(graph.contains("remap") && second.contains("[cbv]"))
+        // The maps it reads exist: luma x and y twice as tall as the output, chroma x and y half as wide (the 4:2:0 planes).
+        let inputs = second.indices.filter { second[$0] == "-i" }.map { second[$0 + 1] }
+        #expect(inputs.count == 5 && inputs[0] == "pipe:0")
+        for (map, header) in zip(inputs.dropFirst(), ["P5\n320 360\n65535\n", "P5\n320 360\n65535\n", "P5\n160 180\n65535\n", "P5\n160 180\n65535\n"]) {
+            let data = try Data(contentsOf: URL(fileURLWithPath: map))
+            #expect(data.starts(with: Data(header.utf8)), "\(map)")
+        }
+        // The same value again changes nothing.
+        correction.set(PictureCorrection(straighten: 0.4, level: 0.15))
+        for index in 8..<12 { out += try await transcoder.transcode(TestFormats.frame(index, key: index == 8)) }
+        #expect(rig.transcoderChildren.count == 2)
+        // No picture was lost over the restart.
+        #expect(out.count == 12, "\(out.count) pictures")
+        transcoder.invalidate()
+        #expect(inputs.dropFirst().allSatisfy { !FileManager.default.fileExists(atPath: $0) })
+    }
+
+    @Test func turningTheCorrectionOffRestartsOnceWithoutTheWarp() async throws {
+        let rig = rig()
+        let correction = MutableCorrection(PictureCorrection(straighten: 0.4, level: 0.15))
+        let transcoder = try FFmpegVideoTranscoder(runtime: rig.codecs.runtime, output: settings(), overlay: nil, correction: correction, minimumRunTime: .zero)
+        defer { transcoder.invalidate() }
+        var out: [EncodedVideoFrame] = []
+        for index in 0..<4 { out += try await transcoder.transcode(TestFormats.frame(index, key: index == 0)) }
+        #expect(rig.transcoderChildren.count == 1 && rig.transcoderChildren[0].arguments.contains { $0.contains("remap") })
+        // Both sliders back at 0: the next keyframe starts one child that only transcodes.
+        correction.set(.off)
+        for index in 4..<8 { out += try await transcoder.transcode(TestFormats.frame(index, key: index == 4)) }
+        #expect(rig.transcoderChildren.count == 2 && rig.transcoderChildren[0].terminated)
+        let second = rig.transcoderChildren[1].arguments
+        #expect(second.allSatisfy { !$0.contains("remap") && $0 != "-filter_complex" } && second.contains("-vf"))
+        #expect(second.filter { $0 == "-i" }.count == 1)
+        // nil is off as well: no further restart.
+        correction.set(nil)
+        for index in 8..<12 { out += try await transcoder.transcode(TestFormats.frame(index, key: index == 8)) }
+        #expect(rig.transcoderChildren.count == 2)
+        #expect(out.count == 12, "\(out.count) pictures")
+    }
+
+    @Test func aBitrateRestartWhileCorrectedReusesTheMaps() async throws {
+        let rig = rig()
+        let correction = StaticPictureCorrection(PictureCorrection(straighten: 0.4, level: 0.15))
+        let transcoder = try FFmpegVideoTranscoder(runtime: rig.codecs.runtime, output: settings(bitrate: 1_000), overlay: nil, correction: correction, minimumRunTime: .zero)
+        defer { transcoder.invalidate() }
+        for index in 0..<4 { _ = try await transcoder.transcode(TestFormats.frame(index, key: index == 0)) }
+        let first = rig.transcoderChildren[0].arguments
+        let maps = first.indices.filter { first[$0] == "-i" }.map { first[$0 + 1] }.dropFirst()
+        #expect(maps.count == 4)
+        let before = try maps.map(FileIdentity.init(path:))
+        transcoder.updateBitrate(kbps: 600)
+        _ = try await transcoder.transcode(TestFormats.frame(4, key: false))
+        #expect(rig.transcoderChildren.count == 2)
+        let second = rig.transcoderChildren[1].arguments
+        #expect(second.contains("600k") && Array(second.indices.filter { second[$0] == "-i" }.map { second[$0 + 1] }.dropFirst()) == Array(maps))
+        // Not one of the four files was written again (each write replaces the file, so it would be a new file).
+        #expect(try maps.map(FileIdentity.init(path:)) == before)
+    }
+
+    @Test func withoutTheWarpFiltersTheCorrectionIsUnavailable() async throws {
+        let warnings = WarningLines()
+        let token = LogHub.addSink(warnings)
+        defer { LogHub.removeSink(token) }
+        let launcher = FakeFFmpegLauncher()
+        let script = ScriptedVideoFFmpeg()
+        let codecs = FFmpegMediaCodecs.fake(launcher, filters: FakeListings.filtersWithoutTheWarp)
+        let probe = launcher.onLaunch
+        launcher.onLaunch = { child in
+            probe?(child)
+            script.attach(to: child)
+        }
+        #expect(!codecs.supportsPictureCorrection)
+        let transcoder = try codecs.makeVideoTranscoder(output: settings(), overlay: nil, correction: StaticPictureCorrection(PictureCorrection(straighten: 0.4, level: 0.15)))
+        defer { transcoder.invalidate() }
+        var out: [EncodedVideoFrame] = []
+        for index in 0..<8 { out += try await transcoder.transcode(TestFormats.frame(index, key: index % 4 == 0)) }
+        #expect(out.count == 8)
+        let children = launcher.children.filter { $0.spec.label == "video transcoder" }
+        #expect(children.count == 1 && children[0].arguments.allSatisfy { !$0.contains("remap") && $0 != "-filter_complex" })
+        #expect(warnings.matching("straighten").count == 1, "\(warnings.matching("straighten"))")
+        #expect(try codecs.capabilitySummary().contains("picture correction unavailable"))
+        #expect(try rig().codecs.capabilitySummary().contains("picture correction available"))
+    }
+
+    @Test func withoutAScratchDirectoryTheTranscoderRunsUncorrected() async throws {
+        // The scratch "directory" is a file, so the maps cannot be written.
+        let blocker = FileManager.default.temporaryDirectory.appendingPathComponent("camera-bridge-test-blocker-\(UUID().uuidString)")
+        try Data("x".utf8).write(to: blocker)
+        defer { try? FileManager.default.removeItem(at: blocker) }
+        let warnings = WarningLines()
+        let token = LogHub.addSink(warnings)
+        defer { LogHub.removeSink(token) }
+        let rig = rig(configuration: FFmpegCodecsConfiguration(fontFile: TestFonts.path, scratchDirectory: blocker))
+        let correction = StaticPictureCorrection(PictureCorrection(straighten: 0.4, level: 0.15))
+        let transcoder = try FFmpegVideoTranscoder(runtime: rig.codecs.runtime, output: settings(), overlay: nil, correction: correction, minimumRunTime: .zero)
+        defer { transcoder.invalidate() }
+        var out: [EncodedVideoFrame] = []
+        for index in 0..<12 { out += try await transcoder.transcode(TestFormats.frame(index, key: index % 4 == 0)) }
+        #expect(out.count == 12)
+        #expect(rig.transcoderChildren.count == 1)
+        #expect(rig.transcoderChildren[0].arguments.allSatisfy { !$0.contains("remap") && $0 != "-filter_complex" })
+        #expect(warnings.matching("straighten").count == 1, "\(warnings.matching("straighten"))")
+    }
+
+    @Test func theThreeArgumentTranscoderWarpsAndTheCodecsSayTheyCan() async throws {
+        let rig = rig()
+        #expect(rig.codecs.supportsPictureCorrection)
+        let transcoder = try rig.codecs.makeVideoTranscoder(output: settings(), overlay: nil, correction: StaticPictureCorrection(PictureCorrection(straighten: -0.2)))
+        defer { transcoder.invalidate() }
+        #expect(try await transcoder.transcode(TestFormats.frame(0, key: true)).count == 1)
+        #expect(rig.transcoderChildren.count == 1 && rig.transcoderChildren[0].arguments.contains { $0.contains("remap") })
+        // Off is no correction at all.
+        let plain = try rig.codecs.makeVideoTranscoder(output: settings(), overlay: nil, correction: StaticPictureCorrection(.off))
+        defer { plain.invalidate() }
+        _ = try await plain.transcode(TestFormats.frame(0, key: true))
+        #expect(rig.transcoderChildren.count == 2 && rig.transcoderChildren[1].arguments.allSatisfy { !$0.contains("remap") })
+    }
+
     @Test func aVAAPIPipelineThatDiesAtStartFallsBackToSoftware() async throws {
         let launcher = FakeFFmpegLauncher()
         let script = ScriptedVideoFFmpeg()
@@ -462,4 +597,219 @@ final class MutableOverlay: TimestampOverlayProviding, @unchecked Sendable {
     }
 
     var current: TimestampOverlay? { snapshot() }
+}
+
+/// A correction the test changes while a transcoder runs.
+final class MutableCorrection: PictureCorrectionProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var correction: PictureCorrection?
+
+    init(_ correction: PictureCorrection?) { self.correction = correction }
+
+    func set(_ correction: PictureCorrection?) {
+        lock.lock()
+        self.correction = correction
+        lock.unlock()
+    }
+
+    var current: PictureCorrection? {
+        lock.lock()
+        defer { lock.unlock() }
+        return correction
+    }
+}
+
+/// A file's identity: a map written again is a new file (written to a temporary name, then renamed over the old one).
+struct FileIdentity: Equatable {
+    var number: Int
+    var modified: Date
+
+    init(path: String) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        number = (attributes[.systemFileNumber] as? NSNumber)?.intValue ?? -1
+        modified = attributes[.modificationDate] as? Date ?? .distantPast
+    }
+}
+
+/// The scratch directory of the correction's maps on its own.
+@Suite struct RemapScratchTests {
+    private let a = PictureCorrection(straighten: 0.4, level: 0.15)
+    private let b = PictureCorrection(straighten: -0.2, level: 0.05)
+
+    private func identities(_ stage: RemapStage) throws -> [FileIdentity] {
+        try [stage.xMap, stage.yMap, stage.chromaXMap, stage.chromaYMap].map(FileIdentity.init(path:))
+    }
+
+    @Test func theFourMapsAreWrittenOnceAndOnlyWhatChangedIsWrittenAgain() throws {
+        // RemapScratch makes its parent directory.
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("camera-bridge-test-remap-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        var scratch: RemapScratch? = try RemapScratch(parent: base)
+        let directory = try #require(scratch?.directory)
+        let permissions = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+        #expect(permissions?.intValue == 0o700)
+        let stage = try #require(try scratch?.stage(for: a, width: 64, height: 32))
+        #expect(stage.width == 64 && stage.height == 32)
+        #expect(Set([stage.xMap, stage.yMap, stage.chromaXMap, stage.chromaYMap]).count == 4)
+        let maps = a.remapMaps(width: 64, height: 32)
+        #expect(try [stage.xMap, stage.yMap, stage.chromaXMap, stage.chromaYMap].map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+            == [maps.x, maps.y, maps.chromaX, maps.chromaY])
+        let first = try identities(stage)
+        // The same correction and size: nothing is written.
+        #expect(try scratch?.stage(for: a, width: 64, height: 32) == stage)
+        #expect(try identities(stage) == first)
+        // Another correction: the y maps only (the x maps depend on the size alone).
+        _ = try scratch?.stage(for: b, width: 64, height: 32)
+        let second = try identities(stage)
+        #expect(second[0] == first[0] && second[2] == first[2])
+        #expect(second[1] != first[1] && second[3] != first[3])
+        #expect(try Data(contentsOf: URL(fileURLWithPath: stage.chromaYMap)) == b.remapMaps(width: 64, height: 32).chromaY)
+        // A file removed behind its back (a temporary-files cleaner) is written again.
+        try FileManager.default.removeItem(atPath: stage.yMap)
+        _ = try scratch?.stage(for: b, width: 64, height: 32)
+        #expect(FileManager.default.fileExists(atPath: stage.yMap))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: stage.yMap)) == b.remapMaps(width: 64, height: 32).y)
+        #expect(try identities(stage)[0] == second[0])
+        // So is the whole directory.
+        try FileManager.default.removeItem(at: directory)
+        _ = try scratch?.stage(for: b, width: 64, height: 32)
+        #expect(try identities(stage).count == 4)
+        // A new size: all four.
+        let before = try identities(stage)
+        let larger = try #require(try scratch?.stage(for: b, width: 128, height: 64))
+        #expect(zip(try identities(larger), before).allSatisfy { $0 != $1 })
+        #expect(try Data(contentsOf: URL(fileURLWithPath: larger.chromaXMap)).starts(with: Data("P5\n64 64\n65535\n".utf8)))
+        // Released: the directory goes with it.
+        scratch = nil
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    @Test func aFailedRenameSaysWhy() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("camera-bridge-test-remap-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let scratch = try RemapScratch(parent: base)
+        // A directory (not empty) where the y map goes: rename(2) refuses with EISDIR.
+        try FileManager.default.createDirectory(atPath: scratch.yMap.path + "/inside", withIntermediateDirectories: true)
+        let error = #expect(throws: (any Error).self) { _ = try scratch.stage(for: a, width: 16, height: 8) }
+        let message = (error as? LocalizedError)?.errorDescription ?? "\(String(describing: error))"
+        #expect(message.contains("y.pgm") && message.contains("Is a directory"), "\(message)")
+        #expect(!FileManager.default.fileExists(atPath: scratch.directory.appendingPathComponent("y.tmp").path))
+    }
+}
+
+/// The maps of the snapshots' straightening, kept between snapshots for each picture size and correction.
+@Suite struct SnapshotMapCacheTests {
+    private let a = PictureCorrection(straighten: 0.4, level: 0.15)
+    private let b = PictureCorrection(straighten: -0.2, level: 0.05)
+    private let c = PictureCorrection(straighten: 0.1)
+
+    private func scratchParent() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("camera-bridge-test-snapshot-maps-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private func sets(in parent: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? []).filter { $0.hasPrefix("camera-bridge-remap-") }
+    }
+
+    private func identities(_ stage: RemapStage) throws -> [FileIdentity] {
+        try [stage.xMap, stage.yMap, stage.chromaXMap, stage.chromaYMap].map(FileIdentity.init(path:))
+    }
+
+    @Test func aSizeAndCorrectionKeepTheirMapsFromOneSnapshotToTheNext() throws {
+        let parent = scratchParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let cache = SnapshotMapCache(parent: parent, capacity: 6)
+        let first = try cache.withMaps(for: a, width: 64, height: 32) { stage in (stage, try identities(stage)) }
+        let maps = a.remapMaps(width: 64, height: 32)
+        #expect(try [first.0.xMap, first.0.yMap, first.0.chromaXMap, first.0.chromaYMap].map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+            == [maps.x, maps.y, maps.chromaX, maps.chromaY])
+        for _ in 0..<3 {
+            let again = try cache.withMaps(for: a, width: 64, height: 32) { stage in (stage, try identities(stage)) }
+            #expect(again.0 == first.0 && again.1 == first.1, "the same files, not written again")
+        }
+        #expect(cache.count == 1 && sets(in: parent).count == 1)
+        // Another correction and another size each have their own set (the cameras take turns, no set is rewritten for the next).
+        let other = try cache.withMaps(for: b, width: 64, height: 32) { stage in (stage, try identities(stage)) }
+        let larger = try cache.withMaps(for: a, width: 128, height: 64) { $0 }
+        #expect(other.0.xMap != first.0.xMap && larger.xMap != first.0.xMap)
+        #expect(cache.count == 3 && sets(in: parent).count == 3)
+        #expect(try cache.withMaps(for: a, width: 64, height: 32) { try identities($0) } == first.1, "and the first is still as it was")
+    }
+
+    @Test func theLeastRecentlyUsedSetIsRemovedPastTheCapacity() throws {
+        let parent = scratchParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let cache = SnapshotMapCache(parent: parent, capacity: 2)
+        let first = try cache.withMaps(for: a, width: 64, height: 32) { $0 }
+        let second = try cache.withMaps(for: b, width: 64, height: 32) { $0 }
+        _ = try cache.withMaps(for: a, width: 64, height: 32) { $0 }      // a is the newest now
+        let third = try cache.withMaps(for: c, width: 64, height: 32) { $0 }   // pushes b out
+        #expect(cache.count == 2 && sets(in: parent).count == 2)
+        #expect(FileManager.default.fileExists(atPath: first.yMap) && FileManager.default.fileExists(atPath: third.yMap))
+        #expect(!FileManager.default.fileExists(atPath: second.yMap), "the evicted set's files are removed")
+        #expect(!FileManager.default.fileExists(atPath: URL(fileURLWithPath: second.yMap).deletingLastPathComponent().path))
+    }
+
+    @Test func aSetInUseOutlivesItsEvictionUntilItsSnapshotEnds() throws {
+        let parent = scratchParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let cache = SnapshotMapCache(parent: parent, capacity: 1)
+        var running: RemapStage?
+        try cache.withMaps(for: a, width: 64, height: 32) { stage in
+            running = stage
+            // Another camera's snapshot pushes this set out while its ffmpeg child is still starting up: the files stay until it is done.
+            _ = try cache.withMaps(for: b, width: 64, height: 32) { _ in }
+            #expect(FileManager.default.fileExists(atPath: stage.yMap) && FileManager.default.fileExists(atPath: stage.xMap))
+        }
+        let stage = try #require(running)
+        #expect(!FileManager.default.fileExists(atPath: stage.yMap), "removed once nobody uses it")
+        #expect(cache.count == 1 && sets(in: parent).count == 1)
+    }
+
+    @Test func aFailureToWriteMapsLeavesNoSetBehindAndTheNextSnapshotTriesAgain() throws {
+        let parent = scratchParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let cache = SnapshotMapCache(parent: parent, capacity: 2)
+        let made = try cache.withMaps(for: a, width: 64, height: 32) { $0 }
+        // The set's directory is gone and a file stands in its place (a full disk, a cleaner that went wrong): the maps cannot be written.
+        let directory = URL(fileURLWithPath: made.yMap).deletingLastPathComponent()
+        try FileManager.default.removeItem(at: directory)
+        FileManager.default.createFile(atPath: directory.path, contents: Data())
+        #expect(throws: (any Error).self) { try cache.withMaps(for: a, width: 64, height: 32) { _ in } }
+        #expect(cache.count == 0 && sets(in: parent).isEmpty, "the broken set is dropped")
+        let fresh = try cache.withMaps(for: a, width: 64, height: 32) { $0 }
+        #expect(FileManager.default.fileExists(atPath: fresh.yMap) && cache.count == 1)
+    }
+
+    @Test func snapshotsAtTheSameTimeWriteASetOnce() async throws {
+        let parent = scratchParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let cache = SnapshotMapCache(parent: parent, capacity: 2)
+        let stages = try await withThrowingTaskGroup(of: RemapStage.self) { group in
+            for _ in 0..<6 { group.addTask { try cache.withMaps(for: self.a, width: 256, height: 128) { $0 } } }
+            return try await group.reduce(into: []) { $0.append($1) }
+        }
+        #expect(Set(stages.map(\.yMap)).count == 1 && cache.count == 1 && sets(in: parent).count == 1)
+    }
+
+    @Test func releasingTheCacheRemovesEveryMap() throws {
+        let parent = scratchParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        var cache: SnapshotMapCache? = SnapshotMapCache(parent: parent, capacity: 4)
+        _ = try cache?.withMaps(for: a, width: 64, height: 32) { $0 }
+        _ = try cache?.withMaps(for: b, width: 64, height: 32) { $0 }
+        #expect(sets(in: parent).count == 2)
+        cache = nil
+        #expect(sets(in: parent).isEmpty)
+    }
+}
+
+/// The warnings logged while it is registered.
+final class WarningLines: LogSink {
+    private let lines = Mutex<[String]>([])
+    func record(_ entry: LogEntry) {
+        guard entry.level == .warning else { return }
+        lines.withLock { $0.append(entry.message) }
+    }
+    func matching(_ text: String) -> [String] { lines.withLock { $0.filter { $0.contains(text) } } }
 }

@@ -377,15 +377,17 @@ private func platformAppleFrameworks() throws -> Set<String> {
     // MARK: Licence notice and tool READMEs
 
     /// The derived Swift files and the definitions generator follow the HAP-NodeJS TypeScript sources of the version
-    /// Interop/node pins (research brief: the 2.1.6 build is dist-only); the notice must name that version.
-    @Test func acknowledgementsNameThePinnedHAPNodeJSVersion() throws {
+    /// Interop/node pins (research brief: the 2.1.6 build is dist-only); the notice must name that version. The notice
+    /// is the repository's NOTICE file: the Mac app's own copy (Archive/mac-app/App/Resources/Acknowledgements.md) is
+    /// archived and no longer checked.
+    @Test func noticeNamesThePinnedHAPNodeJSVersion() throws {
         let manifest = try JSONSerialization.jsonObject(with: Data(try repositoryText("Interop/node/package.json").utf8)) as? [String: Any]
         let dependencies = manifest?["dependencies"] as? [String: String]
         let pin = try #require(dependencies?["@homebridge/hap-nodejs"], "Interop/node/package.json pins no @homebridge/hap-nodejs")
-        let notice = try repositoryText("App/Resources/Acknowledgements.md")
+        let notice = try repositoryText("NOTICE")
         let named = notice.matches(of: /HAP-NodeJS\s+v?([0-9]+\.[0-9]+\.[0-9]+)/).map { String($0.output.1) }
-        #expect(!named.isEmpty, "Acknowledgements names no HAP-NodeJS version")
-        #expect(named.allSatisfy { $0 == pin }, "Acknowledgements names HAP-NodeJS \(named), Interop/node pins \(pin)")
+        #expect(!named.isEmpty, "NOTICE names no HAP-NodeJS version")
+        #expect(named.allSatisfy { $0 == pin }, "NOTICE names HAP-NodeJS \(named), Interop/node pins \(pin)")
     }
 
     @Test func cbctlPointerREADMELinksTheCommandReference() throws {

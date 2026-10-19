@@ -126,6 +126,9 @@ actor CameraRuntime {
     private let mainHub = MediaHub()
     /// The timestamp overlay live views and recordings draw (changed in place by `updateTimestampOverlay`).
     private let overlay: TimestampOverlayControl
+    /// The picture correction live views and recordings straighten with (changed in place by `updatePictureCorrection`); off while the
+    /// codecs cannot apply one.
+    private let correction: PictureCorrectionControl
     private let subHub = MediaHub(retention: .seconds(4))
     private let mainTraits = StreamTraits()
     private let subTraits = StreamTraits()
@@ -180,7 +183,12 @@ actor CameraRuntime {
     private var stack: Stack?
     private var streaming: StreamingHandler?
     private var recording: RecordingHandler?
-    private var snapshots: SnapshotProvider?
+    /// The snapshots of the app, the web and the accessory: the `SnapshotProvider`'s, straightened by `correction`.
+    private var snapshots: CorrectedSnapshots?
+    /// The decoder of the pictures around an event (`eventPictures(from:)`): its own, so they never come between the snapshot provider's
+    /// decoder and the GOP that one is partway through, with its JPEG work off the cooperative pool; one set of pictures at a time.
+    private let eventDecoders: SnapshotDecoderPool
+    private let eventDecoding = AsyncSerialLock()
     private var eventSource: (any CameraEventSource)?
     private var eventTask: Task<Void, Never>?
     private var softMotion: SoftMotionMonitor?
@@ -240,7 +248,10 @@ actor CameraRuntime {
         motionSensitivity = configuration.motionSensitivity
         motionShadowWanted = dependencies.motionShadowTest
         overlay = TimestampOverlayControl(settings: configuration.timestampOverlay, cameraName: configuration.name)
+        correction = PictureCorrectionControl(configuration.pictureCorrection, supported: dependencies.environment.codecs.supportsPictureCorrection)
         let environment = dependencies.environment
+        eventDecoders = SnapshotDecoderPool(codecs: environment.codecs, idleLifetime: EventPictures.decoderIdleLifetime,
+                                            blockingWork: SnapshotDecoderPool.offCooperativePool)
         store = HAPStorage.store(for: configuration.id, dataDirectory: environment.dataDirectory, secrets: environment.platform.secrets)
         if configuration.vendor == .demo || configuration.vendor == .go2rtc {
             reachability = nil   // the demo camera has no network; a go2rtc camera is reached on this Mac, through the helper
@@ -393,7 +404,8 @@ actor CameraRuntime {
         dependencies.onChange()
     }
 
-    /// The snapshot provider behind the app's own pictures and the accessory's snapshot requests.
+    /// The snapshot provider behind the app's own pictures and the accessory's snapshot requests, its pictures straightened by the
+    /// camera's correction (`CorrectedSnapshots`; the codecs' `correctJPEG` runs on a `CodecOffload` thread, off the cooperative pool).
     private func makeSnapshots() {
         let driver = driver, reachability = reachability
         var snapshotAPI: SnapshotProvider.CameraSnapshot?
@@ -403,9 +415,12 @@ actor CameraRuntime {
                 return try await driver.snapshot()
             }
         }
-        snapshots = SnapshotProvider(cameraSnapshot: snapshotAPI, codecs: dependencies.environment.codecs, hub: mainHub,
-                                     timing: dependencies.tuning.snapshots, log: log,
-                                     isOffline: { [reachability] in reachability?.isOffline ?? false })
+        let codecs = dependencies.environment.codecs
+        let provider = SnapshotProvider(cameraSnapshot: snapshotAPI, codecs: codecs, hub: mainHub, timing: dependencies.tuning.snapshots, log: log,
+                                        isOffline: { [reachability] in reachability?.isOffline ?? false })
+        snapshots = CorrectedSnapshots(provider: provider, correction: correction, log: log, correct: CorrectedSnapshots.offloaded { jpeg, correction in
+            try codecs.correctJPEG(jpeg, correction: correction)
+        })
     }
 
     /// Builds the delegates and the accessory, starts its server and registers its controller on the router. Throws
@@ -437,7 +452,7 @@ actor CameraRuntime {
         let onChange = dependencies.onChange
         var liveContext = LiveStreamPipeline.Context(codecs: codecs, cameraAudioEnabled: configuration.audioEnabled, talkback: makeSink,
                                                      controllerTimeout: dependencies.tuning.liveControllerTimeout, log: log,
-                                                     qualityMode: configuration.liveQualityMode, overlay: overlay)
+                                                     qualityMode: configuration.liveQualityMode, overlay: overlay, correction: correction)
         liveContext.timing = dependencies.tuning.liveStreamTiming
         // A live view that starts inside the camera's long GOP asks the camera for a keyframe: through the adapter's own guarded call
         // (`CameraDriver.requestKeyframe`: spacing, no repeat after a refused login, nothing while logins are paused), once per
@@ -452,7 +467,7 @@ actor CameraRuntime {
         let recording = RecordingHandler(hub: mainHub, traits: mainTraits, codecs: codecs, cameraAudioEnabled: configuration.audioEnabled,
                                          timing: dependencies.tuning.recording, log: log, onChange: onChange, hubs: hubs,
                                          streamMode: configuration.recordingStreamMode, qualityMode: configuration.recordingQualityMode,
-                                         overlay: overlay)
+                                         overlay: overlay, correction: correction)
         let controllerConfiguration = AccessoryOptions.controllerConfiguration(for: configuration, aspect: aspect, sourceWidth: size?.width,
                                                                                 sourceHeight: size?.height, talkback: talkbackAvailable)
         let bound: (port: UInt16, value: Stack)
@@ -766,14 +781,29 @@ actor CameraRuntime {
         return (main, sub)
     }
 
-    func snapshot(width: Int, height: Int) async -> Data? {
+    /// A snapshot for the app or the web, straightened unless `original` (the camera's own picture).
+    func snapshot(width: Int, height: Int, original: Bool = false) async -> Data? {
         guard let snapshots else { return nil }
         do {
-            return try await snapshots.snapshot(SnapshotRequest(width: width, height: height, reason: nil))
+            return try await snapshots.snapshot(SnapshotRequest(width: width, height: height, reason: nil), original: original)
         } catch {
             log.debug("Snapshot for the app failed: \(URLFreeErrors.describe(error))")
             return nil
         }
+    }
+
+    /// What the pictures of the event that began at `date` (the bridge's clock, as the event router stamps it) are made from, gathered from the
+    /// main stream and the camera's snapshot API (`EventPictures.gather(at:)`): to be called when the event starts. Encoded data only, nothing
+    /// is decoded; it waits at most 6 s for the keyframes after the event, off the runtime.
+    func gatherEventFrames(at date: Date) async -> EventFrames {
+        guard let snapshots else { return EventFrames(date: date) }
+        return await EventPictures(hub: mainHub, snapshots: snapshots.provider).gather(at: date)
+    }
+
+    /// The pictures of `frames` (at most five JPEGs, 768 px wide at most, in time order: `EventFrames.pictures(decoders:log:)`), one set at a
+    /// time on the camera's own decoder for them, off the runtime and off the cooperative pool.
+    func eventPictures(from frames: EventFrames) async -> [LabeledPicture] {
+        await eventDecoding.withLock { await frames.pictures(decoders: eventDecoders, log: log) }
     }
 
     /// Whether a controller is paired with the accessory.
@@ -806,6 +836,16 @@ actor CameraRuntime {
     /// path changes).
     nonisolated func updateTimestampOverlay(_ settings: TimestampOverlaySettings, cameraName: String) {
         overlay.update(settings: settings, cameraName: cameraName)
+    }
+
+    /// The picture correction changed (never a restart: that would close the camera's NVR file). Every transcoder of a live view or
+    /// recording holds it and straightens its next picture by the new value. A live view's path follows the correction as it is at its
+    /// start, or the next time its video path is rebuilt, and turning it on or off rebuilds each running live view whose path that
+    /// changes, at once (a passthrough starts transcoding, a transcode only for the correction goes back to passthrough). An HKSV
+    /// recording keeps the path it started with until its next start.
+    func updatePictureCorrection(_ correction: PictureCorrection) async {
+        guard self.correction.update(correction) else { return }
+        await streaming?.pictureCorrectionSwitched()
     }
 
     // MARK: - HAP

@@ -82,6 +82,17 @@ import Testing
         #expect(dhcp.backup.ipcWebAPI == ["DHCP": "1", "DNS1": "192.0.2.1", "DNS2": "0.0.0.0"])
     }
 
+    /// The reading carries the camera's address whole, its hardware address too, as `LANConfig` shows it ("Change it by hand" says to keep
+    /// it and reserve it); none when `LANConfig` does not show it whole (here, a gateway off its network).
+    @Test func theReadingCarriesTheAddressLANConfigShows() async throws {
+        let camera = try await Family.start()
+        defer { camera.stop() }
+        #expect(try await camera.service().readDNS()?.addressing == nil, "127.0.0.1 with the gateway 192.0.2.1: not whole")
+        camera.web.state.update { $0.lan = FakeIPCWebCamera.lan(dhcp: 1, ip: "192.0.2.20", gateway: "192.0.2.1") }
+        #expect(try await camera.service().readDNS()?.addressing
+                == CameraAddressing(address: "192.0.2.20", subnetMask: "255.255.255.0", gateway: "192.0.2.1", hardwareAddress: FakeIPCWebCamera.hardwareAddress))
+    }
+
     // MARK: Watch and Restore
 
     /// Watch writes the camera's `LANConfig` back as it was read with only its two DNS servers changed, waits while the camera restarts
@@ -116,7 +127,7 @@ import Testing
         #expect(camera.writes.count == 2)
         #expect(camera.web.state.value.lan == FakeIPCWebCamera.lan(), "exactly as the camera had it")
         #expect(camera.onvif.setDNSBodies.value.isEmpty)
-        for text in ["00:00:5e:00:53:20", "TESTCAM", "255.255.255.0", "1460", "wifi-secret-value", "mail-secret-value", FakeIPCWebCamera.password,
+        for text in [FakeIPCWebCamera.hardwareAddress, "TESTCAM", "255.255.255.0", "1460", "wifi-secret-value", "mail-secret-value", FakeIPCWebCamera.password,
                      IPCWebToken.make(FakeIPCWebCamera.password) ?? "-"] {
             #expect(!capture.text.contains(text), "the network settings and the sign-in are never logged")
         }
@@ -270,6 +281,114 @@ import Testing
         #expect(try JSONDecoder().decode(CameraDNSBackup.self, from: encoded) == original)
         let older = #"{"method":"onvifMinimal","fromDHCP":false,"servers":["1.1.1.1"]}"#
         #expect(try JSONDecoder().decode(CameraDNSBackup.self, from: Data(older.utf8)).ipcWebAPI == nil, "a backup saved before has none")
+    }
+
+    // MARK: Fix its address so the DNS stays (opt-in)
+
+    /// The fake's own address on DHCP (it is reached at its own address, as a camera is), as the choice keeps it, with a gateway and the
+    /// bridge on its network.
+    private let keeps = CameraAddressing(address: "127.0.0.1", subnetMask: "255.255.255.0", gateway: "127.0.0.254")
+    private let local = "127.0.0.2"
+    private func onDHCP(netmask: String = "255.255.255.0", gateway: String = "127.0.0.254", mac: String = FakeIPCWebCamera.hardwareAddress) -> String {
+        FakeIPCWebCamera.lan(dhcp: 1, netmask: netmask, gateway: gateway, mac: mac)
+    }
+
+    /// A camera of the family on DHCP (its page takes DNS servers only in Mode Static) is offered "Fix its address so the DNS stays", keeping
+    /// its address, mask and gateway as `LANConfig` shows them, with its hardware address; one in Mode Static is written as it is. The
+    /// reading writes nothing.
+    @Test func theChoiceIsOfferedOnlyWhereDNSNeedsAFixedAddress() async throws {
+        let camera = try await Family.start()
+        defer { camera.stop() }
+        camera.web.state.update { $0.lan = onDHCP() }
+        let service = camera.service()
+        let (reading, backup) = try await service.readInternetWatch(server: local, cameraAddress: "127.0.0.1")
+        #expect(reading.state == .notSupported(CameraSettingsService.ipcWebDHCPRefusal), "without the choice nothing is written")
+        var offered = keeps
+        offered.hardwareAddress = FakeIPCWebCamera.hardwareAddress
+        #expect(reading.fixAddress == CameraSetupFixAddress(addressing: offered, changes: [
+            CameraSetupChange(label: "Address", now: "127.0.0.1 from the router (DHCP)", after: "127.0.0.1, fixed (mask 255.255.255.0, gateway 127.0.0.254)"),
+            CameraSetupChange(label: "DNS", now: "8.8.8.8 and 1.1.1.1 from the router (DHCP)", after: "the bridge (\(local))"),
+        ], method: .ipcWebAPI))
+        #expect(backup?.fixedAddress == nil)
+        #expect(try await service.readInternetWatch(server: local, cameraAddress: "192.0.2.20").0.fixAddress == nil, "another address")
+
+        camera.web.state.update { $0.lan = FakeIPCWebCamera.lan(gateway: "127.0.0.254") }
+        #expect(try await service.readInternetWatch(server: local, cameraAddress: "127.0.0.1").0.fixAddress == nil, "Mode Static")
+        #expect(camera.writes.isEmpty && camera.onvif.setNetworkInterfacesBodies.value.isEmpty)
+    }
+
+    /// No offer without the whole address: a mask that is not one, no gateway, a gateway on another network; a hardware address it does not
+    /// show is left out.
+    @Test func theChoiceNeedsTheWholeAddress() async throws {
+        let camera = try await Family.start()
+        defer { camera.stop() }
+        let service = camera.service()
+        for lan in [onDHCP(netmask: "0.255.255.0"), onDHCP(gateway: "0.0.0.0"), onDHCP(gateway: ""), onDHCP(gateway: "192.0.2.1")] {
+            camera.web.state.update { $0.lan = lan }
+            #expect(try await service.readInternetWatch(server: local, cameraAddress: "127.0.0.1").0.fixAddress == nil, "\(lan)")
+        }
+        camera.web.state.update { $0.lan = onDHCP(mac: "") }
+        #expect(try await service.readInternetWatch(server: local, cameraAddress: "127.0.0.1").0.fixAddress?.addressing == keeps)
+    }
+
+    /// `LANConfig` goes back as the camera wrote it with only `DHCP` (0: Mode Static), `DNS1` and `DNS2` changed: the camera's address, mask
+    /// and gateway as they were; read back while the camera restarts its network service. Its ONVIF is not written to.
+    @Test func fixingKeepsTheSameAddressMaskAndGateway() async throws {
+        let camera = try await Family.start()
+        defer { camera.stop() }
+        camera.web.state.update { $0.lan = onDHCP() }
+        camera.web.restartAfterLANWrite.set(2)
+        let service = camera.service()
+        #expect(try await service.applyDNS(server: local, fixingAddress: keeps, readBack: quick)
+                == CameraSetupOutcome(succeeded: true, detail: "via web API", addressFixed: true))
+        #expect(camera.writes == [FakeIPCWebCamera.lan(dhcp: 0, dns1: local, dns2: local, gateway: "127.0.0.254")],
+                "one write: Mode Static, its address as it was, the bridge twice")
+        #expect(try await service.readDNS()?.pointsAt(local) == true)
+        #expect(camera.onvif.setDNSBodies.value.isEmpty && camera.onvif.setNetworkInterfacesBodies.value.isEmpty)
+
+        // DHCP gave it another address since the preview: nothing is written.
+        camera.web.state.update { $0.lan = onDHCP(gateway: "127.0.0.253") }
+        #expect(try await service.applyDNS(server: local, fixingAddress: keeps, readBack: quick)
+                == CameraSetupOutcome(succeeded: false, detail: CameraSettingsService.addressChangedRefusal(keeps), addressUntouched: true))
+        #expect(camera.writes.count == 1)
+    }
+
+    /// Restore after the choice puts the camera back on DHCP with its DNS servers as they were, also when they were changed by hand since.
+    @Test func restorePutsDHCPBack() async throws {
+        let camera = try await Family.start()
+        defer { camera.stop() }
+        camera.web.state.update { $0.lan = onDHCP() }
+        let service = camera.service()
+        var backup = try #require(try await service.readInternetWatch(server: local, cameraAddress: "127.0.0.1").1)
+        backup.fixedAddress = keeps   // what the run saves before it changes anything
+        backup.fixedAddressMethod = .ipcWebAPI
+        #expect(try await service.applyDNS(server: local, fixingAddress: keeps, readBack: quick).succeeded)
+        camera.web.state.update { $0.lan = FakeIPCWebCamera.lan(dns1: "127.0.0.53", dns2: "127.0.0.53", gateway: "127.0.0.254") }   // changed by hand since
+
+        #expect(try await service.restoreDNS(backup, readBack: quick) == done())
+        #expect(camera.web.state.value.lan == onDHCP(), "DHCP, and the DNS values as they were")
+        #expect(try await service.restoreDNS(backup, readBack: quick) == done(), "already on DHCP")
+        #expect(camera.writes.count == 2)
+
+        camera.web.state.update { $0.lan = FakeIPCWebCamera.lan(netmask: "255.255.0.0", gateway: "127.0.0.254") }   // fixed otherwise by hand since
+        #expect(try await service.restoreDNS(backup, readBack: quick)
+                == CameraSetupOutcome(succeeded: false, detail: CameraSettingsService.addressChangedSinceFixed(keeps)))
+        #expect(camera.writes.count == 2)
+    }
+
+    /// A Jennov whose DNS backup an older build saved through ONVIF, joined by this run's fix through its web API: Restore puts DHCP back
+    /// through the web API (the way the address was fixed), and its DNS servers, from DHCP, come back with the address.
+    @Test func restorePutsDHCPBackWhicheverWayTheDNSWasRead() async throws {
+        let camera = try await Family.start()
+        defer { camera.stop() }
+        camera.web.state.update { $0.lan = onDHCP() }
+        let service = camera.service()
+        #expect(try await service.applyDNS(server: local, fixingAddress: keeps, readBack: quick).succeeded)
+        let merged = CameraDNSBackup(method: .onvifMinimal, fromDHCP: true, servers: [], searchDomains: [], fixedAddress: keeps, fixedAddressMethod: .ipcWebAPI)
+        #expect(try await service.restoreDNS(merged, readBack: quick) == done())
+        #expect(camera.web.state.value.lan == FakeIPCWebCamera.lan(dhcp: 1, dns1: local, dns2: local, gateway: "127.0.0.254"),
+                "Mode DHCP again; the slots as they were left (the camera takes DHCP's)")
+        #expect(camera.onvif.setDNSBodies.value.isEmpty && camera.onvif.setNetworkInterfacesBodies.value.isEmpty, "its ONVIF is not written to")
     }
 
     // MARK: The write

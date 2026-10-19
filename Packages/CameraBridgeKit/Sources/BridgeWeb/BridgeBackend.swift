@@ -57,7 +57,8 @@ public protocol BridgeBackend: Sendable {
     func resetPairing(cameraID: UUID) async throws
     func resetSensorsBridgePairing() async throws
     func updateSettings(_ change: @Sendable @escaping (inout BridgeSettings) -> Void) async throws
-    func snapshotJPEG(cameraID: UUID) async -> Data?
+    /// `BridgeEngine.snapshot(cameraID:original:)`: the camera's picture, straightened by its picture correction unless `original`.
+    func snapshotJPEG(cameraID: UUID, original: Bool) async -> Data?
     /// `BridgeEngine.liveVideo(cameraID:stream:audio:displayWidth:)` without audio: the camera's encoded video from the newest keyframe on, for the
     /// page's live video. The default throws `EngineError.cameraNotRunning` (a backend without cameras of its own).
     func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription
@@ -74,8 +75,13 @@ public protocol BridgeBackend: Sendable {
     func cameraSetupPreview(cameraID: UUID) async throws -> CameraSetupReport
     /// `BridgeEngine.applyCameraSetup(cameraID:)`. Default throws.
     func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport
+    /// `BridgeEngine.applyCameraSetup(cameraID:options:)`: the run with the person's choices ("Fix its address so the DNS stays"). The
+    /// default runs `applyCameraSetup(cameraID:)` without any, and refuses a choice it can't make before anything is changed.
+    func applyCameraSetup(cameraID: UUID, options: CameraSetupOptions) async throws -> CameraSetupReport
     /// `BridgeEngine.restoreCameraSetup(cameraID:)`. Default throws.
     func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport
+    /// `BridgeEngine.restartCamera(id:)`: "Restart the camera now", only for a camera that waits for it. Default throws.
+    func restartCamera(cameraID: UUID) async throws
     /// Moves a pan/tilt camera (`BridgeEngine.panTilt`).
     func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws
     /// Sets a camera's night vision and/or lamp (`BridgeEngine.setNightVision`).
@@ -90,6 +96,17 @@ public protocol BridgeBackend: Sendable {
     func pluginSecret(id: String) async throws -> Data?
     /// `BridgeEngine.setPluginSecret(id:_:)`. The default throws `EngineError.cameraNotRunning` (a backend that keeps no secrets).
     func setPluginSecret(id: String, _ data: Data?) async throws
+    /// `BridgeEngine.aiKeyStatus()`: whether the AI service's key is saved and the last four characters of it. The key itself never leaves the
+    /// engine. The default has none.
+    func aiKeyStatus() async -> (saved: Bool, hint: String?)
+    /// `BridgeEngine.setAIKey(_:)`: saves the key, trimmed; nil deletes it. The default throws `EngineError.cameraNotRunning` (a backend that
+    /// keeps no secrets).
+    func setAIKey(_ key: String?) async throws
+    /// `BridgeEngine.aiStatus()`: the AI descriptions' counts, limit and last failure. The default has described nothing, and needs a
+    /// recordings folder while none is chosen.
+    func aiStatus() async -> AIStatus
+    /// `BridgeEngine.tryAIDescription(cameraID:)`: Try it. The default throws `AIDescriberError.noService` (a backend without a describer).
+    func tryAIDescription(cameraID: UUID) async throws -> EventDescription
     func triggerTestMotion(cameraID: UUID) async
     func pause() async
     func resume() async
@@ -168,8 +185,8 @@ public struct EngineBackend: BridgeBackend {
         try await engine.updateSettings(change)
     }
 
-    public func snapshotJPEG(cameraID: UUID) async -> Data? {
-        await engine.snapshot(cameraID: cameraID)
+    public func snapshotJPEG(cameraID: UUID, original: Bool) async -> Data? {
+        await engine.snapshot(cameraID: cameraID, original: original)
     }
 
     public func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription {
@@ -214,6 +231,22 @@ public struct EngineBackend: BridgeBackend {
 
     public func setPluginSecret(id: String, _ data: Data?) async throws {
         try await engine.setPluginSecret(id: id, data)
+    }
+
+    public func aiKeyStatus() async -> (saved: Bool, hint: String?) {
+        await engine.aiKeyStatus()
+    }
+
+    public func setAIKey(_ key: String?) async throws {
+        try await engine.setAIKey(key)
+    }
+
+    public func aiStatus() async -> AIStatus {
+        await engine.aiStatus()
+    }
+
+    public func tryAIDescription(cameraID: UUID) async throws -> EventDescription {
+        try await engine.tryAIDescription(cameraID: cameraID)
     }
 
     public func triggerTestMotion(cameraID: UUID) async {
@@ -261,12 +294,20 @@ public struct EngineBackend: BridgeBackend {
     }
 
     public func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
-        let report = try await engine.applyCameraSetup(cameraID: cameraID)
+        try await applyCameraSetup(cameraID: cameraID, options: CameraSetupOptions())
+    }
+
+    public func applyCameraSetup(cameraID: UUID, options: CameraSetupOptions) async throws -> CameraSetupReport {
+        let report = try await engine.applyCameraSetup(cameraID: cameraID, options: options)
         return await engine.withManualHelp(report, cameraID: cameraID)
     }
 
     public func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
         try await engine.restoreCameraSetup(cameraID: cameraID)
+    }
+
+    public func restartCamera(cameraID: UUID) async throws {
+        try await engine.restartCamera(id: cameraID)
     }
 
     public func checkCameraSecurity(cameraID: UUID) async throws -> CameraSecurity {
@@ -284,6 +325,20 @@ extension BridgeBackend {
 
     public func setPluginSecret(id: String, _ data: Data?) async throws {
         throw EngineError.cameraNotRunning
+    }
+
+    public func aiKeyStatus() async -> (saved: Bool, hint: String?) { (false, nil) }
+
+    public func setAIKey(_ key: String?) async throws {
+        throw EngineError.cameraNotRunning
+    }
+
+    public func aiStatus() async -> AIStatus {
+        AIStatus(needsRecordingsFolder: await overview().settings.nvrFolder == nil)
+    }
+
+    public func tryAIDescription(cameraID: UUID) async throws -> EventDescription {
+        throw AIDescriberError.noService
     }
 
     public func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?) async throws -> LiveVideoSubscription {
@@ -315,7 +370,16 @@ extension BridgeBackend {
         throw EngineError.cameraNotRunning
     }
 
+    public func applyCameraSetup(cameraID: UUID, options: CameraSetupOptions) async throws -> CameraSetupReport {
+        guard options == CameraSetupOptions() else { throw EngineError.invalidSettings("this bridge can’t fix a camera’s address") }
+        return try await applyCameraSetup(cameraID: cameraID)
+    }
+
     public func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
+        throw EngineError.cameraNotRunning
+    }
+
+    public func restartCamera(cameraID: UUID) async throws {
         throw EngineError.cameraNotRunning
     }
 

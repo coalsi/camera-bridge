@@ -114,8 +114,10 @@ The camera's page has two DNS slots, "Preferred" (`dns1`) and "Alternative" (`dn
 address can stay on DHCP while the DNS is set by hand). On 2026-10-18 ONVIF's `SetDNS` with the bridge alone filled only the first slot
 of "Patio New": its `GetDNS` then showed the bridge and 8.8.8.8, both set by hand. So Watch goes:
 
-1. ONVIF `SetDNS`, the bridge alone; then the bridge twice; then the bridge and an empty entry; each read back with `GetDNS`. ONVIF goes
-   first because it touches only the DNS and needs no web sign-in.
+1. ONVIF `SetDNS`, the bridge in both slots; then the bridge alone; then the bridge and an empty entry (since 2026-10-18; before, the
+   bridge alone came first). Each form the camera takes is read back with `GetDNS` at once and every 2 s: the first for up to 30 s (a
+   camera that applies DNS slowly), each later one for up to 6 s. ONVIF goes first because it touches only the DNS and needs no web
+   sign-in.
 2. If ONVIF still shows another server (or refused), and the family's API can be asked: `get=eth`, then `set=eth` with the interface exactly
    as the page writes it (its attributes in the page's order with every value as the camera answered it) and only `dns` changed. The
    write rewrites the whole interface, the camera's address included, so an answer the page would not write back unchanged (another

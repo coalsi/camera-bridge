@@ -89,10 +89,17 @@ public struct GuardEvidence: Sendable, Codable, Equatable {
     public var today: Int
     /// The names it asked for in the last 7 days, most asked first.
     public var names: [GuardReport.Lookup]
+    /// Its questions that never leave the home network in the box's last 7 days (`GuardReport.Camera.local`: counted, never named).
+    public var localLookups: Int
 
-    /// `listed` defaults to `watched`, `asksBridge` to true for a watched camera, `dnsFromRouter` to false.
+    /// The box has seen the camera ask it at least once in its last 7 days: a name it blocked, or a question that never leaves the home
+    /// network. Without that, a quiet day is no proof (research §5): a camera with a DNS server built in is quiet too, so it is not gold.
+    public var lookupSeen: Bool { !names.isEmpty || localLookups > 0 || outsideLookups24h > 0 || today > 0 }
+
+    /// `listed` defaults to `watched`, `asksBridge` to true for a watched camera, `dnsFromRouter` to false, `localLookups` to 0.
     public init(watched: Bool, outsideLookups24h: Int, lastLookupNames: [String], available: Bool, today: Int = 0, names: [GuardReport.Lookup] = [],
-                listed: Bool? = nil, asksBridge: Bool? = nil, watchedFor: TimeInterval? = nil, waitsForRestart: Bool = false, dnsFromRouter: Bool = false) {
+                localLookups: Int = 0, listed: Bool? = nil, asksBridge: Bool? = nil, watchedFor: TimeInterval? = nil, waitsForRestart: Bool = false,
+                dnsFromRouter: Bool = false) {
         self.watched = watched
         self.listed = listed ?? watched
         self.asksBridge = asksBridge ?? (watched ? true : nil)
@@ -104,10 +111,14 @@ public struct GuardEvidence: Sendable, Codable, Equatable {
         self.available = available
         self.today = today
         self.names = names
+        self.localLookups = localLookups
     }
 
     /// Gold needs this long a watch without a lookup.
     public static let quietDay: TimeInterval = 86_400
+
+    /// What a full day's watch says of a camera the box never saw ask anything (`lookupSeen` false).
+    public static let noLookupsSeen = "No lookups seen yet; Camera Bridge can’t rule out a built-in DNS server."
 }
 
 /// One thing the level rests on: the feature, as the camera reported it, the best level the camera can have with it, a plain sentence,
@@ -165,9 +176,10 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
     /// - red: the cloud on and linked or of unknown link, UPnP, DDNS or RTMP on, or a cloud-dependent model.
     /// - yellow: the cloud on but not linked, or unknown; video (or another service) without a password; watched and still looking up
     ///   internet names.
-    /// - green: nothing of those, but something can't be confirmed (an unknown, another service, no guard, not watched, or watched for less
-    ///   than a day).
-    /// - gold: everything confirmed off or absent, the video locked, and watched for a full day with no internet lookups.
+    /// - green: nothing of those, but something can't be confirmed (an unknown, another service, no guard, not watched, watched for less
+    ///   than a day, or no lookup ever seen from it).
+    /// - gold: everything confirmed off or absent, the video locked, and watched for a full day with no internet lookups, by a box that has seen
+    ///   the camera ask it something in its last 7 days (`GuardEvidence.lookupSeen`: silence alone is no proof).
     public static func assess(_ readings: [RemoteAccessFinding], cloudModel: String? = nil, internetGuard: GuardEvidence?, checkedAt: Date) -> CameraSecurity {
         var readings = merged(readings)
         if let cloudModel {
@@ -277,9 +289,10 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
     static let dnsFromRouterNote = "Its DNS servers come from your router, which can change them when it renews the camera’s address."
 
     /// What the guard saw: without it, while it does not watch the camera, or before a full day of watching, green is the best; watched and
-    /// still looking up internet names, yellow; watched for a day without a lookup, gold. A camera not on the guard's list gets the "doesn't
-    /// watch" sentence whatever the box's state (a box watching no camera has its DNS off). A watch on DNS the router gives says so
-    /// (`dnsFromRouterNote`).
+    /// still looking up internet names, yellow; watched for a day without a lookup, gold, but only once the box has seen the camera ask it
+    /// something (`GuardEvidence.lookupSeen`, any name, local ones included): else green, `GuardEvidence.noLookupsSeen`. A camera not on the
+    /// guard's list gets the "doesn't watch" sentence whatever the box's state (a box watching no camera has its DNS off). A watch on DNS the
+    /// router gives says so (`dnsFromRouterNote`).
     static func guardFinding(_ evidence: GuardEvidence?) -> CameraSecurityFinding {
         func make(_ state: RemoteAccessState, _ level: CameraSecurityLevel, _ sentence: String) -> CameraSecurityFinding {
             CameraSecurityFinding(feature: .internetGuard, state: state, level: level, sentence: sentence, canChange: false)
@@ -318,6 +331,7 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
             let time = hours < 1 ? "less than an hour" : hours == 1 ? "1 hour" : "\(hours) hours"
             return make(.on, .green, "The \(name) has watched it for \(time) and seen no internet lookups yet. It takes a full day to confirm." + note)
         }
+        guard evidence.lookupSeen else { return make(.on, .green, GuardEvidence.noLookupsSeen + note) }
         return make(.on, .gold, "The \(name) has watched it for the last 24 hours and saw it make no internet lookups." + note)
     }
 

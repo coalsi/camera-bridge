@@ -190,7 +190,7 @@ import Testing
         let names = FFmpegCapabilities.names(inListing: FakeListings.encoders)
         #expect(names == ["libx264", "h264_vaapi", "mjpeg", "aac", "libopus", "pcm_alaw"])
         let filters = FFmpegCapabilities.names(inListing: FakeListings.filters)
-        #expect(filters == ["abench", "scale", "drawtext", "testsrc"])
+        #expect(filters == ["abench", "scale", "drawtext", "extractplanes", "mergeplanes", "remap", "testsrc"])
         // The legend and heading lines are not names.
         #expect(!filters.contains("=") && !filters.contains("Filters:") && !filters.contains("Timeline"))
         #expect(FFmpegCapabilities.versionName(inBanner: "ffmpeg version 7.1.1-1+b1 Copyright (c) 2000-2025 the FFmpeg developers\nbuilt with gcc") == "7.1.1-1+b1")

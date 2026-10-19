@@ -1,6 +1,7 @@
 // The Monitor's events list (screens/wall-events-model.js) and the click that plays the wall from an event (nvr-controller.js playAt).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   ARCHIVE_MAX_RANGE_MS, ARCHIVE_OVERLAP_MS, ARCHIVE_PAGE, ARCHIVE_REFRESH_MS, ARCHIVE_RETRY_MS, LIVE_GRACE_MS, MERGE_MS, PAGE_ROWS, PRE_ROLL_MS, batteryBadge,
   createEventArchive, durationText, eventKind, eventRange, gatherEvents, isRecorded, pickAction, sameEvent, seekTarget, visibleEvents,
@@ -68,6 +69,33 @@ test('gatherEvents takes the archive’s events with their ends and recorded fla
     [id(2), 'Doorbell', 30_000, 0 + 30_000, false],   // the archive's stamp, not the page's 0.8 s later
   ]);
   assert.equal(gatherEvents({ cameras }).at(0).recorded, null, 'without the archive nobody said');
+});
+
+test('gatherEvents keeps a description and a merge does not lose it', () => {
+  const said = (summary, kind, concern) => ({ summary, kind, concern });
+  const cameras = [camera(1), camera(2), camera(3)];
+  const archived = [
+    { id: 'a', cameraID: id(1), kind: 'Person', start: T0, end: T0 + 9_000, recorded: true, description: said('A man in a red jacket walks to the door', 'person', 'routine') },
+    // Two motions of camera 2 within MERGE_MS: only the later one was described.
+    { id: 'b', cameraID: id(2), kind: 'Motion', start: T0 + 60_000, end: null, recorded: true, description: null },
+    { id: 'c', cameraID: id(2), kind: 'Motion', start: T0 + 62_000, end: null, recorded: true, description: said('Branches move in the wind', 'nothing', 'routine') },
+    // Two of camera 3 within MERGE_MS, both described: the one that matters more stays.
+    { id: 'd', cameraID: id(3), kind: 'Person', start: T0 + 90_000, end: null, recorded: true, description: said('A person walks by', 'person', 'routine') },
+    { id: 'e', cameraID: id(3), kind: 'Person', start: T0 + 92_000, end: null, recorded: true, description: said('A person tries the door handle', 'person', 'alarm') },
+    { id: 'f', cameraID: id(1), kind: 'Vehicle', start: T0 + 120_000, end: null, recorded: true, description: said('  A car stops at the gate  ', 'vehicle', 'whatever') },
+    { id: 'g', cameraID: id(1), kind: 'Motion', start: T0 + 180_000, end: null, recorded: true, description: said('', 'other', 'unusual') },   // no words
+  ];
+  // The page saw camera 1's person 0.3 s before the bridge stamped it: the live one has no description of its own.
+  const live = [{ at: T0 - 300, endAt: null, id: id(1), name: 'Camera 1', text: 'Person', level: 'detection' }];
+  const events = gatherEvents({ cameras, live, archived });
+  assert.deepEqual(events.map((e) => [e.cameraId, e.label, e.at - T0, e.description]), [
+    [id(1), 'Person', 0, { text: 'A man in a red jacket walks to the door', concern: 'routine' }],
+    [id(2), 'Motion', 60_000, { text: 'Nothing notable', concern: 'nothing' }],
+    [id(3), 'Person', 90_000, { text: 'A person tries the door handle', concern: 'alarm' }],
+    [id(1), 'Vehicle', 120_000, { text: 'A car stops at the gate', concern: 'routine' }],
+    [id(1), 'Motion', 180_000, null],
+  ]);
+  assert.equal(gatherEvents({ cameras: [camera(1, [{ name: 'Motion', date: iso(T0) }])] }).at(0).description, null, 'the bridge’s own events have none');
 });
 
 test('isRecorded believes the archive when it says nothing was recorded', () => {
@@ -646,5 +674,115 @@ test('“Show older events” keeps the keyboard on the button while the older p
     store.cameras.clear();
     unfocus();
     browser.restore();
+  }
+});
+
+// MARK: The list: AI descriptions
+
+/** Every element under `root` (depth first) that `match` accepts. */
+function all(root, match) {
+  const out = [];
+  const walk = (node) => { for (const child of node.childNodes ?? []) { if (child.tagName && match(child)) out.push(child); walk(child); } };
+  walk(root);
+  return out;
+}
+const byClass = (root, name) => all(root, (node) => node.classList?.contains(name));
+
+/** A wall's events list over `route`, for camera 1 and the last hour, following live; `clock.ms` is the server's clock. */
+async function wallWith(route) {
+  const browser = installFakeBrowser();
+  const unfocus = withFocus(browser.document);
+  const { store } = await import('../web/js/store.js');
+  const { createWallEvents } = await import('../web/js/screens/wall-events.js');
+  store.cameras.set(id(1), camera(1));
+  const clock = { ms: T0 };
+  const context = { cameraIds: [id(1)], range: { fromMs: T0 - 3_600_000, toMs: Infinity }, extentOf: () => ({ oldest: T0 - 86_400_000, newest: T0 }) };
+  const wall = createWallEvents({ now: () => clock.ms, loadEvents: (query) => route.load(query), onChange: () => wall.update(context) });
+  browser.document.append(wall.list);
+  wall.update(context);
+  await settle();
+  return {
+    wall, clock, context,
+    rows: () => byClass(wall.list, 'mon-event'),
+    done() { wall.destroy(); store.cameras.clear(); unfocus(); browser.restore(); },
+  };
+}
+
+test('a row shows the summary under the kind; alarm red, unusual amber, nothing dimmed', async () => {
+  const said = (summary, kind, concern) => ({ summary, kind, concern });
+  const event = (n, description, kind = 'Person') => ({ id: `ai-${n}`, cameraID: id(1), kind, start: T0 - n * 60_000, end: null, recorded: true, description });
+  const route = fakeRoute([
+    event(1, said('A person tries the door handle', 'person', 'alarm')),
+    event(2, said('A van parks across the driveway', 'vehicle', 'unusual'), 'Vehicle'),
+    event(3, said('A man in a red jacket walks to the door', 'person', 'routine')),
+    event(4, said('Leaves blow across the porch', 'nothing', 'routine'), 'Motion'),
+    event(5, null, 'Motion'),
+    event(6, said('<img src=x onerror=alert(1)>', 'other', 'routine'), 'Motion'),
+  ]);
+  const wall = await wallWith(route);
+  try {
+    const rows = wall.rows();
+    assert.equal(rows.length, 6);
+    const shown = rows.map((row) => {
+      const parts = row.childNodes.filter((node) => node.tagName);
+      const kind = parts.findIndex((node) => node.classList.contains('mon-event-kind'));
+      const summary = parts.findIndex((node) => node.classList.contains('mon-event-ai'));
+      if (summary >= 0) assert.ok(summary > kind, 'the summary comes after the kind');
+      return summary < 0 ? null : [parts[summary].textContent, parts[summary].dataset.concern];
+    });
+    assert.deepEqual(shown, [
+      ['A person tries the door handle', 'alarm'],
+      ['A van parks across the driveway', 'unusual'],
+      ['A man in a red jacket walks to the door', 'routine'],
+      ['Nothing notable', 'nothing'],
+      null,
+      ['<img src=x onerror=alert(1)>', 'routine'],
+    ]);
+    const hostile = byClass(rows[5], 'mon-event-ai')[0];
+    assert.ok(hostile.childNodes.every((node) => !node.tagName), 'the words stay words: no element is made of them');
+    assert.match(rows[0].getAttribute('aria-label'), /, alarm: A person tries the door handle$/, 'a screen reader hears it, and how much it matters');
+    assert.match(rows[1].getAttribute('aria-label'), /, unusual: A van parks across the driveway$/);
+    assert.match(rows[2].getAttribute('aria-label'), /, A man in a red jacket walks to the door$/);
+    assert.equal(byClass(rows[0], 'mon-event-ai')[0].getAttribute('style'), null, 'no inline style');
+  } finally {
+    wall.done();
+  }
+
+  // The colours: the page's danger and warning, kept dark on the wall (it is dark whatever the page's appearance); routine has no mark.
+  const css = readFileSync(new URL('../web/monitor.css', import.meta.url), 'utf8');
+  const style = readFileSync(new URL('../web/style.css', import.meta.url), 'utf8');
+  /** The declarations of every rule with a selector that starts with `selector` (in a list too), in order. */
+  const rule = (selector) => [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .filter(([, selectors]) => selectors.split(',').some((part) => part.trim().startsWith(selector)))
+    .map(([, , body]) => body).join(' ');
+  assert.match(rule('.mon-event-ai[data-concern="alarm"]'), /var\(--danger\)/);
+  assert.match(rule('.mon-event-ai[data-concern="unusual"]'), /var\(--warning\)/);
+  assert.match(rule('.mon-event-ai[data-concern="nothing"]'), /color:\s*var\(--mon-dim\)/);
+  assert.equal(rule('.mon-event-ai[data-concern="routine"]'), '', 'routine: no mark');
+  const darkOf = (name) => new RegExp(`${name}:\\s*(#[0-9a-f]{6})`, 'i').exec(style)[1];
+  const wallBlock = /\.monitor \{([^}]*)\}/.exec(css)[1];
+  assert.match(wallBlock, new RegExp(`--danger:\\s*${darkOf('--danger')}`, 'i'), 'the wall keeps the dark red in a light page');
+  assert.match(wallBlock, new RegExp(`--warning:\\s*${darkOf('--warning')}`, 'i'));
+});
+
+test('a description that arrives later updates the row in place', async () => {
+  const stored = [{ id: 'later', cameraID: id(1), kind: 'Person', start: T0 - 20_000, end: null, recorded: true, description: null }];
+  const route = fakeRoute(stored);
+  const wall = await wallWith(route);
+  try {
+    assert.equal(wall.rows().length, 1);
+    assert.equal(byClass(wall.wall.list, 'mon-event-ai').length, 0, 'not described yet');
+    // The describer wrote its line a few seconds later; the list asks for the newest part again, from a little before.
+    stored[0] = { ...stored[0], description: { summary: 'A courier leaves a parcel at the door', kind: 'delivery', concern: 'routine' } };
+    wall.clock.ms += 61_000;
+    wall.wall.update(wall.context);
+    await settle();
+    assert.equal(route.requests.length, 2, 'the newer part was asked for again');
+    const rows = wall.rows();
+    assert.equal(rows.length, 1, 'the same row, no new one');
+    assert.equal(byClass(rows[0], 'mon-event-ai')[0]?.textContent, 'A courier leaves a parcel at the door');
+    assert.match(rows[0].getAttribute('aria-label'), /A courier leaves a parcel at the door$/);
+  } finally {
+    wall.done();
   }
 });

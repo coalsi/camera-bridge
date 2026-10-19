@@ -14,14 +14,14 @@ const MIB = 1_048_576;
 const KEEP_INIT = Object.freeze({ ...DEFAULT_POLICY, initAfterBreak: false });
 const REINIT = Object.freeze({ ...DEFAULT_POLICY, initAfterBreak: true });
 
-function setup({ managed = false, policy, budget, canvas = true, quotaBytes = null, needInitAfterAbort = false, audioShortMs = 0 } = {}) {
+function setup({ managed = false, policy, budget, canvas = true, quotaBytes = null, needInitAfterAbort = false, audioShortMs = 0, holdFrom } = {}) {
   const timers = createFakeTimers();
   const media = createFakeMedia({ timers, managed, quotaBytes, needInitAfterAbort, audioShortMs });
   const archive = createArchive({
     timers,
     files: [{ key: FILE_A, startMs: ORIGIN, parts: 40, gop: 2 }, { key: FILE_B, startMs: ORIGIN + 200_000, parts: 10, gop: 1 }],
   });
-  const surface = new MseSurface({ video: media.video, holdCanvas: canvas ? media.canvas : null, timers, scope: media.scope, policy, budgetBytes: budget });
+  const surface = new MseSurface({ video: media.video, holdCanvas: canvas ? media.canvas : null, holdFrom, timers, scope: media.scope, policy, budgetBytes: budget });
   const drive = async (promise, ms = 200) => (await Promise.all([promise, timers.advance(ms)]))[0];
   const part = (file, index) => archive.byId(`${file}.${index}`);
   const offsetOf = (file) => timestampOffsetSeconds(archive.fileInfo(file, 'x').anchor, BASE);
@@ -442,6 +442,17 @@ describe('changing the codec', () => {
     await drive(surface.seek(sec(part(FILE_B, 0).start + 1)));
     assert.equal(media.canvas.style.display, 'none');
     assert.equal(media.canvas.width, 0);
+  });
+
+  it('recreate holds the picture on screen that holdFrom gives (a straightened canvas), at its size, and the video’s own frame without one', async () => {
+    const straightened = { width: 640, height: 284 };       // the canvas the page draws the straightened picture on, over the video
+    const ctx = await shown({ holdFrom: () => straightened });
+    await ctx.drive(ctx.surface.open(MIME_2));
+    assert.deepEqual(ctx.media.canvas.draws.map((d) => [d.from === straightened, d.width, d.height, d.x, d.y]), [[true, 640, 284, 0, 0]]);
+    assert.equal(ctx.media.canvas.style.display, '', 'the held picture is on screen');
+    const plain = await shown({ holdFrom: () => null });     // a picture that is not straightened: no canvas over the video
+    await plain.drive(plain.surface.open(MIME_2));
+    assert.deepEqual(plain.media.canvas.draws.map((d) => [d.from === plain.media.video, d.width, d.height]), [[true, 2688, 1520]]);
   });
 
   it('recreate without a canvas still works', async () => {

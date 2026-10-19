@@ -78,6 +78,9 @@ struct EngineTuning: Sendable {
     /// Replaces the read of a camera's DNS servers (`CameraSettingsService.readDNS()`) in a security check and in the guard's own reads
     /// (tests); nil from it: not readable; what it throws, the read's error (a login pause, a refused login).
     var securityDNS: (@Sendable (_ camera: CameraConfiguration, _ credentials: HTTPCredentials?) async throws -> CameraDNSReading?)?
+    /// Replaces the security check's read of whether a camera has IPv6 on (`CameraSettingsService.readIPv6()`, for a camera whose DNS it read
+    /// through ONVIF) in tests; nil from it: the camera did not say.
+    var securityIPv6: (@Sendable (_ camera: CameraConfiguration, _ credentials: HTTPCredentials?) async -> Bool?)?
     /// Removing a camera whose DNS servers the setup kept gives them back first (tests turn it off: `EngineTuning.testing`).
     var restoresWatchOnRemoval = true
     /// Replaces the RTSP check (`RTSPAccessProbe`) of a camera's stream address (tests).
@@ -143,6 +146,12 @@ struct EngineTuning: Sendable {
     var beforeRuntimeRefresh: (@Sendable (_ cameraID: UUID) async -> Void)?
     /// Replaces a runtime's heartbeat (tests: a runtime that does not answer).
     var runtimeHeartbeat: (@Sendable (_ cameraID: UUID) async -> Void)?
+
+    /// Replaces the AI service's transport (`URLSessionAITransport`; tests: a fake that answers from memory, never a real service).
+    var aiTransport: (any AITransport)?
+    /// The AI descriptions' clock: the describer's (staleness, the one-a-minute rule, the day's count) and the descriptions' time (tests: a
+    /// clock they move).
+    var aiNow: @Sendable () -> Date = Date.init
 
     /// Whether this Mac is on a VPN (`NetworkNotice.Kind.macOnVPN`); tests replace it.
     var macVPNProbe: @Sendable () -> MacVPNStatus? = { MacVPNDetector.current() }

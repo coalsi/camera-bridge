@@ -2,6 +2,16 @@ import BridgeSupport
 import Foundation
 import Synchronization
 
+/// An event the log began: what `ArchiveEventLog.record` hands back for each rising edge it kept, so that whoever describes the event can
+/// say which one (`NVRCoordinator.recordDescription`). `date` is the edge's stamp, which also names the day file the event is in.
+struct StartedEvent: Sendable, Equatable {
+    var cameraID: UUID
+    /// As stored (cut to `ArchiveEventLog.maximumKindLength`).
+    var kind: String
+    var id: String
+    var date: Date
+}
+
 /// The cameras' events beside the recordings: what the router's rising and falling edges say (motion, person, vehicle, doorbell, tamper, …),
 /// kept whether or not video is recorded, so the box's Monitor lists every event of the recorded timeline and a restart keeps them.
 ///
@@ -11,9 +21,13 @@ import Synchronization
 ///
 ///     {"camera":"<UUID>","id":"<start ms hex>-<8 hex>","kind":"Motion","start":<ms>,"v":1,"video":true}   an event began
 ///     {"end":<ms>,"id":"<the same id>","v":1}                                                            it ended (same file)
+///     {"ai":{"at":<ms>,"concern","kind","model","summary"},"id":"<the same id>","v":1}                    an AI service described it
 ///
-/// `video`: the camera's recorder was writing when it began. A line that does not parse (a torn last line after a crash, a line of a later
-/// version) is skipped, and the next append starts on a new line. An event whose end never came (the bridge stopped first) has no end.
+/// `video`: the camera's recorder was writing when it began. A description line goes to the day file of the event's start, whenever it is
+/// written (so retention takes both together); the last one of an id wins, one of an id the file does not hold is ignored, and a build that
+/// does not know `ai` sees a line that is neither a start nor an end and skips it. A line that does not parse (a torn last line after a
+/// crash, a line of a later version) is skipped, and the next append starts on a new line. An event whose end never came (the bridge stopped
+/// first) has no end.
 /// Retention deletes whole day files, by the recordings' rules (`ArchiveStore.pruneEvents`). Writes run on one serial queue and never wait for
 /// a drive; nothing here creates the recordings folder. `.events` and the camera folders are never written, read or pruned through a link.
 final class ArchiveEventLog: Sendable {
@@ -25,6 +39,9 @@ final class ArchiveEventLog: Sendable {
     /// Lines waiting for the drive (a write failed, or writes queue behind a slow drive): beyond this the oldest are dropped.
     static let maximumPending = 1_000
     static let maximumKindLength = 80
+    /// The most of a description line, its line break included. A summary is at most `EventDescription.maximumSummaryLength` characters, but a
+    /// character can be many bytes; a description that does not fit is not kept, and a longer line is not read.
+    static let maximumDescriptionLineBytes = 2_048
     static let dayMs: Int64 = 86_400_000
 
     /// One line of a day file.
@@ -36,6 +53,8 @@ final class ArchiveEventLog: Sendable {
         var start: Int64?
         var end: Int64?
         var video: Bool?
+        /// A description line (`id` is the event's): the only field of it besides `v` and `id`. Times in it are milliseconds like the rest.
+        var ai: EventDescription?
     }
 
     /// An event as stored: what `read` answers before the store adds whether the recordings hold it now.
@@ -46,6 +65,8 @@ final class ArchiveEventLog: Sendable {
         var startMs: Int64
         var endMs: Int64?
         var video: Bool
+        /// The last description line of this id in the file.
+        var description: EventDescription?
     }
 
     private struct Open: Sendable {
@@ -95,19 +116,17 @@ final class ArchiveEventLog: Sendable {
     // MARK: Writing
 
     /// Records `edges` in `folder` (nil: no place for recordings is chosen, nothing is kept). `video(camera)`: the camera's recorder is writing.
-    /// Returns at once; the lines reach the drive on the log's queue.
-    func record(_ edges: [EventEdge], folder: URL?, video: (UUID) -> Bool) {
-        guard !edges.isEmpty else { return }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    /// Returns the events that began and were kept, in the edges' order (an end, or an edge with no folder, hands out nothing). The lines
+    /// reach the drive on the log's queue, after this returns.
+    @discardableResult
+    func record(_ edges: [EventEdge], folder: URL?, video: (UUID) -> Bool) -> [StartedEvent] {
+        guard !edges.isEmpty else { return [] }
+        let encoder = Self.makeEncoder()
         var writing: [UUID: Bool] = [:]
         for edge in edges where edge.began && writing[edge.cameraID] == nil { writing[edge.cameraID] = video(edge.cameraID) }
-        let schedule = state.withLock { state -> Bool in
-            // The place for recordings changed: what waited for the old one is given up, like the old place's events that have not ended.
-            if let folder {
-                state.pending.removeAll { $0.folder != folder }
-                state.open = state.open.filter { $0.value.folder == folder }
-            }
+        let (schedule, started) = state.withLock { state -> (Bool, [StartedEvent]) in
+            Self.follow(folder, in: &state)
+            var started: [StartedEvent] = []
             for edge in edges {
                 let key = "\(edge.cameraID.uuidString)|\(edge.kind)"
                 let ms = ArchiveTime.ms(edge.date)
@@ -127,26 +146,78 @@ final class ArchiveEventLog: Sendable {
                 }
                 guard var data = try? encoder.encode(line) else { continue }
                 data.append(0x0A)
-                state.nextSequence += 1
-                state.pending.append(Pending(sequence: state.nextSequence, folder: target.folder, camera: edge.cameraID, day: target.day, data: data))
+                Self.enqueue(data, folder: target.folder, camera: edge.cameraID, day: target.day, in: &state)
+                if edge.began, let kind = line.kind { started.append(StartedEvent(cameraID: edge.cameraID, kind: kind, id: line.id, date: edge.date)) }
             }
-            let excess = state.pending.count - Self.maximumPending
-            if excess > 0 {
-                // The oldest go, but never the line being written: it reaches the drive, so it is not lost.
-                let inFlight = state.inFlight
-                var left = excess
-                state.pending = state.pending.filter { line in
-                    guard left > 0, line.sequence != inFlight else { return true }
-                    left -= 1
-                    return false
-                }
-                state.dropped += excess - left
-            }
-            guard !state.pending.isEmpty, !state.writing else { return false }
-            state.writing = true
-            return true
+            return (Self.cappedAndReady(&state), started)
         }
         if schedule { queue.async { [self] in drain() } }
+        return started
+    }
+
+    /// Records the description of `event` (what `record` handed out) in `folder`, in the day file of the event's start, behind the lines
+    /// that wait. Returns at once; the line reaches the drive on the log's queue. Nothing is kept when no folder is chosen or the line would
+    /// pass `maximumDescriptionLineBytes`. A description whose event is not in the file (the place for recordings changed since it began)
+    /// is a line that matches nothing: reading skips it and retention takes it with its day. Its time is kept to the millisecond, like every
+    /// time in the file.
+    func recordDescription(_ description: EventDescription, for event: StartedEvent, folder: URL?) {
+        guard let folder else { return }
+        var description = description
+        description.summary = String(description.summary.prefix(EventDescription.maximumSummaryLength))
+        description.at = ArchiveTime.date(ms: ArchiveTime.ms(description.at))
+        guard var data = try? Self.makeEncoder().encode(Line(v: Self.version, id: event.id, ai: description)) else { return }
+        data.append(0x0A)
+        guard data.count <= Self.maximumDescriptionLineBytes else {
+            log.debug("An AI description was not kept: its line was \(data.count) bytes, over the limit of \(Self.maximumDescriptionLineBytes)")
+            return
+        }
+        let day = Self.dayName(ms: ArchiveTime.ms(event.date))
+        let schedule = state.withLock { state -> Bool in
+            Self.follow(folder, in: &state)
+            Self.enqueue(data, folder: folder, camera: event.cameraID, day: day, in: &state)
+            return Self.cappedAndReady(&state)
+        }
+        if schedule { queue.async { [self] in drain() } }
+    }
+
+    /// Keys sorted and slashes plain (a stable file); times in milliseconds, like every time in the file.
+    private static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        return encoder
+    }
+
+    /// The place for recordings changed: what waited for the old one is given up, like the old place's events that have not ended.
+    private static func follow(_ folder: URL?, in state: inout State) {
+        guard let folder else { return }
+        state.pending.removeAll { $0.folder != folder }
+        state.open = state.open.filter { $0.value.folder == folder }
+    }
+
+    /// Puts `data` (one whole line) last in the queue.
+    private static func enqueue(_ data: Data, folder: URL, camera: UUID, day: String, in state: inout State) {
+        state.nextSequence += 1
+        state.pending.append(Pending(sequence: state.nextSequence, folder: folder, camera: camera, day: day, data: data))
+    }
+
+    /// Drops the oldest lines beyond `maximumPending`, then says whether the caller must start the drain (lines wait and none is being written).
+    private static func cappedAndReady(_ state: inout State) -> Bool {
+        let excess = state.pending.count - maximumPending
+        if excess > 0 {
+            // The oldest go, but never the line being written: it reaches the drive, so it is not lost.
+            let inFlight = state.inFlight
+            var left = excess
+            state.pending = state.pending.filter { line in
+                guard left > 0, line.sequence != inFlight else { return true }
+                left -= 1
+                return false
+            }
+            state.dropped += excess - left
+        }
+        guard !state.pending.isEmpty, !state.writing else { return false }
+        state.writing = true
+        return true
     }
 
     /// Writes what is pending, in order, until nothing is or a write fails (the rest waits for the next event or `retry`).
@@ -295,10 +366,12 @@ final class ArchiveEventLog: Sendable {
         return before.isEmpty ? Array(sorted.prefix { $0.startMs == boundary }) : Array(before)
     }
 
-    /// The events of one day file, in file order: start lines paired with their end lines by id; lines that do not parse are skipped.
+    /// The events of one day file, in file order: start lines paired with their end lines and description lines by id; lines that do not
+    /// parse are skipped.
     static func parse(_ file: URL, camera: UUID) -> [Stored] {
         guard let data = readTail(file) else { return [] }
         let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
         var events: [Stored] = []
         var position: [String: Int] = [:]
         for raw in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
@@ -310,6 +383,8 @@ final class ArchiveEventLog: Sendable {
                                      video: line.video ?? false))
             } else if let end = line.end, let index = position[line.id], events[index].endMs == nil, end >= events[index].startMs {
                 events[index].endMs = end
+            } else if let description = line.ai, raw.count <= maximumDescriptionLineBytes, let index = position[line.id] {
+                events[index].description = description
             }
         }
         return events
@@ -396,10 +471,17 @@ final class ArchiveEventLog: Sendable {
 // MARK: - The store's side: recording, reading with what the recordings hold, retention
 
 extension ArchiveStore {
-    /// The router's edges, into the current folder's event log (nothing is kept while no folder is chosen).
-    func recordEvents(_ edges: [EventEdge], video: (UUID) -> Bool) {
+    /// The router's edges, into the current folder's event log (nothing is kept while no folder is chosen). Returns the events that began.
+    @discardableResult
+    func recordEvents(_ edges: [EventEdge], video: (UUID) -> Bool) -> [StartedEvent] {
         let folder = state.withLock { $0.folder }
-        eventLog.record(edges, folder: folder, video: video)
+        return eventLog.record(edges, folder: folder, video: video)
+    }
+
+    /// The description of an event `recordEvents` handed out, into the current folder's event log (nothing is kept while no folder is chosen).
+    func recordDescription(_ description: EventDescription, for event: StartedEvent) {
+        let folder = state.withLock { $0.folder }
+        eventLog.recordDescription(description, for: event, folder: folder)
     }
 
     /// Only "no place for recordings is chosen" answers no events without looking: a folder that is loading or missing throws
@@ -429,7 +511,8 @@ extension ArchiveStore {
             // Just begun while the recorder writes: the fragment that holds it may not be in the catalog yet.
             let beingWritten = stored.video && stored.startMs >= nowMs - Self.eventLiveGraceMs
             return ArchiveEvent(id: stored.id, camera: stored.camera, kind: stored.kind, start: ArchiveTime.date(ms: stored.startMs),
-                                end: stored.endMs.map { ArchiveTime.date(ms: $0) }, hadVideo: stored.video, recorded: covered || beingWritten)
+                                end: stored.endMs.map { ArchiveTime.date(ms: $0) }, hadVideo: stored.video, recorded: covered || beingWritten,
+                                description: stored.description)
         }
         return ArchiveEventPage(events: events, isTruncated: found.truncated)
     }
@@ -491,9 +574,15 @@ extension ArchiveStore {
 }
 
 extension NVRCoordinator {
-    /// The router's edges (`EventRouter.setEdgeHandler`), with whether each camera's recorder is writing.
-    func recordEvents(_ edges: [EventEdge]) {
+    /// The router's edges (`EventRouter.setEdgeHandler`), with whether each camera's recorder is writing. Returns the events that began: the
+    /// ones to describe.
+    func recordEvents(_ edges: [EventEdge]) -> [StartedEvent] {
         let recorders = recorders
-        store.recordEvents(edges) { camera in recorders.status(for: camera)?.state == .recording }
+        return store.recordEvents(edges) { camera in recorders.status(for: camera)?.state == .recording }
+    }
+
+    /// The description of an event `recordEvents` returned, kept with the event (behind the lines that wait for the drive).
+    func recordDescription(_ description: EventDescription, for event: StartedEvent) {
+        store.recordDescription(description, for: event)
     }
 }

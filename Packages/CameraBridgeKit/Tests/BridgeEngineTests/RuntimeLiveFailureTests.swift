@@ -118,40 +118,6 @@ struct ScriptedCodecs: MediaCodecs {
     }
 }
 
-/// Log lines of the sessions under test (the sink sees every test's lines; `lines(of:)` keeps one session's).
-final class LiveLogCapture: LogSink {
-    private let entries = Mutex<[LogEntry]>([])
-    private let token = Mutex<LogSinkToken?>(nil)
-
-    init() {
-        token.withLock { $0 = LogHub.addSink(self) }
-    }
-
-    func stop() {
-        if let existing = token.withLock({ value -> LogSinkToken? in defer { value = nil }; return value }) { LogHub.removeSink(existing) }
-    }
-
-    func record(_ entry: LogEntry) {
-        entries.withLock { $0.append(entry) }
-    }
-
-    /// Warning-or-worse lines of `category` that contain `text`.
-    func matching(category: String, containing text: String, minimum: LogLevel = .warning) -> [String] {
-        entries.withLock { $0.filter { $0.category == category && $0.level >= minimum && $0.message.contains(text) }.map(\.message) }
-    }
-
-    /// Every line of at least `minimum` level that contains `text` (lines the session's tag is not on).
-    func lines(containing text: String, minimum: LogLevel = .info) -> [String] {
-        entries.withLock { $0.filter { $0.level >= minimum && $0.message.contains(text) }.map(\.message) }
-    }
-
-    /// Lines that mention the session (the pipeline tags its own with the first 8 characters of its id).
-    func lines(of session: UUID, minimum: LogLevel = .debug) -> [String] {
-        let tag = String(session.uuidString.prefix(8))
-        return entries.withLock { $0.filter { $0.level >= minimum && $0.message.contains(tag) }.map { "\($0.level): \($0.message)" } }
-    }
-}
-
 /// Live view failures that used to break it silently (audit 2 F1-F9): each ends in one clear log line and a stream that
 /// recovers or ends, so Home retries instead of spinning or freezing. Timings are shortened; the ladders are the production ones.
 @Suite(.serialized) struct RuntimeLiveFailureTests {
@@ -198,9 +164,11 @@ final class LiveLogCapture: LogSink {
     /// Prepares and starts one session on `source` (`video` is the request).
     static func run(source: any MediaSource, codecs: any MediaCodecs, video: SelectedVideoParameters, timing: LiveStreamTiming = fast,
                     hub: MediaHub = MediaHub(), cameraKeyframe: (@Sendable (Bool) async -> Void)? = nil, selfCheck: Bool = false,
-                    overlay: TimestampOverlayControl? = nil, waitUntilReady: Bool = true) async throws -> Run {
+                    overlay: TimestampOverlayControl? = nil, correction: PictureCorrectionControl? = nil,
+                    waitUntilReady: Bool = true) async throws -> Run {
         let logs = LiveLogCapture()
-        let setup = RuntimeLiveStreamTests.setup(source: source, hub: hub, controllerWait: .zero, codecs: codecs, overlay: overlay, timing: timing,
+        let setup = RuntimeLiveStreamTests.setup(source: source, hub: hub, controllerWait: .zero, codecs: codecs, overlay: overlay, correction: correction,
+                                                 timing: timing,
                                                  cameraKeyframe: cameraKeyframe, selfCheck: selfCheck)
         if waitUntilReady { #expect(await setup.feeder.waitUntilReady(timeout: .seconds(15))) }
         let receiver = try await SRTPTestReceiver.start()
@@ -254,6 +222,18 @@ final class LiveLogCapture: LogSink {
                                      video: RuntimeLiveStreamTests.video(1280, 720), overlay: overlay)
         #expect(await eventually(timeout: .seconds(8)) { run.ended.sessions.value.contains(run.sessionID) })
         #expect(await run.receiver.statistics.videoFrames == 0, "the picture without its overlay was not sent")
+        await run.finish()
+    }
+
+    /// The same for a picture that is to be straightened: the camera's stream would fit the request, but it is not sent crooked.
+    @Test(.timeLimit(.minutes(2))) func aStraightenedStreamWhoseTranscoderCannotBeMadeEndsInsteadOfSendingThePlainPicture() async throws {
+        let codecs = ScriptedCodecs { _, _, _ in throw ScriptedCodecs.Injected() }
+        let correction = PictureCorrectionControl(PictureCorrection(straighten: 0.40, level: 0.15), supported: true)
+        let run = try await Self.run(source: syntheticSource(width: 640, height: 360, fps: 15, gop: .seconds(1), audio: nil), codecs: codecs,
+                                     video: RuntimeLiveStreamTests.video(1280, 720), correction: correction)
+        #expect(await eventually(timeout: .seconds(8)) { run.ended.sessions.value.contains(run.sessionID) }, "the stream ends: \(run.lines)")
+        #expect(await run.receiver.statistics.videoFrames == 0, "the picture was not sent unstraightened")
+        #expect(!run.lines.contains { $0.contains("sent as it is") }, "\(run.lines)")
         await run.finish()
     }
 

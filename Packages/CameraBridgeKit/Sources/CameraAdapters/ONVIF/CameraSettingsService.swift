@@ -249,6 +249,11 @@ public actor CameraSettingsService {
     public internal(set) var memoryUpdate: CameraConfigMemoryUpdate?
     /// Set once a method reported a credential problem: later changes through this service stop right away.
     var credentialFailure: CameraConfigFailure?
+    /// How long `applyDNS(server:)` and `restoreDNS(_:)` read the camera back after a write that restarts its network service (30 s, every
+    /// 2 s; the first form ONVIF's `SetDNS` is accepted in, the later ones 6 s). Tests shorten it (`useDNSReadBack(_:)`).
+    var dnsReadBack = DNSReadBackTiming()
+
+    func useDNSReadBack(_ timing: DNSReadBackTiming) { dnsReadBack = timing }
 
     /// `vendor`, `mainStreamURL`, `preferredMethod` and `reolinkChannel` steer encoder changes (`applyEncoder`).
     public init(endpoint: CameraEndpoint, credentials: HTTPCredentials?, cameraID: UUID? = nil, vendor: CameraVendor? = nil,
@@ -277,6 +282,16 @@ public actor CameraSettingsService {
         if let isapiClient { return isapiClient }
         let made = HikvisionISAPI(endpoint: endpoint, credentials: credentials)
         isapiClient = made
+        return made
+    }
+
+    /// The Dahua CGI client of an Amcrest / Dahua camera, made once and kept for the service's life (like the ISAPI client).
+    private var amcrestClient: AmcrestAPI?
+
+    func amcrest() -> AmcrestAPI {
+        if let amcrestClient { return amcrestClient }
+        let made = AmcrestAPI(endpoint: endpoint, credentials: credentials)
+        amcrestClient = made
         return made
     }
 
@@ -409,9 +424,19 @@ public actor CameraSettingsService {
         }
     }
 
-    /// Asks the camera to reboot (ONVIF `SystemReboot`). The caller should confirm with the person first — this just
-    /// performs it.
+    /// Asks the camera to reboot, once: a Hikvision through ISAPI (`PUT /ISAPI/System/reboot`: its ONVIF users are a list of their own, which
+    /// the account Camera Bridge signs in to ISAPI with may not be on), any other camera through ONVIF (`SystemReboot`). The caller confirms
+    /// with the person first — this just performs it. A Hikvision that refuses says why (`CameraAdapterError.unsupported` with its words;
+    /// `.notPermitted` for an account that may not).
     public func reboot() async throws {
+        if vendor == .hikvision {
+            do {
+                try await isapi().reboot()
+            } catch let refusal as ISAPIRefusal {
+                throw CameraAdapterError.unsupported("the camera refused to restart (\(refusal.words))")
+            }
+            return
+        }
         guard let client = await client() else { throw CameraAdapterError.unsupported("camera has no ONVIF service") }
         try await client.systemReboot()
     }

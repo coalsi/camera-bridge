@@ -317,6 +317,203 @@ import Testing
         #expect(log.pendingCount == 0, "a real folder is written again")
     }
 
+    // MARK: Event ids and descriptions
+
+    static func description(_ summary: String = "A person at the front door", kind: EventDescription.Kind = .person,
+                            concern: EventDescription.Concern = .unusual, at ms: Int64 = 1_760_101_205_000) -> EventDescription {
+        EventDescription(summary: summary, kind: kind, concern: concern, model: "claude-haiku-4-5", at: ArchiveTime.date(ms: ms))
+    }
+
+    @Test func recordHandsOutTheIdsOfTheEventsItStarts() async throws {
+        let folder = try TemporaryDirectory()
+        defer { folder.remove() }
+        let counter = Box<UInt32>(0)
+        let log = ArchiveEventLog(log: .silent, random: { counter.update { $0 += 1 }; return counter.value })
+        let start: Int64 = 1_760_101_200_000   // 2025-10-10 13:00 UTC
+        let started = log.record([Self.edge("Person", start), Self.edge("Motion", start), Self.edge("Tamper", start + 1, began: false)],
+                                 folder: folder.url, video: { _ in true })
+        #expect(started == [
+            StartedEvent(cameraID: Self.camera, kind: "Person", id: "199ce34f080-00000001", date: ArchiveTime.date(ms: start)),
+            StartedEvent(cameraID: Self.camera, kind: "Motion", id: "199ce34f080-00000002", date: ArchiveTime.date(ms: start)),
+        ], "one per event that began, in the edges' order; an end (here of an event that never began) hands out nothing")
+        let ended = log.record([Self.edge("Motion", start + 9_000, began: false)], folder: folder.url, video: { _ in true })
+        #expect(ended.isEmpty)
+        let other = log.record([Self.edge("Doorbell ring", start + 10_000, camera: Self.other)], folder: folder.url, video: { _ in false })
+        #expect(other.map(\.cameraID) == [Self.other] && other.map(\.id) == ["199ce351790-00000003"])
+        await log.flush()
+
+        let read = try ArchiveEventLog.read(folder: folder.url, cameras: [Self.camera], fromMs: start, toMs: start + 1, limit: 10)
+        #expect(Set(read.events.map(\.id)) == Set(started.map(\.id)), "the ids handed out are the ids written")
+    }
+
+    @Test func withoutAFolderNothingStartsAndNoIdIsHandedOut() async throws {
+        let log = ArchiveEventLog(log: .silent)
+        let start: Int64 = 1_760_101_200_000
+        let started = log.record([Self.edge("Motion", start), Self.edge("Person", start)], folder: nil, video: { _ in true })
+        #expect(started.isEmpty && log.pendingCount == 0)
+        let none = log.record([], folder: nil, video: { _ in true })
+        #expect(none.isEmpty)
+        // A description has nowhere to go either.
+        log.recordDescription(Self.description(), for: StartedEvent(cameraID: Self.camera, kind: "Person", id: "x-00000001", date: ArchiveTime.date(ms: start)),
+                              folder: nil)
+        #expect(log.pendingCount == 0)
+
+        let harness = try ArchiveStoreHarness { _ in }
+        var settings = harness.settings()
+        settings.nvrFolder = nil
+        await harness.start(settings)
+        #expect(harness.store.recordEvents([Self.edge("Motion", start)], video: { _ in false }).isEmpty)
+        #expect(harness.store.eventLog.pendingCount == 0)
+    }
+
+    @Test func aDescriptionLineIsReadWithItsEvent() async throws {
+        let folder = try TemporaryDirectory()
+        defer { folder.remove() }
+        let counter = Box<UInt32>(0)
+        let log = ArchiveEventLog(log: .silent, random: { counter.update { $0 += 1 }; return counter.value })
+        let start: Int64 = 1_760_101_200_000
+        let started = log.record([Self.edge("Person", start), Self.edge("Motion", start)], folder: folder.url, video: { _ in true })
+        let person = try #require(started.first), motion = try #require(started.last)
+        let first = Self.description("A person at the front door")
+        log.recordDescription(first, for: person, folder: folder.url)
+        log.record([Self.edge("Person", start + 20_000, began: false)], folder: folder.url, video: { _ in true })
+        await log.flush()
+
+        let file = ArchiveEventLog.dayFile(folder: folder.url, camera: Self.camera, day: "2025-10-10")
+        let lines = try Self.lines(file)
+        #expect(lines.count == 5 && lines.last == "", "two starts, the description, the end and the last break")
+        #expect(lines[2] == #"{"ai":{"at":1760101205000,"concern":"unusual","kind":"person","model":"claude-haiku-4-5","summary":"A person at the front door"},"id":"\#(person.id)","v":1}"#,
+                "dates in milliseconds like the rest of the file: \(lines[2])")
+        #expect(Self.mode(file) == 0o600)
+        let read = { try ArchiveEventLog.read(folder: folder.url, cameras: [Self.camera], fromMs: start, toMs: start + 1, limit: 10).events }
+        var events = try read()
+        #expect(events.map(\.kind) == ["Person", "Motion"] && events.map(\.description) == [first, nil])
+        #expect(events[0].endMs == start + 20_000 && events[1].endMs == nil, "a description line does not disturb the ends")
+
+        // A second description of the same event replaces the first; one of an event the file does not hold is ignored.
+        let second = Self.description("Someone leaves a parcel", kind: .delivery, concern: .routine, at: 1_760_101_230_000)
+        log.recordDescription(second, for: person, folder: folder.url)
+        log.recordDescription(Self.description("A ghost"), for: StartedEvent(cameraID: Self.camera, kind: "Person", id: "199ce34f080-0000ffff",
+                                                                              date: ArchiveTime.date(ms: start)), folder: folder.url)
+        log.recordDescription(Self.description("A cat", kind: .animal, concern: .routine), for: motion, folder: folder.url)
+        await log.flush()
+        events = try read()
+        #expect(events.count == 2 && events.map(\.description) == [second, Self.description("A cat", kind: .animal, concern: .routine)],
+                "the last line of an id wins: \(events)")
+    }
+
+    @Test func aDescriptionIsKeptInTheDayFileOfItsEventsStart() async throws {
+        let folder = try TemporaryDirectory()
+        defer { folder.remove() }
+        let log = ArchiveEventLog(log: .silent)
+        let late: Int64 = 1_760_054_400_000 - 2_000   // 2025-10-09 23:59:58 UTC
+        let started = log.record([Self.edge("Vehicle", late)], folder: folder.url, video: { _ in true })
+        // The picture arrives and the model answers after midnight.
+        log.recordDescription(Self.description("A van pulls up", kind: .vehicle, concern: .routine, at: late + 12_000), for: try #require(started.first),
+                              folder: folder.url)
+        await log.flush()
+        let names = try FileManager.default.contentsOfDirectory(atPath: folder.url.appending(path: ".events/\(Self.camera.uuidString)").path(percentEncoded: false)).sorted()
+        #expect(names == ["2025-10-09.jsonl"], "no file for the day the answer came, so retention takes both together")
+        let read = try ArchiveEventLog.read(folder: folder.url, cameras: [Self.camera], fromMs: late, toMs: late + 1, limit: 5)
+        #expect(read.events.first?.description?.summary == "A van pulls up")
+    }
+
+    /// Final review M3: a description that does not fit is dropped, and the owner who looks at the log at debug level can see that one was
+    /// (its size, never its words).
+    @Test func aDescriptionThatDoesNotFitIsLoggedAtDebugLevel() async throws {
+        let folder = try TemporaryDirectory()
+        defer { folder.remove() }
+        let messages = Box<[(level: LogLevel, message: String)]>([])
+        let log = ArchiveEventLog(log: ArchiveStoreLog { level, message in messages.update { $0.append((level, message)) } })
+        let started = try #require(log.record([Self.edge("Person", 1_760_101_200_000)], folder: folder.url, video: { _ in true }).first)
+        let heavy = String(repeating: "e\u{0301}\u{0302}\u{0303}\u{0304}\u{0305}\u{0306}\u{0307}\u{0308}\u{0309}\u{030A}", count: 130)
+        log.recordDescription(Self.description(heavy), for: started, folder: folder.url)
+        log.recordDescription(Self.description("A van stops outside"), for: started, folder: folder.url)
+        await log.flush()
+        let dropped = messages.value.filter { $0.message.contains("description") && $0.message.contains("not kept") }
+        #expect(dropped.count == 1 && dropped.first?.level == .debug, "\(messages.value)")
+        #expect(!messages.value.contains { $0.message.contains("e\u{0301}") || $0.message.contains("A van stops") }, "the model's words are not logged")
+    }
+
+    @Test func aDescriptionLineIsBoundedAndOldReadersIgnoreIt() async throws {
+        let folder = try TemporaryDirectory()
+        defer { folder.remove() }
+        let log = ArchiveEventLog(log: .silent)
+        let start: Int64 = 1_760_101_200_000
+        let started = try #require(log.record([Self.edge("Person", start)], folder: folder.url, video: { _ in true }).first)
+        // A summary built without `EventDescription.parse` can be any length: the line keeps to the limit.
+        log.recordDescription(Self.description(String(repeating: "word ", count: 2_000)), for: started, folder: folder.url)
+        // Characters can be many bytes: what still does not fit is not kept at all.
+        log.recordDescription(Self.description(String(repeating: "e\u{0301}\u{0302}\u{0303}\u{0304}\u{0305}\u{0306}\u{0307}\u{0308}\u{0309}\u{030A}", count: 130)),
+                              for: started, folder: folder.url)
+        await log.flush()
+        let file = ArchiveEventLog.dayFile(folder: folder.url, camera: Self.camera, day: "2025-10-10")
+        let lines = try Self.lines(file).filter { !$0.isEmpty }
+        #expect(lines.count == 2, "the start and one description: \(lines.count)")
+        #expect(lines.allSatisfy { $0.utf8.count <= ArchiveEventLog.maximumDescriptionLineBytes })
+        let kept = try #require(try ArchiveEventLog.read(folder: folder.url, cameras: [Self.camera], fromMs: start, toMs: start + 1, limit: 5).events.first?.description)
+        #expect(kept.summary.count == EventDescription.maximumSummaryLength)
+        // A longer line than this build writes (a hand edit, a build with another limit) is not read.
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((#"{"ai":{"at":1760101230000,"concern":"alarm","kind":"person","model":"m","summary":""# + String(repeating: "x", count: 5_000)
+                                           + #""},"id":"\#(started.id)","v":1}"# + "\n").utf8))
+        try handle.close()
+        let again = try ArchiveEventLog.read(folder: folder.url, cameras: [Self.camera], fromMs: start, toMs: start + 1, limit: 5).events.first?.description
+        #expect(again == kept, "the oversized line does not replace it")
+
+        // An older build reads the same file: the description line has none of what makes a start or an end, so it pairs with nothing.
+        struct OldLine: Decodable {
+            var v: Int
+            var id: String
+            var camera: String?
+            var kind: String?
+            var start: Int64?
+            var end: Int64?
+            var video: Bool?
+        }
+        let old = try JSONDecoder().decode(OldLine.self, from: Data(lines[1].utf8))
+        #expect(old.id == started.id && old.start == nil && old.kind == nil && old.end == nil)
+        // And this build reads a file with none: a line without `ai` is the line it always was.
+        let plain = try JSONDecoder().decode(ArchiveEventLog.Line.self, from: Data(lines[0].utf8))
+        #expect(plain.ai == nil && plain.start == start && plain.kind == "Person")
+    }
+
+    @Test func aDescriptionRecordedThroughTheStoreComesBackWithItsEvent() async throws {
+        let harness = try ArchiveStoreHarness { _ in }
+        await harness.start()
+        let start: Int64 = 1_760_101_200_000
+        harness.clock.update { $0 = ArchiveTime.date(ms: start + 3_600_000) }
+        let started = harness.store.recordEvents([Self.edge("Person", start), Self.edge("Motion", start + 1_000)], video: { _ in true })
+        #expect(started.count == 2)
+        let description = Self.description()
+        harness.store.recordDescription(description, for: started[0])
+        await harness.store.eventLog.flush()
+        let page = try await harness.store.events(cameras: [Self.camera], range: ArchiveTime.date(ms: start - 60_000)..<ArchiveTime.date(ms: start + 60_000), limit: 10)
+        #expect(page.events.map(\.kind) == ["Motion", "Person"] && page.events.map(\.description) == [nil, description])
+    }
+
+    @Test func aDescriptionWaitsInTheSameQueueAsTheEventsAndAPlaceChangeGivesItUp() async throws {
+        let parent = try TemporaryDirectory()
+        defer { parent.remove() }
+        let old = parent.url.appending(path: "gone", directoryHint: .isDirectory)
+        let new = parent.url.appending(path: "new", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: new, withIntermediateDirectories: false)
+        let log = ArchiveEventLog(log: .silent)
+        let start: Int64 = 1_760_101_200_000
+        let started = try #require(log.record([Self.edge("Person", start)], folder: old, video: { _ in true }).first)
+        log.recordDescription(Self.description(), for: started, folder: old)
+        await log.flush()
+        #expect(log.pendingCount == 2, "the folder is missing: the event and its description wait, in order")
+        // The owner chose another place: what waited for the old one is given up, the description with it. (A description that arrives now
+        // is written there as a line that matches no event: harmless, and retention takes it with its day.)
+        log.recordDescription(Self.description("Late"), for: started, folder: new)
+        await log.flush()
+        #expect(log.pendingCount == 0)
+        let read = try ArchiveEventLog.read(folder: new, cameras: [Self.camera], fromMs: start, toMs: start + 60_000, limit: 5)
+        #expect(read.events.isEmpty, "the new place never saw the event, so its description matches nothing")
+    }
+
     // MARK: The store
 
     @Test func theStoreAnswersEventsWithWhetherTheRecordingsHoldThem() async throws {

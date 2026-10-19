@@ -145,6 +145,8 @@ extension CameraSettingsService {
                 case .unavailable(let why): throw IPCWebUnavailable(reason: why)
                 case .none: throw CameraAdapterError.unsupported("the camera's web API does not answer")
                 }
+            case .dahuaCGI:
+                throw CameraAdapterError.unsupported("the camera’s labels are not changed through Dahua’s API")
             }
             log.info("Put the camera's own labels back through \(backup.method.clockDisplayName)")
             return CleanPictureChange(succeeded: true, method: backup.method, summary: "via \(backup.method.clockDisplayName)")
@@ -219,6 +221,8 @@ extension CameraSettingsService {
             return CleanPictureBackup(method: method, removedOSDs: removed)
         case .ipcWebAPI:
             return nil   // not in the clock order: `cleanPicture()` asks the web API itself
+        case .dahuaCGI:
+            return nil   // not in the clock order: Dahua's CGI is for DNS only
         }
     }
 

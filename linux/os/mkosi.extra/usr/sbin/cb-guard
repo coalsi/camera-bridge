@@ -9,7 +9,8 @@
 #                            (camera-bridge-dns.service) and the collector's timer, else stop them (at boot: camera-bridge-guard.service)
 #   cb-guard collect         read the DNS query log, keep 7 days in /srv/system/guard/history.json, write status/guard.json
 #                            (camera-bridge-guard-collect.timer, every minute while a camera is watched); questions that never leave the
-#                            home network (its names, reverse lookups of its addresses, questions about the DNS server) are left out
+#                            home network (its names, reverse lookups of its addresses, questions about the DNS server) are only
+#                            counted, never named (they show that the camera asks the box)
 #   cb-guard config          print the DNS server's configuration
 #   cb-guard dns-prepare     (internal, camera-bridge-dns.service) write that configuration; refuses while the setup hotspot is open or the
 #                            firewall sets are missing
@@ -204,9 +205,10 @@ cmd_dns_prepare() {
 # Lines of dnsmasq's query log ("Oct 17 17:46:01 dnsmasq[20]: query[A] p2p.example.com from 192.168.77.21"; the service runs with TZ=UTC and
 # the line has no year) as {a: address, n: name, t: epoch}, for the watched addresses only, aggregated per address, hour and name into the
 # kept history; hours older than 7 days and cameras no longer watched are dropped; at most NAMES_PER_HOUR names per camera and hour (the rest
-# is only counted) and MAX_HISTORY_BYTES in all (the oldest hours go first). Questions that never leave the home network are left out: a
-# single-label name, a name under .local, .lan, .home.arpa, .localdomain, .internal or .localhost, a reverse lookup of a local address
-# (10/8, 172.16/12, 192.168/16, 169.254/16, 127/8, fc00::/7, fe80::/10) and a question about the DNS server itself (version.bind and the like).
+# is only counted) and MAX_HISTORY_BYTES in all (the oldest hours go first). Questions that never leave the home network are not internet
+# lookups: a single-label name, a name under .local, .lan, .home.arpa, .localdomain, .internal or .localhost, a reverse lookup of a local
+# address (10/8, 172.16/12, 192.168/16, 169.254/16, 127/8, fc00::/7, fe80::/10) and a question about the DNS server itself (version.bind and
+# the like). They are counted per hour (the hour's "q"), never named: the engine takes them as proof that the camera asks the box.
 # shellcheck disable=SC2016
 JQ_COLLECT='
 def local:
@@ -229,8 +231,11 @@ def cap($max):
 | [inputs
    | capture("^(?<mon>[A-Z][a-z]{2}) +(?<day>[0-9]{1,2}) (?<h>[0-9]{2}):(?<mi>[0-9]{2}):(?<s>[0-9]{2}) dnsmasq\\[[0-9]+\\]: query\\[[A-Za-z0-9]+\\] (?<name>[^ ]{1,300}) from (?<a>[0-9a-f.:]{2,45})$")?
    | select((.a as $a | $addresses | index([$a])) and months[.mon] != null)
-   | (.name | ascii_downcase) as $n | select($n | local | not)
-   | (when($year)) as $t | {a, n: $n, t: (if $t > $now + 86400 then when($year - 1) else $t end)}] as $lines
+   | (.name | ascii_downcase) as $n
+   | (when($year)) as $t | {a, n: $n, q: ($n | local), t: (if $t > $now + 86400 then when($year - 1) else $t end)}] as $all
+| ($all | map(select(.q | not))) as $lines
+| ($all | map(select(.q)) | group_by([.a, (.t / 3600 | floor)])
+   | map({a: .[0].a, h: ((.[0].t / 3600 | floor) * 3600 | tostring), c: length})) as $localDelta
 | ($lines | group_by([.a, (.t / 3600 | floor), .n])
    | map({a: .[0].a, h: ((.[0].t / 3600 | floor) * 3600 | tostring), n: .[0].n, c: length, f: (map(.t) | min), l: (map(.t) | max)})
    | sort_by(-.c)) as $delta
@@ -240,6 +245,8 @@ def cap($max):
     | .cameras[$d.a][$d.h] = (if $b.n[$d.n] != null then $b | .n[$d.n] |= {c: (.c + $d.c), f: ([.f, $d.f] | min), l: ([.l, $d.l] | max)}
                               elif ($b.n | length) < $perHour then $b | .n[$d.n] = {c: $d.c, f: $d.f, l: $d.l}
                               else $b | .o += $d.c end))
+| reduce $localDelta[] as $d (.;
+    .cameras[$d.a][$d.h] = ((.cameras[$d.a][$d.h] // {n: {}, o: 0}) | .q = ((.q // 0) + $d.c)))
 | .v = 1
 | prune($keep; $addresses)
 | cap($maxBytes)
@@ -247,7 +254,8 @@ def cap($max):
 
 # status/guard.json from the history: per watched camera since when it has been watched without a break (the later of its `since` and when
 # the DNS last started, while it runs), the lookups today (since local midnight in the kept time zone, to the hour) and in the last 24 hours
-# (to the hour), and the names of the last 7 days, most asked first.
+# (to the hour), the names of the last 7 days, most asked first, and how many questions that never leave the home network it asked in
+# those 7 days ("local", never named).
 # shellcheck disable=SC2016
 JQ_STATUS='
 def total($from): [to_entries[] | select((.key | tonumber) >= $from) | .value | ([.n[].c] | add // 0) + .o] | add // 0;
@@ -262,7 +270,8 @@ def total($from): [to_entries[] | select((.key | tonumber) >= $from) | .value | 
      | {address, level, since: ([.since // $now, $dnsSince // 0] | max | todate), today: ($hours | total($today)), last24h: ($hours | total($day)),
         names: ([$hours[] | .n | to_entries[]] | group_by(.key)
                 | map({name: .[0].key, count: (map(.value.c) | add), first: (map(.value.f) | min | todate), last: (map(.value.l) | max | todate)})
-                | sort_by([-.count, .name]) | .[:$top])}]}
+                | sort_by([-.count, .name]) | .[:$top]),
+        local: ([$hours[] | .q // 0] | add // 0)}]}
 '
 
 today_start() { # today_start ZONE: local midnight as epoch seconds (UTC midnight when the zone has none that day)

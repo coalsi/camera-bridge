@@ -18,9 +18,23 @@ public protocol MediaCodecs: Sendable {
     /// A transcoder that also draws `overlay` (asked for at every picture; nil: none) on the pictures it encodes. The
     /// default ignores the overlay (a codec service that cannot draw one transcodes without it).
     func makeVideoTranscoder(output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?) throws -> any VideoTranscoding
+    /// Whether `makeVideoTranscoder(output:overlay:correction:)` applies a picture correction ("Straighten the picture"). The default is
+    /// false: a camera's correction is then treated as off everywhere, so it never shows in one place and not in another.
+    var supportsPictureCorrection: Bool { get }
+    /// A transcoder that also straightens the pictures it encodes by `correction` (asked for at every picture; nil or a nil
+    /// `current`: none), before it draws `overlay`. The default ignores the correction and calls `makeVideoTranscoder(output:overlay:)`.
+    func makeVideoTranscoder(output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?,
+                             correction: (any PictureCorrectionProviding)?) throws -> any VideoTranscoding
     func makeAudioTranscoder(input: AudioFormat, output: AudioEncoderSettings) throws -> any AudioTranscoding
     func jpeg(from frame: any DecodedVideoFrame, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data
     func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?) throws -> Data
+    /// The JPEG straightened by `correction` ("Straighten the picture": snapshots), as a JPEG of the same size (an off correction hands
+    /// it back as it is). The default throws `MediaCodecError.unsupported`, as codecs whose `supportsPictureCorrection` is false may.
+    func correctJPEG(_ jpeg: Data, correction: PictureCorrection) throws -> Data
+
+    /// `resizeJPEG(_:maxWidth:maxHeight:)` encoding the smaller picture at `quality` (0…1); an image that already fits comes back unchanged.
+    /// The default ignores `quality` (the codec service's own).
+    func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data
     func silentAACFrames(duration: Duration, sampleRate: Int, channels: Int, startPTS: MediaTime, wallClock: Date) throws -> [EncodedAudioFrame]
     /// Demo camera / tests: moving test pattern (+ optional tone), H.264 at the given fps/GOP.
     func makeSyntheticSource(displayName: String, width: Int, height: Int, fps: Int, keyframeInterval: Duration,
@@ -36,6 +50,21 @@ extension MediaCodecs {
 
     public func makeVideoTranscoder(output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?) throws -> any VideoTranscoding {
         try makeVideoTranscoder(output: output)
+    }
+
+    public var supportsPictureCorrection: Bool { false }
+
+    public func makeVideoTranscoder(output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?,
+                                    correction: (any PictureCorrectionProviding)?) throws -> any VideoTranscoding {
+        try makeVideoTranscoder(output: output, overlay: overlay)
+    }
+
+    public func correctJPEG(_ jpeg: Data, correction: PictureCorrection) throws -> Data {
+        throw MediaCodecError.unsupported("these codecs cannot straighten a picture")
+    }
+
+    public func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data {
+        try resizeJPEG(jpeg, maxWidth: maxWidth, maxHeight: maxHeight)
     }
 
     /// Decodes a keyframe with a fresh decoder and encodes JPEG (quality 0.8), keeping aspect within the bounds.

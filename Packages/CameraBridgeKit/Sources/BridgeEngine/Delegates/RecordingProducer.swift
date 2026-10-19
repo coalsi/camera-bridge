@@ -59,12 +59,16 @@ final class RecordingProducer: Sendable {
     let qualityMode: RecordingQualityMode
     /// The camera's timestamp overlay (nil: none); while it is on every picture is transcoded and drawn on.
     let overlay: TimestampOverlayControl?
+    /// The camera's picture correction (nil: none), held by every transcoder this stream makes, on or off (a new value reaches its next
+    /// picture); while it is on every picture is transcoded and straightened. The path chosen at the stream's start stays until it ends.
+    let correction: PictureCorrectionControl?
     /// Whether this producer reads the sub stream (`CameraConfiguration.recordingStreamMode`; `CameraStatus`).
     let usesSubStream: Bool
 
     init(streamID: Int, configuration: CameraRecordingConfiguration, audioActive: Bool, cameraAudioEnabled: Bool, hub: MediaHub,
          traits: StreamTraits = StreamTraits(), codecs: any MediaCodecs, timing: RecordingTiming, log: Log,
-         qualityMode: RecordingQualityMode = .matchHubRequest, usesSubStream: Bool = false, overlay: TimestampOverlayControl? = nil) {
+         qualityMode: RecordingQualityMode = .matchHubRequest, usesSubStream: Bool = false, overlay: TimestampOverlayControl? = nil,
+         correction: PictureCorrectionControl? = nil) {
         self.streamID = streamID
         self.configuration = configuration
         self.audioActive = audioActive
@@ -77,6 +81,7 @@ final class RecordingProducer: Sendable {
         self.qualityMode = qualityMode
         self.usesSubStream = usesSubStream
         self.overlay = overlay
+        self.correction = correction
     }
 
     /// The controller's reading may fall behind by this many packets (an initialization segment or a fragment each: about 30 s of
@@ -302,7 +307,8 @@ final class RecordingProducer: Sendable {
                 if transcodeFailures > 1, let settings = transcoderSettings {
                     transcoder.invalidate()
                     self.transcoder = try producer.codecs.makeVideoTranscoder(
-                        output: settings, overlay: producer.overlay.flatMap { $0.isEnabled ? $0.provider(for: producer.hub) : nil })
+                        output: settings, overlay: producer.overlay.flatMap { $0.isEnabled ? $0.provider(for: producer.hub) : nil },
+                        correction: producer.correction)
                 }
                 return nil
             }
@@ -396,16 +402,18 @@ final class RecordingProducer: Sendable {
             var gop = [await hub.measuredGOPDuration, traits.longestGOP].compactMap { $0 }.max()
             if gop == nil, let open = await hub.lastKeyframeArrival { gop = ContinuousClock.now - open.arrival }
             let overlayOn = producer.overlay?.isEnabled ?? false
+            let correctionOn = producer.correction?.isOn ?? false
             switch MediaFit.recording(source: frame.format, frameRate: fps, gop: gop, bFrames: traits.usesBFrames, configuration: configuration,
-                                      qualityMode: producer.qualityMode, timestampOverlay: overlayOn) {
+                                      qualityMode: producer.qualityMode, timestampOverlay: overlayOn, pictureCorrection: correctionOn) {
             case .passthrough:
                 // The replay starts at a source keyframe at most one GOP (≤ the fragment) before the prebuffer.
                 prebufferStart = nil
                 producer.log.info("Recording stream \(producer.streamID): passing \(frame.format.width)×\(frame.format.height) H.264 through")
             case .transcode(let reason):
                 let settings = MediaFit.recordingEncoderSettings(for: configuration, source: frame.format, sourceFrameRate: fps,
-                                                                 qualityMode: producer.qualityMode, timestampOverlay: overlayOn)
-                transcoder = try producer.codecs.makeVideoTranscoder(output: settings, overlay: overlayOn ? producer.overlay?.provider(for: hub) : nil)
+                                                                 qualityMode: producer.qualityMode, timestampOverlay: overlayOn || correctionOn)
+                transcoder = try producer.codecs.makeVideoTranscoder(output: settings, overlay: overlayOn ? producer.overlay?.provider(for: hub) : nil,
+                                                                     correction: producer.correction)
                 transcoderSettings = settings
                 producer.log.info("Recording stream \(producer.streamID): transcoding to \(settings.width)×\(settings.height) at "
                                   + "\(settings.bitrateKbps) kbit/s (\(reason))")

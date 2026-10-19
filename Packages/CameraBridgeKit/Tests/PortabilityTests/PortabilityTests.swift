@@ -326,7 +326,7 @@ private func relative(_ url: URL) -> String {
         let repository = packageDirectory.deletingLastPathComponent().deletingLastPathComponent()
         let modules = try FileManager.default.contentsOfDirectory(atPath: sourcesDirectory.path()).filter { !$0.hasPrefix(".") }
         let files = modules.flatMap { swiftFiles(under: sourcesDirectory.appending(path: $0, directoryHint: .isDirectory)) }
-            + swiftFiles(under: repository.appending(path: "App/Sources", directoryHint: .isDirectory))
+            + swiftFiles(under: repository.appending(path: "Archive/mac-app/App/Sources", directoryHint: .isDirectory))
         var userInfoStrippers: [String: Int] = [:]
         var durationConversions: [String] = []
         for file in files {
@@ -336,9 +336,9 @@ private func relative(_ url: URL) -> String {
             if strips > 0 { userInfoStrippers[path] = strips }
             if text.contains(/attoseconds\)?\s*(\*\s*1e-18|\/\s*1e18)/) { durationConversions.append(path) }
         }
-        #expect(files.contains { $0.path().hasSuffix("App/Sources/Model/AddCameraWizardModel.swift") }, "the app's sources were not scanned")
+        #expect(files.contains { $0.path().hasSuffix("App/Sources/Model/AddCameraWizardModel.swift") }, "the archived Mac app's sources (Archive/mac-app/App/Sources) were not scanned")
         #expect(userInfoStrippers == ["Packages/CameraBridgeKit/Sources/BridgeSupport/URLUserInfo.swift": 1,
-                                      "App/Sources/Model/AddCameraWizardModel.swift": 1],
+                                      "Archive/mac-app/App/Sources/Model/AddCameraWizardModel.swift": 1],
                 "use BridgeSupport's `URL.removingUserInfo`: \(userInfoStrippers)")
         #expect(durationConversions.sorted() == ["Packages/CameraBridgeKit/Sources/BridgeSupport/Backoff.swift",
                                                  "Packages/CameraBridgeKit/Sources/FMP4/GOPFragmenter.swift"],
@@ -353,7 +353,7 @@ private func relative(_ url: URL) -> String {
         let repository = packageDirectory.deletingLastPathComponent().deletingLastPathComponent()
         let modules = try FileManager.default.contentsOfDirectory(atPath: sourcesDirectory.path()).filter { !$0.hasPrefix(".") }
         let files = modules.flatMap { swiftFiles(under: sourcesDirectory.appending(path: $0, directoryHint: .isDirectory)) }
-            + swiftFiles(under: repository.appending(path: "App/Sources", directoryHint: .isDirectory))
+            + swiftFiles(under: repository.appending(path: "Archive/mac-app/App/Sources", directoryHint: .isDirectory))
         var sanitizers: [String] = []
         for file in files {
             let text = try String(contentsOf: file, encoding: .utf8)

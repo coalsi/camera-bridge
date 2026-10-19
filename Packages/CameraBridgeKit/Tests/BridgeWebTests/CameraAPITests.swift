@@ -586,6 +586,41 @@ import TestSupport
         #expect(await session.send("PATCH", "/api/v1/cameras/\(id)", json: ["timestampOverlay": ["position": "middle"]]).status == 400)
     }
 
+    @Test func patchingTheCorrectionSavesItAndTheCameraShowsIt() async throws {
+        let harness = try Harness()
+        let session = try await harness.signIn()
+        let id = try await addCamera(session)
+        let first = await session.get("/api/v1/cameras/\(id)")
+        let off = try #require(first.json["pictureCorrection"] as? [String: Any], "a camera always shows its correction")
+        #expect(off["straighten"] as? Double == 0 && off["level"] as? Double == 0)
+        let answer = await session.send("PATCH", "/api/v1/cameras/\(id)", json: ["pictureCorrection": ["straighten": 0.4, "level": 0.15]])
+        #expect(answer.status == 200)
+        let patched = try #require(answer.json["pictureCorrection"] as? [String: Any])
+        #expect(patched["straighten"] as? Double == 0.4 && patched["level"] as? Double == 0.15)
+        let shown = await session.get("/api/v1/cameras/\(id)")
+        let saved = try #require(shown.json["pictureCorrection"] as? [String: Any])
+        #expect(saved["straighten"] as? Double == 0.4 && saved["level"] as? Double == 0.15)
+        // Another change leaves it alone, and the whole value is replaced when it is sent again.
+        let renamed = await session.send("PATCH", "/api/v1/cameras/\(id)", json: ["name": "Back Door"])
+        #expect((renamed.json["pictureCorrection"] as? [String: Any])?["straighten"] as? Double == 0.4)
+        let reset = await session.send("PATCH", "/api/v1/cameras/\(id)", json: ["pictureCorrection": ["straighten": 0, "level": 0]])
+        let cleared = try #require(reset.json["pictureCorrection"] as? [String: Any])
+        #expect(cleared["straighten"] as? Double == 0 && cleared["level"] as? Double == 0)
+    }
+
+    @Test func anOutOfRangeCorrectionIsClampedNotRefused() async throws {
+        let harness = try Harness()
+        let session = try await harness.signIn()
+        let id = try await addCamera(session)
+        let answer = await session.send("PATCH", "/api/v1/cameras/\(id)", json: ["pictureCorrection": ["straighten": 5, "level": -5]])
+        #expect(answer.status == 200)
+        let value = try #require(answer.json["pictureCorrection"] as? [String: Any])
+        #expect(value["straighten"] as? Double == 0.60 && value["level"] as? Double == -0.40)
+        let shown = await session.get("/api/v1/cameras/\(id)")
+        let saved = try #require(shown.json["pictureCorrection"] as? [String: Any])
+        #expect(saved["straighten"] as? Double == 0.60 && saved["level"] as? Double == -0.40)
+    }
+
     @Test func motionChoicesAreChecked() async throws {
         let harness = try Harness()
         let session = try await harness.signIn()
@@ -693,6 +728,37 @@ import TestSupport
         #expect(answer.headers["Content-Type"] == "image/jpeg")
         #expect(answer.headers["Cache-Control"] == "no-store")
         #expect(Array(answer.body.prefix(3)) == [0xFF, 0xD8, 0xFF])
+    }
+
+    @Test func theSnapshotRouteHandsOnOriginal() async throws {
+        let backend = FakeBackend()
+        let harness = try Harness(backend: backend)
+        let session = try await harness.signIn()
+        let id = try await addCamera(session)
+        #expect(await session.get("/api/v1/cameras/\(id)/snapshot?original=1&t=1").status == 200)
+        #expect(await session.get("/api/v1/cameras/\(id)/snapshot").status == 200)
+        #expect(await session.get("/api/v1/cameras/\(id)/snapshot?t=2").status == 200)
+        #expect(backend.read { $0.snapshotOriginals } == [true, false, false],
+                "straightened unless the page asks for the camera's own picture (the camera page, which straightens it itself)")
+    }
+
+    @Test func theLivePreviewHandsOnOriginal() async throws {
+        let backend = FakeBackend()
+        let harness = try Harness(backend: backend)
+        let session = try await harness.signIn()
+        let id = try await addCamera(session)
+        let own = await session.stream("/api/v1/cameras/\(id)/live?original=1&t=1")
+        #expect(await own.wait { $0.components(separatedBy: "--cbframe").count > 2 })
+        own.stop()
+        #expect(await eventually { own.finished.value })
+        let asked = backend.read { $0.snapshotOriginals }.count
+        let straightened = await session.stream("/api/v1/cameras/\(id)/live?t=2")
+        #expect(await straightened.wait { $0.components(separatedBy: "--cbframe").count > 2 })
+        straightened.stop()
+        let originals = backend.read { $0.snapshotOriginals }
+        #expect(asked > 0 && originals.prefix(asked).allSatisfy { $0 },
+                "the camera page's picture stream (when its browser plays no live video) is the camera's own picture: the page straightens it")
+        #expect(originals.count > asked && originals.dropFirst(asked).allSatisfy { !$0 }, "straightened otherwise")
     }
 
     @Test func noPictureYetIsA503WithARetryHint() async throws {

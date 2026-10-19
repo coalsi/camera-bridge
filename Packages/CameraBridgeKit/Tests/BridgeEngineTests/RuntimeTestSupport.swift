@@ -229,6 +229,40 @@ final class PacedFrameSource: MediaSource {
     }
 }
 
+/// Log lines of the sessions under test (the sink sees every test's lines; `lines(of:)` keeps one session's).
+final class LiveLogCapture: LogSink {
+    private let entries = Mutex<[LogEntry]>([])
+    private let token = Mutex<LogSinkToken?>(nil)
+
+    init() {
+        token.withLock { $0 = LogHub.addSink(self) }
+    }
+
+    func stop() {
+        if let existing = token.withLock({ value -> LogSinkToken? in defer { value = nil }; return value }) { LogHub.removeSink(existing) }
+    }
+
+    func record(_ entry: LogEntry) {
+        entries.withLock { $0.append(entry) }
+    }
+
+    /// Warning-or-worse lines of `category` that contain `text`.
+    func matching(category: String, containing text: String, minimum: LogLevel = .warning) -> [String] {
+        entries.withLock { $0.filter { $0.category == category && $0.level >= minimum && $0.message.contains(text) }.map(\.message) }
+    }
+
+    /// Every line of at least `minimum` level that contains `text` (lines the session's tag is not on).
+    func lines(containing text: String, minimum: LogLevel = .info) -> [String] {
+        entries.withLock { $0.filter { $0.level >= minimum && $0.message.contains(text) }.map(\.message) }
+    }
+
+    /// Lines that mention the session (the pipeline tags its own with the first 8 characters of its id).
+    func lines(of session: UUID, minimum: LogLevel = .debug) -> [String] {
+        let tag = String(session.uuidString.prefix(8))
+        return entries.withLock { $0.filter { $0.level >= minimum && $0.message.contains(tag) }.map { "\($0.level): \($0.message)" } }
+    }
+}
+
 #if canImport(Darwin)
 import PlatformApple
 

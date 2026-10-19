@@ -8,7 +8,18 @@ import Synchronization
 /// decodes on a running session as on a new one) and invalidates it `idleLifetime` after the last use, so an idle camera
 /// holds no decoder. A format change (another resolution or codec) replaces it; a decode that fails drops it, so the
 /// next snapshot starts from a clean session.
+///
+/// The JPEG work (an encode or a resize: a blocking ffmpeg one-shot on Linux, CoreImage or ImageIO on the Mac) runs through `blockingWork`:
+/// inline for Home's snapshots, as it always has, or on a thread of its own (`offCooperativePool`) for the pictures of an AI description.
 final class SnapshotDecoderPool: Sendable {
+    /// Runs one piece of the pool's blocking JPEG work and hands back what it made.
+    typealias BlockingWork = @Sendable (_ work: @escaping @Sendable () throws -> Data) async throws -> Data
+    /// On the caller's thread.
+    static let inline: BlockingWork = { work in try work() }
+    /// On a thread of its own (`CodecOffload`), never a cooperative one; given up on after `blockingWorkDeadline` (left to finish there).
+    static let offCooperativePool: BlockingWork = { work in try await CodecOffload.run(deadline: SnapshotDecoderPool.blockingWorkDeadline, work) }
+    static let blockingWorkDeadline: Duration = .seconds(10)
+
     private struct State {
         var decoder: (any VideoDecoding)?
         var format: VideoFormat?
@@ -24,11 +35,13 @@ final class SnapshotDecoderPool: Sendable {
 
     private let codecs: any MediaCodecs
     private let idleLifetime: Duration
+    private let blockingWork: BlockingWork
     private let state = Mutex(State())
 
-    init(codecs: any MediaCodecs, idleLifetime: Duration) {
+    init(codecs: any MediaCodecs, idleLifetime: Duration, blockingWork: @escaping BlockingWork = SnapshotDecoderPool.inline) {
         self.codecs = codecs
         self.idleLifetime = idleLifetime
+        self.blockingWork = blockingWork
     }
 
     deinit {
@@ -41,13 +54,20 @@ final class SnapshotDecoderPool: Sendable {
     var isHoldingDecoder: Bool { state.withLock { $0.decoder != nil } }
 
     /// Decodes `frame` (a keyframe) and encodes the picture as JPEG within the bounds, like
-    /// `MediaCodecs.jpeg(fromKeyframe:maxWidth:maxHeight:)` but on the pool's decoder.
-    func jpeg(fromKeyframe frame: EncodedVideoFrame, maxWidth: Int?, maxHeight: Int?) async throws -> Data {
+    /// `MediaCodecs.jpeg(fromKeyframe:maxWidth:maxHeight:)` but on the pool's decoder (`quality` 0.8 like it, unless asked otherwise). The decoder
+    /// leaves the GOP it was partway through: the next `jpeg(fromGOP:…)` of that GOP starts again from its keyframe.
+    func jpeg(fromKeyframe frame: EncodedVideoFrame, maxWidth: Int?, maxHeight: Int?, quality: Double = 0.8) async throws -> Data {
         guard frame.isKeyframe else { throw MediaCodecError.unsupported("snapshot source is not a keyframe") }
         let decoder = try checkout(for: frame.format)
+        state.withLock { state in
+            state.gopKeyframe = nil
+            state.decodedFrames = 0
+            state.newestPicture = nil
+        }
         do {
             guard let picture = try await decoder.decode(frame) else { throw MediaCodecError.noFrame }
-            let jpeg = try codecs.jpeg(from: picture, maxWidth: maxWidth, maxHeight: maxHeight, quality: 0.8)
+            let codecs = codecs
+            let jpeg = try await blockingWork { try codecs.jpeg(from: picture, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality) }
             scheduleRelease()
             return jpeg
         } catch {
@@ -77,8 +97,9 @@ final class SnapshotDecoderPool: Sendable {
     /// forward through the frames it has not decoded yet (a GOP it has already started is continued, not decoded again from
     /// its keyframe), so the picture is of the newest frame, not of the keyframe a camera with a GOP of tens of seconds sent
     /// long ago. Frames after `until` are left for the next snapshot (the keyframe is always decoded). A frame that fails to
-    /// decode drops the decoder.
-    func jpeg(fromGOP gop: [EncodedVideoFrame], maxWidth: Int?, maxHeight: Int?, until: ContinuousClock.Instant) async throws -> Data {
+    /// decode drops the decoder. `quality` is 0.8 unless asked otherwise.
+    func jpeg(fromGOP gop: [EncodedVideoFrame], maxWidth: Int?, maxHeight: Int?, until: ContinuousClock.Instant,
+              quality: Double = 0.8) async throws -> Data {
         guard let keyframe = gop.first, keyframe.isKeyframe else { throw MediaCodecError.unsupported("snapshot source does not start at a keyframe") }
         let decoder = try checkout(for: keyframe.format)
         let key = GOPKey(keyframe)
@@ -95,7 +116,8 @@ final class SnapshotDecoderPool: Sendable {
                 decoded = index + 1
             }
             guard let newest else { throw MediaCodecError.noFrame }
-            let jpeg = try codecs.jpeg(from: newest, maxWidth: maxWidth, maxHeight: maxHeight, quality: 0.8)
+            let codecs = codecs
+            let jpeg = try await blockingWork { try codecs.jpeg(from: newest, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality) }
             state.withLock { state in
                 state.gopKeyframe = key
                 state.decodedFrames = decoded
@@ -107,6 +129,13 @@ final class SnapshotDecoderPool: Sendable {
             discard(decoder)
             throw error
         }
+    }
+
+    /// `jpeg` (a JPEG or PNG) shrunk to the bounds at `quality` (`MediaCodecs.resizeJPEG(_:maxWidth:maxHeight:quality:)`), through the pool's
+    /// blocking work; no decoder is used. An image that already fits comes back unchanged.
+    func resizedJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) async throws -> Data {
+        let codecs = codecs
+        return try await blockingWork { try codecs.resizeJPEG(jpeg, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality) }
     }
 
     /// The kept decoder when it was made for this format, else a new one (the old one is invalidated).

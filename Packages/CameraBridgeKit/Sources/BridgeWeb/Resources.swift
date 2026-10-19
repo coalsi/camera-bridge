@@ -300,8 +300,8 @@ struct CameraStatusResource: Encodable {
 /// each `{feature, state, level, sentence, canChange, linked, service, manualHelp}` (`feature`: cloud, upnp, ddns, rtmp, unauthenticatedVideo,
 /// extraService, internetGuard; `state`: on, off, absent, unknown; `linked` and `service` null when the camera does not say; `manualHelp`,
 /// "Change it by hand" (`CameraManualHelp`), null where there is none), and `guard`,
-/// what the internet guard saw (`{watched, today, last24h, names: [{name, count, last}]}`, the 10 most asked names of the last 7 days; null
-/// on a bridge without the guard). Every key is always there.
+/// what the internet guard saw (`{watched, today, last24h, names: [{name, count, first, last}]}`, the 10 most asked names of the last 7 days,
+/// `first` and `last` null when the box does not say; null on a bridge without the guard). Every key is always there.
 struct CameraSecurityResource: Encodable {
     struct Finding: Encodable {
         var feature: String
@@ -318,6 +318,7 @@ struct CameraSecurityResource: Encodable {
         struct Name: Encodable, Sendable {
             var name: String
             var count: Int
+            var first: OrNull<Date>
             var last: OrNull<Date>
         }
 
@@ -345,7 +346,7 @@ struct CameraSecurityResource: Encodable {
         }
         `guard` = OrNull(security.internetGuard.map { activity in
             Guard(watched: activity.watched, today: activity.today, last24h: activity.last24h,
-                  names: activity.names.map { Guard.Name(name: $0.name, count: $0.count, last: OrNull($0.last)) })
+                  names: activity.names.map { Guard.Name(name: $0.name, count: $0.count, first: OrNull($0.first), last: OrNull($0.last)) })
         })
     }
 }
@@ -391,14 +392,15 @@ struct NVRStatusResource: Encodable {
 }
 
 /// One camera: its configuration (`CameraConfiguration`, as saved, without any password; with the engine-owned `setupState`, `setupBackup`
-/// and `dnsWatch`) with its `status`, display names, and `internetWatched`: the Internet guard watches it (`BridgeEngine.internetWatchDone`:
-/// its DNS points at the bridge as the newest of the setup's result and the guard's readings says), always there.
+/// and `dnsWatch`) with its `status`, display names, `internetWatched`: the Internet guard watches it (`BridgeEngine.internetWatchDone`:
+/// its DNS points at the bridge as the newest of the setup's result and the guard's readings says), and `restartOffered`: "Restart the
+/// camera now" is offered, the camera waits for a restart to apply a change it took (`BridgeEngine.offersCameraRestart`), both always there.
 struct CameraResource: Encodable {
     var configuration: CameraConfiguration
     var status: CameraStatusResource?
 
     private enum ExtraKeys: String, CodingKey {
-        case status, vendorName, kindName, motionSourceName, address, typeID, internetWatched
+        case status, vendorName, kindName, motionSourceName, address, typeID, internetWatched, restartOffered
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -410,6 +412,7 @@ struct CameraResource: Encodable {
         try container.encode(StatusText.motionSource(configuration.motionSource), forKey: .motionSourceName)
         try container.encode(Self.address(of: configuration), forKey: .address)
         try container.encode(BridgeEngine.internetWatchDone(configuration), forKey: .internetWatched)
+        try container.encode(BridgeEngine.offersCameraRestart(configuration), forKey: .restartOffered)
     }
 
     /// Where the camera is: its host, or for a camera behind a service the service's name.
@@ -438,8 +441,27 @@ struct NoticeResource: Encodable {
     /// of the notice's `cameraID`); nil for a notice with no button. Always encoded, as null when nil (a page that does not know the field
     /// ignores it).
     var action: String?
+    /// The internet guard's notice only: every camera that tried today, most first, each with a button on the page (at most 3); left out
+    /// of the other notices, and of a guard notice without any (the page then falls back to `cameraID`).
+    var cameras: [TriedCamera]? = nil
 
-    private enum CodingKeys: String, CodingKey { case id, kind, severity, title, detail, cameraID, cameraName, date, action }
+    /// A camera of the internet guard's notice: `{id, name, today, mostAsked}` (`mostAsked`: the name it asked for most, as the Security
+    /// card shows it; null when the box listed none).
+    struct TriedCamera: Encodable {
+        var id: UUID
+        var name: String
+        var today: Int
+        var mostAsked: OrNull<String>
+
+        init(_ camera: InternetGuardNotice.Camera) {
+            id = camera.id
+            name = camera.name
+            today = camera.today
+            mostAsked = OrNull(camera.mostAsked)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, kind, severity, title, detail, cameraID, cameraName, date, action, cameras }
 
     func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -452,6 +474,7 @@ struct NoticeResource: Encodable {
         try container.encodeIfPresent(cameraName, forKey: .cameraName)
         try container.encode(date, forKey: .date)
         try container.encode(action, forKey: .action)
+        try container.encodeIfPresent(cameras, forKey: .cameras)
     }
 
     /// Everything the banner shows: the network notices (below), at most one storage notice, first, and the internet guard's notice for the
@@ -463,12 +486,15 @@ struct NoticeResource: Encodable {
         return notices
     }
 
-    /// "Internet guard blocked N lookups from M cameras today.": information, its button opens the page of the camera that tried most
-    /// (`action` "open-camera", with `cameraID`).
+    /// "Internet guard blocked N lookups from M cameras today. Patio New tried 9 times, Doorbell 3 times.": information, with every camera
+    /// that tried (`cameras`, most first); its buttons open those cameras' pages at the Security card (`action` "open-camera"). `cameraID`
+    /// and `cameraName` are the camera that tried most, as before: the page falls back to them when `cameras` is missing or empty (a bridge
+    /// from before).
     static func internetGuardNotice(_ notice: InternetGuardNotice?) -> NoticeResource? {
         guard let notice else { return nil }
-        return NoticeResource(id: "internet-guard", kind: "internetGuard", severity: "info", title: notice.title, detail: notice.sentence,
-                              cameraID: notice.cameraID, cameraName: notice.cameraName, date: notice.date, action: notice.cameraID == nil ? nil : "open-camera")
+        return NoticeResource(id: "internet-guard", kind: "internetGuard", severity: "info", title: notice.title, detail: notice.detail,
+                              cameraID: notice.cameraID, cameraName: notice.cameraName, date: notice.date, action: notice.cameraID == nil ? nil : "open-camera",
+                              cameras: notice.tried.isEmpty ? nil : notice.tried.map(TriedCamera.init))
     }
 
     /// "Recording Can't Continue" when recording is paused (or no folder is chosen), else "Recording Storage Almost Full" when less than
@@ -552,8 +578,10 @@ struct SettingsResource: Encodable {
     var logLevel: String
     var motionShadowTest: Bool
     var timeZone: String?
+    /// The AI description settings, with whether a key is saved and its last four characters (never the key).
+    var ai: AISettingsResource
 
-    init(settings: BridgeSettings, bridgeName: String, webhookProblem: String?) {
+    init(settings: BridgeSettings, bridgeName: String, webhookProblem: String?, aiKey: (saved: Bool, hint: String?), aiStatus: AIStatus) {
         self.bridgeName = bridgeName
         basePort = settings.basePort
         sensorsBridgePort = settings.sensorsBridgePort
@@ -564,6 +592,7 @@ struct SettingsResource: Encodable {
         logLevel = Self.levelName(settings.logLevel)
         motionShadowTest = settings.motionShadowTest
         timeZone = settings.timeZone
+        ai = AISettingsResource(settings.ai, key: aiKey, status: aiStatus)
     }
 
     static func levelName(_ level: LogLevel) -> String {

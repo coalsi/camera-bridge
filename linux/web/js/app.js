@@ -8,7 +8,7 @@ import { store, startEvents, stopEvents, subscribe, loadCameras } from './store.
 import { renderSetup, renderLogin } from './screens/auth.js';
 import { renderCameras } from './screens/cameras.js';
 import { renderAdd } from './screens/add.js';
-import { renderCamera, renderCameraPairing, renderSensorsPairing } from './screens/camera.js';
+import { CAMERA_ROUTE, renderCamera, renderCameraPairing, renderSensorsPairing } from './screens/camera.js';
 import { renderSettings } from './screens/settings.js';
 import { renderLogs } from './screens/logs.js';
 import { renderSystem } from './screens/system.js';
@@ -60,7 +60,8 @@ const ROUTES = [
   { pattern: /^$/, title: 'Monitor', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^cameras$/, title: 'Cameras', render: renderCameras },
   { pattern: /^add$/, title: 'Add a camera', render: renderAdd },
-  { pattern: /^camera\/([0-9A-Fa-f-]{36})$/, title: 'Camera', render: renderCamera },
+  // #/camera/<id>, and #/camera/<id>/security at its Security card (the Internet guard's notice opens that).
+  { pattern: CAMERA_ROUTE, title: 'Camera', render: renderCamera },
   { pattern: /^camera\/([0-9A-Fa-f-]{36})\/pair$/, title: 'Add to Apple Home', render: renderCameraPairing },
   { pattern: /^camera\/([0-9A-Fa-f-]{36})\/watch(?:\/(\d{12,13}))?$/, title: 'Recordings', render: lazy(() => import('./screens/watch.js'), 'renderWatch') },
   // The Monitor writes #/nvr/<epoch ms> while you look back in the recordings; #/monitor is its old address.
@@ -69,7 +70,7 @@ const ROUTES = [
   { pattern: /^pair\/sensors$/, title: 'Sensors bridge', render: renderSensorsPairing },
   { pattern: /^logs$/, title: 'Log', render: renderLogs },
   { pattern: /^system$/, title: 'System', render: renderSystem },
-  { pattern: /^settings(?:\/(recording))?$/, title: 'Settings', render: renderSettings },
+  { pattern: /^settings(?:\/(recording|ai))?$/, title: 'Settings', render: renderSettings },
   { pattern: /^about$/, title: 'About', render: renderAbout },
   { pattern: /^plugins$/, title: 'Plugins', render: renderPlugins },
   { pattern: /^plugins\/wyze$/, title: 'Wyze', render: renderWyzePlugin },

@@ -216,6 +216,30 @@ private func take(_ count: Int, from stream: AsyncStream<MediaSample>) async -> 
         #expect(await hub.lastKeyframe?.pts == MediaTime.seconds(18))
     }
 
+    /// The pictures before an AI-described event are read from the ring: every keyframe it holds, oldest first, without subscribing or
+    /// changing anything.
+    @Test func recentKeyframesListsTheRingsKeyframesOldestFirst() async {
+        let t = Timeline()   // 30 fps, keyframe every 2 s
+        let clock = TestClock()
+        let hub = MediaHub(retention: .seconds(12), now: clock.now)
+        #expect(await hub.recentKeyframes().isEmpty)
+        let samples = t.samples(to: 6)   // three GOPs: keyframes at 0, 2 and 4 s
+        await feed(samples, to: hub, clock: clock)
+        let newest = await hub.newestGOP().map(\.wallClock)
+        let keyframes = await hub.recentKeyframes()
+        #expect(keyframes.map(\.wallClock) == [t.time(0), t.time(2), t.time(4)])
+        #expect(keyframes.allSatisfy { $0.isKeyframe })
+        // The ring is as it was: the same keyframes again, the same newest GOP, nobody subscribed, and a replay of the ring is every sample fed.
+        #expect(await hub.recentKeyframes().map(\.wallClock) == keyframes.map(\.wallClock))
+        #expect(await hub.newestGOP().map(\.wallClock) == newest)
+        #expect(await hub.subscriberCount == 0)
+        let replay = await hub.subscribe(from: .prebuffer(.seconds(100)))
+        #expect(replay.replayCount == samples.count)
+        replay.cancel()
+        await hub.discontinuity()
+        #expect(await hub.recentKeyframes().isEmpty, "a reconnect empties the ring")
+    }
+
     @Test func slowSubscriberIsBoundedDropsItsGOPAndWarns() async {
         let warnings = WarningSink()
         let token = LogHub.addSink(warnings)

@@ -35,6 +35,7 @@ extension WebApp {
         Route("POST", "cameras/:id/pan-tilt", takesBody: true) { app, ctx in try await app.panTilt(ctx) },
         Route("POST", "cameras/:id/night-vision", takesBody: true) { app, ctx in try await app.nightVision(ctx) },
         Route("POST", "cameras/:id/security/check") { app, ctx in try await app.checkSecurity(ctx) },
+        Route("POST", "cameras/:id/restart") { app, ctx in try await app.restartCamera(ctx) },
         Route("GET", "cameras/:id/pairing") { app, ctx in try await app.pairing(ctx) },
         Route("POST", "cameras/:id/reset-pairing") { app, ctx in try await app.resetPairing(ctx) },
         Route("POST", "cameras/:id/test-motion") { app, ctx in try await app.testMotion(ctx) },
@@ -85,7 +86,7 @@ extension WebApp {
         Route("POST", "system/ssh", takesBody: true) { app, ctx in try await app.systemSSH(ctx) },
         Route("POST", "system/auto-update", takesBody: true) { app, ctx in try await app.systemAutomaticUpdates(ctx) },
         Route("POST", "system/factory-reset", takesBody: true) { app, ctx in try await app.systemFactoryReset(ctx) },
-    ] + archiveRoutes + cameraSetupRoutes
+    ] + archiveRoutes + cameraSetupRoutes + aiRoutes
 
     // MARK: Status and session
 
@@ -396,6 +397,9 @@ extension WebApp {
         var recordingStreamMode: RecordingStreamMode?
         var recordingQualityMode: RecordingQualityMode?
         var timestampOverlay: OverlayPatch?
+        /// The whole value (both sliders); numbers past the limits are clamped by `PictureCorrection`, not refused.
+        var pictureCorrection: PictureCorrection?
+        var aiDescriptions: Bool?
     }
 
     func patchCamera(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -476,6 +480,7 @@ extension WebApp {
         if let value = patch.liveMaxBitrateOverride { camera.liveMaxBitrateOverride = value }
         if let value = patch.recordingStreamMode { camera.recordingStreamMode = value }
         if let value = patch.recordingQualityMode { camera.recordingQualityMode = value }
+        if let value = patch.aiDescriptions { camera.aiDescriptions = value }
         if let overlay = patch.timestampOverlay {
             if let value = overlay.enabled { camera.timestampOverlay.enabled = value }
             if let value = overlay.position { camera.timestampOverlay.position = value }
@@ -485,6 +490,7 @@ extension WebApp {
             if let value = overlay.use24Hour { camera.timestampOverlay.use24Hour = value }
             if let value = overlay.size { camera.timestampOverlay.size = value }
         }
+        if let value = patch.pictureCorrection { camera.pictureCorrection = value }
         let password = patch.password.flatMap { $0.isEmpty ? nil : $0 }
         do {
             try await backend.updateCamera(camera, password: password)
@@ -500,10 +506,12 @@ extension WebApp {
 
     // MARK: Snapshot and live preview
 
+    /// The camera's picture, straightened by its picture correction; `?original=1` gives the camera's own picture (the camera page
+    /// straightens that itself while its sliders move).
     func snapshot(_ ctx: RequestContext) async throws -> HTTPResponse {
         let id = try ctx.uuid("id")
         guard await backend.overview().configurations.contains(where: { $0.id == id }) else { throw APIError.notFound("There is no camera with this identifier.") }
-        guard let jpeg = await backend.snapshotJPEG(cameraID: id) else {
+        guard let jpeg = await backend.snapshotJPEG(cameraID: id, original: ctx.request.queryValue("original") == "1") else {
             throw APIError(status: 503, code: "no_picture", message: "The camera has no picture yet.", headers: [("Retry-After", "5")])
         }
         var response = HTTPResponse(status: 200, contentType: "image/jpeg", data: jpeg)
@@ -512,9 +520,11 @@ extension WebApp {
     }
 
     /// `multipart/x-mixed-replace` JPEGs: a quick look from the browser (Apple Home does the real viewing). A new picture every
-    /// `liveFrameInterval`, for at most `liveLifetime`; the page starts it again while it is open.
+    /// `liveFrameInterval`, for at most `liveLifetime`; the page starts it again while it is open. Straightened like `snapshot`, and
+    /// `?original=1` gives the camera's own pictures (the camera page's preview where its browser plays no live video).
     func live(_ ctx: RequestContext) async throws -> HTTPResponse {
         let id = try ctx.uuid("id")
+        let original = ctx.request.queryValue("original") == "1"
         guard await backend.overview().configurations.contains(where: { $0.id == id }) else { throw APIError.notFound("There is no camera with this identifier.") }
         guard takeLiveSlot() else {
             throw APIError(status: 429, code: "too_many_streams", message: "Too many live previews are open. Close one and try again.", headers: [("Retry-After", "5")])
@@ -529,7 +539,7 @@ extension WebApp {
             var waitingSince: ContinuousClock.Instant?
             while !Task.isCancelled, ContinuousClock.now < deadline {
                 let started = ContinuousClock.now
-                if let jpeg = await backend.snapshotJPEG(cameraID: id) {
+                if let jpeg = await backend.snapshotJPEG(cameraID: id, original: original) {
                     waitingSince = nil
                     var part = Data("--\(boundary)\r\nContent-Type: image/jpeg\r\nContent-Length: \(jpeg.count)\r\n\r\n".utf8)
                     part.append(jpeg)

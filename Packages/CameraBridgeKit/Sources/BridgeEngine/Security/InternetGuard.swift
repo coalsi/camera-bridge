@@ -26,6 +26,21 @@ public enum InternetGuardText {
     static func noticeTitle(cameras: Int) -> String {
         cameras == 1 ? "A Camera Tried to Reach the Internet" : "Cameras Tried to Reach the Internet"
     }
+
+    /// The cameras the notice names before "and N more".
+    static let noticeNamesAtMost = 3
+
+    /// "Patio New tried 9 times, Doorbell 3 times." of `cameras`, most first: the first `noticeNamesAtMost` by name, then "and 2 more
+    /// cameras"; nil without any.
+    static func whoTried(_ cameras: [(name: String, today: Int)]) -> String? {
+        guard let first = cameras.first else { return nil }
+        let times = { (count: Int) in count == 1 ? "once" : "\(count) times" }
+        var parts = ["\(first.name) tried \(times(first.today))"]
+        parts += cameras.dropFirst().prefix(noticeNamesAtMost - 1).map { "\($0.name) \(times($0.today))" }
+        let more = cameras.count - noticeNamesAtMost
+        if more > 0 { parts.append("and \(more) more camera\(more == 1 ? "" : "s")") }
+        return parts.joined(separator: ", ") + "."
+    }
 }
 
 extension GuardLevel {
@@ -87,44 +102,79 @@ enum GuardNames {
 }
 
 /// The bridge's notice for the day (one a day, from the first blocked lookup until the day ends; its figures are refreshed at most every
-/// `EngineTuning.guardNoticeRefresh`): "Internet guard blocked N lookups from M cameras today.", with the camera that tried most for the
-/// camera page it opens.
+/// `EngineTuning.guardNoticeRefresh`): "Internet guard blocked N lookups from M cameras today.", then who tried ("Patio New tried 9 times,
+/// Doorbell 3 times."), with every camera that tried for the camera pages it opens.
 public struct InternetGuardNotice: Sendable, Equatable {
+    /// A camera that tried today: its blocked lookups today and the name it asked for most, as `GuardNames.shown` has it (`mostAsked(_:since:)`:
+    /// of the names it was last seen asking for today, the most asked in the box's last 7 days; nil when the box listed none).
+    public struct Camera: Sendable, Equatable {
+        public var id: UUID
+        public var name: String
+        public var today: Int
+        public var mostAsked: String?
+
+        public init(id: UUID, name: String, today: Int, mostAsked: String?) {
+            self.id = id
+            self.name = name
+            self.today = today
+            self.mostAsked = mostAsked
+        }
+    }
+
     /// Where the guard's day starts (`GuardReport.todayStart`).
     public var day: Date
     public var lookups: Int
     public var cameras: Int
-    /// The camera that tried most today.
+    /// The camera that tried most today (the first of `tried`).
     public var cameraID: UUID?
     public var cameraName: String?
     /// When these figures were taken.
     public var date: Date
+    /// Every watched camera that tried today, most first (a tie in the bridge's order of cameras).
+    public var tried: [Camera]
 
-    public init(day: Date, lookups: Int, cameras: Int, cameraID: UUID?, cameraName: String?, date: Date) {
+    public init(day: Date, lookups: Int, cameras: Int, cameraID: UUID?, cameraName: String?, date: Date, tried: [Camera] = []) {
         self.day = day
         self.lookups = lookups
         self.cameras = cameras
         self.cameraID = cameraID
         self.cameraName = cameraName
         self.date = date
+        self.tried = tried
     }
 
     public var title: String { InternetGuardText.noticeTitle(cameras: cameras) }
     public var sentence: String { InternetGuardText.blockedToday(lookups: lookups, cameras: cameras) }
+    /// The banner's text: `sentence`, then who tried ("Patio New tried 9 times, Doorbell 3 times, Garage once, and 2 more cameras.").
+    public var detail: String {
+        guard let who = InternetGuardText.whoTried(tried.map { ($0.name, $0.today) }) else { return sentence }
+        return "\(sentence) \(who)"
+    }
 
     /// Today's figures of the watched `cameras` (by their address) from `report`; nil when nothing was blocked today or the box has no guard.
     static func make(report: GuardReport?, cameras: [(id: UUID, name: String, address: String)], now: Date) -> InternetGuardNotice? {
         guard let report, report.available else { return nil }
-        var lookups = 0, count = 0
-        var most: (id: UUID, name: String, today: Int)?
-        for camera in cameras {
-            guard let entry = report.camera(at: camera.address), entry.level == .watch, entry.today > 0 else { continue }
-            lookups += entry.today
-            count += 1
-            if entry.today > (most?.today ?? 0) { most = (camera.id, camera.name, entry.today) }
-        }
-        guard lookups > 0 else { return nil }
         let day = report.todayStart ?? Calendar.current.startOfDay(for: now)
-        return InternetGuardNotice(day: day, lookups: lookups, cameras: count, cameraID: most?.id, cameraName: most?.name, date: now)
+        var tried: [(offset: Int, camera: Camera)] = []
+        for (offset, camera) in cameras.enumerated() {
+            guard let entry = report.camera(at: camera.address), entry.level == .watch, entry.today > 0 else { continue }
+            tried.append((offset, Camera(id: camera.id, name: camera.name, today: entry.today, mostAsked: mostAsked(entry.names, since: day))))
+        }
+        let ordered = tried.sorted { $0.camera.today != $1.camera.today ? $0.camera.today > $1.camera.today : $0.offset < $1.offset }.map(\.camera)
+        let lookups = ordered.reduce(0) { $0 + $1.today }
+        guard lookups > 0 else { return nil }
+        return InternetGuardNotice(day: day, lookups: lookups, cameras: ordered.count, cameraID: ordered.first?.id, cameraName: ordered.first?.name,
+                                   date: now, tried: ordered)
+    }
+
+    /// The name of `names` (the box's, most asked first) a camera asked for most, as shown: of those last seen since `day`, the most asked;
+    /// when none was (or the box gives no times), the most asked of all; nil without any.
+    static func mostAsked(_ names: [GuardReport.Lookup], since day: Date) -> String? {
+        let shown = GuardNames.shown(names)
+        let today = shown.filter { $0.last.map { $0 >= day } ?? false }
+        let pool = today.isEmpty ? shown : today
+        return pool.enumerated().max { a, b in
+            a.element.count != b.element.count ? a.element.count < b.element.count : a.offset > b.offset
+        }?.element.name
     }
 }

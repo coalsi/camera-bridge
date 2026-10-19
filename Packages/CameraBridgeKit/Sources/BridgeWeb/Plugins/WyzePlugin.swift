@@ -391,8 +391,9 @@ actor WyzePlugin {
         await followAddresses()
     }
 
-    /// An added camera whose address changed is updated: an RTSP camera's address and stream addresses, a local one's go2rtc source.
-    private func followAddresses() async {
+    /// An added camera whose address changed is updated: an RTSP camera's address and stream addresses, a local one's go2rtc source. (Not
+    /// private: the tests call it.)
+    func followAddresses() async {
         let overview = await backend.overview()
         for config in overview.configurations where config.integration?.service == .wyze {
             guard let mac = config.integration?.details[IntegrationSettings.Key.wyzeMAC], let device = device(mac: mac),
@@ -411,6 +412,11 @@ actor WyzePlugin {
             default:
                 continue
             }
+            // `config` was read before the writes of the cameras ahead of this one (each can restart a camera), and the owner may have turned
+            // the camera's AI descriptions off meanwhile: the write keeps the switch the configuration has now. (Only this one field is taken
+            // from the fresh copy; a camera removed meanwhile is left alone.)
+            guard let current = await backend.overview().configurations.first(where: { $0.id == config.id }) else { continue }
+            next.aiDescriptions = current.aiDescriptions
             do {
                 try await backend.updateCamera(next, password: password)
                 log.notice("a Wyze camera moved to a new address; updated")

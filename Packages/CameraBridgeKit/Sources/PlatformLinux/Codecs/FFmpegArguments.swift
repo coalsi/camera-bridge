@@ -46,6 +46,8 @@ struct VideoPipelineSpec: Equatable, Sendable {
     var skipBeforeSeconds: Double?
     /// Honour the odd-millisecond keyframe request in this pipeline (the transcoder's way to force an IDR).
     var keyframeRequestsByTimestamp = true
+    /// Straighten the picture with these maps (the transcoder only; nil: the picture as the camera sent it).
+    var correction: RemapStage?
 }
 
 enum FFmpegArguments {
@@ -57,7 +59,9 @@ enum FFmpegArguments {
 
     // MARK: Video
 
-    /// compressed H.264/HEVC in (FLV on stdin) → H.264 out (FLV on stdout): decode, limit rate, scale, overlay, encode.
+    /// compressed H.264/HEVC in (FLV on stdin) → H.264 out (FLV on stdout): decode, limit rate, scale, straighten, overlay, encode.
+    /// With a correction the four maps are more inputs (images, read once: `remap` keeps the last picture of each for the whole
+    /// stream) and the filters are a graph (`correctedFilterGraph`) whose output pad `cbv` is the one mapped.
     static func transcoder(_ spec: VideoPipelineSpec) -> [String] {
         var arguments = common
         if case .vaapi(let device, _) = spec.backend { arguments += ["-vaapi_device", device] }
@@ -65,8 +69,13 @@ enum FFmpegArguments {
         // transcoder maps output timestamps back by their exact millisecond value and needs them unchanged.
         arguments += ["-copyts"]
         arguments += lowLatencyInput
-        arguments += ["-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn"]
-        arguments += ["-vf", videoFilters(spec)]
+        if let correction = spec.correction {
+            arguments += ["-f", "flv", "-i", "pipe:0"] + remapInputs(correction)
+            arguments += ["-filter_complex", correctedFilterGraph(spec, correction), "-map", "[cbv]", "-an", "-sn", "-dn"]
+        } else {
+            arguments += ["-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn"]
+            arguments += ["-vf", videoFilters(spec)]
+        }
         arguments += ["-fps_mode", "passthrough", "-enc_time_base", "1/1000"]
         if spec.keyframeRequestsByTimestamp { arguments += ["-force_key_frames", "expr:\(keyframeRequestExpression)"] }
         arguments += encoderOptions(spec)
@@ -83,6 +92,7 @@ enum FFmpegArguments {
         var filtered = spec
         filtered.limitFrameRate = false
         filtered.skipBeforeSeconds = nil
+        filtered.correction = nil
         arguments += ["-vf", videoFilters(filtered)]
         arguments += encoderOptions(spec)
         arguments += ["-f", "flv", "-flush_packets", "1", "pipe:1"]
@@ -107,6 +117,7 @@ enum FFmpegArguments {
     /// ordinary picture an even timestamp and the picture a keyframe was requested for an odd one.
     static let keyframeRequestExpression = "mod(round(t*1000),2)"
 
+    /// The filter chain of a pipeline without a correction (`spec.correction` is not looked at).
     static func videoFilters(_ spec: VideoPipelineSpec) -> String {
         var filters: [String] = []
         if let select = selectFilter(spec) { filters.append(select) }
@@ -116,12 +127,62 @@ enum FFmpegArguments {
             filters.append("pad=\(width):\(height):(ow-iw)/2:(oh-ih)/2")
             filters.append("setsar=1")
         }
-        if let overlay = spec.overlay { filters.append(drawText(overlay, outputHeight: height)) }
+        filters += labelAndFormat(spec)
+        return filters.joined(separator: ",")
+    }
+
+    /// The filter graph of a pipeline that straightens the picture: the frame-rate limit first (on the camera's picture, as
+    /// without the correction), then the warp at `correction`'s size (the picture fitted inside the output: a letterboxed picture
+    /// is straightened before its bars are added, so the bars stay plain and the horizon lands on the picture's line, not the
+    /// frame's), then the bars, the label (drawn upright on the straightened picture) and the encoder's pixel format, on pad `cbv`.
+    /// The maps are inputs 1 to 4 (luma x, luma y, chroma x, chroma y).
+    static func correctedFilterGraph(_ spec: VideoPipelineSpec, _ correction: RemapStage) -> String {
+        var graph = ""
+        var input = "0:v:0"
+        if let select = selectFilter(spec) {
+            graph += "[0:v:0]\(select)[cbsel];"
+            input = "cbsel"
+        }
+        graph += remapChain(correction, input: input, output: "cbw")
+        let width = spec.settings.width, height = spec.settings.height
+        var filters: [String] = []
+        if correction.width != width || correction.height != height { filters.append("pad=\(width):\(height):(ow-iw)/2:(oh-ih)/2") }
+        // Square pixels whenever the picture was scaled, as without the correction.
+        if spec.sourceWidth != width || spec.sourceHeight != height { filters.append("setsar=1") }
+        filters += labelAndFormat(spec)
+        return graph + ";[cbw]" + filters.joined(separator: ",") + "[cbv]"
+    }
+
+    /// The correction's four maps as more inputs (1 to 4 after the picture, in the order `remapChain` reads them).
+    static func remapInputs(_ correction: RemapStage) -> [String] {
+        ["-i", correction.xMap, "-i", correction.yMap, "-i", correction.chromaXMap, "-i", correction.chromaYMap]
+    }
+
+    /// The per-plane warp of pad `input` at `correction`'s size with the maps of inputs 1 to 4 (`remapInputs`), onto pad `output`.
+    static func remapChain(_ correction: RemapStage, input: String, output: String) -> String {
+        PictureCorrection.ffmpegRemapChain(input: input, width: correction.width, height: correction.height, xMap: "1:v", yMap: "2:v",
+                                           chromaXMap: "3:v", chromaYMap: "4:v", output: output)
+    }
+
+    /// The end of every chain: the timestamp label, then the pixel format the encoder takes (on the GPU for VA-API).
+    private static func labelAndFormat(_ spec: VideoPipelineSpec) -> [String] {
+        var filters: [String] = []
+        if let overlay = spec.overlay { filters.append(drawText(overlay, outputHeight: spec.settings.height)) }
         switch spec.backend {
         case .software: filters.append("format=yuv420p")
         case .vaapi: filters += ["format=nv12", "hwupload"]
         }
-        return filters.joined(separator: ",")
+        return filters
+    }
+
+    /// The size a `sourceWidth × sourceHeight` picture is scaled to inside `width × height` with its shape kept: the size ffmpeg's
+    /// `force_original_aspect_ratio=decrease` gives (each side rounded to the nearest pixel, as `av_rescale` does), made even
+    /// (4:2:0) and at least 2 × 2.
+    static func fittedSize(sourceWidth: Int, sourceHeight: Int, width: Int, height: Int) -> (width: Int, height: Int) {
+        guard sourceWidth > 0, sourceHeight > 0 else { return (max(2, width & ~1), max(2, height & ~1)) }
+        let keptWidth = (height * sourceWidth + sourceHeight / 2) / sourceHeight
+        let keptHeight = (width * sourceHeight + sourceWidth / 2) / sourceWidth
+        return (max(2, min(width, keptWidth) & ~1), max(2, min(height, keptHeight) & ~1))
     }
 
     /// The frame-rate limiter as a `select` expression (`FrameRateLimiter`'s rule, with state in the expression's variable 1:
@@ -300,7 +361,7 @@ enum FFmpegArguments {
 
     /// One raw yuv420p picture in → one JPEG out, scaled to `width × height`.
     static func jpeg(inputWidth: Int, inputHeight: Int, width: Int, height: Int, quality: Double) -> [String] {
-        let q = min(31, max(2, Int(((1 - min(max(quality, 0), 1)) * 29).rounded()) + 2))
+        let q = mjpegScale(quality)
         var filters = ""
         if width != inputWidth || height != inputHeight { filters = "scale=\(width):\(height):flags=lanczos," }
         filters += "scale=out_range=pc,format=yuvj420p"
@@ -308,10 +369,27 @@ enum FFmpegArguments {
                          "-vf", filters, "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "\(q)", "-f", "mjpeg", "pipe:1"]
     }
 
-    /// A JPEG or PNG in → a JPEG out, scaled to `width × height`.
-    static func resizeImage(width: Int, height: Int) -> [String] {
+    /// A JPEG or PNG in → a JPEG out, scaled to `width × height`, at `quality` (0…1; nil: `-q:v 5`).
+    static func resizeImage(width: Int, height: Int, quality: Double? = nil) -> [String] {
         common + ["-f", "image2pipe", "-i", "pipe:0", "-vf", "scale=\(width):\(height):flags=lanczos,scale=out_range=pc,format=yuvj420p",
-                  "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "5", "-f", "mjpeg", "pipe:1"]
+                  "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "\(quality.map(mjpegScale) ?? 5)", "-f", "mjpeg", "pipe:1"]
+    }
+
+    /// A quality of 0…1 on mjpeg's `-q:v` scale (2 best, 31 worst).
+    static func mjpegScale(_ quality: Double) -> Int {
+        min(31, max(2, Int(((1 - min(max(quality, 0), 1)) * 29).rounded()) + 2))
+    }
+
+    /// A JPEG (or PNG) of `width × height` in, with the correction's maps for `correction` (`remapInputs`) → the straightened picture as a
+    /// JPEG of `width × height`. The warp works at `correction`'s size (its width even: a picture of an odd width is warped one pixel
+    /// wider and scaled back). The decoder's full-range picture goes into the warp's `format=yuv420p` and comes out full range, as
+    /// `resizeImage` writes it.
+    static func correctImage(_ correction: RemapStage, width: Int, height: Int) -> [String] {
+        var filters = correction.width != width || correction.height != height ? "scale=\(width):\(height):flags=lanczos," : ""
+        filters += "scale=out_range=pc,format=yuvj420p"
+        return common + ["-f", "image2pipe", "-i", "pipe:0"] + remapInputs(correction)
+            + ["-filter_complex", remapChain(correction, input: "0:v:0", output: "cbw") + ";[cbw]\(filters)[cbv]", "-map", "[cbv]",
+               "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "5", "-f", "mjpeg", "pipe:1"]
     }
 
     /// Digital silence, encoded as AAC-LC (FLV on stdout).

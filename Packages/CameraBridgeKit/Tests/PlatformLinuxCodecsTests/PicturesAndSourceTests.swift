@@ -109,6 +109,17 @@ import Testing
         #expect(size.width == 320 && size.height == 180)
     }
 
+    /// The pictures of an AI description are resized at quality 0.7: the quality is the one asked, and a picture that fits is left as it is.
+    @Test func resizeJPEGEncodesAtTheQualityAsked() throws {
+        let codecs = FFmpegTesting.makeCodecs()
+        let original = try codecs.jpeg(from: picture(), maxWidth: nil, maxHeight: nil, quality: 0.95)
+        let low = try codecs.resizeJPEG(original, maxWidth: 320, maxHeight: nil, quality: 0.1)
+        let high = try codecs.resizeJPEG(original, maxWidth: 320, maxHeight: nil, quality: 0.95)
+        #expect(FFmpegPictures.imageSize(low)?.width == 320 && FFmpegPictures.imageSize(high)?.width == 320)
+        #expect(low.count < high.count, "\(low.count) bytes at 0.1, \(high.count) at 0.95")
+        #expect(try codecs.resizeJPEG(original, maxWidth: 640, maxHeight: nil, quality: 0.1) == original)
+    }
+
     @Test func resizeJPEGAcceptsPNGAndRefusesOtherData() throws {
         let codecs = FFmpegTesting.makeCodecs()
         let runtime = FFmpegTesting.makeRuntime()
@@ -119,6 +130,127 @@ import Testing
         #expect(fromPNG.prefix(2) == Data([0xFF, 0xD8]) && FFmpegPictures.imageSize(fromPNG)?.width == 200)
         #expect(throws: MediaCodecError.self) { _ = try codecs.resizeJPEG(Data("not an image".utf8), maxWidth: 10, maxHeight: 10) }
         #expect(throws: MediaCodecError.self) { _ = try codecs.resizeJPEG(Data(), maxWidth: 10, maxHeight: 10) }
+    }
+
+    // MARK: Straighten the picture (snapshots)
+
+    private static let backyard = PictureCorrection(straighten: 0.4, level: 0.15)
+
+    /// A video-range picture: luma `background` everywhere (neutral colour), and `line` 3 pixels tall along the horizon `correction`
+    /// describes (rows ⌊h·H⌋ − 1 to ⌊h·H⌋ + 1 of each column).
+    private func horizonPicture(width: Int, height: Int, background: UInt8 = 16, line: UInt8 = 235, along correction: PictureCorrection?) -> RawVideoFrame {
+        let chroma = RawVideoFrame.chromaSize(width: width, height: height)
+        var pixels = [UInt8](repeating: background, count: width * height) + [UInt8](repeating: 128, count: 2 * chroma.width * chroma.height)
+        if let correction {
+            for column in 0..<width {
+                let row = Int((correction.horizon(across: (Double(column) + 0.5) / Double(width)) * Double(height)).rounded(.down))
+                for y in (row - 1)...(row + 1) where (0..<height).contains(y) { pixels[y * width + column] = line }
+            }
+        }
+        return RawVideoFrame(width: width, height: height, pts: MediaTime(value: 0, timescale: 90_000), pixels: Data(pixels))
+    }
+
+    /// The JPEG's luma, decoded by ffmpeg.
+    private func gray(_ jpeg: Data) throws -> [UInt8] {
+        [UInt8](try FFmpegOneShot.run(runtime: FFmpegTesting.makeRuntime(), label: "test decode",
+                                      arguments: FFmpegArguments.common + ["-f", "image2pipe", "-i", "pipe:0", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"],
+                                      input: jpeg, timeout: .seconds(10)))
+    }
+
+    /// The row of the brightest pixel in each column.
+    private func brightestRows(_ pixels: [UInt8], width: Int, height: Int) -> [Int] {
+        (0..<width).map { column in (0..<height).max { pixels[$0 * width + column] < pixels[$1 * width + column] } ?? 0 }
+    }
+
+    /// 641 wide too: a camera's picture fitted inside 1280 × 720 can be 1273 × 720, and the warp needs an even width (it is warped one
+    /// pixel wider and scaled back); and a small picture odd both ways (161 × 91, a 4:2:0 picture with half-filled colour samples).
+    @Test(arguments: [(640, 284), (641, 284), (161, 91)]) func aCurvedHorizonComesOutFlat(width: Int, height: Int) throws {
+        let runtime = FFmpegTesting.makeRuntime()
+        let jpeg = try FFmpegPictures.jpeg(from: horizonPicture(width: width, height: height, along: Self.backyard), maxWidth: nil, maxHeight: nil,
+                                           quality: 0.9, runtime: runtime)
+        #expect(FFmpegPictures.imageSize(jpeg).map { [$0.width, $0.height] } == [width, height])
+        let landing = Self.backyard.landing * Double(height)
+        let columns = (width / 20)..<(width - width / 20)   // 5 % to 95 %
+        // The camera's picture: the line follows the bent horizon, far from the landing line in most columns.
+        let before = brightestRows(try gray(jpeg), width: width, height: height)
+        #expect(columns.filter { abs(Double(before[$0]) - landing) > 3 }.count > columns.count / 2)
+
+        let straightened = try FFmpegTesting.makeCodecs().correctJPEG(jpeg, correction: Self.backyard)
+        #expect(straightened.prefix(2) == Data([0xFF, 0xD8]))
+        let size = try #require(FFmpegPictures.imageSize(straightened))
+        #expect(size.width == width && size.height == height)
+        let pixels = try gray(straightened)
+        #expect(pixels.count == width * height)
+        let after = brightestRows(pixels, width: width, height: height)
+        let off = columns.filter { abs(Double(after[$0]) - landing) > 3 }.map { "column \($0): row \(after[$0])" }
+        #expect(off.isEmpty, "the horizon lands on row \(landing): \(off.prefix(12))")
+        // Full range kept: the black above the line is still black, the line still white (in video range they would be 16 and 235).
+        #expect(pixels[(10 * width)..<(11 * width)].allSatisfy { $0 < 8 }, "\(pixels[(10 * width)..<(10 * width + 8)])")
+        let peaks = columns.map { Int(pixels[after[$0] * width + $0]) }
+        #expect(peaks.allSatisfy { $0 > 220 } && peaks.reduce(0, +) / peaks.count > 245, "the line's brightest pixels: \(peaks.min() ?? 0) at least")
+    }
+
+    @Test func theStraightenedPictureKeepsTheJPEGsColourRange() throws {
+        // A plain grey stays the same grey (the warp moves rows, never changes a plain picture): neither squeezed into video range
+        // nor stretched out of it by the decoder's full-range JPEG picture going through the 4:2:0 warp.
+        let runtime = FFmpegTesting.makeRuntime()
+        let codecs = FFmpegTesting.makeCodecs()
+        for level in [40, 128, 200] as [UInt8] {
+            let jpeg = try FFmpegPictures.jpeg(from: horizonPicture(width: 320, height: 180, background: level, along: nil), maxWidth: nil, maxHeight: nil,
+                                               quality: 0.9, runtime: runtime)
+            let before = try gray(jpeg), after = try gray(codecs.correctJPEG(jpeg, correction: Self.backyard))
+            #expect(after.count == before.count)
+            let mean = { (pixels: [UInt8]) in Double(pixels.reduce(0) { $0 + Int($1) }) / Double(max(1, pixels.count)) }
+            #expect(abs(mean(after) - mean(before)) < 1.5, "level \(level): \(mean(before)) before, \(mean(after)) after")
+        }
+    }
+
+    @Test func theStraighteningChildHasTheEnginesSnapshotLimit() {
+        // The engine gives up on a snapshot's correction a little after this (CorrectedSnapshots.deadline): one number, in MediaCore.
+        #expect(FFmpegPictures.straightenTimeout == PictureCorrection.snapshotTimeout)
+    }
+
+    /// The remap sets (`camera-bridge-remap-…` directories) in `scratch` and the identity of each one's four map files.
+    private func mapSets(in scratch: URL) throws -> [String: [FileIdentity]] {
+        var sets: [String: [FileIdentity]] = [:]
+        for name in try FileManager.default.contentsOfDirectory(atPath: scratch.path) where name.hasPrefix("camera-bridge-remap-") {
+            let directory = scratch.appendingPathComponent(name)
+            sets[name] = try ["x.pgm", "y.pgm", "cx.pgm", "cy.pgm"].map { try FileIdentity(path: directory.appendingPathComponent($0).path) }
+        }
+        return sets
+    }
+
+    @Test func snapshotsOfOneSizeAndCorrectionReuseTheirMapsAndTheyGoWithTheCodecs() throws {
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("cb-snapshot-maps-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        var codecs: FFmpegMediaCodecs? = FFmpegTesting.makeCodecs(FFmpegCodecsConfiguration(scratchDirectory: scratch))
+        let jpeg = try #require(codecs).jpeg(from: picture(), maxWidth: nil, maxHeight: nil, quality: 0.8)
+        let first = try #require(codecs).correctJPEG(jpeg, correction: Self.backyard)
+        let written = try mapSets(in: scratch)
+        #expect(written.count == 1 && written.values.first?.count == 4, "one set of maps after the first snapshot: \(written.keys)")
+        for _ in 0..<3 { #expect(try #require(codecs).correctJPEG(jpeg, correction: Self.backyard) == first) }
+        #expect(try mapSets(in: scratch) == written, "the next snapshots use the same files, none rewritten")
+        // Another correction (the setting was saved) or another size gets its own set; the first is still there for its camera.
+        let flatter = PictureCorrection(straighten: -0.2, level: 0.05)
+        _ = try #require(codecs).correctJPEG(jpeg, correction: flatter)
+        _ = try #require(codecs).correctJPEG(try #require(codecs).resizeJPEG(jpeg, maxWidth: 320, maxHeight: nil), correction: Self.backyard)
+        let sets = try mapSets(in: scratch)
+        #expect(sets.count == 3 && written.allSatisfy { sets[$0.key] == $0.value })
+        // The maps stay as long as the codecs do, and go with them.
+        codecs = nil
+        #expect(try FileManager.default.contentsOfDirectory(atPath: scratch.path).isEmpty, "the maps' directories are removed with the codecs")
+    }
+
+    @Test func correctJPEGLeavesAnOffPictureAloneAndRefusesOtherData() throws {
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("cb-snapshot-maps-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let codecs = FFmpegTesting.makeCodecs(FFmpegCodecsConfiguration(scratchDirectory: scratch))
+        let jpeg = try codecs.jpeg(from: picture(), maxWidth: nil, maxHeight: nil, quality: 0.8)
+        #expect(try codecs.correctJPEG(jpeg, correction: .off) == jpeg)
+        #expect(throws: MediaCodecError.self) { _ = try codecs.correctJPEG(Data("not an image".utf8), correction: Self.backyard) }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: scratch.path).isEmpty, "an off picture and a refused one write no maps")
     }
 }
 

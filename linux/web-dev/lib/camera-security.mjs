@@ -73,17 +73,18 @@ const quiet = () => ({ watched: true, today: 0, last24h: 0, names: [] });
 const notWatched = () => ({ watched: false, today: 0, last24h: 0, names: [] });
 const at = (ms) => new Date(Math.floor(ms / 1000) * 1000).toISOString().replace('.000Z', 'Z');
 
-/** status.security.guard of each fake: watched or not, its blocked lookups today and in 24 hours, and its names, most asked first (the bridge's order). */
+/** status.security.guard of each fake: watched or not, its blocked lookups today and in 24 hours, and its names, most asked first (the bridge's
+ *  order), each with when it was first and last asked for in the last 7 days. */
 const GUARD = {
   red: quiet,
   yellow: notWatched,
   green: notWatched,
   gold: quiet,
   trying: (nowMs) => ({ watched: true, today: 47, last24h: 112, names: [
-    { name: '*.p2p.example.com', count: 290, last: at(nowMs - 4 * MINUTE) },
-    { name: 'cloud.example.net', count: 75, last: at(nowMs - 120 * MINUTE) },
-    { name: 'time.example.org', count: 21, last: at(nowMs - 20 * 60 * MINUTE) },
-    { name: 'update.example.com', count: 3, last: at(nowMs - 3 * 24 * 60 * MINUTE) },
+    { name: '*.p2p.example.com', count: 290, first: at(nowMs - 6 * 24 * 60 * MINUTE), last: at(nowMs - 4 * MINUTE) },
+    { name: 'cloud.example.net', count: 75, first: at(nowMs - 5 * 24 * 60 * MINUTE), last: at(nowMs - 120 * MINUTE) },
+    { name: 'time.example.org', count: 21, first: at(nowMs - 4 * 24 * 60 * MINUTE), last: at(nowMs - 20 * 60 * MINUTE) },
+    { name: 'update.example.com', count: 3, first: at(nowMs - 3 * 24 * 60 * MINUTE), last: at(nowMs - 3 * 24 * 60 * MINUTE) },
   ] }),
 };
 

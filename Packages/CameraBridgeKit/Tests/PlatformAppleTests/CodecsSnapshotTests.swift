@@ -58,6 +58,17 @@ import Testing
         #expect(try codecs.resizeJPEG(original, maxWidth: 1920, maxHeight: 1080) == original)
     }
 
+    /// The pictures of an AI description are resized at quality 0.7: the quality is the one asked, and a picture that fits is left as it is.
+    @Test func resizeJPEGEncodesAtTheQualityAsked() throws {
+        let picture = try #require(try CodecFixtures.pictures(width: 1280, height: 720, count: 1).first)
+        let original = try codecs.jpeg(from: picture, maxWidth: nil, maxHeight: nil, quality: 0.95)
+        let low = try codecs.resizeJPEG(original, maxWidth: 640, maxHeight: nil, quality: 0.2)
+        let high = try codecs.resizeJPEG(original, maxWidth: 640, maxHeight: nil, quality: 0.95)
+        #expect(CodecFixtures.decodedImageSize(low)?.width == 640 && CodecFixtures.decodedImageSize(high)?.width == 640)
+        #expect(low.count < high.count, "\(low.count) bytes at 0.2, \(high.count) at 0.95")
+        #expect(try codecs.resizeJPEG(original, maxWidth: 1280, maxHeight: nil, quality: 0.2) == original)
+    }
+
     @Test func resizeRejectsNonImages() {
         #expect(throws: MediaCodecError.self) { _ = try codecs.resizeJPEG(Data("not a jpeg".utf8), maxWidth: 100, maxHeight: nil) }
         #expect(throws: MediaCodecError.self) { _ = try codecs.resizeJPEG(Data(), maxWidth: nil, maxHeight: nil) }

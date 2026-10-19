@@ -77,7 +77,13 @@ extension CameraSettingsService {
             return .refused("the camera shows no switch for it")
         }
         let answer: ISAPIWriteAnswer
-        do { answer = try await api.write(path, document: edited) } catch let refusal as ISAPIRefusal { return .refused(refusal.words) }
+        do {
+            answer = try await api.write(path, document: edited)
+        } catch let refusal as ISAPIRefusal {
+            return .refused(refusal.words)
+        } catch CameraAdapterError.notPermitted {
+            return .notPermittedRefusal
+        }
         if let after = try await api.document(path), let now = Self.featureEnabled(after), now != enabled, answer != .rebootRequired {
             return .refused("the camera kept it \(now ? "on" : "off")")
         }

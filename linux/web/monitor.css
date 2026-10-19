@@ -6,6 +6,7 @@
   --mon-bg: #000; --mon-panel: #0b0b0d; --mon-line: #1f1f25; --mon-text: #e8e8ea; --mon-dim: #8a8a93;
   --bg: #000; --bg-raised: #0b0b0d; --surface: #0b0b0d; --surface-2: #1a1a1f; --border: #1f1f25; --border-strong: #3a3a42;
   --text: #e8e8ea; --text-2: #b4b4bc; --text-3: #8a8a93; --link: #e06a5a; --focus: #efe6d8; --brand-accent: #e06a5a;
+  --danger: #ff6a61; --warning: #f0b254;
   color-scheme: dark;
   /* From 900 px exactly the height the shell gives it (style.css, the Monitor's route): nothing on the page or in it scrolls. */
   display: flex; flex-direction: column; gap: 10px; padding: 12px; flex: 1 1 auto; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden;
@@ -145,6 +146,14 @@
 .mon-event-play, .mon-event-note { grid-column: 4; grid-row: 2; justify-self: end; color: var(--mon-dim); }
 .mon-event-note { font-size: 0.75rem; white-space: nowrap; }
 .mon-event:hover .mon-event-play, .mon-event[data-selected="true"] .mon-event-play { color: var(--brand-accent); }
+/* An AI service's sentence (wall-events-model.js eventDescription), on its own line under the kind: a red mark when it rates the event alarm,
+   an amber one when unusual, none when routine; "Nothing notable" dimmed. The colours are the page's own, held dark on the wall above. */
+.mon-event-ai { grid-column: 1 / -1; grid-row: 3; color: var(--mon-text); overflow-wrap: anywhere; unicode-bidi: isolate; }
+.mon-event-ai[data-concern="alarm"]::before, .mon-event-ai[data-concern="unusual"]::before {
+  content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; vertical-align: 0.05em; background: var(--danger);
+}
+.mon-event-ai[data-concern="unusual"]::before { background: var(--warning); }
+.mon-event-ai[data-concern="nothing"] { color: var(--mon-dim); font-style: italic; }
 .mon-item-more { padding: 8px 2px; text-align: center; }
 .mon-empty { color: var(--mon-dim); padding: 8px 2px; }
 

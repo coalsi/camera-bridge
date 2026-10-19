@@ -11,12 +11,14 @@ struct ArchiveStoreLog: Sendable {
         let logger = Log(category: "NVR")
         switch level {
         case .warning, .error: logger.warning(message)
+        case .debug: logger.debug(message)
         default: logger.info(message)
         }
     }
 
     static let silent = ArchiveStoreLog { _, _ in }
 
+    func debug(_ message: @autoclosure () -> String) { emit(.debug, message()) }
     func info(_ message: @autoclosure () -> String) { emit(.info, message()) }
     func warning(_ message: @autoclosure () -> String) { emit(.warning, message()) }
 }

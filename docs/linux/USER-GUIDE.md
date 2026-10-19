@@ -10,7 +10,7 @@ You need: a mini PC (see HARDWARE.md), a USB stick or SSD (16 GB or more), an Et
 
 ## 1. Download
 
-Open the project's **Releases** page on GitHub and pick the newest release whose tag starts with `os-v` (for example `os-v0.1`). Releases tagged `v1.0`, `v1.1` ... are the Mac app, not this.
+Open the project's **Releases** page on GitHub and pick the newest release whose tag starts with `os-v` (for example `os-v0.1`). Releases tagged `v1.0`, `v1.1` ... are the earlier Mac app (archived), not this.
 
 Download `camera-bridge-os-<version>-amd64.img.xz`. Optionally also download the `.sha256` file and check it:
 
@@ -76,9 +76,31 @@ The first time, the page asks you to choose an administrator password. Until you
 
 Tips: give the cameras fixed addresses (a DHCP reservation in your router), and use a separate camera user with a strong password. Cameras on a different VLAN need your router to allow the box to reach them.
 
-**Set up for Camera Bridge** (offered right after you add a Hikvision, Reolink, Amcrest or ONVIF camera, and in its page's **Camera setup** section) makes the camera right for the box in one step: its streams for recording, Apple Home and live view, its own on-screen labels off, the box's time zone, its clock set from the box, and on Hikvision cameras Hik-Connect (the maker's cloud) and UPnP off. It reads the camera first and shows every change (now → after) before anything happens; it saves the camera's settings first, and **Restore original settings** puts them all back. It never changes the camera's address, ports, users or passwords, and never restarts it. The box answers time requests from your local network only (the firewall allows nothing else).
+**Set up for Camera Bridge** (offered right after you add a Hikvision, Reolink, Amcrest or ONVIF camera, and in its page's **Camera setup** section) makes the camera right for the box in one step: its streams for recording, Apple Home and live view, its own on-screen labels off, the box's time zone, its clock set from the box, and on Hikvision cameras Hik-Connect (the maker's cloud) and UPnP off. It reads the camera first and shows every change (now → after) before anything happens; it saves the camera's settings first, and **Restore original settings** puts them all back. It never changes the camera's address, ports, users or passwords (the choice **Fix its address so the DNS stays**, below, keeps the address exactly as it is), and it restarts the camera only when you press **Restart the camera now**. The box answers time requests from your local network only (the firewall allows nothing else).
 
-**When a step can't be done.** A step the camera refuses or doesn't support says why, and **Change it by hand** under it says where to change it yourself (the camera's app or web page) and what to enter, with the box's own address on your network filled in for the camera's DNS and time server (for example "Preferred DNS server" and "Alternate DNS server" both the box's address). Menu names Camera Bridge has not confirmed for your camera come with "Menu names differ between models": look for the closest match. If the camera says the account Camera Bridge signs in with may not change a setting, change it by hand or give Camera Bridge an administrator account on the camera; the setup still does every other step. For **Watch its internet**, your router can do it instead: reserve the camera's address and have the router hand that camera the box as its DNS server (this counts too, but can change when the router renews the address), or block the camera's internet. After changing a camera's DNS yourself, press **Check again** on the camera's **Security** card: once its DNS asks only the box, the Internet guard watches it, whoever changed it. The Security card shows the same help under anything the setup can't change, and under **Not watched** when the camera's DNS is why. Restoring original settings shows no such help: it only says what could not be put back.
+**When a step can't be done.** A step the camera refuses or doesn't support says why, and **Change it by hand** under it says where to change it yourself (the camera's app or web page) and what to enter, with the box's own address on your network filled in for the camera's DNS and time server (for example "Preferred DNS server" and "Alternate DNS server" both the box's address). Menu names Camera Bridge has not confirmed for your camera come with "Menu names differ between models": look for the closest match. If the camera says the account Camera Bridge signs in with may not change a setting, change it by hand or give Camera Bridge an administrator account on the camera; the setup still does every other step. For **Watch its internet**, your router can do it instead if it can hand one device its own DNS server (OpenWrt, pfSense, OPNsense, MikroTik, ASUS, Pi-hole; eero, Google/Nest Wifi, Deco and Orbi can't): reserve the camera's address and have the router hand that camera the box as its DNS server. This works only while the camera takes its DNS automatically (DHCP), and only from its next DHCP renewal or restart; it counts too, but can change when the router renews the address. Or block the camera's internet. After changing a camera's DNS yourself, press **Check again** on the camera's **Security** card: once its DNS asks only the box, the Internet guard watches it, whoever changed it. The Security card shows the same help under anything the setup can't change, and under **Not watched** when the camera's DNS is why. Restoring original settings shows no such help: it only says what could not be put back.
+
+**Watch its internet (the Internet guard).** This step points the camera's DNS (the server it asks to look up names) at the box. The box answers every name with "does not exist", so the camera can't find its maker's cloud, and the camera's **Security** card shows what it tried. Camera Bridge puts the box in both of the camera's DNS slots and gives a slow camera up to 30 seconds to take the change. Dahua, Amcrest and Lorex cameras are changed through their own settings first.
+
+- **Fix its address so the DNS stays.** Some cameras keep a DNS server set by hand only while their address is fixed (a Hikvision on DHCP, a Jennov, an ONVIF camera that dropped the change). For those, the preview offers this choice, off unless you tick it. It keeps the camera's address, mask and gateway exactly as they are, turns DHCP off on the camera and points its DNS at the box. Then reserve that address for the camera in your router (the result shows the camera's hardware address), so nothing else takes it. **Restore original settings** puts DHCP back.
+- **Restart the camera now.** A camera that needs a restart to use its new settings (a Hikvision's "Reboot Required") shows this button in the setup's result and on its Security card. Camera Bridge restarts a camera only when you press it; the camera is then off the network for about a minute.
+- **Setting the DNS by hand.** Where Camera Bridge can't, **Change it by hand** under the step (and on the Security card under **Not watched**) has a button **Open the camera's web page**, says what the camera asks now and what to change ("Right now it asks 192.168.77.1 and 192.0.2.53. Change both to 192.168.77.28."), has a **Copy** button for each address, and shows the menus of the camera's maker. For a camera that needs a fixed address first, it says which address, mask and gateway to keep and to reserve in your router. It also warns of what lets a camera go around the box: a public or empty second DNS server, IPv6 left on (when Camera Bridge read it on: turn IPv6 off on the camera), a restart the camera asks for, and a camera plugged into a recorder's own ports (set its DNS on the recorder).
+- **Local only.** The Security card's top level needs a full day of watching without an internet lookup, and at least one lookup seen from the camera (any name, its home network's own names too). A camera that never asks the box may have a DNS server of its own built in, so until the box sees it ask, the card stays at **Good** and says "No lookups seen yet; Camera Bridge can’t rule out a built-in DNS server."
+
+### Straighten the picture
+
+A camera that joins two lenses into one wide picture (a panorama camera) can show the horizon as a curve, most when it points at the sky. On the camera's page, the **Straighten the picture** card (below **Labels on video**) flattens it again, with two sliders:
+
+* **Straighten** (−60 to 60) takes the curve out of the horizon. **Level** (−40 to 40) tips the picture, for a horizon that leans. **Reset** puts both back to 0, which is off.
+* The camera's preview on the page bends as you drag, and a guide line on it shows the height the horizon lands on. Move the sliders until the horizon sits on the guide. A slider saves when you let go of it (with the arrow keys, when you pause). Nothing restarts, and no recording is cut.
+* The picture keeps its shape: nothing is cropped and no black bars appear. A strong setting stretches parts of the picture, and the card says by how much once it is 2× or more ("At this setting parts of the picture are stretched up to 2.7×."). Gentle settings look best.
+
+The correction shows everywhere that camera is seen: its page, live view, the Monitor, recordings as you play them, the Watch screen, zoom, snapshots, Apple Home's live view and tile pictures, and HomeKit Secure Video.
+
+* **Recordings on the box keep the camera's original picture.** Only what is shown is straightened, so you can change the setting later, or turn it off, and every recording follows.
+* **Apple Home:** while a camera is straightened, the box converts its video for Apple Home instead of passing the camera's own stream through. That uses more of the box's processor for that camera, so on a busy box straighten only the cameras that need it. A live view already open straightens at once; a HomeKit Secure Video recording keeps the way it started until the next one.
+* **Saved clips** (**Save clip**, then **Export clip**, on the Monitor and the Watch screen) are straightened by default. For a camera whose correction is on, the clip bar has a **Straightened** checkbox: unticked, the clip is saved as recorded, which is quicker. Your browser remembers the choice.
+* This is in Camera Bridge OS only, not in the Mac app.
 
 ## 6. Add them to Apple Home
 
@@ -218,6 +240,54 @@ Recordings are played by your browser's own video player, and the box serves pla
 
 Open the box with `http://`, not `https://`, as in section 4.
 
+## 12. AI descriptions of events
+
+Optional, and off until you turn it on. When something happens at a camera (motion, a person, a vehicle, an animal, a package, a face or a doorbell ring), the box can ask an AI service to write one short sentence about it, such as "A delivery driver leaves a package at the front door". Tamper, sound and alarm-input events are not described. Nothing else depends on it: viewing, recording, Apple Home and the Internet guard work the same with it off, or when the service is down.
+
+The sentence is kept with the event and shown in two places:
+
+* **The Monitor's events list**: on its own line under the kind of event. A red dot marks an event the service rates an alarm (a likely break-in, someone at a door handle, a covered face at a door or window), an amber dot an unusual one. "Nothing notable", dimmed, means it saw nothing worth saying (shadows, trees, rain). The sentence arrives a few seconds after the event, and the row fills in by itself.
+* **The camera's page**, on the **AI descriptions** card: the camera's last description with its time.
+
+It needs your own account with the AI service and your own key. Camera Bridge does not supply one, and the service charges you whatever it charges for each description.
+
+### Set it up
+
+1. Get an API key from the service: Claude (Anthropic), or any OpenAI-compatible service (OpenAI, OpenRouter, or a model on your own network such as Ollama or LM Studio).
+2. Open **Settings > AI descriptions** and choose the **Service**. For Claude the **Model** is filled in with the least expensive one that reads pictures (`claude-haiku-5-5` at the time of writing); leave it on the default unless you know another model works with Camera Bridge. For an OpenAI-compatible service type its **Address**, like `https://api.openai.com/v1`, or `http://192.168.77.10:11434/v1` for a model at home (which may need no key), and the name of a **Model** that can see pictures.
+3. Paste your key into **API key** and press **Save**. The key stays on the box and is never shown again; the card shows only its last four characters.
+4. Choose a camera and press **Try it**. The box sends that camera's pictures from this moment to the service, then shows the sentence and how long it took, or says in plain words what is wrong ("The key was refused", "The service needs a key", "The service refused the request; check the model name", "The service could not be reached"). Try it sends the pictures even when the camera's AI switch is off, because you pressed it. It counts toward the day's limit and stores nothing.
+5. Open the page of each camera you want described and switch **Describe events with AI** on. Every camera starts with it off.
+
+AI descriptions also need a place for recordings (**Settings > Recording**), because the events are kept beside the recordings. **Record** itself does not have to be on. With no place chosen the card says so, and no event is kept or described.
+
+### What leaves the box
+
+For each event on a camera whose switch is on, the box sends the service up to five still pictures from around the event: up to two from just before it, one at the moment it started and up to two from just after, each a small JPEG at most 768 pixels wide. With them go the camera's name, the kind of event and the local time. No video, no sound, nothing else, and nothing at all from a camera whose switch is off (the one exception is what you send yourself with Try it). The pictures are not kept on the box; only the sentence is. What the service does with them is up to that service's own terms, so read them, or use a model on your own network.
+
+With a model at home (an `http://` address on your own network) the pictures stay on your network. An `http://` address is not encrypted, so use one only for a model on your own network. Anything on the internet should be an `https://` address.
+
+The box never follows a redirect from the service: the key and the pictures go only to the address you saved. If that address answers with a redirect (a typo, a gateway, a captive portal) the card says "The service tried to send the request elsewhere; check the address." and nothing is sent on.
+
+While a camera's switch is on and the service is not on your home network (Claude, or an address that is not a private one such as `192.168.x.x` or `10.x.x.x`, nor a `.local` or `.lan` name), that camera's **Security** card adds one line: "Its event pictures go to Claude for AI descriptions." (or the service's address). The camera's badge, such as **Local only**, is about the camera's own internet traffic and does not change.
+
+### Limits
+
+* Events are described one at a time, and at most one per camera a minute: an event within a minute of the last event picked on that camera gets no sentence.
+* A set of pictures that waits more than a minute for its turn is dropped.
+* At most 200 descriptions a day for all cameras together. You can change the **Daily limit** (1 to 5000). When it is reached, events are kept without a description until midnight, and the card says so. The card shows today's count and the last seven days; the count is kept on the box, so a restart does not reset it.
+* If the network fails or the service has trouble, the box tries once more, unless you have turned the camera's switch off, chosen **Off** or changed the service meanwhile: then nothing more is sent for that event. The same goes for the pictures being made. If the service refuses the key, it stops describing and the card says so; save a new key, choose another service, or press Try it and see it work, to start again.
+
+### Turn it off, and delete the key
+
+* **One camera**: switch **Describe events with AI** off on its page. Nothing more is sent for that camera.
+* **All cameras**: in **Settings > AI descriptions** choose **Off** as the service and press **Save**. This also removes the saved key.
+* **Just the key**: press **Remove** beside the saved key and confirm. The box forgets it. A service that needs a key then describes nothing until you save one again.
+* Changing the service (or, for an OpenAI-compatible one, the server in its address) also removes the saved key, so a key is never sent to a service it was not made for. Type the key of the new one.
+* A factory reset (section 9) erases the key along with everything else.
+
+Sentences already written stay with their events and go when the recordings' rules delete those days (**Keep for** and **Maximum size**, section 11).
+
 ## Troubleshooting
 
 | Problem | What to try |
@@ -240,6 +310,7 @@ Open the box with `http://`, not `https://`, as in section 4.
 | Live looks like a slideshow | Record is off or paused. Live video is the newest part of the recording: switch Record on (section 11). |
 | The picture jumps by many seconds when I drag the timeline | The camera sends a key picture only every N seconds (a "smart codec"). See "Cameras that jump while you scrub" in section 11. |
 | The times are wrong | The box takes its time from the internet. If a camera's clock is more than a minute away from the box's, the box stamps the recordings with its own clock. The page shows times in your browser's time zone. |
+| Events have no AI description | Look at the AI descriptions card in **Settings**: it says if the key was refused, a key is missing, the day's limit is reached, or no place for recordings is chosen. Then check that **Describe events with AI** is on for that camera, that the event is a motion, person, vehicle, animal, package, face or doorbell event, and that the camera had no other described event in the last minute. **Try it** says in plain words what is wrong. |
 
 ## What this version does not do
 
@@ -249,8 +320,9 @@ Open the box with `http://`, not `https://`, as in section 4.
 * The box is for your local network only. Do not forward ports to it from the internet. Apple Home reaches it through your home hub.
 * Recordings go only to the box's own storage. Recording to a separate USB drive comes in a later version.
 * The page does not play recorded sound yet (it is stored when Record sound is on).
-* No export or download of clips, and no motion or person markers on the timeline: the wave shows how much was going on, not what.
+* No motion or person markers on the timeline: the wave shows how much was going on, not what.
 * The web page is plain HTTP; an HTTPS option comes later.
+* AI descriptions are a sentence on the web page only: Apple Home's notifications do not show them, they cannot be searched, older events are not described afterwards, and the box does not tell who a person is.
 
 ## Recording to an attached drive
 
@@ -274,6 +346,8 @@ With a network cable the box needs nothing else. For Wi-Fi there are three ways:
 The box looks for its saved networks again every five minutes while nobody is using its hotspot, so it comes back by itself after a Wi-Fi outage.
 
 ## Moving from Camera Bridge for Mac
+
+If you used the earlier Camera Bridge for Mac app, its cameras can come over to the box:
 
 1. On the Mac: Camera Bridge › Settings › Backup › Export…. Save the file.
 2. On the box: Settings › Move from Camera Bridge for Mac › Choose the backup file…, and pick that file. The cameras in it are listed with their addresses and user names.

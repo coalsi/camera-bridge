@@ -1,9 +1,12 @@
 # Distribution
 
+> **Archived 2026-10-18.** This describes how the Mac app was signed, notarized and released. The app is archived
+> (see [../README.md](../README.md)); paths below are relative to `Archive/mac-app` unless they start with `Packages/`.
+
 Camera Bridge is free and source-available (PolyForm Noncommercial 1.0.0). It is **not** sold through the Mac App Store.
 Releases are a notarized DMG from GitHub Releases, signed with a Developer ID, and the app updates itself with Sparkle 2.
 The App Store route (sandbox, in-app purchases, Camera Bridge Pro) was dropped on 2026-10-08; the old checklists are kept in
-[archive/app-store](archive/app-store).
+[docs/archive/app-store](../../../docs/archive/app-store).
 
 ## Signing and entitlements
 

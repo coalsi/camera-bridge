@@ -8,7 +8,7 @@ import { h, replace, svg } from '../dom.js';
 import { icon } from '../icons.js';
 import { stampText } from '../stamp.js';
 import { cameraList, store, subscribe } from '../store.js';
-import { PAGE_ROWS, createEventArchive, durationText, gatherEvents, isRecorded, sameEvent, visibleEvents } from './wall-events-model.js';
+import { PAGE_ROWS, concernWord, createEventArchive, durationText, gatherEvents, isRecorded, sameEvent, visibleEvents } from './wall-events-model.js';
 
 const BANNER_MS = 9_000;
 const HISTORY_MAX = 200;
@@ -30,7 +30,7 @@ function playMark() {
 /**
  * The events machinery of one wall: `{ soundButton, banners, head, list, update(context), select(event), destroy }`.
  *   onAlert(id, text, level)  marks the camera's tile; the wall clears the mark itself
- *   onPick(event)             a row was chosen (click, Enter or Space): event is { at, endAt, cameraId, cameraName, label, level }
+ *   onPick(event)             a row was chosen (click, Enter or Space): event is { at, endAt, cameraId, cameraName, label, level, recorded, description }
  *   onChange()                the events changed: the wall calls update() again
  *   now()                     the server's clock (live events are stamped with it, like the bridge's own)
  *   loadEvents(query)         GET nvr/events ({ cameras, fromMs, toMs, limit } -> its answer); without it the list has no archive
@@ -99,11 +99,15 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
 
   // MARK: The list
 
+  /** One row. An AI description is the model's words: on its own line under the kind, as text only, its mark from `data-concern` (monitor.css). */
   function rowFor(event, index, recorded) {
     const chosen = sameEvent(event, selected);
     const duration = durationText(event.endAt !== null ? event.endAt - event.at : null);
     const when = stampText(event.at);
-    const label = `${event.label}, ${event.cameraName}, ${when}${duration ? `, ${duration}` : ''}${recorded ? '' : ', not recorded'}`;
+    const described = event.description;
+    const word = described ? concernWord(described.concern) : null;
+    const said = described ? `, ${word ? `${word.toLowerCase()}: ` : ''}${described.text}` : '';
+    const label = `${event.label}, ${event.cameraName}, ${when}${duration ? `, ${duration}` : ''}${recorded ? '' : ', not recorded'}${said}`;
     const button = h('button', {
       class: 'mon-event', type: 'button', 'aria-label': label, 'aria-current': chosen ? 'true' : null, 'aria-disabled': recorded ? null : 'true',
       title: recorded ? 'Play every camera from just before this' : 'Nothing was recorded at this moment',
@@ -113,6 +117,7 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
     h('strong', { class: 'mon-event-camera' }, event.cameraName),
     h('span', { class: 'mon-event-kind' }, event.label),
     duration ? h('span', { class: 'mon-event-duration' }, duration) : null,
+    described ? h('span', { class: 'mon-event-ai', title: word, dataset: { concern: described.concern } }, described.text) : null,
     recorded ? playMark() : h('span', { class: 'mon-event-note' }, 'Not recorded'));
     return h('li', { class: 'mon-item' }, button);
   }
@@ -127,7 +132,7 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
     const drawn = visible.slice(0, shownRows);
     const recorded = drawn.map((event) => isRecorded(event, extentOf(event.cameraId)));
     const key = [visible.length, shownRows, older, selected ? `${selected.cameraId}|${selected.label}|${selected.at}` : '',
-      ...drawn.map((event, i) => `${event.cameraId}|${event.label}|${event.at}|${event.endAt}|${recorded[i]}|${event.cameraName}`)].join('\n');
+      ...drawn.map((event, i) => `${event.cameraId}|${event.label}|${event.at}|${event.endAt}|${recorded[i]}|${event.cameraName}|${event.description?.concern}|${event.description?.text}`)].join('\n');
     if (key === signature) return;
     signature = key;
 

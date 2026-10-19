@@ -99,14 +99,23 @@ extension WebApp {
         var start: Int64
         var end: OrNull<Int64>
         var recorded: Bool
+        var description: OrNull<DescriptionResource>
+    }
+
+    /// What an AI service said it saw: the sentence, what sort of thing, how much to care. Not the model or the time.
+    private struct DescriptionResource: Encodable {
+        var summary: String
+        var kind: EventDescription.Kind
+        var concern: EventDescription.Concern
     }
 
     /// `GET nvr/events?from=ms&to=ms&cameras=<id,…>&limit=n`: the events of those cameras that began in `from..<to` (at most 31 days), newest
     /// first, at most `limit` (1 to 1000, 200 when absent); `more` says older ones in the range were left out (ask again with `to` = the oldest
     /// `start`). A page never splits a millisecond, so that next page loses none: the events of the oldest start are all in this page or all in
     /// the next, and when more than `limit` began in that one millisecond and nothing newer, the page holds them all. 503 `archive_unavailable`
-    /// (with `Retry-After`) while the recordings load or their folder is missing: never an empty answer then. Names and times only: no
-    /// address, path or credential.
+    /// (with `Retry-After`) while the recordings load or their folder is missing: never an empty answer then. Names, times and, for an event
+    /// an AI service described, its sentence (`description`: summary, kind and concern; null until it is written): no address, path,
+    /// credential or picture.
     func nvrEvents(_ ctx: RequestContext) async throws -> HTTPResponse {
         struct Answer: Encodable {
             var from: Int64
@@ -132,7 +141,8 @@ extension WebApp {
             }
             let events = page.events.map { event in
                 EventResource(id: event.id, cameraID: event.camera, kind: event.kind, start: Self.milliseconds(event.start),
-                              end: OrNull(event.end.map(Self.milliseconds)), recorded: event.recorded)
+                              end: OrNull(event.end.map(Self.milliseconds)), recorded: event.recorded,
+                              description: OrNull(event.description.map { DescriptionResource(summary: $0.summary, kind: $0.kind, concern: $0.concern) }))
             }
             return .json(Answer(from: from, to: to, serverTime: Self.milliseconds(Date()), more: page.isTruncated, events: events))
         }

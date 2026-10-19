@@ -22,7 +22,7 @@ import Darwin
 ///     status/install-candidates.json  {disks: [{name, path, model, sizeBytes, partitions, eligible, problems, phrase, ...}]}
 ///     status/install-to-disk.json   {state, step, device, message, updatedAt}
 ///     status/system.json            {version, sshEnabled, autoUpdate, bootEntry, updatedAt}
-///     status/guard.json             {available, running, timeZone, todayStart, cameras: [{address, level, today, last24h, names: [...]}], updatedAt}
+///     status/guard.json             {available, running, timeZone, todayStart, cameras: [{address, level, since, today, last24h, names: [...], local}], updatedAt}
 ///
 /// Nothing here waits without a bound: a check for updates gives up after 60 seconds, a request nobody picks up within 15 seconds
 /// is withdrawn and reported. A request file is written whole under a temporary name and moved into place (`rename`), so the

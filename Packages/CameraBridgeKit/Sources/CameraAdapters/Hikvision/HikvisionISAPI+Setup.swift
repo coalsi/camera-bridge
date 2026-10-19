@@ -8,7 +8,8 @@ import FoundationNetworking
 enum ISAPIWriteAnswer: Sendable, Equatable {
     /// `statusCode` 1 (or a 2xx answer without a status document).
     case ok
-    /// `statusCode` 7 ("Reboot Required"): the setting is taken and applies after the camera restarts. Camera Bridge never restarts it.
+    /// `statusCode` 7 ("Reboot Required"): the setting is taken and applies after the camera restarts. Camera Bridge restarts it only when
+    /// the person presses "Restart the camera now" (`reboot()`).
     case rebootRequired
 }
 
@@ -23,8 +24,10 @@ struct ISAPIRefusal: Error, Sendable, Equatable, CustomStringConvertible {
 /// The ISAPI documents "Set up for Camera Bridge" reads and writes: the clock (`/ISAPI/System/time`), its time server
 /// (`/ISAPI/System/time/ntpServers/1`), and the network features (`/ISAPI/System/Network/capabilities`, UPnP, EZVIZ / Hik-Connect).
 /// Every write is a read-modify-write of the camera's own document, text-level like the encoder's: only the element changed differs.
+/// The restart (`/ISAPI/System/reboot`) is sent only when the person asks for it.
 extension HikvisionISAPI {
     static let timePath = "/ISAPI/System/time"
+    static let rebootPath = "/ISAPI/System/reboot"
     static let ntpServerPath = "/ISAPI/System/time/ntpServers/1"
     static let networkCapabilitiesPath = "/ISAPI/System/Network/capabilities"
     static let upnpPaths = ["/ISAPI/System/Network/UPnP"]
@@ -48,11 +51,23 @@ extension HikvisionISAPI {
         }
     }
 
-    /// PUTs `document` to `path` and reads the camera's `ResponseStatus`. Throws `ISAPIRefusal` with the camera's words when it refuses.
+    /// PUTs `document` to `path` and reads the camera's `ResponseStatus`. Throws `ISAPIRefusal` with the camera's words when it refuses, and
+    /// `CameraAdapterError.notPermitted` for an HTTP 403 that is the account's (`refusesTheAccount`; a `notSupport` one is the camera's words).
     func write(_ path: String, document: String) async throws -> ISAPIWriteAnswer {
-        let (data, response) = try await rawSend(path, method: "PUT", body: Data(document.utf8))
+        try await putStatus(path, body: Data(document.utf8))
+    }
+
+    /// Restarts the camera (`PUT /ISAPI/System/reboot`, no document): it is off the network for about a minute. Sent only when the person
+    /// presses "Restart the camera now"; answered and refused as `write`.
+    func reboot() async throws {
+        _ = try await putStatus(Self.rebootPath, body: nil)
+    }
+
+    private func putStatus(_ path: String, body: Data?) async throws -> ISAPIWriteAnswer {
+        let (data, response) = try await rawSend(path, method: "PUT", body: body)
         if response.statusCode == 401 { throw CameraAdapterError.unauthorized }
         let status = Self.responseStatus(data)
+        if Self.refusesTheAccount(response, data) { throw CameraAdapterError.notPermitted("PUT \(path)") }
         if let status {
             switch status.code {
             case 1: return .ok
@@ -73,6 +88,12 @@ extension HikvisionISAPI {
         } catch {
             throw CameraHTTP.sanitized(error)
         }
+    }
+
+    /// An HTTP 403 to a write: the account Camera Bridge uses signed in (a refused login is a 401) but may not make the change (Hikvision's
+    /// `lowPrivilege`, an operator or user account), unless the camera's status says it has no such setting (`notSupport`).
+    static func refusesTheAccount(_ response: HTTPURLResponse, _ data: Data) -> Bool {
+        response.statusCode == 403 && responseStatus(data)?.isNotSupported != true
     }
 
     /// An ISAPI `ResponseStatus` document: its code and the camera's words. nil when `data` is not one.

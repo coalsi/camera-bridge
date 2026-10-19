@@ -6,7 +6,8 @@ import Foundation
 // ways out (`CameraSettingsService.readRemoteAccess()`), asks one of its stream addresses for its video without credentials
 // (`RTSPAccessProbe`), reads the DNS servers of every camera the Internet guard can watch (`readDNS()`, `readsGuardDNS`: also one whose
 // Watch is not done, and one that works only through its maker's cloud, which is otherwise not asked; the reading decides whether the camera
-// is watched and the guard's gold rests on it asking the bridge now), and adds the guard's evidence where there is a guard. It runs
+// is watched and the guard's gold rests on it asking the bridge now), asks a camera whose DNS it read through ONVIF whether its IPv6 is on
+// (`readIPv6()`, for the DNS help's warning; the guard's own reads never do), and adds the guard's evidence where there is a guard. It runs
 // `securityCheckDelay` after a camera's runtime starts (unless it was checked within `securityCheckFreshness`), every `securityCheckInterval`,
 // right after "Set up for Camera Bridge" ran or was restored (a fresh one: a check under way that began before is waited for, not joined),
 // and on demand (`checkCameraSecurity` from "Check again", at most once per
@@ -41,6 +42,10 @@ final class CameraSecurityChecks {
         var dns: CameraDNSCheck
         var security: CameraSecurity
         var finished: ContinuousClock.Instant
+        /// The camera has IPv6 on, as a check read it (`CameraSettingsService.readIPv6()`) for a camera whose DNS it read through ONVIF: the
+        /// DNS help's warning (CameraManualHelp.swift). nil: never read. A check that learns nothing new (the camera did not say, or its DNS
+        /// read gave nothing) keeps the last one's, and the guard's own reads of the DNS keep it too (they ask nothing more).
+        var ipv6On: Bool? = nil
     }
 
     /// What one check gave: the camera's level, and whether the camera answered (a camera that did not keeps its last record's).
@@ -178,11 +183,18 @@ extension BridgeEngine {
                 await self.guardDNSRead(current, reused.secrets, service: reused.service)
             }
         }
+        // IPv6 for the DNS help, asked of a camera whose DNS this check read through ONVIF (the device service answered). What the last check
+        // read stands when this one learns nothing new: its DNS read gave nothing (IPv6 is not asked), or the camera did not say.
+        var ipv6On: Bool?
+        if case .read(let reading) = dns, reading.method == .onvifMinimal {
+            let last = securityChecks.records[camera.id]?.ipv6On
+            if case .read? = dnsRead { ipv6On = await securityIPv6(camera, secrets, service: service) ?? last } else { ipv6On = last }
+        }
         // What the reading changed about the camera's watch is in its configuration now (saving it may have waited for an operation).
         guard let current = configurations.first(where: { $0.id == camera.id }) else { return nil }
         let evidence = await guardEvidence(for: current, dns: dns)
         let security = CameraSecurity.assess(readings, cloudModel: model, internetGuard: evidence, checkedAt: checkedAt)
-        securityChecks.records[camera.id] = .init(readings: readings, cloudModel: model, dns: dns, security: security, finished: .now)
+        securityChecks.records[camera.id] = .init(readings: readings, cloudModel: model, dns: dns, security: security, finished: .now, ipv6On: ipv6On)
         log.info("\(camera.name): security check: \(answered ? security.title : "the camera did not answer")")
         await refreshStatus()
         return .init(security: security, answered: answered)
@@ -195,6 +207,13 @@ extension BridgeEngine {
         guard let service else { return [.cloudUnknown] }
         let readings = (try? await service.readRemoteAccess()) ?? [.cloudUnknown]
         return await service.remoteAccessUnanswered ? nil : readings
+    }
+
+    /// Whether the camera has IPv6 on (`CameraSettingsService.readIPv6()`, one `GetNetworkInterfaces`; `EngineTuning.securityIPv6` in tests);
+    /// nil when it does not say, or refuses (nothing else follows from that here).
+    private func securityIPv6(_ camera: CameraConfiguration, _ secrets: HTTPCredentials?, service: CameraSettingsService?) async -> Bool? {
+        if let read = tuning.securityIPv6 { return await read(camera, secrets) }
+        return try? await service?.readIPv6()
     }
 
     /// The address the RTSP check asks: the configured sub stream, else the main stream (the vendor's usual ones when none is configured),

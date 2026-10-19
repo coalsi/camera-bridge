@@ -64,16 +64,42 @@ struct AmcrestAPI: Sendable {
         return values
     }
 
-    private func get(_ path: String, query: [URLQueryItem]) async throws -> (Data, HTTPURLResponse) {
+    /// One GET, whatever the camera answers except a refused login (HTTP 401: `.unauthorized`, and logins to the camera pause,
+    /// `ONVIFLoginGuard`). While logins are paused nothing is sent.
+    private func exchange(_ path: String, query: [URLQueryItem]) async throws -> (Data, HTTPURLResponse) {
         let key = Self.loginKey(endpoint)
         if hasCredentials, let pause = ONVIFLoginGuard.shared.pause(host: key) { throw pause.error }
         guard let url = endpoint.httpURL(path: path, query: query) else { throw CameraAdapterError.invalidResponse("invalid camera address") }
+        let (data, response): (Data, HTTPURLResponse)
         do {
-            return try await CameraHTTP.send(http, CameraHTTP.request(url))
-        } catch CameraAdapterError.unauthorized {
+            (data, response) = try await http.data(for: CameraHTTP.request(url))
+        } catch {
+            throw CameraHTTP.sanitized(error)
+        }
+        if response.statusCode == 401 {
             if hasCredentials { ONVIFLoginGuard.shared.recordRejection(host: key) }
             throw CameraAdapterError.unauthorized
         }
+        return (data, response)
+    }
+
+    /// The body of a 2xx answer; any other status is `.httpStatus`.
+    private func get(_ path: String, query: [URLQueryItem]) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await exchange(path, query: query)
+        guard (200..<300).contains(response.statusCode) else { throw CameraAdapterError.httpStatus(response.statusCode) }
+        return (data, response)
+    }
+
+    /// The most of a configuration answer that is read as text: a camera's `Network` table is a few kilobytes. The client has already
+    /// buffered the whole body (up to its own limit, `AuthenticatingHTTPClient.defaultMaximumBodySize`); only the string made from it, and
+    /// so what is parsed, is capped.
+    static let maximumConfigAnswer = 64 * 1024
+
+    /// The answer's status and text (the first `maximumConfigAnswer` bytes of the body), whatever the status but a refused login: a camera
+    /// says why in the body of a 400, and a page that is not Dahua's answers 200 or 404.
+    func answer(_ path: String, query: [URLQueryItem]) async throws -> (status: Int, text: String) {
+        let (data, response) = try await exchange(path, query: query)
+        return (response.statusCode, String(decoding: data.prefix(Self.maximumConfigAnswer), as: UTF8.self))
     }
 
     private func values(_ action: String, in cgi: String = "magicBox") async throws -> [String: String] {

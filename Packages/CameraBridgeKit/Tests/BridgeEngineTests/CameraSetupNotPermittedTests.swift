@@ -26,7 +26,8 @@ import Testing
 
     /// An ONVIF device service that answers every read to anyone (it checks no password), refuses its clock and time servers with a
     /// `NotAuthorized` fault (or `clockFault`), keeps the DNS servers it is sent, and draws its own date and time (an OSD element it lets
-    /// be deleted and created again).
+    /// be deleted and created again). Its network interface `eth0` has the camera's address (192.168.77.21/24, gateway 192.168.77.1,
+    /// a made-up hardware address), from DHCP until `SetNetworkInterfaces` fixes it.
     final class FakeDoorbell: Sendable {
         struct DNS: Sendable, Equatable {
             var fromDHCP = true
@@ -43,6 +44,14 @@ import Testing
         let actions = Box<[String]>([])
         /// The zone it reports (the bridge's, so its time zone is already right).
         let zone: String
+        /// Its address comes from DHCP (`SetNetworkInterfaces` with DHCP false fixes it as sent).
+        let addressFromDHCP = Box(true)
+        /// While its address comes from DHCP, `SetDNS` is answered OK and changes nothing: a DNS set by hand that does not stay.
+        let dnsOnlyWithFixedAddress = Box(false)
+        /// `SetNetworkInterfaces` is answered with an `InvalidArgVal` fault (a body it does not take), always.
+        let refuseNetworkInterfaces = Box(false)
+        /// `SetNetworkInterfaces` is applied and answered 200 with a body that is not its answer, always.
+        let unreadableNetworkInterfaces = Box(false)
         private let listener: any TCPListener
         private let task = Mutex<Task<Void, Never>?>(nil)
 
@@ -137,7 +146,27 @@ import Testing
                 let servers = state.fromDHCP ? ["192.168.77.1"].map { "<tt:DNSFromDHCP>\(Self.address($0))</tt:DNSFromDHCP>" }.joined()
                     : state.manual.map { "<tt:DNSManual>\(Self.address($0))</tt:DNSManual>" }.joined()
                 return envelope("<tds:GetDNSResponse><tds:DNSInformation><tt:FromDHCP>\(state.fromDHCP)</tt:FromDHCP>\(servers)</tds:DNSInformation></tds:GetDNSResponse>")
+            case "GetNetworkInterfaces":
+                let address = "<tt:Address>\(CameraSetupNotPermittedTests.cameraAddress)</tt:Address><tt:PrefixLength>24</tt:PrefixLength>"
+                let config = addressFromDHCP.value ? "<tt:FromDHCP>\(address)</tt:FromDHCP><tt:DHCP>true</tt:DHCP>" : "<tt:Manual>\(address)</tt:Manual><tt:DHCP>false</tt:DHCP>"
+                return envelope("<tds:GetNetworkInterfacesResponse><tds:NetworkInterfaces token=\"eth0\"><tt:Enabled>true</tt:Enabled><tt:Info>"
+                    + "<tt:HwAddress>02:00:00:00:00:21</tt:HwAddress></tt:Info><tt:IPv4><tt:Enabled>true</tt:Enabled><tt:Config>\(config)</tt:Config></tt:IPv4>"
+                    + "</tds:NetworkInterfaces></tds:GetNetworkInterfacesResponse>")
+            case "GetNetworkDefaultGateway":
+                return envelope("<tds:GetNetworkDefaultGatewayResponse><tds:NetworkGateway><tt:IPv4Address>192.168.77.1</tt:IPv4Address></tds:NetworkGateway>"
+                    + "</tds:GetNetworkDefaultGatewayResponse>")
+            case "SetNetworkInterfaces":
+                guard !refuseNetworkInterfaces.value, body.contains("<tds:InterfaceToken>eth0</tds:InterfaceToken>"),
+                      body.contains("<tt:Address>\(CameraSetupNotPermittedTests.cameraAddress)</tt:Address>") || body.contains("<tt:DHCP>true</tt:DHCP>") else {
+                    return fault("InvalidArgVal")
+                }
+                addressFromDHCP.set(body.contains("<tt:DHCP>true</tt:DHCP>"))
+                if unreadableNetworkInterfaces.value { return envelope("<tds:Unexpected/>") }
+                return envelope("<tds:SetNetworkInterfacesResponse><tds:RebootNeeded>false</tds:RebootNeeded></tds:SetNetworkInterfacesResponse>")
+            case "SetNetworkDefaultGateway":
+                return envelope("<tds:SetNetworkDefaultGatewayResponse/>")
             case "SetDNS":
+                if dnsOnlyWithFixedAddress.value, addressFromDHCP.value { return envelope("<tds:SetDNSResponse/>") }
                 let fromDHCP = body.contains("<tds:FromDHCP>true</tds:FromDHCP>")
                 let servers = body.matches(of: /<tt:IPv4Address>([^<]*)<\/tt:IPv4Address>/).map { String($0.output.1) }.filter { !$0.isEmpty }
                 dns.set(DNS(fromDHCP: fromDHCP, manual: servers))
@@ -193,7 +222,7 @@ import Testing
 
         let watch = try #require(steps[.internetWatch])
         #expect(watch.status == .done, "\(watch.detail ?? "")")
-        #expect(camera.dns.value == FakeDoorbell.DNS(fromDHCP: false, manual: [Self.bridgeAddress]))
+        #expect(camera.dns.value == FakeDoorbell.DNS(fromDHCP: false, manual: [Self.bridgeAddress, Self.bridgeAddress]), "the bridge in both slots")
         #expect(stored(fixture, configuration.id)?.setupState?.watchedServer == Self.bridgeAddress)
         #expect(await fixture.waitFor { box.last == [GuardedCamera(address: Self.cameraAddress, level: .watch)] })
         #expect(camera.actions.value.filter { $0 == "SetNTP" }.count == 1, "asked once")

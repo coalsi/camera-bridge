@@ -129,9 +129,23 @@ struct HikvisionISAPI: Sendable {
         try await CameraHTTP.send(http, CameraHTTP.request(url(path, query: query))).0
     }
 
+    /// A 403 is a change the account Camera Bridge uses may not make (`CameraAdapterError.notPermitted`, `refusesTheAccount`), as for the
+    /// setup's own writes (`write(_:document:)`).
     func put(_ path: String, body: Data? = nil) async throws -> Data {
-        try await CameraHTTP.send(http, CameraHTTP.request(url(path), method: "PUT", body: body,
-                                                          contentType: body == nil ? nil : "application/xml")).0
+        let request = CameraHTTP.request(try url(path), method: "PUT", body: body, contentType: body == nil ? nil : "application/xml")
+        let (data, response): (Data, HTTPURLResponse)
+        do {
+            (data, response) = try await http.data(for: request)
+        } catch {
+            throw CameraHTTP.sanitized(error)
+        }
+        switch response.statusCode {
+        case 200..<300: return data
+        case 401: throw CameraAdapterError.unauthorized
+        default:
+            if Self.refusesTheAccount(response, data) { throw CameraAdapterError.notPermitted("PUT \(path)") }
+            throw CameraAdapterError.httpStatus(response.statusCode)
+        }
     }
 
     func xml(_ path: String) async throws -> XMLTree {

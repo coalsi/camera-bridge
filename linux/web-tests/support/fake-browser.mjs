@@ -6,11 +6,29 @@ export class FakeNode {
   constructor() { this.childNodes = []; this.parentNode = null; }
   get firstChild() { return this.childNodes[0] ?? null; }
   get lastChild() { return this.childNodes.at(-1) ?? null; }
+  get children() { return this.childNodes.filter((node) => node instanceof FakeElement); }
   get isConnected() { let node = this; while (node.parentNode) node = node.parentNode; return node === document; }
+  contains(node) { for (let at = node; at; at = at.parentNode) if (at === this) return true; return false; }
   append(...nodes) { for (const node of nodes) this.appendChild(typeof node === 'string' ? new FakeText(node) : node); }
   appendChild(node) { node.parentNode?.removeChild(node); node.parentNode = this; this.childNodes.push(node); return node; }
+  insertBefore(node, before) {
+    if (!before) return this.appendChild(node);
+    if (before.parentNode !== this) throw new DOMException('The node before which the new node is to be inserted is not a child of this node.', 'NotFoundError');
+    node.parentNode?.removeChild(node);
+    this.childNodes.splice(this.childNodes.indexOf(before), 0, node);
+    node.parentNode = this;
+    return node;
+  }
   removeChild(node) { const at = this.childNodes.indexOf(node); if (at >= 0) { this.childNodes.splice(at, 1); node.parentNode = null; } return node; }
   remove() { this.parentNode?.removeChild(this); }
+  after(...nodes) {
+    const parent = this.parentNode;
+    if (!parent) return;
+    const items = nodes.map((node) => (typeof node === 'string' ? new FakeText(node) : node));
+    for (const node of items) node.parentNode?.removeChild(node);
+    parent.childNodes.splice(parent.childNodes.indexOf(this) + 1, 0, ...items);
+    for (const node of items) node.parentNode = parent;
+  }
   get textContent() { return this.childNodes.map((node) => node.textContent).join(''); }
   set textContent(value) { this.childNodes.splice(0).forEach((node) => { node.parentNode = null; }); if (value) this.appendChild(new FakeText(String(value))); }
 }
@@ -88,6 +106,7 @@ export function installFakeBrowser(target = globalThis, { storage = makeStorage(
     title: '',
     hidden: false,
     visibilityState: 'visible',
+    head: new FakeElement('head'),
     body: new FakeElement('body'),
     documentElement: new FakeElement('html'),
   });

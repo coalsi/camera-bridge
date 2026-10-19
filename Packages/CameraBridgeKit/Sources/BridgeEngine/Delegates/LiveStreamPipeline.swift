@@ -150,6 +150,10 @@ final class LiveStreamPipeline: Sendable {
         var qualityMode: LiveQualityMode = .matchHomeKitRequest
         /// The camera's timestamp overlay (nil: none). While it is on every picture is transcoded and drawn on.
         var overlay: TimestampOverlayControl?
+        /// The camera's picture correction (nil: none). Every transcoder the stream makes holds it, on or off, and straightens its next
+        /// picture by a new value. While it is on every picture is transcoded; turning it on or off decides the path again
+        /// (`pictureCorrectionSwitched`).
+        var correction: PictureCorrectionControl?
         /// The health ladder's and the failure ladders' timings.
         var timing = LiveStreamTiming.standard
         /// Asks the camera for a fresh keyframe (ONVIF SetSynchronizationPoint, Hikvision requestKeyFrame) for the main stream
@@ -469,6 +473,19 @@ final class LiveStreamPipeline: Sendable {
         context.log.info("Live stream reconfigured: \(describe(video))" + (resized ? "; the picture is rebuilt from the camera's newest GOP at once" : ""))
     }
 
+    /// The camera's picture correction was turned on or off (`CameraRuntime.updatePictureCorrection`). A stream whose path that changes
+    /// rebuilds it at once from the hub's newest GOP, as `reconfigure` does for a new size: a passthrough starts transcoding to straighten,
+    /// a transcode that was there for the correction goes back to passthrough. Any other transcoder already holds the control and takes
+    /// the change at its next picture; a new value while the correction stays on never comes here.
+    func pictureCorrectionSwitched() {
+        let on = context.correction?.isOn ?? false
+        control.withLock { control in
+            guard control.path == (on ? .passthrough : .transcode(MediaFit.pictureCorrectionReason)) else { return }
+            control.rebuild = RebuildRequest(reason: "the picture correction was turned \(on ? "on" : "off")", redecide: true,
+                                             software: control.rebuild?.software ?? false)
+        }
+    }
+
     /// A keyframe from the transcoder (a passthrough stream waits for the camera's next one).
     func requestKeyframe() {
         guard let transcoder = control.withLock({ $0.transcoder }) else { return }
@@ -699,7 +716,8 @@ final class LiveStreamPipeline: Sendable {
         let (requested, forced) = control.withLock { ($0.requested, $0.forceTranscode) }
         guard forced == nil else { return false }
         return MediaFit.live(source: keyframe.format, frameRate: fps, bFrames: lease.traits.usesBFrames, requested: requested,
-                             qualityMode: context.qualityMode, timestampOverlay: context.overlay?.isEnabled ?? false) == .passthrough
+                             qualityMode: context.qualityMode, timestampOverlay: context.overlay?.isEnabled ?? false,
+                             pictureCorrection: context.correction?.isOn ?? false) == .passthrough
     }
 
     /// Waits for the controller's first packet: once heard, an encoder-made keyframe goes out again (the first one may have
@@ -833,8 +851,9 @@ final class LiveStreamPipeline: Sendable {
         let fps = await lease.hub.measuredFrameRate
         let (requested, forced, software) = control.withLock { ($0.requested, $0.forceTranscode, $0.softwareDecoding) }
         let overlayOn = context.overlay?.isEnabled ?? false
+        let correctionOn = context.correction?.isOn ?? false
         var path = MediaFit.live(source: frame.format, frameRate: fps, bFrames: lease.traits.usesBFrames, requested: requested,
-                                 qualityMode: context.qualityMode, timestampOverlay: overlayOn)
+                                 qualityMode: context.qualityMode, timestampOverlay: overlayOn, pictureCorrection: correctionOn)
         if path == .passthrough, let forced { path = .transcode(forced) }
         if path == .passthrough, let replay, replay.bytes > Self.maximumPassthroughReplayBytes || replay.frames > Self.maximumPassthroughReplayFrames {
             path = .transcode("the camera's current keyframe interval is long (\(replay.frames) frames, \(replay.bytes / 1000) kB since its last keyframe): "
@@ -844,8 +863,9 @@ final class LiveStreamPipeline: Sendable {
         var settingsUsed: VideoEncoderSettings?
         if case .transcode(let reason) = path {
             let settings = MediaFit.liveEncoderSettings(for: requested, source: frame.format, sourceFrameRate: fps,
-                                                        qualityMode: context.qualityMode, timestampOverlay: overlayOn)
-            created = await makeTranscoder(settings: settings, overlay: overlayOn ? context.overlay?.provider(for: lease.hub) : nil, software: software)
+                                                        qualityMode: context.qualityMode, timestampOverlay: overlayOn || correctionOn)
+            created = await makeTranscoder(settings: settings, overlay: overlayOn ? context.overlay?.provider(for: lease.hub) : nil,
+                                           correction: context.correction, software: software)
             if let created {
                 settingsUsed = settings
                 context.log.info("Live video transcoded to \(settings.width)×\(settings.height)@\(settings.fps) at \(settings.bitrateKbps) kbit/s (\(reason))"
@@ -854,7 +874,7 @@ final class LiveStreamPipeline: Sendable {
                 self.sessionTrace?.mark("path decided", "transcode: \(reason)")
             } else if Task.isCancelled {
                 return
-            } else if passthroughIsSafe(frame, requested: requested, frameRate: fps, overlayOn: overlayOn) {
+            } else if passthroughIsSafe(frame, requested: requested, frameRate: fps, overlayOn: overlayOn, correctionOn: correctionOn) {
                 context.log.warning("Live stream [\(sessionID.uuidString.prefix(8))]: the video cannot be transcoded; the camera's stream is sent as it is "
                                     + "(it fits what the controller asked for, and only \"\(reason)\" asked for a transcode)")
                 path = .passthrough
@@ -874,6 +894,7 @@ final class LiveStreamPipeline: Sendable {
         // made (under the lock, so a later reconfigure's rate is never overwritten).
         output.restartSampling()
         if let settingsUsed { output.allowProbing(width: settingsUsed.width, height: settingsUsed.height) } else { output.allowProbing(width: frame.format.width, height: frame.format.height) }
+        let correctionNow = context.correction?.isOn ?? false
         let replaced = control.withLock { control -> (any VideoTranscoding)? in
             defer {
                 control.transcoder = created
@@ -884,6 +905,11 @@ final class LiveStreamPipeline: Sendable {
                 if control.requested.resolution != requested.resolution, control.rebuild == nil {
                     control.rebuild = RebuildRequest(reason: "the controller asked for \(control.requested.resolution.width)×\(control.requested.resolution.height) "
                                                      + "while the path was being made", redecide: true, software: false)
+                }
+                // `pictureCorrectionSwitched` leaves a path that is still being made alone: this decision checks it.
+                if correctionNow != correctionOn, control.rebuild == nil {
+                    control.rebuild = RebuildRequest(reason: "the picture correction was turned \(correctionNow ? "on" : "off") while the path was being made",
+                                                     redecide: true, software: false)
                 }
             }
             if let created, control.requested.maxBitrateKbps != requested.maxBitrateKbps {
@@ -896,7 +922,8 @@ final class LiveStreamPipeline: Sendable {
 
     /// A transcoder for `settings`, retried after the pauses of `LiveStreamTiming.creationBackoff`; each attempt runs off the
     /// cooperative threads under a deadline. nil after the last attempt.
-    private func makeTranscoder(settings: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?, software: Bool) async -> (any VideoTranscoding)? {
+    private func makeTranscoder(settings: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?, correction: (any PictureCorrectionProviding)?,
+                                software: Bool) async -> (any VideoTranscoding)? {
         let pauses = [Duration.zero] + context.timing.creationBackoff
         var lastError: (any Error)?
         for (attempt, pause) in pauses.enumerated() {
@@ -907,7 +934,7 @@ final class LiveStreamPipeline: Sendable {
             let codecs = context.codecs
             do {
                 let transcoder = try await CodecOffload.run(deadline: context.timing.creationDeadline, discard: { late in late.invalidate() }) {
-                    try codecs.makeVideoTranscoder(output: settings, overlay: overlay)
+                    try codecs.makeVideoTranscoder(output: settings, overlay: overlay, correction: correction)
                 }
                 if software { transcoder.preferSoftwareDecoding() }
                 if attempt > 0 { context.log.info("Live video: the transcoder was made on attempt \(attempt + 1)") }
@@ -926,10 +953,11 @@ final class LiveStreamPipeline: Sendable {
     }
 
     /// Whether the camera's own stream may stand in for a transcoder that cannot be made: it is H.264, no overlay has to be drawn
-    /// on it, and it fits what the controller asked for. Only a "transcode" decided on the length of the camera's GOP can then be
-    /// passed through; a size, level, profile or codec the controller cannot take never is.
-    private func passthroughIsSafe(_ frame: EncodedVideoFrame, requested: SelectedVideoParameters, frameRate: Double?, overlayOn: Bool) -> Bool {
-        guard !overlayOn, frame.format.codec == .h264 else { return false }
+    /// on it, its picture is not to be straightened, and it fits what the controller asked for. Only a "transcode" decided on the length
+    /// of the camera's GOP can then be passed through; a size, level, profile or codec the controller cannot take never is.
+    private func passthroughIsSafe(_ frame: EncodedVideoFrame, requested: SelectedVideoParameters, frameRate: Double?, overlayOn: Bool,
+                                   correctionOn: Bool) -> Bool {
+        guard !overlayOn, !correctionOn, frame.format.codec == .h264 else { return false }
         return MediaFit.live(source: frame.format, frameRate: frameRate, bFrames: lease.traits.usesBFrames, requested: requested,
                              qualityMode: context.qualityMode, timestampOverlay: false) == .passthrough
     }

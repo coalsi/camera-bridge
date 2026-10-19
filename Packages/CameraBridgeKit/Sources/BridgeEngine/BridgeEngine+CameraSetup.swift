@@ -23,14 +23,23 @@ public struct CameraSetupStep: Sendable, Codable, Equatable {
     public var changes: [CameraSetupChange]
     /// Why not, the camera's words, or how it was done ("via ISAPI").
     public var detail: String?
-    /// The camera took the change and applies it when it restarts (it is not restarted by the bridge).
+    /// The camera took the change and applies it when it restarts (the bridge restarts it only when the person presses "Restart the camera
+    /// now": `BridgeEngine.restartCamera(id:)`).
     public var needsRestart: Bool
     /// "Change it by hand" for a step the camera refused or does not support (Security/CameraManualHelp.swift); filled in for the web page
     /// (`withManualHelp(_:cameraID:)`), never saved.
     public var manualHelp: CameraManualHelp?
+    /// A preview's "Watch its internet": "Fix its address so the DNS stays (keeps <address>)" is offered, off unless the person chooses it
+    /// (`CameraSetupOptions.fixAddress`), with the camera's address as it is and what changes with it. nil where it is not offered, and in a
+    /// run's or a restore's result.
+    public var fixAddress: CameraSetupFixAddress?
+    /// A run's "Watch its internet" fixed the camera's address (as it was): the page says to reserve it in the router, with the camera's
+    /// hardware address when it showed one. Never saved.
+    public var fixedAddress: CameraAddressing?
 
     public init(id: CameraSetupStepID, title: String, status: CameraSetupStepStatus, changes: [CameraSetupChange] = [], detail: String? = nil,
-                needsRestart: Bool = false, manualHelp: CameraManualHelp? = nil) {
+                needsRestart: Bool = false, manualHelp: CameraManualHelp? = nil, fixAddress: CameraSetupFixAddress? = nil,
+                fixedAddress: CameraAddressing? = nil) {
         self.id = id
         self.title = title
         self.status = status
@@ -38,6 +47,8 @@ public struct CameraSetupStep: Sendable, Codable, Equatable {
         self.detail = detail
         self.needsRestart = needsRestart
         self.manualHelp = manualHelp
+        self.fixAddress = fixAddress
+        self.fixedAddress = fixedAddress
     }
 }
 
@@ -51,6 +62,8 @@ public struct CameraSetupState: Sendable, Codable, Equatable {
         public var id: CameraSetupStepID
         public var status: CameraSetupStepStatus
         public var detail: String?
+        /// Done "after the camera restarts" and not yet restarted: cleared once the person restarts it ("Restart the camera now"), or by the
+        /// next run's record (`BridgeEngine.offersCameraRestart`). A reading is no proof of a restart and leaves it.
         public var needsRestart: Bool
 
         public init(id: CameraSetupStepID, status: CameraSetupStepStatus, detail: String? = nil, needsRestart: Bool = false) {
@@ -107,6 +120,29 @@ public struct CameraSetupState: Sendable, Codable, Equatable {
     }
 }
 
+/// `BridgeEngine.restartCamera(id:)` for a camera that does not wait for a restart (`BridgeEngine.offersCameraRestart`): it is not restarted,
+/// so a page left open can't restart a camera at will.
+public struct CameraRestartNotNeeded: Error, Equatable, Sendable, CustomStringConvertible {
+    public init() {}
+
+    public var description: String { "The camera isn’t waiting for a restart, so Camera Bridge didn’t restart it." }
+}
+
+/// The person's choices for a run of "Set up for Camera Bridge", made in the setup's preview: off unless chosen.
+public struct CameraSetupOptions: Sendable, Equatable {
+    /// "Fix its address so the DNS stays (keeps <address>)" for "Watch its internet": taken only where the run's reading offers it
+    /// (`CameraSetupStep.fixAddress`). Off by default.
+    public var fixAddress: Bool
+    /// The camera's address as the preview showed it with the choice: the run fixes the address only while the camera still has exactly this
+    /// one (its address, mask and gateway), and refuses the step without writing otherwise. nil: the address the run reads.
+    public var shownAddress: CameraAddressing?
+
+    public init(fixAddress: Bool = false, shownAddress: CameraAddressing? = nil) {
+        self.fixAddress = fixAddress
+        self.shownAddress = shownAddress
+    }
+}
+
 /// What `cameraSetupPreview`, `applyCameraSetup` and `restoreCameraSetup` answer.
 public struct CameraSetupReport: Sendable, Codable, Equatable {
     public var steps: [CameraSetupStep]
@@ -141,6 +177,10 @@ struct CameraSetupRead {
     var timeServer: String?
     /// The bridge's address on the camera's network, for "Watch its internet".
     var guardServer: String?
+    /// "Fix its address so the DNS stays", chosen where the reading offers it (`BridgeEngine.chooseFixAddress`): the address the run keeps
+    /// (the one the preview showed), and the reading's offer. nil when the choice is not taken.
+    var fixAddress: CameraAddressing?
+    var fixOffer: CameraSetupFixAddress?
     var planned: [PlannedEncoderFix] = []
     var mainSmartCodecOn = false
     var subSmartCodecOn = false
@@ -149,7 +189,7 @@ struct CameraSetupRead {
 }
 
 /// The login a step's change goes through: Hikvision's ISAPI, Reolink's API, or ONVIF, whose account and paused logins
-/// (`ONVIFLoginGuard`) the IP camera web APIs share.
+/// (`ONVIFLoginGuard`) the IP camera web APIs and Dahua's CGI share.
 enum CameraSetupLogin: Sendable, Equatable {
     case isapi, reolink, onvif
 
@@ -204,13 +244,19 @@ extension BridgeEngine {
     /// because the account may not make the change (`CameraSetupOutcome.notPermitted`: `CameraAdapterError.notPermitted`, or Reolink's
     /// `GetAbility`; owner decision, 2026-10-18) stops nothing: the camera signed the account in, so no login pauses, the step says to use an
     /// administrator account, and the steps after it still run. Running it again changes nothing that is already right.
-    public func applyCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
+    ///
+    /// `options` are the person's choices in the preview: "Fix its address so the DNS stays" (`CameraSetupOptions.fixAddress`, off by default)
+    /// fixes the camera's address exactly as the preview showed it, then points its DNS at the bridge, where the reading offers it; the
+    /// backup records that address before anything changes, and Restore puts DHCP back.
+    public func applyCameraSetup(cameraID: UUID, options: CameraSetupOptions = CameraSetupOptions()) async throws -> CameraSetupReport {
         guard !isPreview else { throw EngineError.cameraNotRunning }
         return try await operations.withLock {
             let (camera, service) = try await cameraSetupService(cameraID)
-            let read = try await readCameraSetup(camera, service: service)
-            var backup = Self.mergedSetupBackup(existing: camera.setupBackup, fresh: read.fresh, readings: read.readings,
-                                                cleanPicture: camera.cleanPictureBackup, optimization: homeKitOptimizationSnapshots[cameraID])
+            var read = try await readCameraSetup(camera, service: service)
+            Self.chooseFixAddress(options, read: &read)
+            var backup = Self.keepingFixedAddress(Self.mergedSetupBackup(existing: camera.setupBackup, fresh: read.fresh, readings: read.readings,
+                                                                         cleanPicture: camera.cleanPictureBackup,
+                                                                         optimization: homeKitOptimizationSnapshots[cameraID]), read: read)
             if let code = backup.cloud?.cloudAuthcode {
                 await keepSetupCloudAuthcode(code, camera: camera)
                 backup.cloud?.cloudAuthcode = nil
@@ -237,8 +283,15 @@ extension BridgeEngine {
             for id in CameraSetupStepID.allCases {
                 let preview = Self.previewStep(id, read.readings[id])
                 var step = preview
+                step.fixAddress = nil   // an offer is the preview's: the result has none
                 if stoppedAt != nil, preview.status == .willChange, id != .internetWatch || watchHeld != nil {
                     step.status = .notRun
+                    // A Watch that does not run fixes no address: the address this run saved for it goes (one an earlier run saved
+                    // stays), so Restore and the camera's removal never put DHCP back on a camera Camera Bridge did not fix.
+                    if id == .internetWatch, camera.setupBackup?.internetWatch?.fixedAddress == nil {
+                        backup.internetWatch?.fixedAddress = nil
+                        backup.internetWatch?.fixedAddressMethod = nil
+                    }
                     if id == .internetWatch, let watchHeld {
                         step.detail = watchHeld
                         log.info("\(camera.name): camera setup, \(Self.cameraSetupTitle(id).lowercased()): not run (\(watchHeld))")
@@ -250,6 +303,13 @@ extension BridgeEngine {
                     // A note about a part not offered stays; the streams step's "it sends H.265" sentence goes once it is changed.
                     step.detail = outcome.succeeded ? ((id == .streams ? read.streamsNote : preview.detail) ?? outcome.detail) : outcome.detail
                     step.needsRestart = outcome.needsRestart
+                    if outcome.addressFixed { step.fixedAddress = read.fixOffer?.addressing ?? read.fixAddress }
+                    // A fix refused before anything about the address changed leaves nothing to put back on DHCP: the address this run
+                    // saved for it goes (one an earlier run saved stays), so Restore and the camera's removal don't wait on it.
+                    if id == .internetWatch, outcome.addressUntouched, camera.setupBackup?.internetWatch?.fixedAddress == nil {
+                        backup.internetWatch?.fixedAddress = nil
+                        backup.internetWatch?.fixedAddressMethod = nil
+                    }
                     if outcome.succeeded, id == .streams {
                         streamChanged = true
                         codecChanged = read.planned.contains { $0.fixes.contains("codec") }
@@ -345,6 +405,39 @@ extension BridgeEngine {
         }
     }
 
+    // MARK: Restart the camera now
+
+    /// Whether "Restart the camera now" is offered for `camera`, and `restartCamera(id:)` restarts it: a step of the setup's last run was
+    /// done "after the camera restarts" (ISAPI `statusCode` 7: `needsRestart`) and the person has not restarted it since. A reading of its DNS
+    /// is no proof (a camera can show the new servers at once and ask its old ones until it restarts), and a restart made elsewhere is not
+    /// known: the button then stays, harmless, as it still needs a press and a confirm. A new run's record replaces the flags. The web API's
+    /// camera resource carries it (`restartOffered`).
+    public nonisolated static func offersCameraRestart(_ camera: CameraConfiguration) -> Bool {
+        camera.setupState?.steps.contains { $0.status == .done && $0.needsRestart } == true
+    }
+
+    /// Restarts the camera because the person pressed "Restart the camera now", so the changes it took "after it restarts" apply; Camera
+    /// Bridge never restarts a camera by itself. Only for a camera that waits for it (`offersCameraRestart`), else `CameraRestartNotNeeded`
+    /// before anything is sent. One request (`CameraSettingsService.reboot()`: ISAPI on a Hikvision); once the camera took it, no step waits
+    /// for a restart any more, and its DNS is read again when it is back (`guardDNSReconnectDelay`). Throws `EngineError.unknownCamera`,
+    /// `CameraOfflineError` for a camera known to be unreachable, and the camera's refusal.
+    public func restartCamera(id: UUID) async throws {
+        guard !isPreview else { throw EngineError.cameraNotRunning }
+        try await operations.withLock {
+            guard let current = configurations.first(where: { $0.id == id }) else { throw EngineError.unknownCamera }
+            guard Self.offersCameraRestart(current) else { throw CameraRestartNotNeeded() }
+            let (camera, service) = try await cameraSetupService(id)
+            try await service.reboot()
+            log.notice("\(camera.name): restarting the camera, as the person asked, so the changes it took apply")
+            await changeConfiguration(id) { configuration in
+                guard var state = configuration.setupState else { return }
+                for index in state.steps.indices { state.steps[index].needsRestart = false }
+                configuration.setupState = state
+            }
+            if readsGuardDNS(camera) { scheduleGuardDNSRead(id, after: tuning.guardDNSReconnectDelay) }
+        }
+    }
+
     // MARK: Reading
 
     private func cameraSetupService(_ cameraID: UUID) async throws -> (CameraConfiguration, CameraSettingsService) {
@@ -401,7 +494,9 @@ extension BridgeEngine {
             read.readings[.internetWatch] = .notOffered(InternetGuardText.notOnThisBridge)
         } else if let server = internetWatchServer(camera) {
             read.guardServer = server
-            let (reading, value) = try await readStep({ try await service.readInternetWatch(server: server) },
+            // "Fix its address so the DNS stays" is offered for the camera's address as the guard knows it, the one the box watches.
+            let address = guardCameraAddress(camera), refused = Self.watchRefusedLastRun(camera)
+            let (reading, value) = try await readStep({ try await service.readInternetWatch(server: server, cameraAddress: address, refusedBefore: refused) },
                                                       unreadable: { (CameraSetupReading.notSupported($0), nil) })
             read.readings[.internetWatch] = reading
             read.fresh.internetWatch = value
@@ -543,18 +638,56 @@ extension BridgeEngine {
         return (problem, facts.main?.codec)
     }
 
-    static func previewStep(_ id: CameraSetupStepID, _ reading: CameraSetupReading?) -> CameraSetupStep {
+    nonisolated static func previewStep(_ id: CameraSetupStepID, _ reading: CameraSetupReading?) -> CameraSetupStep {
         let title = cameraSetupTitle(id)
         guard let reading else {
             let why = id == .timeSource ? "Camera Bridge OS serves time to cameras; this bridge does not." : "not supported by this camera"
             return CameraSetupStep(id: id, title: title, status: .notOffered, detail: why)
         }
+        var step: CameraSetupStep
         switch reading.state {
-        case .willChange: return CameraSetupStep(id: id, title: title, status: .willChange, changes: reading.changes, detail: reading.note)
-        case .alreadyRight: return CameraSetupStep(id: id, title: title, status: .alreadyRight, detail: reading.note)
-        case .notSupported(let why): return CameraSetupStep(id: id, title: title, status: .notSupported, detail: why)
-        case .notOffered(let why): return CameraSetupStep(id: id, title: title, status: .notOffered, detail: why)
+        case .willChange: step = CameraSetupStep(id: id, title: title, status: .willChange, changes: reading.changes, detail: reading.note)
+        case .alreadyRight: step = CameraSetupStep(id: id, title: title, status: .alreadyRight, detail: reading.note)
+        case .notSupported(let why): step = CameraSetupStep(id: id, title: title, status: .notSupported, detail: why)
+        case .notOffered(let why): step = CameraSetupStep(id: id, title: title, status: .notOffered, detail: why)
         }
+        step.fixAddress = reading.fixAddress
+        return step
+    }
+
+    // MARK: Fix its address so the DNS stays
+
+    /// The run with the person's choice: where the reading offers "Fix its address so the DNS stays" and the person chose it, "Watch its
+    /// internet" will change the address as it is and the DNS (the offer's changes), keeping `options.shownAddress` (the preview's) or else
+    /// the address the run read. Elsewhere, and without the choice (the default), the reading stays as it is.
+    nonisolated static func chooseFixAddress(_ options: CameraSetupOptions, read: inout CameraSetupRead) {
+        guard options.fixAddress, let offer = read.readings[.internetWatch]?.fixAddress else { return }
+        var keeps = options.shownAddress ?? offer.addressing
+        keeps.interface = offer.addressing.interface   // which of the camera's interfaces has it: the camera's word, not the page's
+        read.fixOffer = offer
+        read.fixAddress = keeps
+        read.readings[.internetWatch] = CameraSetupReading(state: .willChange, changes: offer.changes)
+    }
+
+    /// The run's backup with the address the choice fixes (without the hardware address) and the way it fixes it, when it is the one the
+    /// camera has (else the step writes nothing): Restore puts DHCP back that way, whatever way the DNS servers were read. An earlier run's DNS
+    /// backup gets it too (it may have been read another way: a Jennov's through ONVIF by an older build); one that has an address keeps its
+    /// own.
+    nonisolated static func keepingFixedAddress(_ backup: CameraSetupBackup, read: CameraSetupRead) -> CameraSetupBackup {
+        guard let fixing = read.fixAddress, let offer = read.fixOffer, offer.addressing.sameAddress(as: fixing), var watch = backup.internetWatch,
+              watch.fixedAddress == nil else { return backup }
+        var copy = backup
+        watch.fixedAddress = CameraAddressing(address: fixing.address, subnetMask: fixing.subnetMask, gateway: fixing.gateway, interface: fixing.interface)
+        watch.fixedAddressMethod = offer.method
+        copy.internetWatch = watch
+        return copy
+    }
+
+    /// Whether the camera's last run refused "Watch its internet" with an answer of its own (a DNS set by hand that did not take or stay), not
+    /// for the account's rights: an ONVIF camera on DHCP is then offered "Fix its address so the DNS stays".
+    nonisolated static func watchRefusedLastRun(_ camera: CameraConfiguration) -> Bool {
+        guard let record = camera.setupState?.steps.last(where: { $0.id == .internetWatch }), record.status == .refused else { return false }
+        return record.detail != CameraAdapterError.notPermittedReason
     }
 
     // MARK: The backup
@@ -563,8 +696,8 @@ extension BridgeEngine {
     /// the values read now fill the steps that will change and have none yet. A Reolink backup an earlier build saved with less than this
     /// run changes is completed from the camera's values now (`completedReolinkTimeZone`, `completedReolinkTimeSource`), so Restore puts
     /// back everything the run writes.
-    static func mergedSetupBackup(existing: CameraSetupBackup?, fresh: CameraSetupBackup, readings: [CameraSetupStepID: CameraSetupReading],
-                                  cleanPicture: CleanPictureBackup?, optimization: HomeKitOptimizationSnapshot?) -> CameraSetupBackup {
+    nonisolated static func mergedSetupBackup(existing: CameraSetupBackup?, fresh: CameraSetupBackup, readings: [CameraSetupStepID: CameraSetupReading],
+                                              cleanPicture: CleanPictureBackup?, optimization: HomeKitOptimizationSnapshot?) -> CameraSetupBackup {
         var backup = existing ?? CameraSetupBackup(version: CameraSetupState.currentVersion, created: fresh.created)
         func changing(_ id: CameraSetupStepID) -> Bool { readings[id]?.state == .willChange }
         if backup.timeZone == nil, changing(.timeZone) { backup.timeZone = fresh.timeZone }
@@ -636,7 +769,8 @@ extension BridgeEngine {
                 return try await service.applyTimeSource(server: server)
             case .internetWatch:
                 guard let server = read.guardServer else { return CameraSetupOutcome(succeeded: false, detail: "no address for the bridge") }
-                return try await service.applyDNS(server: server)
+                if let keeps = read.fixAddress { return try await service.applyDNS(server: server, fixingAddress: keeps) }
+                return try await service.applyDNS(server: server, cameraAddress: guardCameraAddress(camera))
             case .cleanPicture:
                 let change = try await service.cleanPicture()
                 if change.succeeded, backup.cleanPicture == nil { backup.cleanPicture = change.backup }

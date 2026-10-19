@@ -54,8 +54,8 @@ body:
     attributes:
       label: Diagnostics export
       description: |
-        **File ▸ Export Diagnostics…** after trying to add or use the camera. Passwords and tokens are removed; the file can still
-        contain IP addresses and names, so review it before attaching.
+        **Download diagnostics** (Settings ▸ Troubleshooting in the web interface) after trying to add or use the camera.
+        Passwords and tokens are removed; the file can still contain IP addresses and names, so review it before attaching.
     validations:
       required: false
   - type: textarea

@@ -197,6 +197,129 @@ import Testing
         #expect(arguments.contains("ogg"))
     }
 
+    // MARK: Straighten the picture
+
+    /// Whether `run` appears in `arguments` as consecutive elements.
+    private func contains(_ run: [String], in arguments: [String]) -> Bool {
+        guard run.count <= arguments.count else { return false }
+        return (0...(arguments.count - run.count)).contains { Array(arguments[$0..<($0 + run.count)]) == run }
+    }
+
+    private func corrected(_ base: VideoPipelineSpec, width: Int, height: Int) -> VideoPipelineSpec {
+        var spec = base
+        spec.correction = RemapStage(xMap: "/s/x.pgm", yMap: "/s/y.pgm", chromaXMap: "/s/cx.pgm", chromaYMap: "/s/cy.pgm", width: width, height: height)
+        return spec
+    }
+
+    @Test func aCorrectedTranscoderReadsTheMapsAndUsesAFilterGraph() throws {
+        let arguments = FFmpegArguments.transcoder(corrected(spec(width: 1920, height: 1080, sourceWidth: 1920, sourceHeight: 1080), width: 1920, height: 1080))
+        #expect(contains(["-f", "flv", "-i", "pipe:0", "-i", "/s/x.pgm", "-i", "/s/y.pgm", "-i", "/s/cx.pgm", "-i", "/s/cy.pgm"], in: arguments))
+        #expect(!arguments.contains("-vf"))
+        #expect(contains(["-map", "[cbv]"], in: arguments) && !arguments.contains("0:v:0"))
+        let graph = try #require(value(after: "-filter_complex", in: arguments))
+        // The frame-rate limit first, then the warp (each 4:2:0 plane as gray, maps 1:v…4:v), then the pixel format the encoder takes.
+        #expect(graph.hasPrefix("[0:v:0]select='"))
+        #expect(graph.contains("'[cbsel];" + PictureCorrection.ffmpegRemapChain(input: "cbsel", width: 1920, height: 1080, xMap: "1:v", yMap: "2:v",
+                                                                               chromaXMap: "3:v", chromaYMap: "4:v", output: "cbw")
+            + ";[cbw]format=yuv420p[cbv]"))
+        #expect(graph.contains("[cbsel]scale=1920:2160:flags=bicubic,format=yuv420p,extractplanes=y+u+v[cbpy][cbpu][cbpv];[1:v]format=gray16[cbx];"
+            + "[2:v]format=gray16[cby];[3:v]format=gray16,split[cbcx1][cbcx2];[4:v]format=gray16,split[cbcy1][cbcy2];"))
+        #expect(graph.contains("mergeplanes=map0s=0:map0p=0:map1s=1:map1p=0:map2s=2:map2p=0:format=yuv420p,scale=1920:1080:flags=area[cbw]"))
+        #expect(graph.hasSuffix("[cbw]format=yuv420p[cbv]"))
+        // Same size in and out: no bars.
+        #expect(!graph.contains("pad=") && !graph.contains("setsar"))
+        // Everything else is as without the correction.
+        #expect(arguments.contains("-copyts") && contains(["-an", "-sn", "-dn"], in: arguments))
+        #expect(value(after: "-fps_mode", in: arguments) == "passthrough")
+        #expect(value(after: "-force_key_frames", in: arguments) == "expr:mod(round(t*1000),2)")
+        #expect(value(after: "-c:v", in: arguments) == "libx264")
+        #expect(arguments.suffix(5) == ["-f", "flv", "-flush_packets", "1", "pipe:1"])
+        // Without a frame-rate limit or catch-up there is no select: the chain reads the camera's picture itself.
+        var unlimited = corrected(spec(width: 1920, height: 1080, sourceWidth: 1920, sourceHeight: 1080), width: 1920, height: 1080)
+        unlimited.limitFrameRate = false
+        let plain = try #require(value(after: "-filter_complex", in: FFmpegArguments.transcoder(unlimited)))
+        #expect(plain.hasPrefix("[0:v:0]scale=1920:2160:flags=bicubic,format=yuv420p,extractplanes=y+u+v[cbpy][cbpu][cbpv];") && !plain.contains("select"))
+        // The raw encoder (the Mac-style encode of decoded pictures) never warps.
+        let raw = corrected(spec(sourceWidth: 640, sourceHeight: 360), width: 640, height: 360)
+        #expect(FFmpegArguments.rawEncoder(raw, inputWidth: 640, inputHeight: 360) == FFmpegArguments.rawEncoder(spec(sourceWidth: 640, sourceHeight: 360), inputWidth: 640, inputHeight: 360))
+    }
+
+    @Test func aLetterboxedPictureIsStraightenedBeforeItIsPadded() throws {
+        let fitted = FFmpegArguments.fittedSize(sourceWidth: 4256, sourceHeight: 1888, width: 1920, height: 1080)
+        #expect(fitted.width == 1920 && fitted.height == 852)
+        let arguments = FFmpegArguments.transcoder(corrected(spec(width: 1920, height: 1080, sourceWidth: 4256, sourceHeight: 1888), width: fitted.width, height: fitted.height))
+        let graph = try #require(value(after: "-filter_complex", in: arguments))
+        let warp = try #require(graph.range(of: "scale=1920:1704:flags=bicubic"))
+        let shrink = try #require(graph.range(of: "scale=1920:852:flags=area"))
+        let pad = try #require(graph.range(of: "pad=1920:1080:(ow-iw)/2:(oh-ih)/2"))
+        let square = try #require(graph.range(of: "setsar=1"))
+        #expect(warp.lowerBound < shrink.lowerBound && shrink.lowerBound < pad.lowerBound && pad.lowerBound < square.lowerBound)
+        #expect(!graph.contains("force_original_aspect_ratio"))
+        // The fitted size is the one force_original_aspect_ratio=decrease gives (rounded to the nearest pixel), made even.
+        func size(_ sw: Int, _ sh: Int, _ w: Int, _ h: Int) -> [Int] {
+            let s = FFmpegArguments.fittedSize(sourceWidth: sw, sourceHeight: sh, width: w, height: h)
+            return [s.width, s.height]
+        }
+        #expect(size(1920, 1080, 1920, 1080) == [1920, 1080])
+        #expect(size(1920, 1080, 1280, 720) == [1280, 720])
+        #expect(size(640, 360, 320, 320) == [320, 180])
+        #expect(size(1080, 1920, 1920, 1080) == [608, 1080])   // 607.5 rounds up
+        #expect(size(1919, 1080, 1920, 1080) == [1918, 1080])  // odd width made even
+        #expect(size(4000, 10, 1920, 1080) == [1920, 4])
+        #expect(size(10_000, 2, 320, 180) == [320, 2])           // never below 2
+    }
+
+    @Test func theLabelIsDrawnAfterTheWarp() throws {
+        let overlay = DrawTextOverlay(fontFile: "/f.ttf", textFile: "/t/overlay.txt", position: .bottomLeft, size: .medium)
+        let arguments = FFmpegArguments.transcoder(corrected(spec(width: 1920, height: 1080, sourceWidth: 4256, sourceHeight: 1888, overlay: overlay), width: 1920, height: 852))
+        let graph = try #require(value(after: "-filter_complex", in: arguments))
+        let remap = try #require(graph.range(of: "remap"))
+        let pad = try #require(graph.range(of: "pad="))
+        let draw = try #require(graph.range(of: "drawtext=fontfile=/f.ttf:textfile=/t/overlay.txt"))
+        let format = try #require(graph.range(of: "format=yuv420p[cbv]"))
+        #expect(remap.lowerBound < pad.lowerBound && pad.lowerBound < draw.lowerBound && draw.lowerBound < format.lowerBound)
+        // The label's size follows the output picture, as without the correction.
+        #expect(graph.contains("fontsize=35"))   // 0.032 × 1080
+    }
+
+    @Test func withoutACorrectionTheArgumentsAreUnchanged() {
+        // Goldens of the arguments before the correction existed (2026-10-18).
+        var labelled = spec(overlay: DrawTextOverlay(fontFile: "/f.ttf", textFile: "/t/overlay.txt", position: .topRight, size: .medium))
+        labelled.skipBeforeSeconds = 12.3455
+        #expect(FFmpegArguments.transcoder(labelled) == [
+            "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-copyts", "-flags", "+low_delay", "-analyzeduration", "1", "-probesize", "2048",
+            "-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn",
+            "-vf", "select='if(gte(t,12.3455),if(gt(gte(t,ld(1)-0.033333/4)+lt(t,ld(1)-0.033333-1)+mod(round(t*1000),2),0),st(1,if(gt(between(t,ld(1)-0.033333,ld(1)+0.033333)*gt(ld(1),0),0),ld(1)+0.033333,t+0.033333))*0+1,0),0)',"
+                + "scale=1280:720:force_original_aspect_ratio=decrease:flags=bicubic,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                + "drawtext=fontfile=/f.ttf:textfile=/t/overlay.txt:reload=1:expansion=none:fontsize=23:fontcolor=white:box=1:boxcolor=black@0.42:boxborderw=8"
+                + ":shadowcolor=black@0.5:shadowx=1:shadowy=1:x=w-tw-29:y=29,format=yuv420p",
+            "-fps_mode", "passthrough", "-enc_time_base", "1/1000", "-force_key_frames", "expr:mod(round(t*1000),2)",
+            "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "main", "-level:v", "4.0", "-x264-params", "scenecut=0:keyint=120:min-keyint=30",
+            "-b:v", "2000k", "-maxrate", "3000k", "-bufsize", "3000k", "-g", "120", "-bf", "0", "-f", "flv", "-flush_packets", "1", "pipe:1",
+        ])
+        #expect(FFmpegArguments.transcoder(spec(width: 1920, height: 1080, backend: .vaapi(device: "/dev/dri/renderD128", lowPower: true))) == [
+            "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-vaapi_device", "/dev/dri/renderD128", "-copyts", "-flags", "+low_delay",
+            "-analyzeduration", "1", "-probesize", "2048", "-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn",
+            "-vf", "select='if(gt(gte(t,ld(1)-0.033333/4)+lt(t,ld(1)-0.033333-1)+mod(round(t*1000),2),0),st(1,if(gt(between(t,ld(1)-0.033333,ld(1)+0.033333)*gt(ld(1),0),0),ld(1)+0.033333,t+0.033333))*0+1,0)',"
+                + "format=nv12,hwupload",
+            "-fps_mode", "passthrough", "-enc_time_base", "1/1000", "-force_key_frames", "expr:mod(round(t*1000),2)",
+            "-c:v", "h264_vaapi", "-profile:v", "main", "-level:v", "40", "-async_depth", "1", "-g", "120", "-bf", "0", "-low_power", "1",
+            "-b:v", "2000k", "-maxrate", "3000k", "-bufsize", "3000k", "-f", "flv", "-flush_packets", "1", "pipe:1",
+        ])
+        // nil is the default.
+        #expect(spec().correction == nil)
+    }
+
+    @Test func vaapiStillUploadsLast() throws {
+        let arguments = FFmpegArguments.transcoder(corrected(spec(width: 1920, height: 1080, backend: .vaapi(device: "/dev/dri/renderD128", lowPower: false),
+                                                                  sourceWidth: 4256, sourceHeight: 1888), width: 1920, height: 852))
+        #expect(value(after: "-vaapi_device", in: arguments) == "/dev/dri/renderD128")
+        #expect(value(after: "-c:v", in: arguments) == "h264_vaapi")
+        let graph = try #require(value(after: "-filter_complex", in: arguments))
+        #expect(graph.hasSuffix(",format=nv12,hwupload[cbv]"))
+        #expect(graph.contains("remap"))
+    }
+
     @Test func jpegQualityMapsToTheMJPEGScale() {
         func q(_ quality: Double) -> String? {
             let arguments = FFmpegArguments.jpeg(inputWidth: 640, inputHeight: 360, width: 640, height: 360, quality: quality)
@@ -207,5 +330,13 @@ import Testing
         #expect(q(0.8) == "8")
         let scaled = FFmpegArguments.jpeg(inputWidth: 1920, inputHeight: 1080, width: 640, height: 360, quality: 0.8)
         #expect(scaled.contains { $0.hasPrefix("scale=640:360:flags=lanczos") })
+        // A resize takes the quality asked on the same scale, and keeps -q:v 5 without one.
+        func resizeQ(_ quality: Double?) -> String? {
+            let arguments = FFmpegArguments.resizeImage(width: 768, height: 432, quality: quality)
+            return arguments.firstIndex(of: "-q:v").map { arguments[$0 + 1] }
+        }
+        #expect(resizeQ(nil) == "5")
+        #expect(resizeQ(0.7) == "11")
+        #expect(resizeQ(0.8) == "8")
     }
 }

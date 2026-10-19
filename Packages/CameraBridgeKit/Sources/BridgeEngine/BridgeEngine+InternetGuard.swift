@@ -115,7 +115,9 @@ extension BridgeEngine {
     /// record has no `watchedServer` to clear), or `dnsWatch` cleared. The setup's record of what it did and its backup stay. Nothing changes
     /// for a reading taken before the setup's last run ended (the run's result is newer), nor for a camera whose Watch waits for its restart
     /// (ISAPI's "after the camera restarts") while it still asks the servers it had, nor for one that does not know which servers the camera
-    /// asks (`serversUnknown`: an unreadable read changes nothing).
+    /// asks (`serversUnknown`: an unreadable read changes nothing). A reading never ends a Watch's wait for the camera's restart, even one that
+    /// shows the bridge: a camera can show the new servers at once and ask its old ones until it restarts (only the person's restart, or a new
+    /// run, ends it: `offersCameraRestart`).
     nonisolated static func watchAfterReading(_ camera: CameraConfiguration, _ reading: CameraDNSReading, server: String, takenAt: Date) -> CameraConfiguration? {
         guard !reading.serversUnknown else { return nil }
         var updated = camera
@@ -590,7 +592,7 @@ extension BridgeEngine {
     /// that address whenever it is listed. `available` only for a report that is `fresh` (the box has the guard, its DNS answers, and it
     /// wrote the report recently): otherwise "no lookups seen" is no evidence. `watchedFor` from the box's `since` (when the camera joined
     /// its list); `waitsForRestart`: the step was taken "after the camera restarts"; `dnsFromRouter`: the reading's servers came from DHCP.
-    /// Names as `GuardNames.shown` has them.
+    /// Names as `GuardNames.shown` has them; `localLookups` the box's count of the camera's questions that never leave the home network.
     nonisolated static func guardEvidence(address: String?, listed: Bool, asksBridge: Bool?, waitsForRestart: Bool = false, dnsFromRouter: Bool = false,
                                           report: GuardReport?, fresh: Bool, now: Date) -> GuardEvidence {
         let available = fresh && report.map { $0.available && $0.running != false } == true
@@ -608,7 +610,7 @@ extension BridgeEngine {
             return left != right ? left > right : a.offset < b.offset
         }.map(\.element.name)
         return GuardEvidence(watched: asksBridge == true, outsideLookups24h: entry.last24h, lastLookupNames: recent, available: available, today: entry.today,
-                             names: names, listed: true, asksBridge: asksBridge, watchedFor: entry.since.map { max(0, now.timeIntervalSince($0)) },
+                             names: names, localLookups: entry.local, listed: true, asksBridge: asksBridge, watchedFor: entry.since.map { max(0, now.timeIntervalSince($0)) },
                              waitsForRestart: waitsForRestart, dnsFromRouter: dnsFromRouter)
     }
 

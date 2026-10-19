@@ -7,8 +7,9 @@ import Testing
 /// Internet guard's evidence: red "Outside access possible", yellow "Needs work", green "Good", gold "Local only", each with its findings.
 @Suite struct CameraSecurityTests {
     static let now = Date(timeIntervalSince1970: 1_792_224_000)
-    /// Watched for two days, its DNS asking the bridge, no lookups.
-    static let watchedQuiet = GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, watchedFor: 2 * 86_400)
+    /// Watched for two days, its DNS asking the bridge, no internet lookups (the box saw it ask names of the home network: it asks the bridge).
+    static let watchedQuiet = GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, localLookups: 3,
+                                            watchedFor: 2 * 86_400)
 
     private func finding(_ feature: RemoteAccessFeature, _ state: RemoteAccessState, linked: Bool? = nil, service: String? = nil,
                          canChange: Bool = false) -> RemoteAccessFinding {
@@ -174,6 +175,39 @@ import Testing
         #expect(security.findings.first { $0.feature == .ddns }?.sentence == "The camera has no dynamic DNS.")
         #expect(security.findings.first { $0.feature == .internetGuard }?.sentence
             == "The Internet guard has watched it for the last 24 hours and saw it make no internet lookups.")
+    }
+
+    /// Silence is no proof (research §5, recommendation 6): a camera that asks a DNS server of its own (built in) is as quiet as one that
+    /// asks nothing. A full day watched without a single lookup seen from it stays green, and says so.
+    @Test func quietAloneIsNotGold() throws {
+        let silent = assess(allOff, guard: GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, watchedFor: 2 * 86_400))
+        #expect(silent.level == .green && silent.title == "Good")
+        let finding = try #require(silent.findings.first { $0.feature == .internetGuard })
+        #expect(finding == CameraSecurityFinding(feature: .internetGuard, state: .on, level: .green,
+                                                 sentence: "No lookups seen yet; Camera Bridge can’t rule out a built-in DNS server.", canChange: false))
+        let router = CameraSecurity.guardFinding(GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true,
+                                                               watchedFor: 2 * 86_400, dnsFromRouter: true))
+        #expect(router.level == .green)
+        #expect(router.sentence == "No lookups seen yet; Camera Bridge can’t rule out a built-in DNS server. " + CameraSecurity.dnsFromRouterNote)
+    }
+
+    /// One lookup seen from the camera, of any name, shows it asks Camera Bridge: one the guard blocked earlier in the box's week, or a
+    /// question that never leaves the home network (the box counts those but never names them). Then a quiet day is gold.
+    @Test func oneLookupSeenThenQuietIsGold() throws {
+        let earlier = Self.now.addingTimeInterval(-3 * 86_400)
+        let blockedBefore = GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true,
+                                          names: [GuardReport.Lookup(name: "p2p.example.com", count: 1, first: earlier, last: earlier)], watchedFor: 4 * 86_400)
+        #expect(blockedBefore.lookupSeen)
+        #expect(assess(allOff, guard: blockedBefore).level == .gold)
+        let local = GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, localLookups: 1, watchedFor: 2 * 86_400)
+        let gold = assess(allOff, guard: local)
+        #expect(gold.level == .gold)
+        #expect(gold.findings.first { $0.feature == .internetGuard }?.sentence
+            == "The Internet guard has watched it for the last 24 hours and saw it make no internet lookups.")
+        var young = local
+        young.watchedFor = 3600
+        #expect(assess(allOff, guard: young).level == .green, "a lookup seen does not shorten the day")
+        #expect(!GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true).lookupSeen)
     }
 
     @Test func anythingUnknownOrAnotherServiceKeepsItGreen() {

@@ -31,7 +31,7 @@ test('status.security: one camera per level and one watched camera that keeps tr
     assert.deepEqual(Object.keys(security).sort(), [...KEYS].sort(), `${name}: every key is there`);
     for (const entry of security.findings) assert.deepEqual(Object.keys(entry).sort(), [...FINDING_KEYS].sort());
     assert.deepEqual(Object.keys(security.guard).sort(), ['last24h', 'names', 'today', 'watched']);
-    for (const entry of security.guard.names) assert.deepEqual(Object.keys(entry).sort(), ['count', 'last', 'name']);
+    for (const entry of security.guard.names) assert.deepEqual(Object.keys(entry).sort(), ['count', 'first', 'last', 'name']);
   }
   const trying = byName['Living Room'];
   assert.equal(trying.guard.watched, true);

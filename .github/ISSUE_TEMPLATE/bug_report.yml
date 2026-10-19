@@ -27,15 +27,9 @@ body:
   - type: input
     id: version
     attributes:
-      label: Camera Bridge version
-      description: "Camera Bridge ▸ About Camera Bridge, for example 1.0 (3)."
-    validations:
-      required: true
-  - type: input
-    id: macos
-    attributes:
-      label: macOS version and Mac model
-      placeholder: "macOS 15.6, MacBook Pro (M3)"
+      label: Camera Bridge OS version
+      description: "The build number on the About page of the web interface (Camera Bridge OS is a beta, so the build matters)."
+      placeholder: "0.1.113"
     validations:
       required: true
   - type: textarea
@@ -50,9 +44,9 @@ body:
     attributes:
       label: Diagnostics export
       description: |
-        In Camera Bridge choose **File ▸ Export Diagnostics…** (or Settings ▸ Diagnostics ▸ Export Diagnostics…) and
-        drag the text file here, or paste the relevant part. Passwords and tokens are removed, but the file can
-        contain **IP addresses, camera names and your Mac's name**. Open it and delete what you do not want to share.
+        In the web interface open **Settings ▸ Troubleshooting** and press **Download diagnostics** (the button is also on
+        System and Log), then drag the text file here, or paste the relevant part. Passwords and tokens are removed, but
+        the file can contain **IP addresses and camera names**. Open it and delete what you do not want to share.
     validations:
       required: true
   - type: checkboxes

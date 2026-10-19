@@ -420,6 +420,7 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .setup-steps .change { font-size: 0.85rem; color: var(--text-2); margin-top: 2px; overflow-wrap: anywhere; }
 .setup-steps .pill { flex: none; }
 .camera-setup .setup-steps { max-height: 52vh; overflow-y: auto; margin: 12px 0; }
+.setup-steps .fix-address { margin-top: 8px; padding-bottom: 0; }
 /* Night vision (screens/night-vision.js): the camera's modes as one segmented control, a line about the one in use, the IR lights switch. */
 .nv-card h2 { margin-bottom: 0; }
 .nv-modes { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-raised); }
@@ -458,6 +459,12 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .manual-values { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 6px 0 0; }
 .manual-values dt { color: var(--text-2); }
 .manual-values dd { margin: 0; color: var(--text); font-family: var(--mono); overflow-wrap: anywhere; }
+.manual-values dd .manual-copy { margin-left: 8px; min-height: 28px; padding: 2px 10px; font-family: var(--font); vertical-align: baseline; }
+.manual-help .manual-link { margin-top: 2px; }
+.manual-current, .manual-keep, .manual-reserve { color: var(--text); overflow-wrap: anywhere; }
+.manual-router strong { color: var(--text); font-weight: 600; }
+.manual-warnings { margin: 6px 0 0; padding-left: 1.2em; list-style: disc; }
+.manual-warnings li { display: list-item; padding: 0; border: 0; margin-bottom: 2px; }
 @media (max-width: 640px) { .manual-values { grid-template-columns: minmax(0, 1fr); } .manual-values dd { margin-bottom: 4px; } }
 
 /* Security (screens/security.js): a level's badge (its shield, with a mark of its own, and its word: never the colour alone), the Cameras
@@ -491,6 +498,7 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .sec-card h2 { margin-bottom: 0; }
 .sec-card .desc { margin-top: 8px; }
 .sec-checked { margin-bottom: 4px; }
+.sec-ai-note { margin: 6px 0 0; }
 .sec-problem:not(:empty) { margin-top: 10px; }
 .sec-findings { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
 .sec-finding { display: flex; gap: 10px; align-items: flex-start; font-size: 0.92rem; }
@@ -499,6 +507,10 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .sec-mark .sec-shield { width: 16px; height: 16px; }
 .sec-can-change { display: block; font-size: 0.82rem; color: var(--text-2); }
 .sec-fix { margin-top: 14px; }
+/* "Restart the camera now" (camera-setup.js restartControl): on the Security card and in the setup's result. */
+.sec-restart { margin-top: 14px; }
+.restart-camera p { margin: 8px 0 0; }
+.restart-camera .row, .restart-camera .banner { margin-top: 8px; }
 .sec-guard .section-title { margin: 22px 0 0; }
 .sec-guard-text p { margin: 8px 0 0; }
 .sec-guard > .row:not(.spread) { margin-top: 10px; }
@@ -506,6 +518,11 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .sec-names p { margin: 0 0 4px; }
 .sec-name { flex-wrap: wrap; gap: 2px 12px; font-size: 0.9rem; }
 .sec-name code { min-width: 0; overflow-wrap: anywhere; }
+/* What a name likely is, on its own line under the name and its times. */
+.sec-name .sec-name-what { flex-basis: 100%; color: var(--text-2); }
+.sec-names .sec-was-it-you { margin: 8px 0 0; }
+/* The banner's "See what <camera> tried" scrolls the card to the top of the window: a little room above it. */
+.sec-card { scroll-margin-top: 16px; }
 .support-list { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; font-size: 0.92rem; }
 .support-list li { display: flex; gap: 8px; align-items: flex-start; }
 .support-list svg { width: 18px; height: 18px; flex: none; margin-top: 2px; color: var(--live); }
@@ -599,6 +616,15 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
 .video-label[data-position="bottomRight"] { bottom: 3%; right: 1.5%; }
 .video-label[data-position="bottomLeft"] { bottom: 3%; left: 1.5%; }
 
+/* Straighten the picture (js/live/straighten.js): the camera's own picture stays in its place, unseen whatever a page's rules say about its
+   opacity (opacity, not visibility: a video keeps decoding and its frame callbacks keep firing), and the straightened canvas, which carries
+   the same classes, is drawn over the same box. Every picture the page straightens fills its positioned box (the preview, a tile, the stage). */
+.straighten-source { opacity: 0 !important; }
+canvas.straightened { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+/* The camera page's guide (screens/camera.js): the line the straightened horizon lands on, across the picture (its left, width and top are
+   set from script); faint, with a dark edge so it shows on a bright sky too. */
+.preview .straighten-guide { position: absolute; height: 0; border-top: 1px dashed rgb(255 255 255 / 0.75); filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.9)); pointer-events: none; }
+
 /* About (screens/about.js) and the "Updated to the newest beta" notice (js/whats-new.js). */
 a.version { text-decoration: none; }
 a.version:hover { color: var(--text); text-decoration: underline; }
@@ -637,6 +663,33 @@ a.version:hover { color: var(--text); text-decoration: underline; }
 /* Settings (screens/settings.js): its cards in titled sections. */
 .settings { display: grid; gap: 28px; }
 .settings-section > .section-title { font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); margin: 0 0 12px; }
+/* Settings › AI descriptions (screens/ai-settings.js): what leaves the box set apart, the saved key's line, and Try it below a rule. */
+.ai-what-leaves { margin: 0 0 14px; padding: 10px 12px; border-left: 3px solid var(--brand-accent); border-radius: 8px; background: var(--surface-2); font-size: 0.95rem; }
+.ai-status:not(:empty) { margin-bottom: 14px; }
+.ai-counts { margin: 0 0 4px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ai-last-error { margin: 4px 0 0; color: var(--text-2); }
+.ai-note { margin: -8px 0 16px; }
+.ai-key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ai-key > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.ai-try { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.ai-try h3 { margin-bottom: 12px; }
+.ai-try-result:not(:empty) { margin-top: 12px; }
+.ai-try-summary { margin: 0 0 2px; font-weight: 600; unicode-bidi: isolate; }   /* the model's words never reorder what is around them */
+.ai-card { scroll-margin-top: 84px; }      /* #/settings/ai scrolls here, below the sticky top bar */
+.ai-card h2:focus { outline: none; }       /* and its heading takes the focus */
+/* The camera page's AI descriptions card (screens/camera.js createAIDescriptionsCard): what Settings says is missing, and the camera's last
+   description with its mark as on the Monitor's events list (red for an alarm, amber for something unusual, none for the routine; "Nothing
+   notable" dimmed). */
+.ai-cam-notes:not(:empty) { display: grid; gap: 8px; margin-top: 8px; }
+.ai-cam-notes .banner, .ai-cam-notes p { margin: 0; }
+.ai-cam-last { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.ai-cam-summary, .ai-cam-none, .ai-cam-when { margin: 2px 0 0; }
+.ai-cam-summary { font-weight: 600; overflow-wrap: anywhere; unicode-bidi: isolate; }
+.ai-cam-summary[data-concern="alarm"]::before, .ai-cam-summary[data-concern="unusual"]::before {
+  content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 7px; border-radius: 50%; vertical-align: 0.05em; background: var(--danger);
+}
+.ai-cam-summary[data-concern="unusual"]::before { background: var(--warning); }
+.ai-cam-summary[data-concern="nothing"] { color: var(--text-3); font-weight: 400; font-style: italic; }
 
 /* Plugins (screens/plugins.js). */
 .plugin-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }

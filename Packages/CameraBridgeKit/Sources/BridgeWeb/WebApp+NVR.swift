@@ -201,6 +201,8 @@ final class ArchiveWebState: Sendable {
     }
 
     let slots = Mutex(Slots())
+    /// The places for saved-clip conversions (`WebApp.maximumClipConversions` at once).
+    let conversions = ConversionSlots(limit: WebApp.maximumClipConversions)
     let files = FileInfoCache()
     let folders = ArchiveFolderProbe()
     private let optimizing = Mutex(Set<UUID>())

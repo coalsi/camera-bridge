@@ -154,6 +154,15 @@ public actor MediaHub {
         }
     }
 
+    /// Every keyframe the ring holds, oldest first (one per GOP: at least the last `retention` once that much has arrived), read without
+    /// subscribing and without changing anything (the pictures from before an event come from here). Empty before the first keyframe and
+    /// after a `discontinuity()` until the reconnected source delivers one.
+    public func recentKeyframes() -> [EncodedVideoFrame] {
+        ring.compactMap { gop in
+            if case .video(let frame) = gop.samples.first { frame } else { nil }
+        }
+    }
+
     /// `lastKeyframe` with the moment it arrived on the hub's monotonic clock (`ContinuousClock` outside tests). Its age
     /// is `ContinuousClock.now - arrival`; the frame's `wallClock` may be the camera's clock (RTSP sender reports), which
     /// can run seconds off the Mac's.

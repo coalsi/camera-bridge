@@ -108,6 +108,11 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
     /// The "CameraBridge timestamp" drawn on live view and HomeKit Secure Video recordings (docs/CONTRACT_CHANGES.md
     /// 2026-10-02). Off by default; on, both always use the Mac's video encoder (`MediaFit`).
     public var timestampOverlay: TimestampOverlaySettings
+    /// "Straighten the picture": the two sliders that move a bent horizon (a panorama stitched from two lenses) onto a straight line, in
+    /// everything the bridge shows of this camera (docs/superpowers/specs/2026-10-18-straighten-the-picture-design.md; docs/CONTRACT_CHANGES.md
+    /// 2026-10-18). Off (both 0) by default; a configuration saved before it existed loads with it off. Applied in place to the running
+    /// camera, never a restart (`BridgeEngine.needsRestart`).
+    public var pictureCorrection: PictureCorrection
     /// Set while CameraBridge has turned the camera's own on-screen date/time off (`BridgeEngine.setCameraClockHidden`):
     /// how, and what it takes to put it back.
     public var hiddenCameraClock: HiddenCameraClock?
@@ -132,11 +137,14 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
     public var nvrEnabled: Bool
     /// Also record the camera's sound (AAC), when `audioEnabled` is on. Same rules as `nvrEnabled`.
     public var nvrRecordSound: Bool
+    /// Describe this camera's events with the AI service the person chose (`BridgeSettings.ai`): a few still pictures from around each event go
+    /// to that service. Off by default. Applied in place, so changing it never restarts the camera (`BridgeEngine.needsRestart`).
+    public var aiDescriptions: Bool
 
     /// Defaults: no stream URLs, camera events for motion (sensitivity 0.5, 20 s hold), no sensors, audio on,
     /// two-way audio off, port 0 (allocated by the engine), enabled, empty device info, capabilities unknown,
     /// automatic live/recording stream selection, quality matched to what HomeKit/the hub asked for, no bit rate override,
-    /// timestamp overlay off, the camera's own clock untouched, NVR recording off (sound off).
+    /// timestamp overlay off, picture correction off, the camera's own clock untouched, NVR recording off (sound off), AI descriptions off.
     public init(id: UUID = UUID(), name: String, kind: CameraKind, vendor: CameraVendor, endpoint: CameraEndpoint, username: String) {
         self.id = id
         self.name = name
@@ -166,6 +174,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         self.recordingQualityMode = .matchHubRequest
         self.preferredConfigMethod = nil
         self.timestampOverlay = TimestampOverlaySettings()
+        self.pictureCorrection = .off
         self.hiddenCameraClock = nil
         self.cleanPictureBackup = nil
         self.setupBackup = nil
@@ -174,6 +183,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         self.integration = nil
         self.nvrEnabled = false
         self.nvrRecordSound = false
+        self.aiDescriptions = false
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -181,7 +191,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         case sensors, audioEnabled, twoWayAudio, hapPort, isEnabled, manufacturer, model, serialNumber, firmware, capabilities
         case liveStreamMode, liveQualityMode, liveMaxBitrateOverride, recordingStreamMode, recordingQualityMode
         case preferredConfigMethod, timestampOverlay, hiddenCameraClock, cleanPictureBackup, integration, nvrEnabled, nvrRecordSound
-        case setupBackup, setupState, dnsWatch
+        case setupBackup, setupState, dnsWatch, pictureCorrection, aiDescriptions
     }
 
     public init(from decoder: any Decoder) throws {
@@ -221,6 +231,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         recordingQualityMode = value(.recordingQualityMode, default: recordingQualityMode)
         preferredConfigMethod = value(.preferredConfigMethod, default: nil)
         timestampOverlay = value(.timestampOverlay, default: timestampOverlay)
+        pictureCorrection = value(.pictureCorrection, default: .off)
         hiddenCameraClock = value(.hiddenCameraClock, default: nil)
         cleanPictureBackup = value(.cleanPictureBackup, default: nil)
         setupBackup = value(.setupBackup, default: nil)
@@ -229,6 +240,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         integration = value(.integration, default: nil)
         nvrEnabled = value(.nvrEnabled, default: nvrEnabled)
         nvrRecordSound = value(.nvrRecordSound, default: nvrRecordSound)
+        aiDescriptions = value(.aiDescriptions, default: aiDescriptions)
         if !unreadable.isEmpty {
             Log(category: "Engine", cameraID: id).warning("\(name): unreadable \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }
@@ -273,6 +285,9 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
     /// The plugins' own settings by plugin id ("wyze"): switched on, the account shown, the last sync. Secrets are not here: they are in the
     /// platform `SecretStore` (`BridgeEngine.pluginSecret(id:)`).
     public var plugins: [String: PluginState]
+    /// How events are described by an AI service: which service and model, its address, the daily limit. Nothing secret: the key is in the
+    /// platform `SecretStore` (`BridgeEngine.setAIKey(_:)`).
+    public var ai: AIDescriptionSettings
 
     public static let nvrKeepDaysRange = 1...365
     public static let nvrMaxSizeGBRange = 10...100_000
@@ -285,7 +300,7 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
     }
 
     /// Webhook off (port 21090, random 32-hex-digit token), keep-awake off, sensors bridge on 21099,
-    /// log level info, camera HAP ports from 21100, motion shadow test off, no recordings folder, keep 7 days, at most 500 GB.
+    /// log level info, camera HAP ports from 21100, motion shadow test off, no recordings folder, keep 7 days, at most 500 GB, no AI service.
     public init() {
         webhookEnabled = false
         webhookPort = 21_090
@@ -301,11 +316,12 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         nvrMaxSizeGB = 500
         timeZone = nil
         plugins = [:]
+        ai = AIDescriptionSettings()
     }
 
     private enum CodingKeys: String, CodingKey {
         case webhookEnabled, webhookPort, webhookToken, keepMacAwake, sensorsBridgePort, logLevel, basePort, motionShadowTest
-        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone, plugins
+        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone, plugins, ai
     }
 
     public init(from decoder: any Decoder) throws {
@@ -340,6 +356,7 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
             if TimeZone(identifier: zone) != nil { timeZone = zone } else { unreadable.append(CodingKeys.timeZone.stringValue) }
         }
         plugins = value(.plugins, default: plugins)
+        ai = value(.ai, default: ai)
         if !unreadable.isEmpty {
             Log(category: "Engine").warning("Unreadable settings \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }

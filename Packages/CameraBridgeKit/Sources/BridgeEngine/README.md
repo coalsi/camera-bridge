@@ -142,7 +142,7 @@ WebhookServer (engine) ───────────────────
   goes through `LiveStreamSession.end(reason: .pipelineFailed(...))` so the log and the status say why, and `StreamingHandler` ends the
   HomeKit session and Home retries (`CameraStatus.liveSessions` carries each stream's `health` and, once the pipeline gave up, its
   `endReason`). Transcoder: never
-  replaced by a passthrough that would not fit (HEVC, a timestamp overlay, a profile/level over the request; only a transcode
+  replaced by a passthrough that would not fit (HEVC, a timestamp overlay, a straightened picture, a profile/level over the request; only a transcode
   chosen for a long GOP falls back to the camera's own stream when the transcoder cannot be made); creation is retried after
   0.5 / 1 / 2 s, then the stream ends; a failing transcoder drops the frame, then is rebuilt (software decoder after a keyframe
   failure; at most every 0.5 s), and 3 s of failures without a frame ends the stream; creation, teardown and each transcode call
@@ -422,7 +422,7 @@ for recording, a GOP longer than the fragment); `MediaFit.prefersSubStream` take
 `EngineStatus` types `LiveSessionStatus`, `RecordingSessionStatus`, `SourceStreamInfo`;
 `CameraStatus.liveSessions`/`.recordingSession`/`.mainStreamInfo`/`.subStreamInfo` expose what is currently playing
 through each live viewer and the running recording, and the camera's own measured stream facts, to the app's camera
-detail page (`StreamsSection` in `App/Sources/Manager/CameraDetailView.swift`). `LiveSessionStatus.health` (the stream health check's
+detail page (`StreamsSection` in `Archive/mac-app/App/Sources/Manager/CameraDetailView.swift`). `LiveSessionStatus.health` (the stream health check's
 verdict) and `.endReason` (why the pipeline ended it; nil while it runs) are init parameters with default nil (2026-10-03). `StreamingHandler.init` and
 `RecordingHandler.init` grow optional stream/quality parameters; `RecordingHandler.stopAll` is now `async`.
 
@@ -442,17 +442,48 @@ CameraBridge timestamp (2026-10-02, see `docs/CONTRACT_CHANGES.md`): `CameraConf
 a configuration saved before it existed loads with the defaults) draws the Mac's clock on live view and HKSV recordings.
 While it is on `MediaFit.live` / `MediaFit.recording` (new optional `timestampOverlay` parameter) always return
 `.transcode("timestamp overlay")` (`MediaFit.timestampOverlayReason`); with Original Quality / Original When Possible the transcode
-keeps the camera's own size (`MediaFit.liveEncoderSettings` / `recordingEncoderSettings`). The look (position, size, text options,
+keeps the camera's own size (`MediaFit.liveEncoderSettings` / `recordingEncoderSettings`), at most `MediaFit.maximumOutputWidth` (3840) wide, the height in proportion and even (`MediaFit.cappedEvenSize`, the rule saved clips use too: the H.264 encoder's limit is 4096). The look (position, size, text options,
 camera name) is applied in place to running streams through the camera's `TimestampOverlayControl` (no restart); turning it on or
 off restarts the camera's runtime (`BridgeEngine.needsRestart`). The time shown is each picture's `wallClock` corrected by the hub's
 measured `wallClockOffset`, so an RTSP camera whose own clock runs off shows the Mac's time. `BridgeEngine.setCameraClockHidden(cameraID:hidden:)`
 turns the camera's own on-screen clock off and back on (`CameraSettingsService.hideCameraClock`) and keeps how in
 `CameraConfiguration.hiddenCameraClock`, which only the engine writes (`updateCamera` keeps the engine's value).
+Straighten the picture (2026-10-18, see `docs/CONTRACT_CHANGES.md`, `docs/superpowers/specs/2026-10-18-straighten-the-picture-design.md`):
+`CameraConfiguration.pictureCorrection` (MediaCore's `PictureCorrection`: `straighten` −0.60 to +0.60 bends the horizon's curve onto a
+straight line, `level` −0.40 to +0.40 tips it; both 0, `.off`, by default and for a configuration saved before it existed; values past the
+limits are clamped, never refused) is the per-camera correction of a bent horizon. Changing it never restarts the camera:
+`BridgeEngine.needsRestart` ignores it, because a restart would close the camera's NVR file; it is applied to the running camera in place.
+The web API's `PATCH /api/v1/cameras/:id` takes it as a whole value (`{"pictureCorrection": {"straighten": 0.4, "level": 0.15}}`) and the
+camera resource carries it with the configuration. Apple Home's live view and HKSV recordings straighten the picture where the codecs can
+(`MediaCodecs.supportsPictureCorrection`, the box's ffmpeg; where they cannot, the correction is off everywhere, so it never shows in one
+place and not in another): while it is on `MediaFit.live` / `MediaFit.recording` (new optional `pictureCorrection` parameter) return
+`.transcode("straightened picture")` (`MediaFit.pictureCorrectionReason`; the overlay's reason when both are on), Original Quality /
+Original When Possible keep the camera's own size as they do for the overlay (capped at 3840 wide, so a 4256 × 1888 panorama is converted at 3840 × 1704), and the transcoder is handed the camera's
+`PictureCorrectionControl`, which it asks at every picture. An edit reaches the running camera through `CameraRuntime.updatePictureCorrection`,
+never a restart. Every transcoder of a live view or recording holds the control, on or off (a nil correction costs nothing), so it
+straightens its next picture by a new value, or leaves it as the camera sends it once the correction is off. A live view's path follows the
+correction as it is at the session's start, or the next time its video path is rebuilt, and turning the correction on or off rebuilds each
+running live view whose path that changes, at once from the hub's newest GOP (`LiveStreamPipeline.pictureCorrectionSwitched`, as a new
+size does): a passthrough view starts transcoding to straighten, a transcode that was there for the correction goes back to passthrough. A
+new value while it stays on rebuilds nothing. An HKSV recording keeps the path it started with until its next start: one that passes the
+camera's stream through is straightened from the next recording on, and one transcoded only for the correction stays transcoded to its end,
+unstraightened from its next picture. Snapshots (Apple Home's tiles and notifications, the app's and the web's stills) go through
+`CorrectedSnapshots`: the `SnapshotProvider`'s JPEG straightened by the codecs' `MediaCodecs.correctJPEG` at the correction of the moment,
+unless the caller asks for the original (`BridgeEngine.snapshot(cameraID:original:)`, `CameraRuntime.snapshot(width:height:original:)`; the
+web's `?original=1` for the camera page, which straightens it in the browser while its sliders move). While the correction is off nothing
+runs. The straightening fits inside the provider's own budget (`SnapshotProvider.Timing.limit(for:)`: 3 s for an event snapshot, else 4 s;
+it gets what the provider left, less 150 ms), a camera runs one correction at a time (each holds a thread while its ffmpeg runs: one of `CodecOffload`'s, never one of the cooperative pool's, which HomeKit and RTP share, and it is given up on after `CorrectedSnapshots.deadline`, 7 s; a request
+for another picture waits for it within its budget), the newest straightened picture of each of the last two sizes is kept (Apple Home's
+tiles and the web ask for different ones) and handed out at once, a picture straightened by values that changed meanwhile is straightened
+once more by the new ones, and a correction that fails or is late serves the camera's own picture, warned at most once every 30 s (a late
+one keeps running, and the next request for the same picture takes its result).
+Saved clips are straightened by the web route (BridgeWeb, `straighten=1`), which re-encodes them with ffmpeg; `ClipExporter.pictureSize(_:part:)` gives it
+the part's picture size (from the part's recordings' init segment), at which the maps are made. The recordings themselves are never changed.
 Internal: `EngineTuning` (`Runtime/EngineTuning.swift`; `afterSensorsBridgeStatus` is a test hook) +
 `BridgeEngine.init(environment:tuning:)` (tests shrink the demo camera and shorten timers), `BridgeEngine.networkSettle`,
 `CameraRuntime`, `IngestSupervisor`, `StreamTraits`, `StreamSources`, `AccessoryOptions`, `SoftMotionMonitor`, `ControllerRegistry`,
 `MediaFit`, `H264Levels` (HAP level → level_idc; limits from MediaCore's `H264LevelLimits`), `StreamAddress`, `InterfaceAddress`, `OpusRepacketizer`, `TimelineRebaser`, `StreamingHandler`, `LiveStreamPipeline`,
-`TalkbackBridge`, `RecordingHandler`, `RecordingProducer`, `SnapshotProvider`, `PowerController`, `LocalNetworkCheck`,
+`TalkbackBridge`, `RecordingHandler`, `RecordingProducer`, `SnapshotProvider`, `CorrectedSnapshots`, `PowerController`, `LocalNetworkCheck`,
 `LogCollector`, `ChangeSignal` (deadlines and the FIFO lock are BridgeSupport's `withDeadline` and `AsyncSerialLock`).
 
 ## Part A (W2-3) entry points — additions beyond the contract
@@ -600,6 +631,102 @@ with its deadline (a torn line is skipped). `recorded`: the catalog holds video 
 was writing it less than 2 minutes ago. The janitor deletes whole day files after each pass: those that ended before `nvrKeepDays`, and those
 before the newest file the size rule deleted. Nothing is kept while no folder is chosen.
 
+## Additions beyond the contract: descriptions of events (2026-10-18, docs/CONTRACT_CHANGES.md)
+
+`ArchiveEvent.description` (`EventDescription?`, a trailing `init` parameter with default nil): what an AI service said it saw at the event's
+start, as `EventDescription` has it (`summary`, `kind`, `concern`, `model`, `at`; `EventDescription` is now `Hashable`, so `ArchiveEvent` stays
+so). The event log gains a third kind of line, `{"ai":{"at","concern","kind","model","summary"},"id":"<the event's>","v":1}` (`at` in milliseconds
+like every time in the file): it goes through the same pending queue and serial drain as the start and end lines, into the day file of the
+event's start (whenever the answer comes, so retention takes the event and its description together), at most 2048 bytes (a description that
+does not fit is not kept, and a longer line is not read). The last description line of an id wins; one of an id the file does not hold (the
+place for recordings changed since the event began) is ignored; a build that does not know `ai` sees a line that is neither a start nor an end
+and skips it. `ArchiveEventLog.record` returns a `StartedEvent` (`cameraID`, `kind`, `id`, `date`; internal) for each event it began and kept,
+`NVRCoordinator.recordEvents(_:)` hands them on, and `NVRCoordinator.recordDescription(_:for:)` writes a description for one of them. The
+events route of BridgeWeb carries `description` (`{summary, kind, concern}` or null) on each event.
+
+## Additions beyond the contract: AI descriptions (2026-10-18, docs/CONTRACT_CHANGES.md)
+
+`BridgeEngine/AI` writes one brief description of a camera event from a few still pictures, with the AI service the person chose. Opt-in twice: no
+service is chosen until the person chooses one (`BridgeSettings.ai`), and each camera has its own switch (`CameraConfiguration.aiDescriptions`, off).
+
+- **The description.** `EventDescription` (`summary` at most `maximumSummaryLength` characters and `maximumSummaryBytes` (600) UTF-8 bytes, without control or format characters (the emoji joiner stays), `kind` and `concern` as `EventDescription.Kind` and
+  `EventDescription.Concern`, `model`, `at`); `EventDescription.parse(_:model:at:)` reads a model's answer leniently; `nothingNotable` is the
+  summary of an event with nothing in it.
+- **The services.** `AIVisionDescribing` (`model`, `describe(_:)`) is what one service is: `AnthropicVision` (Claude; `defaultModel` is
+  `claude-haiku-5-5`) and `OpenAICompatibleVision` (OpenAI, OpenRouter, or a model at home such as Ollama; the key may be empty). A
+  `DescriptionRequest` holds the camera's name, the kind of event, the local time and the `LabeledPicture`s in time order; `DescriptionPrompt` is what
+  the model is told. Both send through an `AITransport`, `URLSessionAITransport` live (certificate checks on, 20 s, answers up to 1 MiB, and
+  it never follows a redirect: `AuthenticatingHTTPClient(followsRedirects: false)`, so a 3xx is the answer and the key and the pictures go only
+  to the saved address). `AIProviderError` (`keyRefused`, `notAllowed`, `notFound`, `rateLimited`, `unreachable`, `serviceFailed(_:)`, `keyNeeded`
+  (a 401 with no key to send), `requestRefused` (a 400), `redirected` (a 3xx), `declined` (Claude's `stop_reason` "refusal"), `badAnswer`)
+  carries no request or answer data, so it is safe to log and show; `sentence` is the plain words.
+- **The settings.** `AIDescriptionSettings` (`provider` as `AIProviderKind`, `anthropic` or `openAICompatible`; `model`, 1 to 100 printable
+  characters (`modelLengthRange`); `baseURL`, which an OpenAI-compatible provider needs: http or https, a host, no user name or password, no query or
+  fragment, at most 500 characters; and `dailyLimit`, 1 to 5000 (`dailyLimitRange`), default 200) is `BridgeSettings.ai`. `validationProblem` names the first field that cannot be saved (`Problem`: the field and the words),
+  and `BridgeEngine` refuses such settings with `EngineError.invalidSettings`. Decoding is lenient: a value the
+  build would refuse takes its default (logged by key name, never by value), and an OpenAI-compatible provider without a usable address loads as no
+  provider, so what is loaded can always be saved again.
+- **The key.** `BridgeEngine.setAIKey(_:)` keeps it in the platform `SecretStore` as `ai.key`: never in `config.json`, a log, a diagnostic, an error or
+  an answer of the web API. It is trimmed of spaces, tabs and line breaks (`AIDescriptionSettings.cleanedKey(_:)`: a trailing newline would make an
+  invalid header) and refused unless what is left is 1 to `maximumKeyLength` characters of visible ASCII (0x21 to 0x7E), which leaves out an inner space,
+  a control character, a zero-width character, a byte order mark, a bidi control and any non-ASCII text; nil or an empty string deletes it.
+  Nothing reads it back but the engine and the describer (`aiKey()`, internal). `aiKeySaved` and `aiKeyHint` (its last four characters; none for a key
+  under eight characters, where four would be most of it) are all the page learns; `aiKeyStatus()` gives both from one read made off the main actor
+  (a failed read counts as no key and is logged once, by the name `ai.key`).
+- **A key is for one service.** The settings update that changes `ai.provider` (to or from none too), or for an OpenAI-compatible service the
+  scheme, host or port of `baseURL` (the scheme's own port when none is written; the case of the host and the path do not count), deletes the saved key
+  first (one that cannot be read is deleted all the same), and only a failure to delete it stops the update; a new model, daily limit or path
+  keeps it. The card then asks for the key of the new service, and the old one is never sent there. Two addresses that cannot be read are never the
+  same server. The log says the key was removed, naming the new service (the address's host only), once the settings are saved.
+- **The camera's switch** is applied in place: `needsRestart` ignores `aiDescriptions`, so switching it never restarts a camera.
+- **The pictures.** Two steps, so that only encoded data waits and one set of pictures is decoded at a time. `CameraRuntime.gatherEventFrames(at:)`
+  (internal; `EventPictures.gather(at:)`), called when the event starts, with its date on the bridge's clock as the event router stamps it,
+  gathers `EventFrames` and decodes nothing: "4 s before" and "2 s before", keyframes of the main stream's ring (`MediaHub.recentKeyframes()`), each
+  within 1.5 s of its moment and used once (the pair closest to their moments together, else one for the moment it is nearer; none for a camera
+  that streams on demand: its ring is empty when the event starts); the event picture's source, the camera's own JPEG as it sent it when it comes
+  within 3 s of the event (`SnapshotProvider.cameraJPEG(within:startedAfter:)`: Home's one fetch, never Home's caches, never the last picture in
+  its place; a fetch it starts keeps Home's own limit for an event snapshot, so only the describer's wait is short, and a fetch that began more
+  than 0.5 s before the event, a picture of before it, is not used), else
+  the newest GOP of the ring up to the frame nearest the event (at most 150 frames and 8 MiB; in a longer GOP the last frame kept), else the first
+  keyframe that arrives within 3 s, else none; "2 s after" and "4 s after", chosen as the ones before, from the ring and then live, the wait ending
+  at the first keyframe 4 s after the event or 6 s after the call (`afterWait`). Frame times are `wallClock` plus the hub's `wallClockOffset`, the
+  bridge's clock as the recordings place frames. `CameraRuntime.eventPictures(from:)` (`EventFrames.pictures(decoders:log:)`) makes the JPEGs later,
+  in time order, at most 768 px wide at quality 0.7 (a camera JPEG that fits as it came), one set at a time on the runtime's own
+  `SnapshotDecoderPool` for them (kept 10 s, never the snapshot provider's), whose JPEG work runs off the cooperative pool
+  (`SnapshotDecoderPool.offCooperativePool`, `CodecOffload`); decoding forward to the event picture stops after 3 s. A picture that cannot be had
+  is left out; a cancelled gather or decode stops at once. One `EventFrames` holds about 10 MiB at most; the describer keeps few waiting (it drops
+  an event older than 60 s). `SnapshotDecoderPool` gains `blockingWork` (default inline, as Home's snapshots always ran), `quality:` on
+  `jpeg(fromKeyframe:…)` and `jpeg(fromGOP:…)` (default 0.8) and `resizedJPEG(_:maxWidth:maxHeight:quality:)`; a keyframe decoded on it moves the
+  decoder off the GOP it was partway through, so the next picture of that GOP starts again at its keyframe.
+- **The describer.** `EventDescriber` (internal actor, `AI/EventDescriber.swift`), made by the engine at first use, started with `startServices` and
+  stopped with `stopServices` (before the runtimes; a call in flight is cancelled). The edge handler hands it what the event log began
+  (`eventsStarted`, which returns at once; nothing while no recordings folder is chosen). It describes an event when a service is set, describing is
+  not paused, today's limit is not reached, the camera runs with its switch on and had no event described in the last 60 s; of the events of one
+  camera that start together, the most specific (Person > Package > Vehicle > Animal > Face > Doorbell ring > Motion); tamper, sound and alarm inputs
+  never. A skipped event costs nothing. A more specific kind that starts on the camera within 2 s of the admitted event (Motion, then Person a
+  second later), while that one is still gathered or waits, takes its place: its frames, and the description goes to its row (the minute still
+  counts from the first). The frames of an admitted event are gathered at once (every camera at the same time), then it waits in a queue of
+  width one; one that waited more than 60 s is dropped before its pictures are made, and when its turn comes its camera is looked up again: one
+  turned off or removed meanwhile has nothing made or sent; the switch is read once more, and the service must still be the one the turn began
+  with (`serviceGeneration`), right before the first send and again right before the retry, else the event is dropped unsent (uncounted before its
+  first send). The request carries the camera's name, the kind it
+  reported and the event's local time in the bridge's zone ("Sunday 18 October 2026, 9:19 PM"); a network error or a 5xx is tried once more after
+  2 s unless the event is stale by then, nothing else is. The description goes into the event log (its `at` to the whole millisecond); a failure
+  becomes the last error, unless the service or key it came from was replaced since. A refused key pauses describing until the service or the
+  key changes, or Try it works again (which also clears the refusal): one error, one log line.
+  Each event sent counts once toward the day (`AIUsage`, `<data>/ai/usage.json`, 0600: the counts of the last 8 days by the day's name in the
+  bridge's zone, so a 25-hour day is one day and a restart keeps the count). The engine gives it its service whenever the settings or the key change
+  (`AnthropicVision`, which needs a key, or `OpenAICompatibleVision`, over `URLSessionAITransport`; tests replace the transport and the clock with
+  `EngineTuning.aiTransport` and `aiNow`), and every change of the AI settings (a new model or limit too), the service or the key starts a new generation: a pause ends, the last
+  error is forgotten and a call for what was in use before is neither kept nor sent again (whether the key goes with the service is a separate
+  rule, `keepsKey(from:)`). A settings save that fails after
+  the change of service deleted the key gives the describer its service again, without the key. `BridgeEngine.aiStatus()` gives the Settings
+  card an `AIStatus` (`today`, `last7Days`, `limitReached`, `paused`, `lastError`, `lastErrorAt`, `needsRecordingsFolder`).
+  `BridgeEngine.tryAIDescription(cameraID:)` is Try it: the pictures around now of any running camera (its switch on or off: the person asked),
+  described and not stored, counted toward the day, one at a time; it throws `EngineError.unknownCamera`, `AIDescriberError` (`noService`,
+  `limitReached(_:)`, `cameraNotRunning`, `noPictures`, `alreadyTrying`, each with a `sentence`) or the service's `AIProviderError`. A failed try is
+  logged as "Try it for <camera> failed: <sentence>".
+
 ## The NVR (Sources/BridgeEngine/NVR)
 
 Recording the cameras' main streams and reading the recordings back (docs/CONTRACT_CHANGES.md 2026-10-10; the new public API is listed under "Additions beyond the contract: the NVR"). One `MediaHub` subscription per camera feeds one recorder; the store owns the catalog, the reads and the retention; the engine's own surface is `setNVR`, `archive` and `nvrStorage`.
@@ -676,37 +803,69 @@ a write of the value Home already shows leaves it so.
 ## Additions beyond the contract: Change it by hand (2026-10-18, docs/CONTRACT_CHANGES.md)
 
 Why a step of Set up for Camera Bridge, or a finding of the Security card, could not be done, and how to do it by hand (owner decisions,
-2026-10-18). `Security/CameraManualHelp.swift`: `CameraFamily` (`hikvision`, `reolink`, `tapo`, `ipcWebAPI` (Jennov and other Anjvision
-cameras), `ipcamWeb` (the IPCamera Web family), `dahua` (Dahua and Amcrest), `onvif`; `CameraFamily.of(_:webAPI:)`: the vendor, then the web
-API the camera's address showed in this run (CameraAdapters' `CameraWebAPIFamily.seen(at:)`), then its maker and model, then what an earlier
-setup kept), `CameraManualHelp` (`why`, one sentence; `places`, each `CameraManualHelp.Place` with `app`, menu `path`, `action` and
-`confirmed`; `values` to set, `CameraManualHelp.Value`; `router`, `note`, `then`; `caveat`, set by the init whenever a place is not
-confirmed), and `CameraManualHelpText`, every word in one table like `InternetGuardText` (`CameraManualHelpText.Context`: the bridge's time
-server and DNS address on the camera's network and its time zone in words; `CameraManualHelpText.caveat`; `CameraManualHelpText.step(_:status:detail:family:context:changes:)`;
-`CameraManualHelpText.withHelp(_:family:context:)` for a `CameraSetupReport` or a `CameraSecurity`). Only `notSupported` and `refused`
-steps get help, and none for the DNS or the time without the bridge's address. The why comes from the step's own detail where it says
-something (a refused login, paused logins, no answer, an account that may not change it: "sign Camera Bridge in with an administrator
-account", the camera's own words); a menu path is `confirmed` only when it was read on the camera's own pages or in its maker's documents
-(the IPCamera Web family's page, the IP camera web API's page, TP-Link FAQ 4372, Reolink's UPnP and UID articles), and any other path or a
-general instruction carries "Menu names differ between models and firmware versions, so look for the closest match." Watch also offers the
-router's way (a DHCP reservation with the bridge as the camera's DNS, which counts too but can change when the router renews the address, or
-blocking the camera's internet) and "Then press Check again on the camera’s Security card."; UPnP and the cloud offer the router too. On the
-Security card: UPnP or the cloud on or unreadable, the video or an extra service without a password, where `canChange` is false, and the
-Internet guard's finding while `CameraSecurity.internetGuard` does not watch the camera because of its DNS (`CameraManualHelpText.GuardDNS`,
-from the engine's last reading, `manualHelpGuardDNS`: it asks other servers and is not waiting for a restart that takes the bridge, or its DNS
-could not be read; not while it already asks the bridge, nor while a listed camera's box isn't running). `CameraSetupStep.manualHelp` and
+2026-10-18). `Security/CameraManualHelp.swift`: `CameraFamily` (`hikvision` (and its OEMs), `reolink`, `tapo`, `ipcWebAPI` (Jennov and other
+Anjvision cameras), `ipcamWeb` (the IPCamera Web family), `dahua` (Dahua, Amcrest, Lorex), `axis`, `hanwha` (Wisenet), `uniview`, `foscam`,
+`vigi`, `xmeye`, `unifi` (standalone), `onvif`; `CameraFamily.of(_:webAPI:)`: the vendor, then the web API the camera's address showed in
+this run (CameraAdapters' `CameraWebAPIFamily.seen(at:)`), then its maker and model (a Tapo, then the manufacturer containing "hikvision",
+"annke", "reolink", "dahua", "amcrest", "lorex", "axis", "hanwha", "wisenet", "uniview", "foscam", "vigi" (the model too), "xiongmai" or
+"ubiquiti", any case), then what an earlier setup kept), `CameraManualHelp` (`why`, one sentence; `places`, each `CameraManualHelp.Place`
+with `app`, menu `path`, `action` and `confirmed`; `values` to set, `CameraManualHelp.Value` with `copy` for an address to type; `router`,
+`note`, `then`; `caveat`, set by the init whenever a place is not confirmed; since 2026-10-19 `link`, `current`, `keep`, `reserve`,
+`warnings`, below), and `CameraManualHelpText`, every word in one table like `InternetGuardText` (`CameraManualHelpText.Context`: the
+bridge's time server and DNS address on the camera's network and its time zone in words, and since 2026-10-19 `webPage`, `cameraAddress`,
+`currentDNS`, `addressing`, `ipv6On`; `CameraManualHelpText.caveat`; `CameraManualHelpText.step(_:status:detail:family:context:changes:)`;
+`CameraManualHelpText.withHelp(_:family:context:)` for a `CameraSetupReport` or a `CameraSecurity`). Only `notSupported` and `refused` steps
+get help, and none for the DNS or the time without the bridge's address. The why comes from the step's own detail where it says something (a
+refused login, paused logins, no answer, an account that may not change it: "sign Camera Bridge in with an administrator account", the
+camera's own words); a menu path is `confirmed` only when it was read on the camera's own pages or in its maker's documents (the IPCamera
+Web family's page, the IP camera web API's page, TP-Link FAQs 688 and 4372, Reolink's UPnP and UID articles, and for the DNS the makers'
+documents in the research's §4: Hikvision's manual 5.7.20, the AXIS OS help, Hanwha's KB, Uniview's manual V3.00, Foscam FAQ 243 and VIGI
+FAQ 4741), and any other path or a general instruction carries "Menu names differ between models and firmware versions, so look for the
+closest match." Watch also offers the router's way (a DHCP reservation with the bridge as the camera's DNS, which counts too but can change
+when the router renews the address, and works only while the camera takes its DNS from DHCP, from its next renewal or restart; or blocking
+the camera's internet) and "Then press Check again on the camera’s Security card."; UPnP and the cloud offer the router too. On the Security
+card: UPnP or the cloud on or unreadable, the video or an extra service without a password, where `canChange` is false, and the Internet
+guard's finding while `CameraSecurity.internetGuard` does not watch the camera because of its DNS (`CameraManualHelpText.GuardDNS`, from the
+engine's last reading, `manualHelpGuardDNS`: it asks other servers and is not waiting for a restart that takes the bridge, or its DNS could
+not be read; not while it already asks the bridge, nor while a listed camera's box isn't running). `CameraSetupStep.manualHelp` and
 `CameraSecurityFinding.manualHelp` (init parameters, default nil) carry it; nothing in the engine sets them and they are never saved:
 `BridgeEngine.withManualHelp(_:cameraID:)` (a report or a security result) and `BridgeEngine.withManualHelp(_:)` (statuses, the bridge's
-interfaces and its zone read once) add it for a camera the setup works with, reached directly, and BridgeWeb's `EngineBackend` calls them for
-the page's preview, run, check and statuses, never for a restore's report (its help would say how to make the change Restore is undoing).
-Hikvision's, Dahua's and Amcrest's menus (only in other people's guides) and the IP camera web API's OSD tab get the general instruction with
-the caveat; Reolink's cloud note says doorbell rings still come through Apple Home only for a doorbell (`Context.doorbell`); where the camera
-has no place of its own (a Tapo's cloud and UPnP, the IPCamera Web family's UPnP) the router's way is said as the way, not as another.
-`BridgeEngine.cameraFamily(_:)` keeps the web API family each camera's address showed while the bridge runs (the clients forget it when the
-camera starts again). Tests: `CameraManualHelpTests` (every step and family that can fail says why and where; the bridge's address; only the
-confirmed paths unmarked; the caveat; the why from the detail; the families; the Security card; the guard's DNS help only where the DNS is
-why), `CameraManualHelpEngineTests`, and BridgeWeb's `CameraManualHelpBackendTests` (the real `EngineBackend`: preview, run, check and status
-carry it, a restore does not).
+interfaces and its zone read once) add it for a camera the setup works with, reached directly, and BridgeWeb's `EngineBackend` calls them
+for the page's preview, run, check and statuses, never for a restore's report (its help would say how to make the change Restore is
+undoing). The other steps of Hikvision, Dahua and Amcrest (their menus only in other people's guides) and of the makers added on 2026-10-19
+(their menus not known), and the IP camera web API's OSD tab, get the general instruction with the caveat; their DNS menus are the table's
+below (Hikvision's TCP/IP page confirmed, the Dahua family's a best guess); Reolink's cloud note says doorbell rings still come through
+Apple Home only for a doorbell (`Context.doorbell`); where the camera has no place of its own (a Tapo's cloud and UPnP, the IPCamera Web
+family's UPnP) the router's way is said as the way, not as another. `BridgeEngine.cameraFamily(_:)` keeps the web API family each camera's
+address showed while the bridge runs (the clients forget it when the camera starts again).
+
+Pointing the DNS at Camera Bridge by hand (2026-10-19, docs/superpowers/specs/2026-10-18-camera-dns-design.md, "What the person sees" 1):
+each maker's menus from the research's §4 (`.superpowers/sdd/camera-dns-research.md`; confirmed: Hikvision's TCP/IP page, Axis, Hanwha,
+Uniview's DNS page, Foscam and its Equipment Search Tool, VIGI, the Tapo app, the IPCamera Web family, the IP camera web API; best guesses
+with the caveat: Reolink's DNS switch on its confirmed network pages, the Dahua family's (Amcrest and Lorex), XMEye on the recorder or in
+CMS/VMS, a standalone UniFi camera; a camera of an unknown maker gets the general instruction). `link` ("Open the camera’s web page") is
+the camera's configured address and web port (internal `webPageURL`: `http(s)://host[:port]/`, https where Camera Bridge reaches it so, the port left
+out when it is the scheme's own; nil for a host that is not a plain name or address), never anything the camera says (ruling D1), on a help
+that names the camera's web page, for a maker Camera Bridge knows (not a Tapo, not an unknown maker). The DNS help also carries `current`
+(the servers the engine's last reading showed; empty in a setup report, whose change row says them), `keep` and `reserve`
+(`CameraManualHelp.Keep`: address, mask, gateway; `CameraManualHelp.Reserve`: address, MAC; `CameraManualHelp.Link` for `link`) for a camera whose
+DNS stays only with a fixed address (Hikvision, Foscam, VIGI, Tapo, the IP camera web API, XMEye, UniFi: the address, mask, gateway and
+hardware address of a setup report's offer or fix, else the last reading's `CameraDNSReading.addressing` when it is of the address Camera
+Bridge reaches the camera at, else that address alone; with none, the reservation as a warning), and `warnings` (both slots the bridge; IPv6,
+"IPv6 is on: the camera may get DNS servers from your router over IPv6 too. Turn IPv6 off on the camera.", only while `Context.ipv6On`;
+a restart the camera asks for; a recorder that runs the camera's network; a Tapo's factory reset). Uniview's note says to set its address
+to static first, keeping it, and reserve it in the router, if it won't take the servers. The router's way says which routers can hand one
+device its DNS (OpenWrt, pfSense, OPNsense, MikroTik, ASUS, Pi-hole), which only a whole network (UniFi, Synology, Firewalla) and which
+can't (eero, Google/Nest Wifi, Deco, Orbi), and that it works only while the camera takes its DNS from DHCP (automatic), from its next
+DHCP renewal or restart. `manualHelpContext` fills the context from the camera's configuration, its last DNS reading and, for `ipv6On`,
+its last security check (which asks a camera whose DNS it read through ONVIF whether its IPv6 is on: CameraAdapters'
+`CameraSettingsService.readIPv6()`, one `GetNetworkInterfaces`; kept with the check's record, never asked by the guard's own reads);
+nothing here asks the camera. Tests: `CameraManualHelpTests` (every step and family
+that can fail says why and where; the bridge's address; only the confirmed paths unmarked; the caveat; the why from the detail; one test per
+maker's DNS; the link; what it asks now; keep and reserve; the warnings, IPv6's among them; the router; the families; the Security card; the guard's DNS help
+only where the DNS is why; the page's fixtures, `linux/web-tests/support/manual-help-fixtures.json`, are the table's own words, written
+again with `CB_WRITE_WEB_FIXTURES=1 swift test --filter CameraManualHelpTests`), `CameraManualHelpEngineTests`, and BridgeWeb's
+`CameraManualHelpBackendTests` (the real `EngineBackend`: preview, run, check and status carry it, a restore does not).
 
 ## Additions beyond the contract: Set up for Camera Bridge (2026-10-16, docs/CONTRACT_CHANGES.md)
 
@@ -747,7 +906,8 @@ local network and a `GuardLevel`, only `watch` so far; an empty list turns the g
 `BridgeEnvironment.guardReport` (a `GuardReport`, nil while the box has none): `available`, `running` (its DNS answers now), `timeZone` and
 `todayStart` (today is counted in the bridge's time zone, to the hour), `updatedAt`, and per watched camera a `GuardReport.Camera` (`address`,
 `level`, `since`: watched without a break since then, nil when the box does not say, `today`, `last24h`, `names`: `GuardReport.Lookup` `name`,
-`count`, `first`, `last`, the last 7 days' names, most asked first, at most 50; `GuardReport.camera(at:)`). `GuardReport.unavailable` is the report of a system without the guard. The report is read leniently (the root
+`count`, `first`, `last`, the last 7 days' names, most asked first, at most 50; since 2026-10-19 `local`: its questions that never leave the
+home network in those 7 days, counted, never named, 0 from an older box; `GuardReport.camera(at:)`). `GuardReport.unavailable` is the report of a system without the guard. The report is read leniently (the root
 side writes it): a missing or odd field gets its default, a level this build does not know is nil, a camera without an address is left out.
 
 ## Additions beyond the contract: camera security levels (2026-10-17, docs/CONTRACT_CHANGES.md)
@@ -761,15 +921,19 @@ Internet guard saw, nil without a guard, so green is the best there; `listed`: i
 read pointing at the bridge), `asksBridge`: the camera's DNS as last read is the bridge's address now, nil when not read, `dnsFromRouter`: those
 servers came from the router's DHCP, `watchedFor`: how long the box has watched it without a break, nil when it
 does not say, `waitsForRestart`: the step was taken "after the camera restarts" (ISAPI `statusCode` 7: "The camera takes Camera Bridge as its
-DNS server when it restarts."); the init's `listed` defaults to `watched` and `asksBridge` to true for a watched camera; `GuardEvidence.quietDay`
-24 h);
+DNS server when it restarts."); since 2026-10-19 `localLookups` (init parameter, default 0: the box's `local` count) and `lookupSeen` (a
+name it blocked in the box's week, or a local question: the box saw the camera ask it); the init's `listed` defaults to `watched` and
+`asksBridge` to true for a watched camera; `GuardEvidence.quietDay` 24 h; `GuardEvidence.noLookupsSeen`);
 `CloudDependentModels.brand(integration:manufacturer:model:)` (Wyze and eufy through their plugins; Ring, Google Nest, TP-Link Tapo (also a
 maker "tp-link" with a model that is not VIGI, as Tapo's ONVIF names itself), Blink, Arlo, SimpliSafe by integration or maker: red, and never
 asked). Red: the cloud on and linked or of unknown link, UPnP, DDNS or RTMP on, a cloud-dependent model. Yellow: the cloud on but not linked
 or unknown (a camera without a reader), video (or another service, named) without a password, watched and still looking up internet names.
 Green: none of that, but an unknown, another service on, no guard, not watched, a camera that no longer asks the bridge or whose DNS could
-not be read, or watched for less than a day ("has watched it for 2 hours and seen no internet lookups yet"). Gold: all confirmed off or
-absent, the video locked, watched for a full day without a lookup. The guard's finding says "doesn't watch this camera" for a camera not on
+not be read, or watched for less than a day ("has watched it for 2 hours and seen no internet lookups yet"), or (since 2026-10-19) watched
+for a day by a box that never saw it ask anything: "No lookups seen yet; Camera Bridge can’t rule out a built-in DNS server." (silence is
+no proof: a camera with a DNS server of its own is quiet too; research §5, spec docs/superpowers/specs/2026-10-18-camera-dns-design.md,
+"What the person sees" 3). Gold: all confirmed off or absent, the video locked, watched for a full day without an internet lookup, and at
+least one lookup seen from the camera in the box's last 7 days, any name, local ones included (`GuardEvidence.lookupSeen`). The guard's finding says "doesn't watch this camera" for a camera not on
 its list whatever the box's state (a box watching no camera has its DNS off), and "isn't running" only for a listed one; a watch on DNS the
 router gives adds that the router can change it (`CameraSecurity.dnsFromRouterNote`).
 
@@ -813,6 +977,23 @@ one table, `InternetGuardText` (`name`, `watch`, `seal`, `watchStep` "Watch its 
   camera's subnet (`bridgeAddress(onNetworkOf:interfaces:)`, no fallback, unlike the time source); otherwise not offered, "Camera Bridge OS
   watches cameras’ internet; this bridge does not." or "Camera Bridge can watch only cameras on its own local network." A restore that gives
   the DNS back marks the step's record `restored`.
+- **"Fix its address so the DNS stays"** (2026-10-18). For a camera whose DNS only stays with a fixed address, the preview's step carries the
+  offer (`CameraSetupStep.fixAddress`, off unless chosen; read against the camera's address as the guard knows it, `guardCameraAddress`, and,
+  for an ONVIF camera, offered only after a run whose Watch it refused for its own reasons, `watchRefusedLastRun`).
+  `applyCameraSetup(cameraID:options:)` takes the person's choice (`CameraSetupOptions`: `fixAddress`, with `shownAddress`, the address the
+  preview showed): the step then changes the address as it is and the DNS (`chooseFixAddress`), the backup records the address it fixes
+  before anything changes (`keepingFixedAddress`, never the hardware address), and the adapters write nothing when the camera's address is
+  not the shown one any more. A run that fixed it says so in its step (`CameraSetupStep.fixedAddress`, with the hardware address, for the
+  router reservation); Restore puts DHCP back. A fix refused before anything about the address changed (`CameraSetupOutcome.addressUntouched`)
+  takes the address this run saved back out of the backup, so Restore and removal don't wait on it. Without the choice nothing about the
+  address changes.
+- **"Restart the camera now"** (2026-10-18). Camera Bridge restarts a camera only when the person presses it.
+  `BridgeEngine.offersCameraRestart(_:)` says whether it is offered: a step of the setup's last run was done "after the camera restarts" (a
+  Hikvision's ISAPI `statusCode` 7, ONVIF's `RebootNeeded` after a fixed address: `needsRestart`) and the person has not restarted it since
+  (a reading of its DNS is no proof of a restart, and a new run's record replaces the flags). `BridgeEngine.restartCamera(id:)` restarts it
+  (`CameraSettingsService.reboot()`, one request, under the engine's operations) only then, else throws `CameraRestartNotNeeded` before
+  anything is sent; once the camera took it no step waits any more, and its DNS is read again `guardDNSReconnectDelay` later. BridgeWeb's
+  `POST cameras/:id/restart` and the camera resource's `restartOffered` carry it.
 - **After a refused step.** The steps after a refused one are not run, but this one still is whenever it is offered and was read (a
   camera's DNS is another setting, and its read in this run just took the login it needs): streams that "didn't stick" no longer keep a
   camera's DNS from the guard. It is not run, with why (`watchHeld`, the step's detail and the log), after a refusal that says the camera stopped
@@ -909,7 +1090,11 @@ one table, `InternetGuardText` (`name`, `watch`, `seal`, `watchStep` "Watch its 
 - **The notice.** `BridgeEngine.internetGuardNotice` (`InternetGuardNotice`: `day`, `lookups`, `cameras`, `cameraID` and `cameraName` of the
   camera that tried most, `date`, `title`, `sentence` "Internet guard blocked 7 lookups from 2 cameras today."): one a day, from the first
   blocked lookup of the guard's day; its figures change at most every `guardNoticeRefresh` (1 h); none when nothing was blocked today or the
-  report is no evidence. Only watched cameras count.
+  report is no evidence. Only watched cameras count. Since 2026-10-18 it has every camera that tried today, most first (a tie in the
+  bridge's order of cameras): `tried`, each an `InternetGuardNotice.Camera` (`id`, `name`, `today`, `mostAsked`: of the names it was last
+  seen asking for today, the most asked, as `GuardNames.shown` has it; when the box gives no times or none was today, its most asked name;
+  nil when it listed none), and `detail`, the banner's text: the sentence, then "Patio New tried 9 times, Doorbell 3 times, Garage once,
+  and 2 more cameras." (`InternetGuardText.whoTried`, the first three by name). It changes nothing the guard blocks.
 - Tests: `EngineTuning.guardCameraAddress` stands a loopback fake camera for one at 192.168.77.x; nothing else of the guard runs unless the
   test's environment has it. `EngineTuning.securityDNS` stands for the cameras' DNS (it may throw the read's error), and the reads' times are
   shortened through `guardDNSInterval`, `guardDNSReconnectDelay`, `guardDNSPauseMargin` and `guardDNSSpacing`.

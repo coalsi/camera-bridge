@@ -26,12 +26,15 @@ struct ONVIFPrefixedAddress: Sendable, Equatable {
     var prefixLength: Int?
 }
 
-/// One network interface as `GetNetworkInterfaces` reports it. Its hardware (MAC) address is not kept.
+/// One network interface as `GetNetworkInterfaces` reports it. Its hardware (MAC) address is read for the router reservation of "Fix its
+/// address so the DNS stays" only: never logged or saved.
 struct ONVIFNetworkInterface: Sendable, Equatable {
     var token: String
     var enabled: Bool
     var name: String?
     var mtu: Int?
+    /// `Info`'s `HwAddress`; nil when the camera does not show one.
+    var hardwareAddress: String? = nil
     var ipv4Enabled: Bool
     /// The IPv4 address comes from DHCP.
     var ipv4DHCP: Bool
@@ -52,8 +55,9 @@ struct ONVIFNetworkInterface: Sendable, Equatable {
     }
 }
 
-/// ONVIF device service: the camera's DNS servers (`GetDNS` / `SetDNS`), and its gateway and network interfaces, read only for now (the
-/// internet guard's Seal will set them).
+/// ONVIF device service: the camera's DNS servers (`GetDNS` / `SetDNS`), its gateway (`GetNetworkDefaultGateway` /
+/// `SetNetworkDefaultGateway`) and network interfaces (`GetNetworkInterfaces` / `SetNetworkInterfaces`). Watch's "Fix its address so the DNS
+/// stays" sets an interface's IPv4 to the address it has, with DHCP off, and its gateway as it was; nothing else changes them.
 extension ONVIFClient {
     func dns() async throws -> ONVIFDNSSettings {
         let envelope = try await call(deviceServiceURL, body: "<tds:GetDNS/>", action: "http://www.onvif.org/ver10/device/wsdl/GetDNS")
@@ -103,6 +107,46 @@ extension ONVIFClient {
         return ONVIFDefaultGateway(ipv4: texts("IPv4Address"), ipv6: texts("IPv6Address"))
     }
 
+    /// `SetNetworkDefaultGateway` with `gateway` as `GetNetworkDefaultGateway` read it (`setDefaultGatewayBody`). Throws `.unsupported` for an
+    /// entry that is not an address, before anything is sent.
+    func setDefaultGateway(_ gateway: ONVIFDefaultGateway) async throws {
+        guard let body = Self.setDefaultGatewayBody(gateway) else { throw CameraAdapterError.unsupported("a gateway is an IPv4 or IPv6 address") }
+        _ = try await call(deviceServiceURL, body: body, action: "http://www.onvif.org/ver10/device/wsdl/SetNetworkDefaultGateway")
+    }
+
+    /// The `SetNetworkDefaultGateway` request: the IPv4 gateways, then the IPv6 ones (the schema's order); nil when one is not an address.
+    static func setDefaultGatewayBody(_ gateway: ONVIFDefaultGateway) -> String? {
+        guard gateway.ipv4.allSatisfy(isIPv4), gateway.ipv6.allSatisfy(isIPv6) else { return nil }
+        return "<tds:SetNetworkDefaultGateway>" + gateway.ipv4.map { "<tds:IPv4Address>\($0)</tds:IPv4Address>" }.joined()
+            + gateway.ipv6.map { "<tds:IPv6Address>\($0)</tds:IPv6Address>" }.joined() + "</tds:SetNetworkDefaultGateway>"
+    }
+
+    /// `SetNetworkInterfaces` for the interface `token`'s IPv4 (`setNetworkInterfaceBody`); whether the camera needs a restart to apply it
+    /// (`RebootNeeded`: Camera Bridge restarts a camera only when the person presses "Restart the camera now"). Throws `.unsupported` for an
+    /// address that is not an IPv4 one or a prefix out of range, before anything is sent.
+    func setNetworkInterface(token: String, manual: ONVIFPrefixedAddress?, dhcp: Bool) async throws -> Bool {
+        guard let body = Self.setNetworkInterfaceBody(token: token, manual: manual, dhcp: dhcp) else {
+            throw CameraAdapterError.unsupported("an interface's address is an IPv4 address with a prefix length of 1 to 32")
+        }
+        let envelope = try await call(deviceServiceURL, body: body, action: "http://www.onvif.org/ver10/device/wsdl/SetNetworkInterfaces")
+        let answer = try responseBody(envelope, "SetNetworkInterfacesResponse")
+        return answer.child("RebootNeeded").flatMap { ONVIFNotification.parseBool($0.text) } ?? false
+    }
+
+    /// The `SetNetworkInterfaces` request in the device WSDL's shape (`tt:NetworkInterfaceSetConfiguration`, its elements in the schema's
+    /// order): the interface on, its IPv4 on, `manual` as its one fixed address when given (`Manual`: `Address`, `PrefixLength`), then `DHCP`.
+    /// Nothing else (link, MTU, IPv6) is named, so the camera keeps them. nil when `manual` is not an IPv4 address with a prefix of 1 to 32.
+    static func setNetworkInterfaceBody(token: String, manual: ONVIFPrefixedAddress?, dhcp: Bool) -> String? {
+        var ipv4 = "<tt:Enabled>true</tt:Enabled>"
+        if let manual {
+            guard isIPv4(manual.address), let prefix = manual.prefixLength, (1...32).contains(prefix) else { return nil }
+            ipv4 += "<tt:Manual><tt:Address>\(manual.address)</tt:Address><tt:PrefixLength>\(prefix)</tt:PrefixLength></tt:Manual>"
+        }
+        ipv4 += "<tt:DHCP>\(dhcp)</tt:DHCP>"
+        return "<tds:SetNetworkInterfaces><tds:InterfaceToken>\(XMLTree.escape(token))</tds:InterfaceToken><tds:NetworkInterface>"
+            + "<tt:Enabled>true</tt:Enabled><tt:IPv4>\(ipv4)</tt:IPv4></tds:NetworkInterface></tds:SetNetworkInterfaces>"
+    }
+
     func networkInterfaces() async throws -> [ONVIFNetworkInterface] {
         let envelope = try await call(deviceServiceURL, body: "<tds:GetNetworkInterfaces/>",
                                       action: "http://www.onvif.org/ver10/device/wsdl/GetNetworkInterfaces")
@@ -120,10 +164,12 @@ extension ONVIFClient {
             let ipv4 = entry.child("IPv4"), config4 = ipv4?.child("Config")
             let ipv6 = entry.child("IPv6"), config6 = ipv6?.child("Config")
             let name = entry.string("Info", "Name")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hardware = entry.string("Info", "HwAddress")?.trimmingCharacters(in: .whitespacesAndNewlines)
             let ipv6Addresses = ["Manual", "FromDHCP", "FromRA"].flatMap { config6?.children($0) ?? [] }.compactMap(prefixed)
             return ONVIFNetworkInterface(
                 token: entry.attribute("token") ?? "", enabled: flag(entry, "Enabled") ?? false, name: name?.isEmpty == false ? name : nil,
                 mtu: entry.string("Info", "MTU").flatMap { Int($0.trimmingCharacters(in: .whitespaces)) },
+                hardwareAddress: hardware?.isEmpty == false ? hardware : nil,
                 ipv4Enabled: flag(ipv4, "Enabled") ?? false, ipv4DHCP: flag(config4, "DHCP") ?? false,
                 ipv4Manual: (config4?.children("Manual") ?? []).compactMap(prefixed), ipv4FromDHCP: config4?.child("FromDHCP").flatMap(prefixed),
                 ipv4LinkLocal: config4?.child("LinkLocal").flatMap(prefixed), ipv6Enabled: flag(ipv6, "Enabled"),

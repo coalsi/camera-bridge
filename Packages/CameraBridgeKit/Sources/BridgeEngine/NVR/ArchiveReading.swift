@@ -47,8 +47,12 @@ public struct ArchiveEvent: Sendable, Equatable, Hashable, Identifiable {
     public var hadVideo: Bool
     /// The recordings hold video of its start now (retention may have taken it since), or are still being written up to it.
     public var recorded: Bool
+    /// What an AI service said it saw at the event's start, when the camera has descriptions on and one was written (the last one of the
+    /// event's description lines in the log). The pictures it came from are not kept.
+    public var description: EventDescription?
 
-    public init(id: String, camera: UUID, kind: String, start: Date, end: Date? = nil, hadVideo: Bool = false, recorded: Bool = false) {
+    public init(id: String, camera: UUID, kind: String, start: Date, end: Date? = nil, hadVideo: Bool = false, recorded: Bool = false,
+                description: EventDescription? = nil) {
         self.id = id
         self.camera = camera
         self.kind = kind
@@ -56,6 +60,7 @@ public struct ArchiveEvent: Sendable, Equatable, Hashable, Identifiable {
         self.end = end
         self.hadVideo = hadVideo
         self.recorded = recorded
+        self.description = description
     }
 }
 

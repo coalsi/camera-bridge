@@ -4,7 +4,8 @@
 //   * operations on the SourceBuffer never overlap (one at a time, in the order asked);
 //   * a chain break (a jump to somewhere else) is `abort()` then the new `timestampOffset`, then the bytes, and the init segment stays, unless
 //     the policy's `initAfterBreak` asks for the init once more between the offset and the bytes (task T06's protocol abort + offset + init);
-//   * a codec change rebuilds the MediaSource behind a held picture (the last frame drawn on a canvas), so the tile never flashes;
+//   * a codec change rebuilds the MediaSource behind a held picture (the last frame drawn on a canvas), so the tile never flashes; the held
+//     picture is the one on screen: the page's straightened canvas over the video when `holdFrom()` gives one (js/live/straighten.js);
 //   * it never removes the buffered range under the playhead (the unit that holds the keepAround time stays; see planEviction).
 // Buffer times are seconds on the page's time line: (epoch ms - the catalog's baseMs) / 1000.
 import { realTimers } from './clock.js';
@@ -50,6 +51,7 @@ function waitForUpdateEnd(sourceBuffer) {
 export class MseSurface {
   #video;
   #canvas;
+  #holdFrom;
   #policy;
   #timers;
   #scope;
@@ -68,9 +70,14 @@ export class MseSurface {
   #destroyed = false;
   #forwarders = [];
 
-  constructor({ video, holdCanvas = null, policy = DEFAULT_POLICY, timers = realTimers, scope = globalThis, budgetBytes = BUDGET_BYTES }) {
+  /**
+   * `holdFrom()` gives the element whose picture is held instead of the video's own frame (a canvas the page draws the video on, drawn that
+   * moment), or null for the video's frame.
+   */
+  constructor({ video, holdCanvas = null, holdFrom = null, policy = DEFAULT_POLICY, timers = realTimers, scope = globalThis, budgetBytes = BUDGET_BYTES }) {
     this.#video = video;
     this.#canvas = holdCanvas;
+    this.#holdFrom = holdFrom;
     this.#policy = policy;
     this.#timers = timers;
     this.#scope = scope;
@@ -272,9 +279,10 @@ export class MseSurface {
     const video = this.#video;
     if (!canvas || !video.videoWidth || video.readyState < 2) return;
     try {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext('2d').drawImage(video, 0, 0);
+      const shown = this.#holdFrom?.() ?? null;
+      canvas.width = shown ? shown.width : video.videoWidth;
+      canvas.height = shown ? shown.height : video.videoHeight;
+      canvas.getContext('2d').drawImage(shown ?? video, 0, 0);
       canvas.style.display = '';
       this.#holding = true;
     } catch {

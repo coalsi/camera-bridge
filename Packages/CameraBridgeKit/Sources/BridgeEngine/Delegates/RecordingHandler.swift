@@ -23,6 +23,7 @@ actor RecordingHandler: CameraRecordingDelegate {
     private let streamMode: RecordingStreamMode
     private let qualityMode: RecordingQualityMode
     private let overlay: TimestampOverlayControl?
+    private let correction: PictureCorrectionControl?
 
     private(set) var isActive = false
     private(set) var configuration: CameraRecordingConfiguration?
@@ -39,7 +40,7 @@ actor RecordingHandler: CameraRecordingDelegate {
     init(hub: MediaHub, traits: StreamTraits = StreamTraits(), codecs: any MediaCodecs, cameraAudioEnabled: Bool,
          timing: RecordingTiming = RecordingTiming(), log: Log, onChange: @escaping @Sendable () -> Void = {},
          hubs: HubProvider? = nil, streamMode: RecordingStreamMode = .automatic, qualityMode: RecordingQualityMode = .matchHubRequest,
-         overlay: TimestampOverlayControl? = nil) {
+         overlay: TimestampOverlayControl? = nil, correction: PictureCorrectionControl? = nil) {
         self.hub = hub
         self.traits = traits
         self.codecs = codecs
@@ -51,6 +52,7 @@ actor RecordingHandler: CameraRecordingDelegate {
         self.streamMode = streamMode
         self.qualityMode = qualityMode
         self.overlay = overlay
+        self.correction = correction
     }
 
     /// A recording stream is being produced.
@@ -113,7 +115,8 @@ actor RecordingHandler: CameraRecordingDelegate {
         }
         let producer = RecordingProducer(streamID: streamID, configuration: configuration, audioActive: audioActive,
                                          cameraAudioEnabled: cameraAudioEnabled, hub: recordingHub, traits: recordingTraits, codecs: codecs,
-                                         timing: timing, log: log, qualityMode: qualityMode, usesSubStream: usesSubStream, overlay: overlay)
+                                         timing: timing, log: log, qualityMode: qualityMode, usesSubStream: usesSubStream, overlay: overlay,
+                                         correction: correction)
         current = producer
         let resolution = configuration.resolution
         let trace = DiagnosticsCenter.shared.begin(kind: "recording", id: UUID(), cameraID: log.cameraID,

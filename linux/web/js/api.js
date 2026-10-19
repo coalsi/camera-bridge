@@ -127,4 +127,5 @@ export async function openStream(path, { signal } = {}) {
 export const get = (path, options) => api('GET', path, undefined, options);
 export const post = (path, body) => api('POST', path, body ?? {});
 export const patch = (path, body) => api('PATCH', path, body);
+export const put = (path, body) => api('PUT', path, body);
 export const del = (path) => api('DELETE', path);

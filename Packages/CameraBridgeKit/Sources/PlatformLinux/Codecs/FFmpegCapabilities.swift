@@ -71,6 +71,8 @@ struct FFmpegCapabilities: Sendable, Equatable {
 
     var hasLibx264: Bool { encoders.contains("libx264") }
     var hasDrawText: Bool { filters.contains("drawtext") }
+    /// The filters Straighten the picture's warp needs (each 4:2:0 plane warped as grey).
+    var hasPictureCorrectionFilters: Bool { ["remap", "extractplanes", "mergeplanes"].allSatisfy(filters.contains) }
     var hasOpus: Bool { encoders.contains("libopus") }
     var hasAACEncoder: Bool { encoders.contains("aac") || encoders.contains("libfdk_aac") }
     var hasAACELDEncoder: Bool { encoders.contains("libfdk_aac") }
@@ -157,6 +159,7 @@ final class FFmpegRuntime: Sendable {
         var vaapiDisabled = false
         var loggedBackend: String?
         var loggedFontProblem = false
+        var loggedCorrectionProblem = false
         var fontResolved = false
         var font: String?
     }
@@ -237,6 +240,21 @@ final class FFmpegRuntime: Sendable {
             return !state.vaapiDisabled
         }
         if first { log.warning("VA-API encoding failed (\(reason)); switching to libx264 for new pipelines") }
+    }
+
+    /// Whether this ffmpeg can straighten the picture (it has `remap`, `extractplanes` and `mergeplanes`); false, logged once, otherwise.
+    func pictureCorrectionAvailable() -> Bool {
+        guard let capabilities = try? capabilities() else { return false }
+        if capabilities.hasPictureCorrectionFilters { return true }
+        let first = state.withLock { state -> Bool in
+            defer { state.loggedCorrectionProblem = true }
+            return !state.loggedCorrectionProblem
+        }
+        if first {
+            let missing = ["remap", "extractplanes", "mergeplanes"].filter { !capabilities.filters.contains($0) }
+            log.warning("the picture cannot be straightened: this ffmpeg lacks the filter(s) \(missing.joined(separator: ", ")) (it needs remap, extractplanes and mergeplanes)")
+        }
+        return false
     }
 
     /// The overlay's font, nil (logged once) when overlay drawing is not possible. Resolved once.

@@ -3,7 +3,7 @@ import Foundation
 import MediaCore
 import Synchronization
 
-/// Decode (H.264/HEVC) → limit frame rate → scale → timestamp overlay → encode H.264, in **one** ffmpeg child process.
+/// Decode (H.264/HEVC) → limit frame rate → scale → straighten → timestamp overlay → encode H.264, in **one** ffmpeg child process.
 ///
 /// Compressed pictures go into ffmpeg's stdin as FLV (the engine's 90 kHz PTS kept in a table, ffmpeg sees milliseconds),
 /// encoded pictures come back as FLV on stdout. `transcode` never waits for the child: it writes the frame and returns whatever
@@ -18,6 +18,9 @@ import Synchronization
 /// - **Overlay**: `drawtext` re-reads a text file for every picture; the words are rewritten when they change. A change of the
 ///   overlay's position, size or presence restarts the child like a bit rate change.
 /// - **Frame-rate limit**: a `select` expression with the rule of `FrameRateLimiter`.
+/// - **Straighten the picture**: `remap` on each 4:2:0 plane with four map images written from the correction (`RemapScratch`), read
+///   when the child starts. A change of the correction (asked for at every picture) restarts the child like a bit rate change; maps
+///   that cannot be written, or an ffmpeg without the filters, leave the picture uncorrected (said once), never a restart loop.
 ///
 /// Delta frames before the first keyframe are dropped. A parameter-set change on a keyframe starts a new child. A child that
 /// dies surfaces as a thrown `MediaCodecError` (ffmpeg's last stderr lines in the message) and the transcoder starts a new one at
@@ -37,15 +40,19 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
         let spec: VideoPipelineSpec
         let sourceFormat: VideoFormat
         let overlayKey: OverlayKey?
+        /// The correction this child applies (nil: none).
+        let correction: PictureCorrection?
         let startedAt = ContinuousClock.now
         var produced = 0
 
-        init(session: FFmpegSession, stream: VideoFLVStream, spec: VideoPipelineSpec, sourceFormat: VideoFormat, overlayKey: OverlayKey?) {
+        init(session: FFmpegSession, stream: VideoFLVStream, spec: VideoPipelineSpec, sourceFormat: VideoFormat, overlayKey: OverlayKey?,
+             correction: PictureCorrection?) {
             self.session = session
             self.stream = stream
             self.spec = spec
             self.sourceFormat = sourceFormat
             self.overlayKey = overlayKey
+            self.correction = correction
             output = H264FLVOutput(width: spec.settings.width, height: spec.settings.height)
         }
 
@@ -76,6 +83,9 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
         var scratch: OverlayScratch?
         /// The scratch directory for the overlay's text could not be made: no overlay (said once), and no restarts over it.
         var overlayUnavailable = false
+        var remapScratch: RemapScratch?
+        /// The correction's maps could not be written: no correction (said once), and no restarts over it.
+        var correctionUnavailable = false
         var lastKeyframeBytes: Int?
         var lastKeyframeSize: (width: Int, height: Int)?
     }
@@ -92,6 +102,7 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
     private let runtime: FFmpegRuntime
     private let settings: VideoEncoderSettings
     private let overlay: (any TimestampOverlayProviding)?
+    private let correction: (any PictureCorrectionProviding)?
     private let minimumRunTime: Duration
     private let state: Mutex<State>
     private let keyframeRequested = Atomic<Bool>(false)
@@ -100,7 +111,8 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
     private let live = Mutex<FFmpegSession?>(nil)
     private let log = Log(category: "VideoTranscoder")
 
-    init(runtime: FFmpegRuntime, output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?, minimumRunTime: Duration = FFmpegVideoTranscoder.defaultMinimumRunTime) throws {
+    init(runtime: FFmpegRuntime, output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?, correction: (any PictureCorrectionProviding)? = nil,
+         minimumRunTime: Duration = FFmpegVideoTranscoder.defaultMinimumRunTime) throws {
         guard output.width > 0, output.height > 0, output.fps > 0, output.bitrateKbps > 0 else {
             throw MediaCodecError.unsupported("encoder settings \(output.width)×\(output.height) @ \(output.fps) fps, \(output.bitrateKbps) kbit/s")
         }
@@ -115,6 +127,7 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
         self.runtime = runtime
         self.settings = settings
         self.overlay = overlay
+        self.correction = correction
         self.minimumRunTime = minimumRunTime
         requestedBitrate = Atomic(settings.bitrateKbps)
         state = Mutex(State(backend: try runtime.videoBackend()))
@@ -192,6 +205,8 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
             state.run = nil
             state.scratch?.remove()
             state.scratch = nil
+            state.remapScratch?.remove()
+            state.remapScratch = nil
         }
     }
 
@@ -319,8 +334,15 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
         return OverlayKey(position: current.settings.position, size: current.settings.size)
     }
 
+    /// The correction a new child would apply now (nil: off, the maps cannot be written, or ffmpeg lacks the filters).
+    private func currentCorrection(state: State) -> PictureCorrection? {
+        guard !state.correctionUnavailable, let current = correction?.current, !current.isOff, runtime.pictureCorrectionAvailable() else { return nil }
+        return current
+    }
+
     private func wantsRestart(_ run: Run, state: State) -> Bool {
         if overlayKey(state: state) != run.overlayKey { return true }
+        if currentCorrection(state: state) != run.correction { return true }
         let wanted = requestedBitrate.load(ordering: .relaxed)
         let applied = run.spec.bitrateKbps
         guard ContinuousClock.now - run.startedAt >= minimumRunTime else { return false }
@@ -389,6 +411,21 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
                 drawText = DrawTextOverlay(fontFile: font, textFile: scratch.textFile.path, position: current.settings.position, size: current.settings.size)
             }
         }
+        // Correction: the maps exist before ffmpeg starts, for the picture fitted inside the output.
+        var applied: PictureCorrection?
+        var remap: RemapStage?
+        if let current = currentCorrection(state: state) {
+            let fitted = FFmpegArguments.fittedSize(sourceWidth: sourceFormat.width, sourceHeight: sourceFormat.height, width: settings.width, height: settings.height)
+            do {
+                let scratch = try state.remapScratch ?? RemapScratch(parent: runtime.configuration.scratchDirectory)
+                state.remapScratch = scratch
+                remap = try scratch.stage(for: current, width: fitted.width, height: fitted.height)
+                applied = current
+            } catch {
+                state.correctionUnavailable = true
+                log.warning("the picture cannot be straightened: its maps cannot be written to a scratch directory (\(error.localizedDescription))")
+            }
+        }
         // The frames' tags first: the catch-up threshold is the newest picture's millisecond.
         var tags: [Data] = []
         var skipMs: Int64?
@@ -401,10 +438,11 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
                                      sourceWidth: sourceFormat.width, sourceHeight: sourceFormat.height, overlay: drawText)
         // Half a millisecond before the newest picture's timestamp, so rounding never skips it.
         spec.skipBeforeSeconds = skipMs.map { (Double($0) - 0.5) / 1000 }
+        spec.correction = remap
         let arguments = FFmpegArguments.transcoder(spec)
         let process = FFmpegProcessSpec(executable: executable, arguments: arguments, label: "video transcoder")
         let session = try FFmpegSession(launcher: runtime.launcher, spec: process)
-        let run = Run(session: session, stream: stream, spec: spec, sourceFormat: sourceFormat, overlayKey: overlayKey)
+        let run = Run(session: session, stream: stream, spec: spec, sourceFormat: sourceFormat, overlayKey: overlayKey, correction: applied)
         do {
             try session.send(header)
             for tag in tags { try session.send(tag) }
@@ -423,7 +461,8 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
         live.withLock { $0 = session }
         log.info("ffmpeg video transcoder started: \(sourceFormat.codec.rawValue) \(sourceFormat.width)×\(sourceFormat.height) → H.264 "
                  + "\(settings.width)×\(settings.height) @ \(settings.fps) fps, \(spec.bitrateKbps) kbit/s, \(spec.backend.description)"
-                 + (drawText == nil ? "" : ", timestamp overlay") + (skipMs == nil ? "" : ", caught up on \(frames.count) frames"))
+                 + (remap == nil ? "" : ", straightened") + (drawText == nil ? "" : ", timestamp overlay")
+                 + (skipMs == nil ? "" : ", caught up on \(frames.count) frames"))
     }
 
     private static func write(_ frame: EncodedVideoFrame, to run: Run, requestKeyframe: Bool) throws {

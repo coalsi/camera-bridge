@@ -41,9 +41,9 @@ enum JPEGSnapshot {
         return data
     }
 
-    /// Downscales an image (JPEG or anything ImageIO reads) to fit the bounds as JPEG (quality 0.8); returns the input
-    /// unchanged when it already fits. Throws `MediaCodecError.unsupported` for data ImageIO cannot read.
-    static func resize(_ data: Data, maxWidth: Int?, maxHeight: Int?) throws -> Data {
+    /// Downscales an image (JPEG or anything ImageIO reads) to fit the bounds as JPEG (`quality`, 0.8 unless asked otherwise); returns the
+    /// input unchanged when it already fits. Throws `MediaCodecError.unsupported` for data ImageIO cannot read.
+    static func resize(_ data: Data, maxWidth: Int?, maxHeight: Int?, quality: Double = 0.8) throws -> Data {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int, let height = properties[kCGImagePropertyPixelHeight] as? Int,
@@ -63,7 +63,7 @@ enum JPEGSnapshot {
         guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, "public.jpeg" as CFString, 1, nil) else {
             throw MediaCodecError.unsupported("ImageIO has no JPEG encoder")
         }
-        CGImageDestinationAddImage(destination, thumbnail, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        CGImageDestinationAddImage(destination, thumbnail, [kCGImageDestinationLossyCompressionQuality: min(max(quality, 0), 1)] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw MediaCodecError.unsupported("ImageIO could not encode a JPEG") }
         return output as Data
     }

@@ -37,6 +37,31 @@ import TestSupport
         #expect((help["router"] as? String)?.contains("192.168.77.28") == true)
     }
 
+    /// The DNS help's own parts on the wire: `link` {label, url} (the camera's own page), `current` (what it asks now), `keep` {address,
+    /// mask, gateway} and `reserve` {address, mac} (a camera whose DNS stays only with a fixed address), `warnings`, and `copy` on each value.
+    @Test func theDNSHelpCarriesTheCamerasPageWhatItAsksAndWhatToKeep() async throws {
+        let rig = try await NVRRig.make()
+        var context = Self.context
+        context.webPage = "http://192.168.77.120/"
+        context.cameraAddress = "192.168.77.120"
+        context.currentDNS = ["192.168.77.1", "192.0.2.53"]
+        context.addressing = CameraAddressing(address: "192.168.77.120", subnetMask: "255.255.255.0", gateway: "192.168.77.1", hardwareAddress: "02:00:00:00:00:21")
+        let help = CameraManualHelpText.step(.internetWatch, status: .notSupported, detail: nil, family: .hikvision, context: context)
+        rig.backend.write {
+            $0.setup = .success(CameraSetupReport(steps: [CameraSetupStep(id: .internetWatch, title: "Watch its internet", status: .notSupported, manualHelp: help)],
+                                                  state: nil, canRestore: false))
+        }
+        let answer = await rig.session.send("GET", "/api/v1/cameras/\(rig.cameraID)/setup")
+        let wire = try #require(answer.array("steps").first?["manualHelp"] as? [String: Any])
+        #expect(wire["link"] as? [String: String] == ["label": "Open the camera’s web page", "url": "http://192.168.77.120/"])
+        #expect(wire["current"] as? [String] == ["192.168.77.1", "192.0.2.53"])
+        #expect(wire["keep"] as? [String: String] == ["address": "192.168.77.120", "mask": "255.255.255.0", "gateway": "192.168.77.1"])
+        #expect(wire["reserve"] as? [String: String] == ["address": "192.168.77.120", "mac": "02:00:00:00:00:21"])
+        #expect((wire["warnings"] as? [String])?.first?.hasPrefix("Put Camera Bridge in both slots") == true)
+        let values = try #require(wire["values"] as? [[String: Any]])
+        #expect(values.contains { $0["label"] as? String == "Preferred DNS server" && $0["copy"] as? Bool == true })
+    }
+
     @Test func everyFindingHasTheKeyAndTheNotWatchedGuardCarriesTheDNSHelp() async throws {
         let rig = try await NVRRig.make()
         var guardFinding = CameraSecurityFinding(feature: .internetGuard, state: .off, level: .green,

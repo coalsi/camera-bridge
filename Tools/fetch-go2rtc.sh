@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fetches the go2rtc helper (MIT, github.com/AlexxIT/go2rtc), checks it against the SHA-256 pinned below, and writes a universal
-# macOS binary to build/helpers/go2rtc. The app bundles it as Contents/Helpers/go2rtc (Tools/embed-go2rtc.sh, run by the build);
+# macOS binary to build/helpers/go2rtc. The archived Mac app bundles it as Contents/Helpers/go2rtc (Archive/mac-app/Tools/embed-go2rtc.sh, run by its build);
 # a build without the file simply has no streaming helper.
 #
 #   Tools/fetch-go2rtc.sh                    fetch (or reuse the verified cache) and build build/helpers/go2rtc

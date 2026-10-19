@@ -121,7 +121,7 @@ import Testing
 
     @Test func theGuardsEvidenceMakesItGoldAndANewOneIsAssessedWithoutAskingTheCamera() async throws {
         let asked = Asked()
-        asked.evidence.set(GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, watchedFor: 2 * 86_400))
+        asked.evidence.set(GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, localLookups: 2, watchedFor: 2 * 86_400))
         let fixture = try await fixture(asked)
         defer { fixture.directory.remove() }
         let camera = camera()

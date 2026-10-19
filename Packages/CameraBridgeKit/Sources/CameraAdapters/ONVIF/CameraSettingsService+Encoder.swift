@@ -70,6 +70,7 @@ extension CameraSettingsService {
             case .onvifMinimal: return try await viaONVIF(edit, minimal: true)
             case .onvifFull: return try await viaONVIF(edit, minimal: false)
             case .ipcWebAPI: return .failed(.unsupported("the web API does not change the encoder"))
+            case .dahuaCGI: return .failed(.unsupported("Dahua’s API does not change the encoder"))
             }
         } catch is CancellationError {
             throw CancellationError()

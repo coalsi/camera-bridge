@@ -6,17 +6,17 @@ Camera Bridge brings the network cameras you already own into the Apple Home app
 live view, motion and doorbell notifications. It speaks to cameras over standard protocols (RTSP and ONVIF) and shows up
 in Home as ordinary camera accessories.
 
-**Camera Bridge OS** is the all-in-one way to run it, and the one we recommend: a small Linux system for an Intel mini PC
-that brings your cameras into Apple Home, shows every camera live on a web page, and records them around the clock. You
-set it all up from a browser at `http://camera-bridge.local`; it needs no keyboard, screen or Mac. If you would rather use
-a Mac you already keep running, [Camera Bridge for Mac](#camera-bridge-for-mac) does the same from the menu bar.
+**Camera Bridge OS** (beta) is the way to run it for now: a small Linux system for an Intel mini PC that brings your
+cameras into Apple Home, shows every camera live on a web page, and records them around the clock. You set it all up
+from a browser at `http://camera-bridge.local`; it needs no keyboard, screen or Mac. (A new
+[Camera Bridge for Mac](#camera-bridge-for-mac) is coming soon.)
 
 Camera Bridge is **free for personal and noncommercial use**, and the source is available here. Commercial use needs a
 license: see [License](#license).
 
 Website: <https://www.camera-bridge.app> · Documentation: <https://docs.camera-bridge.app>
 
-## Camera Bridge OS
+## Camera Bridge OS (beta)
 
 Releases are tagged `os-v*` on [GitHub Releases](https://github.com/coalsi/camera-bridge/releases). Versions before 1.0 are
 **betas** (published as pre-releases) while the interface is being refined: they run every day on the reference box below,
@@ -38,7 +38,7 @@ and a box on a beta updates itself to the next one. 1.0 will be the first full r
 - Finds ONVIF cameras on your network, joins Wi-Fi by itself (or opens a setup hotspot for your phone), installs itself
   to the PC's internal disk, and updates itself from signed releases with automatic rollback if a new version does not
   start properly.
-- Imports your cameras from Camera Bridge for Mac.
+- Imports your cameras from the earlier Camera Bridge for Mac app.
 
 ### Minimum requirements
 
@@ -92,16 +92,11 @@ Camera Bridge accessories are not certified by Apple: the Home app asks you to t
 
 ## Camera Bridge for Mac
 
-An option if you already have a Mac that stays on: the same engine as a menu bar app. It publishes your cameras to Apple
-Home with HomeKit Secure Video, shows them in an overview grid and a viewer, and can record them to a folder you choose
-with a scrubbable timeline. Camera passwords stay in the Mac's keychain. When you are ready to move to a box, *Move to
-Camera Bridge OS* exports your cameras for the box and stops the Mac's bridge, so the two never run the same cameras.
+A new Camera Bridge for Mac is coming soon. For now, Camera Bridge OS (beta) is the way to run Camera Bridge.
 
-- Requires **macOS 15 (Sequoia)** or later on a Mac that stays awake on the cameras' network (Keep Mac Awake is a
-  setting), plus the same home hub and iCloud+ plan for HomeKit Secure Video.
-- Download the latest `CameraBridge-<version>.dmg` from <https://www.camera-bridge.app> or from
-  [GitHub Releases](https://github.com/coalsi/camera-bridge/releases) (tags `v*`), open it and drag Camera Bridge to
-  Applications. It is signed with a Developer ID, notarized by Apple, and updates itself (Sparkle).
+If you have the earlier Mac app, copies that are already installed keep working and get no new versions for now. To move
+your cameras over, use *Move to Camera Bridge OS* in that app, then import them on the box. Its source is kept in
+[Archive/mac-app](Archive/mac-app).
 
 ## Build from source
 
@@ -109,24 +104,19 @@ Camera Bridge OS: the image is built with mkosi from `linux/os` (`linux/os/build
 `os-v*` tag), and the daemon is the `camerabridged` product of the engine package, built with Swift 6.4 on Linux. See
 [docs/linux/BUILDING.md](docs/linux/BUILDING.md).
 
-The Mac app requires Xcode 27 (the app runs on macOS 15 and later, but builds with the macOS 27 SDK), [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.43 (`brew install xcodegen`).
+The engine tests run on a Mac with Xcode 27 (Swift 6.4), and on Linux in a container (`sh Tools/linux-test.sh`):
 
 ```sh
 # The engine (portable Swift package) and its tests
 cd Packages/CameraBridgeKit
 swift test
 
-# The app
+# The web interface's tests (Node; no install)
 cd ../..
-xcodegen generate
-xcodebuild -project CameraBridge.xcodeproj -scheme CameraBridge -configuration Debug build
-xcodebuild -project CameraBridge.xcodeproj -scheme CameraBridge -configuration Debug test
+sh linux/web-tests/run.sh
 ```
 
-Open `CameraBridge.xcodeproj` in Xcode to run it. A Debug build is signed for development with your own team (set
-`DEVELOPMENT_TEAM` in `project.yml`, or in Xcode's Signing & Capabilities), has no updater, and accepts launch arguments
-such as `-previewEngine YES` for sample data (see [App/README.md](App/README.md)). Building without a Developer
-account works with `CODE_SIGNING_ALLOWED=NO` (the app then cannot be run, only built and tested).
+The archived Mac app is built from its own folder; see [Archive/mac-app/README.md](Archive/mac-app/README.md).
 
 Layout:
 
@@ -134,12 +124,10 @@ Layout:
 |---|---|
 | `Packages/CameraBridgeKit` | The engine: HomeKit Accessory Protocol server, HomeKit Secure Video, RTSP/RTP, camera drivers, media pipeline. Portable Swift; Apple frameworks only in `PlatformApple`. |
 | `linux` | Camera Bridge OS: the image (`linux/os`), the web interface (`linux/web`) and their tests and tools. |
-| `App` | The macOS app (SwiftUI). |
-| `Tools` | Release script, key setup, asset scripts, `cbctl`. |
+| `Archive/mac-app` | The archived macOS app (SwiftUI), its Xcode project and release tools. CI does not build it. |
+| `Tools` | Test and capture scripts, brand asset scripts, the go2rtc fetch script, `cbctl`. |
 | `Interop` | Node-based test oracles (dev only, never shipped). |
-| `docs` | Integration guides, distribution, interop notes, third-party notices and the engine contract changes. |
-
-Releases are built with `Tools/release.sh` (see [docs/distribution.md](docs/distribution.md)).
+| `docs` | Integration guides, interop notes, third-party notices and the engine contract changes. |
 
 ## Support the project
 

@@ -120,9 +120,10 @@ enum TestFormats {
 }
 
 extension FFmpegMediaCodecs {
-    /// Codecs over a fake launcher that pretends ffmpeg is installed with libx264, drawtext, Opus and AAC.
+    /// Codecs over a fake launcher that pretends ffmpeg is installed with libx264, drawtext, the warp's filters (remap, extractplanes,
+    /// mergeplanes), Opus and AAC; `filters` is the `-filters` listing it answers.
     static func fake(_ launcher: FakeFFmpegLauncher, configuration: FFmpegCodecsConfiguration = FFmpegCodecsConfiguration(fontFile: TestFonts.path),
-                     deviceExists: @escaping @Sendable (String) -> Bool = { _ in false }) -> FFmpegMediaCodecs {
+                     deviceExists: @escaping @Sendable (String) -> Bool = { _ in false }, filters: String = FakeListings.filters) -> FFmpegMediaCodecs {
         launcher.onLaunch = { child in
             // The capability probe: answer `-encoders` and `-filters`.
             if child.arguments.contains("-encoders") {
@@ -132,7 +133,7 @@ extension FFmpegMediaCodecs {
                 child.emit(Data(FakeListings.decoders.utf8))
                 child.exit(status: 0)
             } else if child.arguments.contains("-filters") {
-                child.emit(Data(FakeListings.filters.utf8))
+                child.emit(Data(filters.utf8))
                 child.exit(status: 0)
             } else if child.arguments.contains("-version") {
                 child.emit(Data("ffmpeg version 7.1.1-fake Copyright (c) 2000-2025 the FFmpeg developers\n".utf8))
@@ -173,8 +174,15 @@ enum FakeListings {
      ... abench            A->A       Benchmark part of a filtergraph.
      ... scale             V->V       Scale the input video size and/or convert the image format.
      T.C drawtext          V->V       Draw text on top of video frames using libfreetype library.
+     ... extractplanes     V->N       Extract planes as grayscale frames.
+     ... mergeplanes       N->V       Merge planes.
+     .S. remap             VVV->V     Remap pixels.
      ... testsrc           |->V       Generate test pattern.
     """
+    /// An ffmpeg built without the filters Straighten the picture needs.
+    static let filtersWithoutTheWarp = filters.split(separator: "\n")
+        .filter { line in !["extractplanes", "mergeplanes", "remap"].contains { line.contains(" \($0) ") } }
+        .joined(separator: "\n")
 }
 
 enum TestFonts {

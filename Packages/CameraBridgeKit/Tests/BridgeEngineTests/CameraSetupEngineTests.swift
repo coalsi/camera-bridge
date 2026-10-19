@@ -34,6 +34,10 @@ import Testing
         let port: UInt16
         let documents = Box(FakeHikvision.originals)
         let refusePUT = Box<Set<String>>([])
+        /// PUTs answered 403 with Hikvision's `lowPrivilege`: the account may not make that change (it signs in and reads).
+        let forbidPUT = Box<Set<String>>([])
+        /// PUTs taken with `statusCode` 7 ("Reboot Required"): the change applies when the camera restarts.
+        let rebootRequired = Box<Set<String>>([])
         /// PUTs answered 401: the camera refuses the login for that change (its reads take it).
         let refuseLoginPUT = Box<Set<String>>([])
         /// PUTs never answered: the connection closes, as when the camera stops answering.
@@ -93,16 +97,22 @@ import Testing
                 return (200, document)
             case "PUT":
                 puts.update { $0.append(path) }
+                if path == CameraSetupEngineTests.rebootPath { return (200, Self.status(1, "OK", "ok")) }   // it restarts
                 guard documents.value[path] != nil else { return (404, Self.status(4, "Invalid Operation", "notSupport")) }
                 if refuseLoginPUT.value.contains(path) { return (401, "") }
                 if refusePUT.value.contains(path) { return (403, Self.status(4, "Invalid Operation", "notSupport")) }
+                if forbidPUT.value.contains(path) { return (403, Self.status(4, "Invalid Operation", "lowPrivilege")) }
                 documents.update { $0[path] = body }
+                if rebootRequired.value.contains(path) { return (200, Self.status(7, "Reboot Required", "rebootRequired")) }
                 return (200, Self.status(1, "OK", "ok"))
             default:
                 return (404, "")   // ONVIF's POSTs: this camera has no ONVIF user for the bridge
             }
         }
     }
+
+    /// Where ISAPI restarts the camera.
+    nonisolated static let rebootPath = "/ISAPI/System/reboot"
 
     private static let interfaces: @Sendable () -> [InterfaceAddress] = {
         [InterfaceAddress(interface: "lo0", address: "127.0.0.1", prefixLength: 8),
@@ -210,6 +220,48 @@ import Testing
         #expect(restored.steps.allSatisfy { $0.status == .restored })
         #expect(camera.documents.value["/ISAPI/System/Video/inputs/channels/1/overlays"] == FakeHikvision.originals["/ISAPI/System/Video/inputs/channels/1/overlays"])
         #expect(stored(fixture, configuration.id)?.setupBackup == nil)
+    }
+
+    /// A Hikvision step answered 403 (`lowPrivilege`) is a change the account may not make, not a refused login: the step says to use an
+    /// administrator account and the steps after it still run.
+    @Test func aHikvisionStepTheAccountMayNotChangeStopsNothing() async throws {
+        let (fixture, camera, configuration) = try await fixture()
+        defer { camera.stop(); fixture.directory.remove() }
+        camera.forbidPUT.update { $0.insert("/ISAPI/System/Network/UPnP") }
+
+        let report = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        #expect(report.stoppedAt == nil)
+        let upnp = try #require(report.steps.first { $0.id == .upnp })
+        #expect(upnp.status == .refused && upnp.detail == CameraAdapterError.notPermittedReason)
+        #expect(report.steps.first { $0.id == .cloud }?.status == .done, "the step after it still ran")
+    }
+
+    /// A camera that takes a change "after it restarts" (ISAPI `statusCode` 7) is never restarted by the setup: the step says so, and "Restart
+    /// the camera now" is offered. Only `restartCamera(id:)` restarts it, once, through ISAPI (a Hikvision's ONVIF users are a list of their
+    /// own); then nothing waits for a restart: pressed again, or for a camera that needs none, it is refused without a request.
+    @Test func theButtonRestartsOnlyWhenPressed() async throws {
+        let (fixture, camera, configuration) = try await fixture()
+        defer { camera.stop(); fixture.directory.remove() }
+        let id = configuration.id
+        let restarts = { camera.puts.value.filter { $0 == Self.rebootPath }.count }
+        await #expect(throws: CameraRestartNotNeeded.self) { try await fixture.engine.restartCamera(id: id) }
+        #expect(camera.puts.value.isEmpty, "a camera that needs no restart is not asked anything")
+
+        camera.rebootRequired.update { $0.insert("/ISAPI/System/Network/UPnP") }
+        let report = try await fixture.engine.applyCameraSetup(cameraID: id)
+        let upnp = try #require(report.steps.first { $0.id == .upnp })
+        #expect(upnp.status == .done && upnp.needsRestart)
+        #expect(restarts() == 0, "the setup never restarts the camera")
+        #expect(BridgeEngine.offersCameraRestart(try #require(stored(fixture, id))))
+
+        try await fixture.engine.restartCamera(id: id)
+        #expect(restarts() == 1)
+        let after = try #require(stored(fixture, id))
+        #expect(!BridgeEngine.offersCameraRestart(after), "it restarted: nothing waits for it")
+        #expect(after.setupState?.steps.first { $0.id == .upnp }?.status == .done, "what the setup did stays")
+        await #expect(throws: CameraRestartNotNeeded.self) { try await fixture.engine.restartCamera(id: id) }
+        #expect(restarts() == 1, "pressed once, restarted once")
+        await #expect(throws: EngineError.unknownCamera) { try await fixture.engine.restartCamera(id: UUID()) }
     }
 
     @Test func cleanPictureFromItsSwitchIsFoldedIntoTheOneBackup() async throws {
