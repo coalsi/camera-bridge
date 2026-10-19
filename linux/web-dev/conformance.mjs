@@ -431,7 +431,8 @@ export async function runConformance({ baseUrl, password, mutate = false, intrus
     ok(typeof body.more === 'boolean' && isInt(body.serverTime), 'more or serverTime');
     ok(Array.isArray(body.events) && body.events.length <= 5, 'at most limit events');
     for (const event of body.events) {
-      same(Object.keys(event).sort(), ['cameraID', 'end', 'id', 'kind', 'recorded', 'start'], 'event keys');
+      same(Object.keys(event).sort(), ['cameraID', 'description', 'end', 'id', 'kind', 'recorded', 'start'], 'event keys');
+      ok(event.description === null || typeof event.description?.summary === 'string', 'description: null or its AI summary');
       same(event.cameraID, camera.id, 'cameraID (upper case)');
       ok(typeof event.id === 'string' && event.id.length > 0 && typeof event.kind === 'string' && typeof event.recorded === 'boolean', 'id, kind or recorded');
       ok(isInt(event.start) && event.start >= from && event.start < to, `start ${event.start} outside ${from} to ${to}`);
