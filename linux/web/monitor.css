@@ -128,7 +128,7 @@
 .mon-event-count { margin-left: auto; color: var(--mon-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 /* One event: a button (Enter or Space plays it). Time on top; camera, kind and duration under it; a play mark on the right. */
 .mon-event {
-  display: grid; grid-template-columns: minmax(0, max-content) auto 1fr auto; align-items: baseline; gap: 2px 8px; width: 100%; padding: 6px 6px; margin: 0;
+  display: grid; grid-template-columns: 64px minmax(0, max-content) auto 1fr auto; align-items: baseline; gap: 2px 8px; width: 100%; padding: 6px 6px; margin: 0;
   border: 0; border-left: 3px solid transparent; border-radius: 4px; background: transparent; color: var(--mon-text); font: inherit; text-align: left; cursor: pointer;
 }
 .mon-event:hover { background: #15151a; }
@@ -136,24 +136,30 @@
 .mon-event[data-selected="true"] { background: #23232b; border-left-color: var(--brand-accent); }
 .mon-event[data-recorded="false"] { cursor: default; opacity: 0.6; }
 .mon-event[data-recorded="false"]:hover { background: transparent; }
-.mon-event time { grid-column: 1 / -1; color: var(--mon-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.mon-event time { white-space: nowrap; grid-column: 2 / -1; color: var(--mon-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 .mon-event-camera { font-weight: 650; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mon-event-kind { color: #c9c9d0; white-space: nowrap; }
 .mon-event[data-level="doorbell"] .mon-event-kind { color: #ff6a61; }
 .mon-event[data-level="detection"] .mon-event-kind { color: #7fb2ff; }
 .mon-event[data-level="motion"] .mon-event-kind { color: #ffd36b; }
 .mon-event-duration { color: var(--mon-dim); font-size: 0.8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.mon-event-play, .mon-event-note { grid-column: 4; grid-row: 2; justify-self: end; color: var(--mon-dim); }
+.mon-event-play, .mon-event-note { grid-column: 5; grid-row: 2; justify-self: end; color: var(--mon-dim); }
 .mon-event-note { font-size: 0.75rem; white-space: nowrap; }
 .mon-event:hover .mon-event-play, .mon-event[data-selected="true"] .mon-event-play { color: var(--brand-accent); }
 /* An AI service's sentence (wall-events-model.js eventDescription), on its own line under the kind: a red mark when it rates the event alarm,
    an amber one when unusual, none when routine; "Nothing notable" dimmed. The colours are the page's own, held dark on the wall above. */
-.mon-event-ai { grid-column: 1 / -1; grid-row: 3; color: var(--mon-text); overflow-wrap: anywhere; unicode-bidi: isolate; }
+.mon-event-ai { grid-column: 3 / -1; grid-row: 3; color: var(--mon-text); overflow-wrap: anywhere; unicode-bidi: isolate; }
 .mon-event-ai[data-concern="alarm"]::before, .mon-event-ai[data-concern="unusual"]::before {
   content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; vertical-align: 0.05em; background: var(--danger);
 }
 .mon-event-ai[data-concern="unusual"]::before { background: var(--warning); }
 .mon-event-ai[data-concern="nothing"] { color: var(--mon-dim); font-style: italic; }
+/* The picture at the event's start (nvr/thumbs.js), what the AI saw, and the wait for its words. */
+.mon-event .ev-thumb { grid-column: 1; grid-row: 1 / span 3; align-self: start; width: 64px; }
+.mon-event .ev-chip { grid-column: 2; grid-row: 3; justify-self: start; }
+.mon-event .ev-describing { grid-column: 2 / -1; grid-row: 3; }
+.mon-all-events { font-size: 0.8rem; color: var(--brand-accent); text-decoration: none; white-space: nowrap; }
+.mon-all-events:hover { text-decoration: underline; }
 .mon-item-more { padding: 8px 2px; text-align: center; }
 .mon-empty { color: var(--mon-dim); padding: 8px 2px; }
 
@@ -287,3 +293,59 @@
 .mon-nv-state:empty { display: none; }
 .mon-nv-light[aria-pressed="true"] .mon-nv-state { color: inherit; }
 .mon-nv .mon-ptz-status { max-width: 144px; }   /* a refusal wraps under the buttons, as wide as they are, so the column keeps its width */
+
+/* The Events page (#/events, js/screens/events.js): filters on top, then every event in groups by day, each with its picture. It is an ordinary
+   page (the page's own tokens, light or dark), so the dot colours are the page's --danger and --warning. No video: the pictures are <img>. */
+.ev-page { display: grid; gap: 12px; max-width: 980px; }
+.ev-filters { display: grid; gap: 8px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.ev-line, .ev-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ev-line select, .ev-line input[type="search"] { min-height: 36px; width: auto; }
+.ev-line input[type="search"] { flex: 1 1 180px; min-width: 0; }
+.ev-check { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ev-label { flex: none; width: 5.5rem; color: var(--text-2); font-size: 0.82rem; }
+.ev-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.ev-filter {
+  min-height: 32px; padding: 4px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: transparent; color: var(--text);
+  font: inherit; font-size: 0.86rem; cursor: pointer;
+}
+.ev-filter:hover { background: var(--surface-2); }
+.ev-filter:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ev-filter[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+.ev-held { justify-self: center; position: sticky; top: 8px; z-index: 2; }
+.ev-day h2 { margin: 12px 0 6px; font-size: 0.82rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
+.ev-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.ev-item { border-left: 4px solid transparent; border-radius: var(--radius-sm); background: var(--surface); border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.ev-item[data-concern="alarm"] { border-left-color: var(--danger); }
+.ev-item[data-concern="unusual"] { border-left-color: var(--warning); }
+.ev-item[data-concern="nothing"] { opacity: 0.72; }
+.ev-row { display: flex; gap: 12px; padding: 8px; color: var(--text); text-decoration: none; border-radius: var(--radius-sm); }
+a.ev-row:hover { background: var(--surface-2); }
+a.ev-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+div.ev-row { cursor: default; }
+.ev-item[data-recorded="false"] .ev-thumb { opacity: 0.6; }
+.ev-thumb { flex: none; width: 128px; aspect-ratio: 16 / 9; border-radius: 6px; overflow: hidden; background: var(--surface-2); display: grid; place-items: center; }
+.ev-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ev-thumb[data-state="loading"] { animation: ev-wait 1.2s ease-in-out infinite; }
+@keyframes ev-wait { 50% { opacity: 0.6; } }
+@media (prefers-reduced-motion: reduce) { .ev-thumb[data-state="loading"] { animation: none; } }
+.ev-body { min-width: 0; flex: 1; display: grid; align-content: start; gap: 4px; }
+.ev-head, .ev-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.ev-camera { font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
+.ev-head time, .ev-duration { color: var(--text-2); font-size: 0.84rem; font-variant-numeric: tabular-nums; }
+.ev-type { font-size: 0.84rem; font-weight: 600; }
+.ev-type[data-level="doorbell"] { color: var(--danger); }
+.ev-type[data-level="detection"] { color: var(--info); }
+.ev-type[data-level="motion"] { color: var(--warning); }
+.ev-note { color: var(--text-2); font-size: 0.8rem; }
+.ev-chip { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-strong); font-size: 0.78rem; color: var(--text-2); }
+.ev-says { margin: 0; }
+.ev-page .ev-ai { color: var(--text); }
+.ev-page .ev-ai[data-concern="nothing"] { color: var(--text-2); font-style: italic; }
+.ev-describing { color: var(--text-2); font-style: italic; font-size: 0.9rem; }
+.ev-foot { display: flex; justify-content: center; padding: 8px 0 24px; }
+.ev-count { margin: 0; }
+.ev-empty { padding: 32px 16px; }
+@media (max-width: 560px) {
+  .ev-thumb { width: 96px; }
+  .ev-label { width: 100%; }
+}

@@ -65,8 +65,13 @@ final class EventHub: Sendable {
     private let broadcaster = AsyncBroadcaster<ServerEvent>(bufferingNewest: 256)
     private let task = Mutex<Task<Void, Never>?>(nil)
 
-    init(backend: any BridgeBackend, interval: Duration = .milliseconds(500)) {
+    private let notifications: NotificationLog?
+    /// How often the notices are put in the notification log while nobody listens (they are, every look, while somebody does).
+    private let recordEvery: Duration = .seconds(5)
+
+    init(backend: any BridgeBackend, interval: Duration = .milliseconds(500), notifications: NotificationLog? = nil) {
         self.backend = backend
+        self.notifications = notifications
         self.interval = interval
     }
 
@@ -112,11 +117,16 @@ final class EventHub: Sendable {
         var notices: [NoticeResource.Fingerprint] = []
         var started = false
         var lastPing = ContinuousClock.now
+        var lastRecord = ContinuousClock.now
         while !Task.isCancelled {
             try? await Task.sleep(for: interval)
             guard !Task.isCancelled else { return }
             guard broadcaster.subscriberCount > 0 else {
                 started = false
+                if let notifications, ContinuousClock.now - lastRecord >= recordEvery {
+                    lastRecord = .now
+                    notifications.record(NoticeResource.resources(for: await backend.overview(), now: Date()))
+                }
                 continue
             }
             let overview = await backend.overview()
@@ -127,7 +137,9 @@ final class EventHub: Sendable {
                 cameras = Dictionary(overview.cameras.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 configurations = Dictionary(overview.configurations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 bridge = overview.bridgeResource
-                notices = NoticeResource.resources(for: overview, now: now).map(\.fingerprint)
+                let baseline = NoticeResource.resources(for: overview, now: now)
+                notices = baseline.map(\.fingerprint)
+                notifications?.record(baseline, now: now)
                 continue
             }
             if overview.bridgeResource != bridge {
@@ -162,6 +174,7 @@ final class EventHub: Sendable {
             let currentNotices = NoticeResource.resources(for: overview, now: now)
             if currentNotices.map(\.fingerprint) != notices {
                 notices = currentNotices.map(\.fingerprint)
+                notifications?.record(currentNotices, now: now)   // in the log before the page hears of it
                 broadcaster.yield(Self.event("notices", currentNotices))
             }
             if ContinuousClock.now - lastPing >= .seconds(15) {

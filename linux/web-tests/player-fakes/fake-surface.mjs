@@ -155,6 +155,11 @@ export class FakeSurface {
     return { presented: true, mediaTime: this.time };
   }
 
+  setRate(rate) {
+    this.#freeze();
+    this.rate = rate;
+  }
+
   pause() {
     this.#freeze();
     this.playing = false;

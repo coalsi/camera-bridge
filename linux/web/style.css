@@ -389,6 +389,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--brand-accent);
 .tile .d { color: var(--text-2); font-size: 0.82rem; overflow-wrap: anywhere; }
 .layout-2 { display: grid; gap: 18px; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); align-items: start; }
 @media (max-width: 900px) { .layout-2 { grid-template-columns: minmax(0, 1fr); } }
+/* The camera page: the preview and its status cards stay in view while the settings column beside them scrolls with the page. */
+@media (min-width: 901px) {
+  .camera-layout > .cam-left { position: sticky; top: 18px; max-height: calc(100dvh - 36px); overflow-y: auto; overscroll-behavior: contain; }
+}
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
 .kv dt { color: var(--text-2); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
@@ -709,3 +713,47 @@ a.version:hover { color: var(--text); text-decoration: underline; }
 .plugin-internet { color: var(--text-2); margin: 4px 0 0; }
 .plugin-internet-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: -6px 0 14px; }
 .plugin-internet-head .plugin-internet { margin: 0; flex: 1 1 320px; }
+
+/* Notifications (js/notifications.js): toasts that slide in at the top right (full width, top, on a phone) and fade away; the Notifications page */
+.notifs { position: fixed; z-index: 70; top: 12px; right: 12px; display: grid; gap: 10px; width: min(380px, calc(100vw - 24px)); pointer-events: none; }
+@media (max-width: 640px) { .notifs { left: 8px; right: 8px; top: calc(8px + env(safe-area-inset-top)); width: auto; } }
+.notif { pointer-events: auto; position: relative; display: flex; align-items: flex-start; gap: 12px; padding: 12px 12px 12px 14px; border-radius: 18px;
+  background: color-mix(in srgb, var(--surface-2) 90%, transparent); -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+  border: 1px solid var(--border-strong); box-shadow: var(--shadow); touch-action: pan-y; animation: notif-in 0.35s cubic-bezier(0.2, 0.8, 0.2, 1); transition: opacity 0.3s, transform 0.3s; }
+.notif:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
+.notif.leaving { opacity: 0; transform: translateX(28px); pointer-events: none; }
+.notif > svg { width: 26px; height: 26px; flex: none; margin-top: 1px; color: var(--info); }
+.notif.warning > svg { color: var(--warning); }
+.notif-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; }
+button.notif-body { background: none; border: 0; padding: 0; margin: 0; color: inherit; font: inherit; cursor: pointer; border-radius: 8px; }
+.notif-title { font-weight: 650; }
+.notif-detail { color: var(--text-2); font-size: 0.92rem; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin: 0; }
+.notif-act { color: var(--link); font-size: 0.88rem; margin-top: 4px; }
+.notif-time { color: var(--text-3); font-size: 0.8rem; white-space: nowrap; margin-top: 2px; }
+.notif-close { flex: none; width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text-3); cursor: pointer; }
+.notif-close:hover { background: var(--surface); color: var(--text); }
+.notif-close svg { width: 16px; height: 16px; }
+@keyframes notif-in { from { opacity: 0; transform: translateX(40px); } }
+@media (prefers-reduced-motion: reduce) {
+  .notif { animation: notif-fade 0.2s ease-out; }
+  .notif.leaving { transform: none; }
+}
+@keyframes notif-fade { from { opacity: 0; } }
+.nav-badge { margin-left: auto; min-width: 20px; padding: 1px 6px; border-radius: 10px; background: var(--brand-accent); color: var(--bg); font-size: 0.72rem; font-weight: 700; text-align: center; }
+.nav-badge[hidden] { display: none; }
+.notif-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.chip { padding: 6px 14px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-2); font: inherit; cursor: pointer; }
+.chip.on { background: var(--surface-2); color: var(--text); border-color: var(--text-3); font-weight: 650; }
+.notif-list { display: grid; gap: 10px; max-width: 760px; }
+.notif-list .card + .card { margin-top: 0; }
+.notif-item { display: flex; gap: 14px; align-items: flex-start; padding: 14px 16px; }
+.notif-item > svg { width: 24px; height: 24px; flex: none; color: var(--info); }
+.notif-item.warning > svg { color: var(--warning); }
+.notif-item.unread { border-left: 4px solid var(--brand-accent); }
+.notif-text { flex: 1; min-width: 0; }
+.notif-head { display: flex; gap: 12px; justify-content: space-between; align-items: baseline; }
+.notif-item .notif-detail { display: block; -webkit-line-clamp: unset; margin: 2px 0 0; }
+.notif-item .actions { margin-top: 10px; }
+.sec-guard-ok { display: flex; gap: 8px; align-items: flex-start; color: var(--live); font-weight: 600; }
+.sec-guard-ok svg { width: 20px; height: 20px; flex: none; margin-top: 1px; }
+.sec-name-ok { color: var(--live); }

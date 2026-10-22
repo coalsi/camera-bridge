@@ -5,6 +5,7 @@ import { icon } from './icons.js';
 import { askToPowerOff, powerOff } from './power.js';
 import { THEME_EVENT, THEME_INFO, applyTheme, currentTheme, nextTheme, setTheme } from './theme.js';
 import { store, startEvents, stopEvents, subscribe, loadCameras } from './store.js';
+import { onUnread, startNotifications, unreadCount } from './notifications.js';
 import { renderSetup, renderLogin } from './screens/auth.js';
 import { renderCameras } from './screens/cameras.js';
 import { renderAdd } from './screens/add.js';
@@ -20,9 +21,13 @@ const root = document.getElementById('app');
 let screen = null;          // { el, destroy }
 let shell = null;           // { main, nav, ... } while signed in
 let unsubscribe = null;
+let stopNotifications = null;
+let stopUnread = null;
 
 const NAV = [
   { href: '#/', label: 'Monitor', icon: 'monitor', match: (p) => p === '' || p === 'monitor' || p === 'nvr' || p.startsWith('nvr/') },
+  { href: '#/events', label: 'Events', icon: 'clock', match: (p) => p === 'events' || p.startsWith('events?') },
+  { href: '#/notifications', label: 'Notifications', icon: 'bell', match: (p) => p === 'notifications' },
   { href: '#/cameras', label: 'Cameras', icon: 'camera', match: (p) => p === 'cameras' || p.startsWith('camera/') || p === 'add' || p.startsWith('pair') },
   { href: '#/plugins', label: 'Plugins', icon: 'plugin', match: (p) => p === 'plugins' || p.startsWith('plugins/') },
   { href: '#/logs', label: 'Log', icon: 'list', match: (p) => p === 'logs' },
@@ -58,6 +63,9 @@ function lazy(importer, exportName) {
 const ROUTES = [
   // page: 'monitor' marks the shell for the Monitor (style.css: black beside the menu, the window's height from 900 px).
   { pattern: /^$/, title: 'Monitor', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
+  // The Events page keeps its filters in the address: #/events?cameras=<ids>&type=Person&saw=person&concern=notable&range=7d
+  { pattern: /^events(?:\?(.*))?$/, title: 'Events', render: lazy(() => import('./screens/events.js'), 'renderEvents') },
+  { pattern: /^notifications$/, title: 'Notifications', render: lazy(() => import('./screens/notifications.js'), 'renderNotifications') },
   { pattern: /^cameras$/, title: 'Cameras', render: renderCameras },
   { pattern: /^add$/, title: 'Add a camera', render: renderAdd },
   // #/camera/<id>, and #/camera/<id>/security at its Security card (the Internet guard's notice opens that).
@@ -65,7 +73,8 @@ const ROUTES = [
   { pattern: /^camera\/([0-9A-Fa-f-]{36})\/pair$/, title: 'Add to Apple Home', render: renderCameraPairing },
   { pattern: /^camera\/([0-9A-Fa-f-]{36})\/watch(?:\/(\d{12,13}))?$/, title: 'Recordings', render: lazy(() => import('./screens/watch.js'), 'renderWatch') },
   // The Monitor writes #/nvr/<epoch ms> while you look back in the recordings; #/monitor is its old address.
-  { pattern: /^nvr(?:\/(\d{12,13}))?$/, title: 'NVR', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
+  // `?camera=<id>&play=1` comes from the Events page: that camera leads and the wall plays from the time.
+  { pattern: /^nvr(?:\/(\d{12,13}))?(?:\?(.*))?$/, title: 'NVR', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^monitor$/, title: 'Monitor', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^pair\/sensors$/, title: 'Sensors bridge', render: renderSensorsPairing },
   { pattern: /^logs$/, title: 'Log', render: renderLogs },
@@ -131,7 +140,8 @@ function markNav(path) {
 function buildShell() {
   const name = h('span', null, store.session.bridgeName);
   const nav = h('nav', { class: 'nav', 'aria-label': 'Main' },
-    NAV.map((item) => h('a', { href: item.href, title: item.label }, icon(item.icon), h('span', null, item.label))));
+    NAV.map((item) => h('a', { href: item.href, title: item.label }, icon(item.icon), h('span', null, item.label),
+      item.href === '#/notifications' ? h('span', { class: 'nav-badge', id: 'nav-unread', hidden: true }) : null)));
   const content = h('div');
   const main = h('main', { id: 'main', class: 'main', tabindex: '-1' }, content);
   const reconnect = h('div', { class: 'reconnect', role: 'status', hidden: true }, 'Lost contact with the bridge. Trying again…');
@@ -155,12 +165,25 @@ function buildShell() {
     h('div', { class: 'app-main' }, reconnect, notice, main));
   shell = { nav, content, main, name, reconnect, version, theme };
   showTheme();
+  stopUnread?.();
+  stopUnread = onUnread(showUnread);
+  showUnread(unreadCount());
   get('system').then((s) => {
     power.hidden = !s.canManage;
     version.textContent = versionLabel(s.product, s.version);
     const news = whatsNewNotice(s.version);
     if (news) notice.append(news);
   }).catch(() => {});
+}
+
+/** The count of notifications not read, in the menu: a number beside the bell, and said in the link's name. */
+function showUnread(count) {
+  const link = shell?.nav.querySelector('a[href="#/notifications"]');
+  const badge = link?.querySelector('.nav-badge');
+  if (!link || !badge) return;
+  badge.hidden = count === 0;
+  badge.textContent = count > 99 ? '99+' : String(count);
+  link.setAttribute('aria-label', count ? `Notifications, ${count} unread` : 'Notifications');
 }
 
 /** The appearance button: the icon of the appearance in use, and what a click switches to. */
@@ -188,6 +211,8 @@ async function showApp() {
     if (!settings.timeZone && zone) return patch('settings', { timeZone: zone });
     return null;
   }).catch(() => {});
+  stopNotifications?.();
+  stopNotifications = startNotifications();
   startEvents();
   if (!location.hash) location.hash = '#/';
   route();
@@ -201,6 +226,8 @@ export async function showSignedIn(info) {
 
 function showSignedOut() {
   stopEvents();
+  stopNotifications?.();
+  stopNotifications = null;
   shell = null;
   root.classList.remove('signed-in');
   markPage(null);

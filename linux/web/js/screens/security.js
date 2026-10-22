@@ -12,6 +12,7 @@
 // itself.
 import { api } from '../api.js';
 import { h, replace, svg } from '../dom.js';
+import { icon } from '../icons.js';
 import { timeAgo } from '../format.js';
 import { describeGuardName } from '../guard-names.js';
 import { putCamera, store } from '../store.js';
@@ -28,10 +29,10 @@ export const SECURITY_TEXT = {
   colours: { red: 'Red', yellow: 'Yellow', green: 'Green', gold: 'Gold' },
   /** What each colour means (the owner's words, 2026-10-17). */
   meanings: {
-    gold: 'Camera Bridge found no way in from outside, and its Internet guard saw it make no internet lookups for a full day and has seen at least one lookup from it.',
+    gold: 'Camera Bridge found no way in from outside, and its Internet guard saw nothing get out for a full day and has seen at least one lookup from it.',
     green: 'Its cloud is off; something Camera Bridge can’t confirm remains.',
     yellow: 'Camera Bridge found nothing that lets it in from outside, but something needs work: its cloud is on but not linked, its video plays '
-      + 'without a password on your network, it keeps looking up internet names, or Camera Bridge can’t read its cloud.',
+      + 'without a password on your network, or Camera Bridge can’t read its cloud.',
     red: 'Its cloud, UPnP, dynamic DNS or RTMP push is on, or it only works through its maker’s cloud.',
   },
   legend: 'What do the colours mean?',
@@ -75,7 +76,13 @@ export const GUARD_TEXT = {
     + 'then stops working away from home; Camera Bridge, Apple Home and your recordings keep working.',
   limit: 'Watch sees lookups by name only. A camera with a built-in internet address needs none, so to be sure, also block it in your router (below).',
   quiet: 'It made no internet lookups in the last 24 hours.',
-  blocked: (today, day) => `Blocked ${today} lookup${today === 1 ? '' : 's'} today, ${day} in the last 24 hours.`,
+  /** A watched camera whose attempts the guard blocks: the guard working, so it reads as a success. */
+  blocked: (today, week) => {
+    const attempts = (n) => `${n} attempt${n === 1 ? '' : 's'}`;
+    return today > 0 ? `Blocked ${attempts(today)} today, ${week} in the last 7 days. Nothing got out.`
+      : `Blocked ${attempts(week)} in the last 7 days, none today. Nothing got out.`;
+  },
+  blockedName: 'Blocked',
   names: 'The internet names it looked up (last 7 days)',
   times: (count) => `${count} time${count === 1 ? '' : 's'}`,
   /** Under the names when one of them is likely the maker's cloud: the guard sees names and times only, not who caused them, so the
@@ -99,7 +106,7 @@ function guardView(guard, finding) {
   const sentence = typeof finding?.sentence === 'string' && finding.sentence ? finding.sentence : null;
   const manual = manualHelpView(finding?.manualHelp);
   if (!guard || typeof guard !== 'object') {
-    return { onBridge: false, watched: false, today: 0, last24h: 0, names: [], sentence: sentence ?? GUARD_TEXT.notOnThisBridge, running: false, manual: null };
+    return { onBridge: false, watched: false, today: 0, last24h: 0, last7d: 0, names: [], sentence: sentence ?? GUARD_TEXT.notOnThisBridge, running: false, manual: null };
   }
   const names = (Array.isArray(guard.names) ? guard.names : [])
     .filter((entry) => entry && typeof entry.name === 'string' && entry.name)
@@ -107,7 +114,7 @@ function guardView(guard, finding) {
     .sort((a, b) => (b.last ?? -Infinity) - (a.last ?? -Infinity) || a.index - b.index)
     .map(({ index, ...entry }) => entry);
   const watched = guard.watched === true;
-  return { onBridge: true, watched, today: count(guard.today), last24h: count(guard.last24h), names, sentence, running: finding?.state !== 'unknown',
+  return { onBridge: true, watched, today: count(guard.today), last24h: count(guard.last24h), last7d: count(guard.last7d), names, sentence, running: finding?.state !== 'unknown',
     manual: watched ? null : manual };
 }
 
@@ -338,6 +345,7 @@ export function nameItem(entry, now, explain = (name) => describeGuardName(name)
   return h('li', { class: 'sec-name' }, h('code', null, entry.name),
     h('span', { class: 'muted sec-name-when' }, GUARD_TEXT.times(entry.count), first !== null ? [' · first ', when(first, now)] : null,
       entry.last !== null ? [' · last ', when(entry.last, now)] : null),
+    h('span', { class: 'sec-name-ok' }, GUARD_TEXT.blockedName),
     h('span', { class: 'sec-name-what' }, what.text, what.hint ? [' ', h('span', { class: 'muted' }, what.hint)] : null));
 }
 
@@ -422,9 +430,11 @@ export function createSecurityCard(camera, {
     }
     guardPill.className = `pill ${g.running ? 'live' : 'warning'}`;
     guardPill.textContent = GUARD_TEXT.watching;
-    const tried = g.today > 0 || g.last24h > 0;
-    const said = g.sentence ?? (tried ? null : GUARD_TEXT.quiet);
-    replace(guardText, said ? line(said) : null, tried ? line(GUARD_TEXT.blocked(g.today, g.last24h)) : null,
+    // Blocked attempts are the guard working: a success line, not the bridge's warning-style sentence (which says the same for 24 hours).
+    const tried = g.today > 0 || g.last24h > 0 || g.last7d > 0;
+    const said = tried && g.running ? null : g.sentence ?? (tried ? null : GUARD_TEXT.quiet);
+    replace(guardText, said ? line(said) : null,
+      tried ? h('p', { class: 'small sec-guard-ok' }, icon('check'), GUARD_TEXT.blocked(g.today, Math.max(g.last7d, g.last24h))) : null,
       h('p', { class: 'small muted' }, GUARD_TEXT.limit));
     const described = new Map(g.names.map((entry) => [entry.name, describeGuardName(entry.name, { camera: current, canSetUp: setUp })]));
     const makersCloud = [...described.values()].some((what) => what.kind === 'cloud');

@@ -39,7 +39,7 @@ public enum CameraSecurityLevel: String, Sendable, Codable, CaseIterable, Compar
         case .yellow: "Nothing Camera Bridge read opens this camera to the outside, but something needs work."
         case .green: "Camera Bridge found no cloud turned on, but it can’t confirm everything, so a way out is still possible."
         case .gold: "Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the \(InternetGuardText.name) saw "
-            + "it make no internet lookups in the last 24 hours."
+            + "nothing get out in the last 24 hours."
         }
     }
 }
@@ -174,11 +174,11 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
     /// confirmed it), `cloudModel` (a camera that works only through its maker's cloud: `CloudDependentModels`) and the guard's evidence.
     /// A camera without a reading of its cloud has it unknown; video nothing checked is unknown too.
     /// - red: the cloud on and linked or of unknown link, UPnP, DDNS or RTMP on, or a cloud-dependent model.
-    /// - yellow: the cloud on but not linked, or unknown; video (or another service) without a password; watched and still looking up
-    ///   internet names.
+    /// - yellow: the cloud on but not linked, or unknown; video (or another service) without a password. (Blocked lookups
+    ///   of a watched camera never lower the level: they are the guard working.)
     /// - green: nothing of those, but something can't be confirmed (an unknown, another service, no guard, not watched, watched for less
     ///   than a day, or no lookup ever seen from it).
-    /// - gold: everything confirmed off or absent, the video locked, and watched for a full day with no internet lookups, by a box that has seen
+    /// - gold: everything confirmed off or absent, the video locked, and watched for a full day, by a box that has seen
     ///   the camera ask it something in its last 7 days (`GuardEvidence.lookupSeen`: silence alone is no proof).
     public static func assess(_ readings: [RemoteAccessFinding], cloudModel: String? = nil, internetGuard: GuardEvidence?, checkedAt: Date) -> CameraSecurity {
         var readings = merged(readings)
@@ -201,7 +201,7 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
         let level = findings.map(\.level).min() ?? .green
         let activity = internetGuard.map { evidence in
             CameraGuardActivity(watched: evidence.watched, today: evidence.today, last24h: evidence.outsideLookups24h,
-                                names: Array(evidence.names.prefix(CameraGuardActivity.maximumNames)))
+                                names: Array(evidence.names.prefix(CameraGuardActivity.maximumNames)), last7d: evidence.names.reduce(0) { $0 + $1.count })
         }
         return CameraSecurity(level: level, title: level.title, summary: level.summary, findings: findings, checkedAt: checkedAt, internetGuard: activity)
     }
@@ -288,8 +288,8 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
     /// A watch on DNS servers the camera's router gives (DHCP) can end when the router renews the camera's address.
     static let dnsFromRouterNote = "Its DNS servers come from your router, which can change them when it renews the camera’s address."
 
-    /// What the guard saw: without it, while it does not watch the camera, or before a full day of watching, green is the best; watched and
-    /// still looking up internet names, yellow; watched for a day without a lookup, gold, but only once the box has seen the camera ask it
+    /// What the guard saw: without it, while it does not watch the camera, or before a full day of watching, green is the best; watched
+    /// and blocking its lookups counts in its favour (the same level as a camera that never tried); watched for a day, gold, but only once the box has seen the camera ask it
     /// something (`GuardEvidence.lookupSeen`, any name, local ones included): else green, `GuardEvidence.noLookupsSeen`. A camera not on the
     /// guard's list gets the "doesn't watch" sentence whatever the box's state (a box watching no camera has its DNS off). A watch on DNS the
     /// router gives says so (`dnsFromRouterNote`).
@@ -308,12 +308,6 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
             return make(.unknown, .green, "The \(name) isn’t running, so Camera Bridge can’t confirm that nothing gets out.")
         }
         let note = evidence.watched && evidence.dnsFromRouter ? " " + dnsFromRouterNote : ""
-        if evidence.outsideLookups24h > 0 {
-            let count = evidence.outsideLookups24h
-            let names = evidence.lastLookupNames.prefix(3)
-            return make(.on, .yellow, "The \(name) blocked \(count == 1 ? "1 lookup of an internet name" : "\(count) lookups of internet names") in the last "
-                        + "24 hours" + (names.isEmpty ? "" : " (\(names.joined(separator: ", ")))") + ", but the camera may have another way out." + note)
-        }
         switch evidence.asksBridge {
         case false? where evidence.waitsForRestart:
             return make(.off, .green, "The camera takes Camera Bridge as its DNS server when it restarts. Until then the \(name) can’t see its lookups.")
@@ -326,12 +320,20 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
             break
         }
         guard evidence.watched else { return make(.unknown, .green, "The \(name) hasn’t started watching this camera yet.") }
+        // Blocked lookups are the guard working: they never lower the level (a watched camera that keeps trying is as good as one that never did).
+        let blocked = evidence.outsideLookups24h
+        let blockedSentence = blocked > 0
+            ? "The \(name) blocked \(blocked == 1 ? "1 attempt" : "\(blocked) attempts") to reach the internet in the last 24 hours"
+                + (evidence.lastLookupNames.isEmpty ? "" : " (\(evidence.lastLookupNames.prefix(3).joined(separator: ", ")))") + ". Nothing got out." + note
+            : nil
         guard let watchedFor = evidence.watchedFor, watchedFor >= GuardEvidence.quietDay else {
             let hours = Int((evidence.watchedFor ?? 0) / 3600)
             let time = hours < 1 ? "less than an hour" : hours == 1 ? "1 hour" : "\(hours) hours"
+            if let blockedSentence { return make(.on, .green, blockedSentence) }
             return make(.on, .green, "The \(name) has watched it for \(time) and seen no internet lookups yet. It takes a full day to confirm." + note)
         }
         guard evidence.lookupSeen else { return make(.on, .green, GuardEvidence.noLookupsSeen + note) }
+        if let blockedSentence { return make(.on, .gold, blockedSentence) }
         return make(.on, .gold, "The \(name) has watched it for the last 24 hours and saw it make no internet lookups." + note)
     }
 

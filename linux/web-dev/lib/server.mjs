@@ -222,6 +222,14 @@ export function createDevServer(options) {
       for (const name of Object.keys(settingsBody)) if (name in ctx.body && name !== 'webhookToken' && name !== 'webhookProblem') settingsBody[name] = ctx.body[name];
       return json({ bridgeName: config.bridgeName, ...settingsBody });
     }],
+    // Notifications (BridgeWeb/WebApp+Notifications.swift): the log of every notice, the once-only claim for a toast, the read marker.
+    ['GET', 'notifications', 'session', false, () => { state.notifications.record(state.notices(), state.serverNow()); return json({ unread: state.notifications.unread, notifications: state.notifications.list }); }],
+    ['POST', 'notifications/shown', 'session', false, () => {
+      const notices = state.notices();
+      state.notifications.record(notices, state.serverNow());
+      return json({ shown: state.notifications.claim(notices), unread: state.notifications.unread });
+    }],
+    ['POST', 'notifications/read', 'session', true, (ctx) => { state.notifications.markRead(ctx.body.ids); return json({ unread: state.notifications.unread }); }],
     ['GET', 'system', 'session', false, systemInfo],
     ['GET', 'events', 'session', false, () => ({ events: true })],
     ...NVR_ROUTES.map(([method, pattern, handler, takesBody]) => [method, pattern, 'session', takesBody, (ctx) => handler(app, ctx)]),

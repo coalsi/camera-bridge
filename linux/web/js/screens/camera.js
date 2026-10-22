@@ -10,7 +10,8 @@ import { loadNVR, nvrSupported } from '../nvr/lite.js';
 import { stampText } from '../stamp.js';
 import { putCamera, store, subscribe } from '../store.js';
 import { aiNotices, aiSettingsView } from './ai-settings.js';
-import { SHOW_SECURITY_EVENT, banners } from './banners.js';
+import { banners } from './banners.js';
+import { SHOW_SECURITY_EVENT } from '../notifications.js';
 import { cameraSetupCard, cameraSetupDialog, localOnlyCard, removalNote, RESTART_TEXT, restartControl, setupSupported } from './camera-setup.js';
 import { batteryCharging, batteryPill } from './cameras.js';
 import { backLink, field, homeState, inlineError, selectField, statePill, switchRow } from './common.js';
@@ -92,7 +93,7 @@ function pictureArea(fit, boxWidth, boxHeight, width, height) {
 }
 
 /** The camera page's address (app.js): #/camera/<id>, and #/camera/<id>/security, which brings its Security card into view (the Internet
- *  guard's notice opens it, banners.js securityAddress). */
+ *  guard's notification opens it, notifications.js securityAddress). */
 export const CAMERA_ROUTE = /^camera\/([0-9A-Fa-f-]{36})(?:\/(security))?$/;
 
 // MARK: AI descriptions
@@ -546,7 +547,7 @@ export function renderCamera({ params, navigate, setTitle }) {
     securityHandle.heading?.focus({ preventScroll: true });
   }
 
-  // The banner's "See what <camera> tried" while this camera's page is already on screen.
+  // The notification's "See its Security card" while this camera's page is already on screen.
   const onShowSecurity = (event) => {
     if (String(event?.detail).toLowerCase() !== String(id).toLowerCase()) return;
     wantsSecurity = true;
@@ -782,7 +783,7 @@ export function renderCamera({ params, navigate, setTitle }) {
   // MARK: Layout
 
   const headingHost = h('div', { class: 'page-head' });
-  const left = h('div', { class: 'stack' });
+  const left = h('div', { class: 'stack cam-left' });   // the preview and the status cards: kept in view while the settings beside them scroll
   const right = h('div', { class: 'stack' });
   const statusHost = h('div');
   const homeHost = h('div');
@@ -867,7 +868,7 @@ export function renderCamera({ params, navigate, setTitle }) {
     replace(root, backLink('#/cameras', 'Cameras'), h('div', { class: 'empty' }, h('h2', null, 'This camera was removed'), h('a', { class: 'btn primary', href: '#/cameras' }, 'Back to your cameras')));
     return { el: root, destroy() { destroyed = true; stop(); bannerHost.destroy(); window.removeEventListener(SHOW_SECURITY_EVENT, onShowSecurity); } };
   }
-  replace(root, backLink('#/cameras', 'Cameras'), headingHost, bannerHost, homeHost, h('div', { class: 'layout-2' }, left, right), homeBottomHost);
+  replace(root, backLink('#/cameras', 'Cameras'), headingHost, bannerHost, homeHost, h('div', { class: 'layout-2 camera-layout' }, left, right), homeBottomHost);
   renderAll();
 
   return {

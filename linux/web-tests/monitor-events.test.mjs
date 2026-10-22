@@ -89,10 +89,10 @@ test('gatherEvents keeps a description and a merge does not lose it', () => {
   const live = [{ at: T0 - 300, endAt: null, id: id(1), name: 'Camera 1', text: 'Person', level: 'detection' }];
   const events = gatherEvents({ cameras, live, archived });
   assert.deepEqual(events.map((e) => [e.cameraId, e.label, e.at - T0, e.description]), [
-    [id(1), 'Person', 0, { text: 'A man in a red jacket walks to the door', concern: 'routine' }],
-    [id(2), 'Motion', 60_000, { text: 'Nothing notable', concern: 'nothing' }],
-    [id(3), 'Person', 90_000, { text: 'A person tries the door handle', concern: 'alarm' }],
-    [id(1), 'Vehicle', 120_000, { text: 'A car stops at the gate', concern: 'routine' }],
+    [id(1), 'Person', 0, { text: 'A man in a red jacket walks to the door', concern: 'routine', kind: 'person' }],
+    [id(2), 'Motion', 60_000, { text: 'Nothing notable', concern: 'nothing', kind: 'nothing' }],
+    [id(3), 'Person', 90_000, { text: 'A person tries the door handle', concern: 'alarm', kind: 'person' }],
+    [id(1), 'Vehicle', 120_000, { text: 'A car stops at the gate', concern: 'routine', kind: 'vehicle' }],
     [id(1), 'Motion', 180_000, null],
   ]);
   assert.equal(gatherEvents({ cameras: [camera(1, [{ name: 'Motion', date: iso(T0) }])] }).at(0).description, null, 'the bridge’s own events have none');
@@ -349,7 +349,7 @@ test('a page that stops short leaves the rest for “Show more”', async () => 
   archive.destroy();
 });
 
-test('following live asks for the newest part again every half minute, and a failure waits', async () => {
+test('following live asks for the newest part again every ten seconds, and a failure waits', async () => {
   const events = stored(5, 1, 60_000, T0 - 300_000);
   const { archive, route, time } = archiveWith(events);
   archive.want({ cameraIds: [id(1)], fromMs: T0 - 3_600_000, toMs: Infinity });
@@ -357,11 +357,11 @@ test('following live asks for the newest part again every half minute, and a fai
   assert.equal(route.requests.length, 1);
   assert.equal(route.requests[0].toMs, T0 + 60_000, 'an open end is a minute past now');
   events.push({ id: 'late', cameraID: id(1), kind: 'Person', start: T0 + 20_000, end: null, recorded: true });
-  time.advance(10_000);
+  time.advance(ARCHIVE_REFRESH_MS / 2);
   archive.want({ cameraIds: [id(1)], fromMs: T0 - 3_600_000, toMs: Infinity });
   await settle();
   assert.equal(route.requests.length, 1, 'not yet');
-  time.advance(ARCHIVE_REFRESH_MS);
+  time.advance(ARCHIVE_REFRESH_MS / 2);
   await settle();
   assert.equal(route.requests.length, 2, 'the timer asked again');
   assert.equal(route.requests[1].fromMs, T0 + 60_000 - ARCHIVE_OVERLAP_MS);

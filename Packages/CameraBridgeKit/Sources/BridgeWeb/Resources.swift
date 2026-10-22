@@ -325,6 +325,7 @@ struct CameraSecurityResource: Encodable {
         var watched: Bool
         var today: Int
         var last24h: Int
+        var last7d: Int
         var names: [Name]
     }
 
@@ -345,7 +346,7 @@ struct CameraSecurityResource: Encodable {
                     canChange: $0.canChange, linked: OrNull($0.linked), service: OrNull($0.service), manualHelp: OrNull($0.manualHelp))
         }
         `guard` = OrNull(security.internetGuard.map { activity in
-            Guard(watched: activity.watched, today: activity.today, last24h: activity.last24h,
+            Guard(watched: activity.watched, today: activity.today, last24h: activity.last24h, last7d: activity.last7d,
                   names: activity.names.map { Guard.Name(name: $0.name, count: $0.count, first: OrNull($0.first), last: OrNull($0.last)) })
         })
     }
@@ -441,27 +442,21 @@ struct NoticeResource: Encodable {
     /// of the notice's `cameraID`); nil for a notice with no button. Always encoded, as null when nil (a page that does not know the field
     /// ignores it).
     var action: String?
-    /// The internet guard's notice only: every camera that tried today, most first, each with a button on the page (at most 3); left out
-    /// of the other notices, and of a guard notice without any (the page then falls back to `cameraID`).
-    var cameras: [TriedCamera]? = nil
-
-    /// A camera of the internet guard's notice: `{id, name, today, mostAsked}` (`mostAsked`: the name it asked for most, as the Security
-    /// card shows it; null when the box listed none).
-    struct TriedCamera: Encodable {
-        var id: UUID
-        var name: String
-        var today: Int
-        var mostAsked: OrNull<String>
-
-        init(_ camera: InternetGuardNotice.Camera) {
-            id = camera.id
-            name = camera.name
-            today = camera.today
-            mostAsked = OrNull(camera.mostAsked)
+    /// Where the notification page files it: "security", "recording", "cameras" or "system" (by `kind`).
+    var category: String {
+        switch kind {
+        case "internetGuard": "security"
+        case "nvrStorage": "recording"
+        case "liveViewNotReceived": "cameras"
+        default: "system"
         }
     }
 
-    private enum CodingKeys: String, CodingKey { case id, kind, severity, title, detail, cameraID, cameraName, date, action, cameras }
+    /// What the notice says, as the key the notification log tells one happening from another by: another title or camera is a new thing,
+    /// other figures in the text (the free gigabytes) are not.
+    var key: String { "\(id)|\(title)|\(cameraID?.uuidString ?? "")" }
+
+    private enum CodingKeys: String, CodingKey { case id, kind, severity, title, detail, cameraID, cameraName, date, action, category, key }
 
     func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -474,27 +469,24 @@ struct NoticeResource: Encodable {
         try container.encodeIfPresent(cameraName, forKey: .cameraName)
         try container.encode(date, forKey: .date)
         try container.encode(action, forKey: .action)
-        try container.encodeIfPresent(cameras, forKey: .cameras)
+        try container.encode(category, forKey: .category)
+        try container.encode(key, forKey: .key)
     }
 
-    /// Everything the banner shows: the network notices (below), at most one storage notice, first, and the internet guard's notice for the
-    /// day, last. This is what the status answer, the event stream's snapshot and its change detection all use.
+    /// Everything that is a notification now: the network notices (below), at most one storage notice, first, and what the internet guard
+    /// found, last. This is what the status answer, the event stream's snapshot, its change detection and the notification log all use.
     static func resources(for overview: BridgeOverview, now: Date = Date()) -> [NoticeResource] {
         var notices = resources(for: overview.networkNotices, now: now)
         if let storage = storageNotice(for: overview, now: now) { notices.insert(storage, at: 0) }
-        if let blocked = internetGuardNotice(overview.internetGuardNotice) { notices.append(blocked) }
+        notices += overview.internetGuardAlerts.map(internetGuardNotice)
         return notices
     }
 
-    /// "Internet guard blocked N lookups from M cameras today. Patio New tried 9 times, Doorbell 3 times.": information, with every camera
-    /// that tried (`cameras`, most first); its buttons open those cameras' pages at the Security card (`action` "open-camera"). `cameraID`
-    /// and `cameraName` are the camera that tried most, as before: the page falls back to them when `cameras` is missing or empty (a bridge
-    /// from before).
-    static func internetGuardNotice(_ notice: InternetGuardNotice?) -> NoticeResource? {
-        guard let notice else { return nil }
-        return NoticeResource(id: "internet-guard", kind: "internetGuard", severity: "info", title: notice.title, detail: notice.detail,
-                              cameraID: notice.cameraID, cameraName: notice.cameraName, date: notice.date, action: notice.cameraID == nil ? nil : "open-camera",
-                              cameras: notice.tried.isEmpty ? nil : notice.tried.map(TriedCamera.init))
+    /// "Patio New tried to reach the internet": information, with a button to the camera's page at its Security card (`action` "open-camera");
+    /// a warning for a camera the guard can no longer watch.
+    static func internetGuardNotice(_ alert: InternetGuardAlert) -> NoticeResource {
+        NoticeResource(id: alert.id, kind: "internetGuard", severity: alert.isWarning ? "warning" : "info", title: alert.title, detail: alert.detail,
+                       cameraID: alert.cameraID, cameraName: alert.cameraName, date: alert.date, action: "open-camera")
     }
 
     /// "Recording Can't Continue" when recording is paused (or no folder is chosen), else "Recording Storage Almost Full" when less than

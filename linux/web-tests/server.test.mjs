@@ -255,7 +255,7 @@ test('scenario noFolder: the banner asks for a folder, Record is refused, choosi
   assert.ok(chosen.json.freeBytes > 0 && chosen.json.totalBytes > 0 && chosen.json.floorBytes > 0 && chosen.json.effectiveMaxBytes > 0,
     'the answer to a folder change is a complete snapshot (the daemon once answered with the numbers from before the change: state noFolder, every byte count 0)');
   assert.deepEqual((await api.get('nvr/storage')).json, chosen.json, 'and equals what a GET says right after');
-  assert.equal((await api.get('status')).json.notices.length, 0);
+  assert.equal((await api.get('status')).json.notices.filter((entry) => entry.id === 'nvr-storage').length, 0);
   assert.ok((await api.get('nvr/cameras')).json.cameras.length > 0);
   const enabled = await api.patch(`cameras/${camera('Shed')}/nvr`, { enabled: true });
   assert.equal(enabled.json.status.nvr.state, 'recording');
@@ -308,7 +308,7 @@ test('scenario folderMissing flips back: the URLs that were 410 gone are served 
   assert.equal((await api.get(keyframe)).status, 200);
   const nvr = (await api.get(`cameras/${cam}`)).json.status.nvr;
   assert.deepEqual([nvr.state, nvr.pause], ['recording', null]);
-  assert.equal((await api.get('status')).json.notices.length, 0, 'the banner is gone');
+  assert.equal((await api.get('status')).json.notices.filter((entry) => entry.id === 'nvr-storage').length, 0, 'the storage notice is gone');
 });
 
 test('scenario stalled: reads wait, then 504 drive_slow with Retry-After 2; the folder check likewise', opts, async () => {

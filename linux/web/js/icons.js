@@ -23,6 +23,7 @@ const PATHS = {
   monitor: ['M3 5h18v11H3z', 'M8 20h8', 'M12 16v4'],
   maximize: ['M4 9V4h5', 'M20 9V4h-5', 'M4 15v5h5', 'M20 15v5h-5'],
   minimize: ['M9 4v5H4', 'M15 4v5h5', 'M9 20v-5H4', 'M15 20v-5h5'],
+  clock: ['circle:12,12,9', 'M12 7v5l3 2'],
   bell: ['M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z', 'M10 20a2 2 0 0 0 4 0'],
   plugin: ['M9 3v4M15 3v4', 'M6 7h12v4a6 6 0 0 1-12 0z', 'M12 17v4'],
   volume: ['M4 9h4l5-4v14l-5-4H4z', 'M16.5 8.5a5 5 0 0 1 0 7', 'M19 6a8.5 8.5 0 0 1 0 12'],

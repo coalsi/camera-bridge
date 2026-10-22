@@ -15,6 +15,19 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.114',
+    date: '2026-10-22',
+    title: 'An Events page, notifications that fade away, and faster playback',
+    items: [
+      'Events: a new page in the menu with every camera’s events, newest first, each with a picture, its type and the AI’s sentence. Alarm and unusual events stand out. Filter by camera, type, what the AI saw, importance or words in the sentence, and click an event to play it on the Monitor from just before it began.',
+      'The Monitor’s events list shows the same picture, type and AI details, and a link to the Events page. New AI descriptions show within seconds.',
+      'Playback speed on the Monitor: 1×, 2×, 3×, 5× or 10× while you look back in the recordings. Sound is off above 2×, and going live puts it back to 1×.',
+      'Notifications now appear in the corner of the page and fade away after a few seconds, and each one shows only once, on every device. The bell in the menu opens the Notifications page, which keeps them all.',
+      'The Internet guard no longer warns every day about lookups it blocked: blocking them is the guard doing its job. A camera’s first try gets one notification, and its Security card counts the blocked attempts as a success.',
+      'Camera pages keep the preview and its status in view while the settings beside them scroll.',
+    ],
+  },
+  {
     version: '0.1.113',
     date: '2026-10-19',
     title: 'Straighten the picture, AI descriptions of events, and the Internet guard on more cameras',

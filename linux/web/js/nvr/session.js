@@ -4,6 +4,7 @@
 // runs on every pointer event. A cell works out the rest. Each dispatch to the cells has a new epoch, so a cell can tell the newest
 // desire from an old one, and so can this file when a cell reports back.
 import { realTimers } from './clock.js';
+import { nearestSpeed } from './speed.js';
 import { choosePolicy, currentEnvironment } from './planner.js';
 
 const MAX_TILES = 16;
@@ -34,6 +35,7 @@ export function createSession({
 
   let reportedMode = clock.mode;
   const stopClockEvents = clock.onChange(() => announceMode());
+  const stopRateEvents = clock.onRate?.((rate) => emit({ kind: 'rate', rate })) ?? (() => {});
 
   function emit(event) {
     for (const fn of [...listeners]) {
@@ -361,12 +363,20 @@ export function createSession({
       clearTimers();
       clearWait();
       stopClockEvents();
+      stopRateEvents();
       for (const entry of cells.values()) { entry.off(); entry.cell.destroy(); }
       cells.clear();
       order = [];
       listeners.clear();
     },
 
+    /** The playback speed (nvr/speed.js SPEEDS); live is always 1. */
+    get rate() { return clock.rate ?? 1; },
+    /** Plays (or will play) at the step nearest to `rate`; every cell follows the clock's speed. */
+    setRate(rate) {
+      if (destroyed) return;
+      clock.setRate?.(nearestSpeed(rate));
+    },
     get position() { return clock.position(); },
     get mode() { return effectiveMode(); },
     /** fn({ kind: 'mode', mode } | { kind: 'position' } | { kind: 'cameras', ids } | { kind: 'coverage', id, coverage }); returns the unsubscribe function. */

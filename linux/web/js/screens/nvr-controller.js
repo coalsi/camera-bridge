@@ -1,5 +1,6 @@
 // The logic of the NVR grid page, without a DOM: which cameras are on the page, what each tile says, what the transport does, how a tile opens
 // the watch screen and how the page comes back. nvr.js builds the session, the cells and the DOM and hands them in; the tests hand in fakes.
+import { stepSpeed } from '../nvr/speed.js';
 import { EPOCH_MIN_MS, chooseWaveformCameras, gridPath, pageRanges, tileState, tileSummary, watchPath, whenKnown } from './nvr-model.js';
 
 const IDLE = Object.freeze({ kind: 'idle', next: null, message: null });
@@ -221,6 +222,8 @@ export function createGridController(deps) {
         canPlay: canAct(),
         canGoLive: canAct() && started && mode !== 'live',
         positionMs: position,
+        rate: session.rate ?? 1,
+        canSpeed: canAct() && started && mode !== 'live',
       },
       waveform,
       noRecordings: phase === 'ready' && waveform.ids.length === 0 && !cameras.some((camera) => camera.nvrEnabled),
@@ -259,6 +262,9 @@ export function createGridController(deps) {
       schedule();
     },
     goLive() { if (canAct()) { session.goLive(); schedule(); } },
+    /** The playback speed (nvr/speed.js): every playing tile follows the shared clock. */
+    setSpeed(rate) { if (canAct()) { session.setRate(rate); schedule(); } },
+    stepSpeed(step) { if (canAct()) { session.setRate(stepSpeed(session.rate ?? 1, step)); schedule(); } },
     /** The timeline shows `id`'s recordings alone (one camera on the whole wall), or every camera's again (null). */
     showOnly(id) {
       if (destroyed || id === onlyId) return;
@@ -283,6 +289,7 @@ export function createGridController(deps) {
       if (keyAction.action === 'togglePlay') api.togglePlay();
       else if (keyAction.action === 'goLive') api.goLive();
       else if (keyAction.action === 'seek') api.seek(keyAction.deltaMs);
+      else if (keyAction.action === 'speed') api.stepSpeed(keyAction.step);
     },
 
     setPage(next) {

@@ -91,13 +91,13 @@ import TestSupport
             try #require(try JSONSerialization.jsonObject(with: try JSONEncoder.iso.encode(notice)) as? [String: Any])
         }
         let storage = try json(try #require(NoticeResource.resources(for: overview(folder: nil), now: now).first))
-        #expect(Set(storage.keys) == ["id", "kind", "severity", "title", "detail", "date", "action"], "no camera: those two keys stay out, as for other notices")
+        #expect(Set(storage.keys) == ["id", "kind", "severity", "title", "detail", "date", "action", "category", "key"], "no camera: those two keys stay out, as for other notices")
         #expect(storage["action"] as? String == "choose-folder")
         let network = try json(try #require(NoticeResource.resources(for: overview(recording: false, notices: [NetworkNotice(kind: .dualHomedSubnet, interfaceName: "eth0, wlan0")]),
                                                                      now: Date()).first))
         #expect(network["action"] is NSNull && network["kind"] as? String == "dualHomedSubnet")
         let camera = try json(NoticeResource(id: "x", kind: "k", severity: "info", title: "t", detail: "d", cameraID: UUID(), cameraName: "Porch", date: now))
-        #expect(Set(camera.keys) == ["id", "kind", "severity", "title", "detail", "cameraID", "cameraName", "date", "action"])
+        #expect(Set(camera.keys) == ["id", "kind", "severity", "title", "detail", "cameraID", "cameraName", "date", "action", "category", "key"])
     }
 
     @Test func theStatusAnswerCarriesTheNoticeAndLeavesItOutWhenAllIsWell() async throws {

@@ -17,30 +17,6 @@ public enum InternetGuardText {
     /// no address next to.
     public static let notOnThisBridge = "Camera Bridge OS watches cameras’ internet; this bridge does not."
     public static let notOnItsNetwork = "Camera Bridge can watch only cameras on its own local network."
-
-    /// "Internet guard blocked 7 lookups from 2 cameras today."
-    static func blockedToday(lookups: Int, cameras: Int) -> String {
-        "\(name) blocked \(lookups) lookup\(lookups == 1 ? "" : "s") from \(cameras) camera\(cameras == 1 ? "" : "s") today."
-    }
-
-    static func noticeTitle(cameras: Int) -> String {
-        cameras == 1 ? "A Camera Tried to Reach the Internet" : "Cameras Tried to Reach the Internet"
-    }
-
-    /// The cameras the notice names before "and N more".
-    static let noticeNamesAtMost = 3
-
-    /// "Patio New tried 9 times, Doorbell 3 times." of `cameras`, most first: the first `noticeNamesAtMost` by name, then "and 2 more
-    /// cameras"; nil without any.
-    static func whoTried(_ cameras: [(name: String, today: Int)]) -> String? {
-        guard let first = cameras.first else { return nil }
-        let times = { (count: Int) in count == 1 ? "once" : "\(count) times" }
-        var parts = ["\(first.name) tried \(times(first.today))"]
-        parts += cameras.dropFirst().prefix(noticeNamesAtMost - 1).map { "\($0.name) \(times($0.today))" }
-        let more = cameras.count - noticeNamesAtMost
-        if more > 0 { parts.append("and \(more) more camera\(more == 1 ? "" : "s")") }
-        return parts.joined(separator: ", ") + "."
-    }
 }
 
 extension GuardLevel {
@@ -59,12 +35,26 @@ public struct CameraGuardActivity: Sendable, Codable, Equatable {
     public var today: Int
     public var last24h: Int
     public var names: [GuardReport.Lookup]
+    /// Its blocked lookups in the last 7 days (all the names, not only the `names` listed).
+    public var last7d: Int
 
-    public init(watched: Bool, today: Int, last24h: Int, names: [GuardReport.Lookup]) {
+    public init(watched: Bool, today: Int, last24h: Int, names: [GuardReport.Lookup], last7d: Int = 0) {
         self.watched = watched
         self.today = today
         self.last24h = last24h
         self.names = names
+        self.last7d = last7d
+    }
+
+    private enum CodingKeys: String, CodingKey { case watched, today, last24h, names, last7d }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        watched = try container.decode(Bool.self, forKey: .watched)
+        today = try container.decode(Int.self, forKey: .today)
+        last24h = try container.decode(Int.self, forKey: .last24h)
+        names = try container.decode([GuardReport.Lookup].self, forKey: .names)
+        last7d = try container.decodeIfPresent(Int.self, forKey: .last7d) ?? 0
     }
 
     /// At most this many names.
@@ -101,80 +91,45 @@ enum GuardNames {
     }
 }
 
-/// The bridge's notice for the day (one a day, from the first blocked lookup until the day ends; its figures are refreshed at most every
-/// `EngineTuning.guardNoticeRefresh`): "Internet guard blocked N lookups from M cameras today.", then who tried ("Patio New tried 9 times,
-/// Doorbell 3 times."), with every camera that tried for the camera pages it opens.
-public struct InternetGuardNotice: Sendable, Equatable {
-    /// A camera that tried today: its blocked lookups today and the name it asked for most, as `GuardNames.shown` has it (`mostAsked(_:since:)`:
-    /// of the names it was last seen asking for today, the most asked in the box's last 7 days; nil when the box listed none).
-    public struct Camera: Sendable, Equatable {
-        public var id: UUID
-        public var name: String
-        public var today: Int
-        public var mostAsked: String?
+/// Something the internet guard found that needs the person (Camera Bridge OS's notifications): a camera seen trying the internet for
+/// the first time (blocked, so it says so: once per camera, the notification log keeps it from coming back), or a camera it can no
+/// longer watch. A blocked lookup of a watched camera is the guard working, so it raises nothing more.
+public struct InternetGuardAlert: Sendable, Equatable {
+    public enum Kind: String, Sendable { case firstTry, stoppedAsking }
 
-        public init(id: UUID, name: String, today: Int, mostAsked: String?) {
-            self.id = id
-            self.name = name
-            self.today = today
-            self.mostAsked = mostAsked
-        }
-    }
-
-    /// Where the guard's day starts (`GuardReport.todayStart`).
-    public var day: Date
-    public var lookups: Int
-    public var cameras: Int
-    /// The camera that tried most today (the first of `tried`).
-    public var cameraID: UUID?
-    public var cameraName: String?
-    /// When these figures were taken.
+    public var cameraID: UUID
+    public var cameraName: String
+    public var kind: Kind
     public var date: Date
-    /// Every watched camera that tried today, most first (a tie in the bridge's order of cameras).
-    public var tried: [Camera]
 
-    public init(day: Date, lookups: Int, cameras: Int, cameraID: UUID?, cameraName: String?, date: Date, tried: [Camera] = []) {
-        self.day = day
-        self.lookups = lookups
-        self.cameras = cameras
+    public init(cameraID: UUID, cameraName: String, kind: Kind, date: Date) {
         self.cameraID = cameraID
         self.cameraName = cameraName
+        self.kind = kind
         self.date = date
-        self.tried = tried
     }
 
-    public var title: String { InternetGuardText.noticeTitle(cameras: cameras) }
-    public var sentence: String { InternetGuardText.blockedToday(lookups: lookups, cameras: cameras) }
-    /// The banner's text: `sentence`, then who tried ("Patio New tried 9 times, Doorbell 3 times, Garage once, and 2 more cameras.").
-    public var detail: String {
-        guard let who = InternetGuardText.whoTried(tried.map { ($0.name, $0.today) }) else { return sentence }
-        return "\(sentence) \(who)"
-    }
-
-    /// Today's figures of the watched `cameras` (by their address) from `report`; nil when nothing was blocked today or the box has no guard.
-    static func make(report: GuardReport?, cameras: [(id: UUID, name: String, address: String)], now: Date) -> InternetGuardNotice? {
-        guard let report, report.available else { return nil }
-        let day = report.todayStart ?? Calendar.current.startOfDay(for: now)
-        var tried: [(offset: Int, camera: Camera)] = []
-        for (offset, camera) in cameras.enumerated() {
-            guard let entry = report.camera(at: camera.address), entry.level == .watch, entry.today > 0 else { continue }
-            tried.append((offset, Camera(id: camera.id, name: camera.name, today: entry.today, mostAsked: mostAsked(entry.names, since: day))))
+    public var id: String { "guard-\(kind == .firstTry ? "tried" : "away")-\(cameraID.uuidString)" }
+    public var isWarning: Bool { kind == .stoppedAsking }
+    public var title: String {
+        switch kind {
+        case .firstTry: "\(cameraName) tried to reach the internet"
+        case .stoppedAsking: "The Internet guard can’t watch \(cameraName)"
         }
-        let ordered = tried.sorted { $0.camera.today != $1.camera.today ? $0.camera.today > $1.camera.today : $0.offset < $1.offset }.map(\.camera)
-        let lookups = ordered.reduce(0) { $0 + $1.today }
-        guard lookups > 0 else { return nil }
-        return InternetGuardNotice(day: day, lookups: lookups, cameras: ordered.count, cameraID: ordered.first?.id, cameraName: ordered.first?.name,
-                                   date: now, tried: ordered)
+    }
+    public var detail: String {
+        switch kind {
+        case .firstTry: "Camera Bridge blocked it. Nothing got out."
+        case .stoppedAsking: "\(cameraName) no longer asks Camera Bridge for its lookups. Run Set up for Camera Bridge again to watch it."
+        }
     }
 
-    /// The name of `names` (the box's, most asked first) a camera asked for most, as shown: of those last seen since `day`, the most asked;
-    /// when none was (or the box gives no times), the most asked of all; nil without any.
-    static func mostAsked(_ names: [GuardReport.Lookup], since day: Date) -> String? {
-        let shown = GuardNames.shown(names)
-        let today = shown.filter { $0.last.map { $0 >= day } ?? false }
-        let pool = today.isEmpty ? shown : today
-        return pool.enumerated().max { a, b in
-            a.element.count != b.element.count ? a.element.count < b.element.count : a.offset > b.offset
-        }?.element.name
+    /// A watched camera (by its address) the box has seen asking for a name outside the home network, now or in the last 7 days.
+    static func firstTries(report: GuardReport?, cameras: [(id: UUID, name: String, address: String)], now: Date) -> [InternetGuardAlert] {
+        guard let report, report.available else { return [] }
+        return cameras.compactMap { camera in
+            guard let entry = report.camera(at: camera.address), entry.level == .watch, entry.today > 0 || entry.last24h > 0 || !entry.names.isEmpty else { return nil }
+            return InternetGuardAlert(cameraID: camera.id, cameraName: camera.name, kind: .firstTry, date: now)
+        }
     }
 }

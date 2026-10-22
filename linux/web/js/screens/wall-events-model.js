@@ -19,7 +19,7 @@ export const PAGE_ROWS = 100;             // rows drawn at first, and added by "
 export const LOW_BATTERY = 20;            // percent: below this the battery badge warns
 export const ARCHIVE_PAGE = 200;          // events per GET nvr/events
 export const ARCHIVE_MAX_RANGE_MS = 31 * 86_400_000;   // the route's longest range
-export const ARCHIVE_REFRESH_MS = 30_000; // while following live, the newest part is asked again this often (ends, events the stream missed)
+export const ARCHIVE_REFRESH_MS = 10_000; // while following live, the newest part is asked again this often (ends, events the stream missed, AI descriptions)
 export const ARCHIVE_OVERLAP_MS = 600_000; // and from this far back, so events that began a little earlier get their ends
 export const ARCHIVE_RETRY_MS = 10_000;   // after a failed answer (a 503 while the recordings load or their drive is away, a 429, …)
 export const ARCHIVE_KEEP = 5000;         // events kept in the page at most, besides older pages asked for (the oldest go first)
@@ -39,19 +39,22 @@ function finite(value) {
 }
 
 const NOTHING_NOTABLE = 'Nothing notable';
+export const AI_KINDS = ['person', 'vehicle', 'animal', 'delivery', 'other', 'nothing'];   // what the AI service saw (a description's `kind`)
 const CONCERN_ORDER = ['nothing', 'routine', 'unusual', 'alarm'];   // how much a description matters, least first
 
 /**
- * What an AI service said of an event (the archive's `description`: { summary, kind, concern }), as the page shows it: { text, concern }
- * with concern 'alarm', 'unusual', 'routine' or 'nothing' (it saw nothing worth saying: the text is then always "Nothing notable"), or null.
+ * What an AI service said of an event (the archive's `description`: { summary, kind, concern }), as the page shows it: { text, concern, kind }
+ * with concern 'alarm', 'unusual', 'routine' or 'nothing' (it saw nothing worth saying: the text is then always "Nothing notable"), kind one of
+ * AI_KINDS ('other' for a word it does not know), or null.
  * The words are the model's: put them in with textContent only.
  */
 export function eventDescription(description) {
   if (!description || typeof description !== 'object') return null;
-  if (description.kind === 'nothing') return { text: NOTHING_NOTABLE, concern: 'nothing' };
+  const kind = AI_KINDS.includes(description.kind) ? description.kind : 'other';
+  if (kind === 'nothing') return { text: NOTHING_NOTABLE, concern: 'nothing', kind };
   const text = typeof description.summary === 'string' ? description.summary.trim() : '';
   if (!text) return null;
-  return { text, concern: ['alarm', 'unusual'].includes(description.concern) ? description.concern : 'routine' };
+  return { text, concern: ['alarm', 'unusual'].includes(description.concern) ? description.concern : 'routine', kind };
 }
 
 /** The word for how much a description matters, for those that get a mark: 'Alarm', 'Unusual', or null. */

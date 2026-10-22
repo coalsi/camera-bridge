@@ -96,18 +96,20 @@ import Testing
         #expect(video?.sentence == "Its video plays without a password on your home network.")
     }
 
-    @Test func aWatchedCameraThatKeepsTryingToReachTheInternetIsYellow() {
+    @Test func blockedAttemptsNeverLowerAWatchedCamerasLevel() {
         let evidence = GuardEvidence(watched: true, outsideLookups24h: 12, lastLookupNames: ["p2p.example.com", "api.example.com", "time.example.net", "x.example.org"],
-                                     available: true)
+                                     available: true, watchedFor: 2 * 86_400)
         let security = assess(allOff, guard: evidence)
-        #expect(security.level == .yellow)
-        #expect(security.findings.first == CameraSecurityFinding(
-            feature: .internetGuard, state: .on, level: .yellow,
-            sentence: "The Internet guard blocked 12 lookups of internet names in the last 24 hours (p2p.example.com, api.example.com, time.example.net), "
-                + "but the camera may have another way out.", canChange: false))
+        #expect(security.level == .gold, "a lookup seen (a blocked one is one) and a full day watched")
+        #expect(security.findings.first { $0.feature == .internetGuard } == CameraSecurityFinding(
+            feature: .internetGuard, state: .on, level: .gold,
+            sentence: "The Internet guard blocked 12 attempts to reach the internet in the last 24 hours (p2p.example.com, api.example.com, time.example.net). "
+                + "Nothing got out.", canChange: false))
         let one = assess(allOff, guard: GuardEvidence(watched: true, outsideLookups24h: 1, lastLookupNames: [], available: true, watchedFor: 3600))
-        #expect(one.level == .yellow && one.findings.first?.sentence == "The Internet guard blocked 1 lookup of an internet name in the last 24 hours, "
-            + "but the camera may have another way out.", "seen at once, also before a full day")
+        #expect(one.level == .green && one.findings.first { $0.feature == .internetGuard }?.sentence == "The Internet guard blocked 1 attempt to reach the internet in the last 24 hours. Nothing got out.",
+                "seen at once; green before a full day, the same as a camera that never tried")
+        let quiet = assess(allOff, guard: GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, watchedFor: 3600))
+        #expect(one.level == quiet.level)
     }
 
     @Test func anExtraServiceWithoutAPasswordIsYellowAndNamed() {
@@ -170,7 +172,7 @@ import Testing
         let security = assess(allOff, guard: Self.watchedQuiet)
         #expect(security.level == .gold && security.title == "Local only")
         #expect(security.summary == "Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the Internet guard "
-            + "saw it make no internet lookups in the last 24 hours.")
+            + "saw nothing get out in the last 24 hours.")
         #expect(security.findings.allSatisfy { $0.level == .gold })
         #expect(security.findings.first { $0.feature == .ddns }?.sentence == "The camera has no dynamic DNS.")
         #expect(security.findings.first { $0.feature == .internetGuard }?.sentence

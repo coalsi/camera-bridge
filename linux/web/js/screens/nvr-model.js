@@ -492,7 +492,7 @@ export function whenKnown(isKnown, { subscribe = () => () => {}, timeoutMs = 100
 /**
  * The transport keys of the grid, from a keydown event's fields. `typing`: focus is in an input, select, textarea or editable text, or a
  * dialog is open. `activatable`: focus is on something Space already operates (a button, a link, a switch).
- * Returns { action: 'togglePlay' | 'goLive' } or { action: 'seek', deltaMs } or null.
+ * Returns { action: 'togglePlay' | 'goLive' } or { action: 'seek', deltaMs } or { action: 'speed', step: -1 | 1 } or null.
  */
 export function keyAction(event, { typing = false, activatable = false } = {}) {
   if (typing || event.defaultPrevented || event.ctrlKey || event.metaKey) return null;
@@ -503,6 +503,8 @@ export function keyAction(event, { typing = false, activatable = false } = {}) {
     case 'ArrowRight': return { action: 'seek', deltaMs: step };
     case 'l':
     case 'L': return { action: 'goLive' };
+    case ',': return { action: 'speed', step: -1 };
+    case '.': return { action: 'speed', step: 1 };
     default: return null;
   }
 }

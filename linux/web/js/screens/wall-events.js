@@ -8,7 +8,10 @@ import { h, replace, svg } from '../dom.js';
 import { icon } from '../icons.js';
 import { stampText } from '../stamp.js';
 import { cameraList, store, subscribe } from '../store.js';
-import { PAGE_ROWS, concernWord, createEventArchive, durationText, gatherEvents, isRecorded, sameEvent, visibleEvents } from './wall-events-model.js';
+import { createThumbnails } from '../nvr/thumbs.js';
+import { aiChip, aiSays, eventLabel } from './events-row.js';
+import { isDescribing } from './events-model.js';
+import { PAGE_ROWS, createEventArchive, durationText, gatherEvents, isRecorded, sameEvent, visibleEvents } from './wall-events-model.js';
 
 const BANNER_MS = 9_000;
 const HISTORY_MAX = 200;
@@ -34,10 +37,12 @@ function playMark() {
  *   onChange()                the events changed: the wall calls update() again
  *   now()                     the server's clock (live events are stamped with it, like the bridge's own)
  *   loadEvents(query)         GET nvr/events ({ cameras, fromMs, toMs, limit } -> its answer); without it the list has no archive
+ *   thumbs                    the snapshot tiles (nvr/thumbs.js createThumbnails); a row shows the picture at its start, loaded when it is on screen
  * update({ cameraIds, range: { fromMs, toMs }, extentOf(id) }) draws the list for the cameras on the wall and the timeline's range.
  */
-export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChange = () => {}, now = () => Date.now(), loadEvents = null } = {}) {
+export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChange = () => {}, now = () => Date.now(), loadEvents = null, thumbs = createThumbnails() } = {}) {
   let destroyed = false;
+  let tiles = [];               // the snapshot tiles of the rows drawn
   const archive = loadEvents ? createEventArchive({ load: loadEvents, now, onChange: () => { if (!destroyed) { signature = ''; onChange(); } } }) : null;
   let soundOn = false;          // off after every page load: a browser lets sound play only after a click
   let audio = null;
@@ -53,7 +58,8 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
   const soundButton = h('button', { class: 'btn small', type: 'button', onclick: () => setSound(!soundOn) });
   const banners = h('div', { class: 'mon-banners', role: 'status', 'aria-live': 'polite' });
   const count = h('span', { class: 'mon-event-count' });
-  const head = h('div', { class: 'mon-timeline-head' }, h('strong', { id: 'mon-events-title' }, 'Events'), count);
+  const allLink = h('a', { class: 'mon-all-events', href: '#/events', title: 'Every camera’s events, with pictures and filters' }, 'All events');
+  const head = h('div', { class: 'mon-timeline-head' }, h('strong', { id: 'mon-events-title' }, 'Events'), count, allLink);
   const list = h('ol', { class: 'mon-list', 'aria-labelledby': 'mon-events-title' });
 
   function showSound() {
@@ -105,19 +111,21 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
     const duration = durationText(event.endAt !== null ? event.endAt - event.at : null);
     const when = stampText(event.at);
     const described = event.description;
-    const word = described ? concernWord(described.concern) : null;
-    const said = described ? `, ${word ? `${word.toLowerCase()}: ` : ''}${described.text}` : '';
-    const label = `${event.label}, ${event.cameraName}, ${when}${duration ? `, ${duration}` : ''}${recorded ? '' : ', not recorded'}${said}`;
+    const thumb = recorded ? thumbs.tile(event.cameraId, event.at) : null;
+    if (thumb) tiles.push(thumb);
+    const says = aiSays(described, { describing: isDescribing(event, store.cameras.get(event.cameraId), now()) });
     const button = h('button', {
-      class: 'mon-event', type: 'button', 'aria-label': label, 'aria-current': chosen ? 'true' : null, 'aria-disabled': recorded ? null : 'true',
+      class: 'mon-event', type: 'button', 'aria-label': eventLabel(event, { recorded }), 'aria-current': chosen ? 'true' : null, 'aria-disabled': recorded ? null : 'true',
       title: recorded ? 'Play every camera from just before this' : 'Nothing was recorded at this moment',
       dataset: { level: event.level, index: String(index), selected: String(chosen), recorded: String(recorded) },
     },
+    thumb ?? h('span', { class: 'ev-thumb', 'aria-hidden': 'true', dataset: { state: 'none' } }),
     h('time', { datetime: new Date(event.at).toISOString() }, when),
     h('strong', { class: 'mon-event-camera' }, event.cameraName),
     h('span', { class: 'mon-event-kind' }, event.label),
     duration ? h('span', { class: 'mon-event-duration' }, duration) : null,
-    described ? h('span', { class: 'mon-event-ai', title: word, dataset: { concern: described.concern } }, described.text) : null,
+    aiChip(described),
+    says,
     recorded ? playMark() : h('span', { class: 'mon-event-note' }, 'Not recorded'));
     return h('li', { class: 'mon-item' }, button);
   }
@@ -132,7 +140,7 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
     const drawn = visible.slice(0, shownRows);
     const recorded = drawn.map((event) => isRecorded(event, extentOf(event.cameraId)));
     const key = [visible.length, shownRows, older, selected ? `${selected.cameraId}|${selected.label}|${selected.at}` : '',
-      ...drawn.map((event, i) => `${event.cameraId}|${event.label}|${event.at}|${event.endAt}|${recorded[i]}|${event.cameraName}|${event.description?.concern}|${event.description?.text}`)].join('\n');
+      ...drawn.map((event, i) => `${event.cameraId}|${event.label}|${event.at}|${event.endAt}|${recorded[i]}|${event.cameraName}|${event.description?.concern}|${event.description?.kind}|${event.description?.text}|${isDescribing(event, store.cameras.get(event.cameraId), now())}`)].join('\n');
     if (key === signature) return;
     signature = key;
 
@@ -145,6 +153,8 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
 
     rows = drawn;
     count.textContent = visible.length ? `${visible.length}${older ? '+' : ''}` : '';
+    for (const tile of tiles) thumbs.release?.(tile);
+    tiles = [];
     const items = drawn.map((event, i) => rowFor(event, i, recorded[i]));
     if (visible.length > drawn.length || older) {
       const more = Math.min(PAGE_ROWS, visible.length - drawn.length);
@@ -256,6 +266,8 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
     /** Draws the list for these cameras and this range; cheap when nothing changed. */
     update(next) {
       context = next;
+      // One camera on its own: its events on the Events page (the same address for the wall is every camera's).
+      allLink.setAttribute('href', next?.cameraIds?.length === 1 ? `#/events?cameras=${next.cameraIds[0]}` : '#/events');
       draw();
     },
     /** Marks `event` as the chosen one (null: none). */
@@ -268,6 +280,7 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
       destroyed = true;
       stop();
       archive?.destroy();
+      thumbs.destroy();
       try { audio?.close?.(); } catch { /* already closed */ }
     },
   };

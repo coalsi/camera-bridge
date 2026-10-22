@@ -23,6 +23,8 @@ export class PlaybackClock {
   #anchor = 0;
   #since = 0;
   #listeners = new Set();
+  #rate = 1;
+  #rateListeners = new Set();
 
   constructor({ serverNow, perf = () => performance.now() }) {
     this.#serverNow = serverNow;
@@ -31,9 +33,12 @@ export class PlaybackClock {
 
   get mode() { return this.#mode; }
 
+  /** How many seconds of recording pass in one second: 1, or one of the Monitor's speeds (nvr/speed.js). */
+  get rate() { return this.#rate; }
+
   position() {
     if (this.#mode === 'live') return this.#serverNow() - LIVE_BEHIND_MS;
-    if (this.#mode === 'playing') return this.#anchor + Math.max(0, this.#perf() - this.#since);
+    if (this.#mode === 'playing') return this.#anchor + Math.max(0, this.#perf() - this.#since) * this.#rate;
     return this.#anchor;
   }
 
@@ -46,7 +51,27 @@ export class PlaybackClock {
   /** Stand still where the playhead is now. */
   pause() { this.#set('paused', this.position(), 0); }
 
-  goLive() { this.#set('live', 0, 0); }
+  /** Plays at `rate` from here on, without a jump. A new `live` brings 1 back. */
+  setRate(rate) {
+    if (!(rate > 0) || rate === this.#rate) return;
+    if (this.#mode === 'playing' && this.#perf() >= this.#since) {
+      this.#anchor = this.position();
+      this.#since = this.#perf();
+    }
+    this.#rate = rate;
+    for (const fn of [...this.#rateListeners]) fn(rate);
+  }
+
+  /** fn(rate) runs when the speed changes. Returns the unsubscribe function. */
+  onRate(fn) {
+    this.#rateListeners.add(fn);
+    return () => this.#rateListeners.delete(fn);
+  }
+
+  goLive() {
+    this.#set('live', 0, 0);
+    this.setRate(1);
+  }
 
   /** True when `ms` is within LIVE_SNAP_MS of the server's now, or later. */
   shouldGoLive(ms) { return ms >= this.#serverNow() - LIVE_SNAP_MS; }

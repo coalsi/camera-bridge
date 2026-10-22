@@ -132,9 +132,9 @@ import Testing
         asked.evidence.set(GuardEvidence(watched: true, outsideLookups24h: 4, lastLookupNames: ["p2p.example.com"], available: true, watchedFor: 2 * 86_400))
         await fixture.engine.guardEvidenceChanged()
         let security = try #require(fixture.status(camera.id)?.security)
-        #expect(security.level == .yellow)
+        #expect(security.level == .gold, "blocked attempts do not lower the level")
         #expect(security.checkedAt == gold.checkedAt, "the time of the camera's readings, not of the guard's report")
-        #expect(security.findings.first?.sentence.contains("4 lookups of internet names in the last 24 hours (p2p.example.com)") == true)
+        #expect(security.findings.first { $0.feature == .internetGuard }?.sentence.contains("4 attempts to reach the internet in the last 24 hours (p2p.example.com)") == true)
         #expect(asked.readings.value.count == 1 && asked.probes.value.count == 1, "the camera was not asked again")
     }
 

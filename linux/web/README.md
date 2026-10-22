@@ -86,3 +86,5 @@ Then open `http://nvr.test:8081` in that Chrome. `--dev` keeps the web interface
 ## Screenshots
 
 Taken from the daemon on a Mac with the demo camera (a test pattern) and documentation addresses: `docs/linux/screenshots/` (cameras, add a camera, a camera, pairing, log, phone, system in light mode).
+
+Notifications (2026-10-22): a notice is not a banner any more. `js/notifications.js` shows each new one once as a toast at the top right (6 s, a warning 10 s, held by the pointer or the keyboard focus, at most 3, a swipe or the close button puts it away) after asking the bridge (`POST notifications/shown`: the bridge hands each to one browser, so nothing comes back on a reload and the phone and the Mac agree; nothing is kept in the browser), and counts the unread ones for the menu's bell. `js/screens/notifications.js` is the Notifications page (`#/notifications`: the bridge's log, a filter by section, "Mark all as read"; opening it marks what it shows as read). `js/screens/banners.js` keeps only the bridge's own state (paused, starting, not running) as a slim line.

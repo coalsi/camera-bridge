@@ -98,7 +98,6 @@ struct EngineTuning: Sendable {
     /// A report not updated for this long (the box's collector writes it every minute) is no evidence.
     var guardReportStaleAfter: Duration = .seconds(600)
     /// The day's notice changes its figures at most this often.
-    var guardNoticeRefresh: Duration = .seconds(3600)
     /// The guard's own reads of the cameras' DNS servers (BridgeEngine+InternetGuard.swift; while `securityChecks` is on): every camera
     /// the guard can watch is read once each `guardDNSInterval`, one after the other; `guardDNSReconnectDelay` after a camera comes back
     /// online; `guardDNSPauseMargin` after a login pause a read met ends; those two no sooner than `guardDNSSpacing` after the camera's last

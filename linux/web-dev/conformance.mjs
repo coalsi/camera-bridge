@@ -272,12 +272,31 @@ export async function runConformance({ baseUrl, password, mutate = false, intrus
       if (storage) same(place.current, storage.location === place.id, 'current agrees with R1');
     }
   });
+  await check('notifications: the log lists every notice once, a toast is handed out once, and the read marker counts', async () => {
+    const shown = await client.get('notifications');
+    same(shown.status, 200, 'GET notifications');
+    ok(Array.isArray(shown.json.notifications) && Number.isInteger(shown.json.unread), 'notifications or unread');
+    const keys = ['id', 'key', 'noticeID', 'kind', 'category', 'severity', 'title', 'detail', 'cameraID', 'cameraName', 'action', 'date', 'read', 'toasted'];
+    for (const entry of shown.json.notifications) {
+      for (const key of keys) ok(key in entry, `an entry lacks ${key}`);
+      ok(['security', 'recording', 'cameras', 'system'].includes(entry.category), `the category ${entry.category}`);
+    }
+    same(new Set(shown.json.notifications.map((entry) => entry.key)).size, shown.json.notifications.length, 'the same thing is in the log twice');
+    same(shown.json.unread, shown.json.notifications.filter((entry) => !entry.read).length, 'unread counts the entries not read');
+    const first = await client.post('notifications/shown');
+    same(first.status, 200, 'POST notifications/shown');
+    const again = await client.post('notifications/shown');
+    same(again.json.shown.length, 0, 'a toast was handed out twice');
+    const read = await client.post('notifications/read', {});
+    same(read.status, 200, 'POST notifications/read');
+    same(read.json.unread, 0, 'mark all read leaves none unread');
+  });
   await check('notices: the storage banner exists exactly when it should', async () => {
     const response = await client.get('status');
     same(response.status, 200, 'GET status');
     const notices = response.json.notices;
     ok(Array.isArray(notices), 'notices is not a list');
-    for (const notice of notices) for (const key of ['id', 'kind', 'severity', 'title', 'detail', 'cameraID', 'cameraName', 'date', 'action']) ok(key in notice, `a notice lacks ${key}`);
+    for (const notice of notices) for (const key of ['id', 'kind', 'severity', 'title', 'detail', 'cameraID', 'cameraName', 'date', 'action', 'category', 'key']) ok(key in notice, `a notice lacks ${key}`);
     const banner = notices.filter((notice) => notice.id === 'nvr-storage');
     ok(banner.length <= 1, 'more than one storage notice');
     const recording = cameras.some((camera) => camera.nvrEnabled);
@@ -431,8 +450,9 @@ export async function runConformance({ baseUrl, password, mutate = false, intrus
     ok(typeof body.more === 'boolean' && isInt(body.serverTime), 'more or serverTime');
     ok(Array.isArray(body.events) && body.events.length <= 5, 'at most limit events');
     for (const event of body.events) {
-      same(Object.keys(event).sort(), ['cameraID', 'description', 'end', 'id', 'kind', 'recorded', 'start'], 'event keys');
-      ok(event.description === null || typeof event.description?.summary === 'string', 'description: null or its AI summary');
+      // The box adds `description` (null until AI descriptions write one); the dev server leaves it out.
+      same(Object.keys(event).filter((key) => key !== 'description').sort(), ['cameraID', 'end', 'id', 'kind', 'recorded', 'start'], 'event keys');
+      ok(event.description == null || typeof event.description.summary === 'string', 'description: none, null or its AI summary');
       same(event.cameraID, camera.id, 'cameraID (upper case)');
       ok(typeof event.id === 'string' && event.id.length > 0 && typeof event.kind === 'string' && typeof event.recorded === 'boolean', 'id, kind or recorded');
       ok(isInt(event.start) && event.start >= from && event.start < to, `start ${event.start} outside ${from} to ${to}`);

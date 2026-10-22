@@ -9,7 +9,7 @@ export const DAY = 86_400_000;
  * boundary: how one file meets the next: 'abut' (exactly), 'gap300' (300 ms of nothing), 'overlap' (the next file starts 0.4 ms early).
  * history: 'days3' records for three days (with `gap`, a daily gap in UTC), 'stopped' ended `stoppedHoursAgo` ago, 'fresh' began `freshMinutes` ago.
  * nightVision: the modes it offers and whether it has an IR lamp; `refuses` makes every change fail (night-vision.mjs).
- * security: its status.security level (red, yellow, green, gold, or trying: yellow, watched and still trying to reach the internet;
+ * security: its status.security level (red, yellow, green, gold, or trying: gold, watched and its attempts to reach the internet blocked;
  * camera-security.mjs); the others have not been checked.
  * panTilt, zoom: it turns and zooms (status.panTilt and status.zoom; POST cameras/:id/pan-tilt answers it and moves nothing). Driveway has
  * them with night vision and a lamp, as a camera whose lamp is on its PTZ node: the Monitor's column holds the pad and the night vision.

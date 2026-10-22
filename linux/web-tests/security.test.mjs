@@ -26,8 +26,8 @@ const finding = (feature, state, level, sentence, { canChange = false, linked = 
 const QUIET = finding('internetGuard', 'on', 'gold', 'The Internet guard has watched it for the last 24 hours and saw it make no internet lookups.');
 const NOT_WATCHED = finding('internetGuard', 'off', 'green', 'The Internet guard doesn’t watch this camera, so Camera Bridge can’t confirm that nothing gets out.');
 const NO_GUARD = finding('internetGuard', 'absent', 'green', 'This bridge can’t watch the camera’s internet traffic, so Camera Bridge can’t confirm that nothing gets out.');
-const TRYING = finding('internetGuard', 'on', 'yellow',
-  'The Internet guard blocked 112 lookups of internet names in the last 24 hours (*.p2p.example.com, cloud.example.net), but the camera may have another way out.');
+const TRYING = finding('internetGuard', 'on', 'gold',
+  'The Internet guard blocked 112 attempts to reach the internet in the last 24 hours (*.p2p.example.com, cloud.example.net). Nothing got out.');
 
 const SECURITY = {
   red: { level: 'red', title: 'Outside access possible', summary: 'Something on this camera can let it be reached from outside your home.', checkedAt: ago(180),
@@ -44,7 +44,7 @@ const SECURITY = {
       finding('unauthenticatedVideo', 'on', 'yellow', 'Its video plays without a password on your home network.', { canChange: true }),
       TRYING,
     ],
-    guard: { watched: true, today: 47, last24h: 112, names: [
+    guard: { watched: true, today: 47, last24h: 112, last7d: 340, names: [
       { name: 'cloud.example.net', count: 75, last: ago(120) },
       { name: '*.p2p.example.com', count: 290, last: ago(4) },
       { name: 'update.example.org', count: 3, last: null },
@@ -58,7 +58,7 @@ const SECURITY = {
     ],
     guard: { watched: false, today: 0, last24h: 0, names: [] } },
   gold: { level: 'gold', title: 'Local only',
-    summary: 'Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the Internet guard saw it make no internet lookups in the last 24 hours.',
+    summary: 'Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the Internet guard saw nothing get out in the last 24 hours.',
     checkedAt: ago(60),
     findings: [finding('cloud', 'off', 'gold', 'VisionEye cloud is off.', { canChange: true, service: 'VisionEye cloud' }), finding('unauthenticatedVideo', 'off', 'gold', 'Its video needs a password.'), QUIET],
     guard: { watched: true, today: 0, last24h: 0, names: [] } },
@@ -130,7 +130,7 @@ test('the findings keep the bridge’s order without the guard’s; what the set
 
 test('the guard: watched or not, today and 24 h, the names newest first (a name never seen last goes last); none on a bridge without it', () => {
   const trying = sec.securityView(camera(SECURITY.yellow)).guard;
-  assert.deepEqual([trying.onBridge, trying.watched, trying.today, trying.last24h], [true, true, 47, 112]);
+  assert.deepEqual([trying.onBridge, trying.watched, trying.today, trying.last24h, trying.last7d], [true, true, 47, 112, 340]);
   assert.deepEqual(trying.names.map((entry) => entry.name), ['*.p2p.example.com', 'cloud.example.net', 'time.example.org', 'update.example.org']);
   assert.equal(trying.sentence, TRYING.sentence);
   const notWatched = sec.securityView(camera(SECURITY.green)).guard;
@@ -139,7 +139,7 @@ test('the guard: watched or not, today and 24 h, the names newest first (a name 
   assert.deepEqual([mac.onBridge, mac.watched, mac.names], [false, false, []]);
   assert.equal(mac.sentence, NO_GUARD.sentence);
   const bad = sec.securityView(camera({ ...SECURITY.yellow, guard: { watched: true, today: -3, last24h: 'x', names: 'no' } })).guard;
-  assert.deepEqual([bad.today, bad.last24h, bad.names], [0, 0, []]);
+  assert.deepEqual([bad.today, bad.last24h, bad.last7d, bad.names], [0, 0, 0, []]);
 });
 
 test('the levels and the guard use the bridge’s words (BridgeEngine CameraSecurityLevel.title and InternetGuardText)', (t) => {
@@ -194,10 +194,10 @@ test('the legend says what each colour means in the owner’s words, best first,
   const meanings = all(legend, (node) => node.localName === 'dd').map((node) => node.textContent);
   assert.deepEqual(terms.slice(0, 4).map((node) => node.firstChild.dataset.level), ['gold', 'green', 'yellow', 'red']);
   assert.deepEqual(meanings.slice(0, 4), [
-    'Gold. Camera Bridge found no way in from outside, and its Internet guard saw it make no internet lookups for a full day and has seen at least one lookup from it.',
+    'Gold. Camera Bridge found no way in from outside, and its Internet guard saw nothing get out for a full day and has seen at least one lookup from it.',
     'Green. Its cloud is off; something Camera Bridge can’t confirm remains.',
     'Yellow. Camera Bridge found nothing that lets it in from outside, but something needs work: its cloud is on but not linked, its video plays '
-      + 'without a password on your network, it keeps looking up internet names, or Camera Bridge can’t read its cloud.',
+      + 'without a password on your network, or Camera Bridge can’t read its cloud.',
     'Red. Its cloud, UPnP, dynamic DNS or RTMP push is on, or it only works through its maker’s cloud.',
   ]);
   assert.ok(!/Nobody is watching/.test(legend.textContent), 'nothing Camera Bridge could not confirm is promised');
@@ -388,12 +388,14 @@ test('watched and still trying: what it blocked today and in 24 hours, the names
   const { el } = card(SECURITY.yellow);
   const guard = guardOf(el);
   assert.equal(one(guard, 'pill').textContent, 'Watching');
-  assert.match(guard.textContent, /Blocked 47 lookups today, 112 in the last 24 hours\./);
-  assert.ok(guard.textContent.includes(TRYING.sentence));
+  const ok = one(guard, 'sec-guard-ok');
+  assert.equal(ok.textContent, 'Blocked 47 attempts today, 340 in the last 7 days. Nothing got out.', 'it reads as a success');
+  assert.ok(!guard.textContent.includes('another way out'), 'no warning for blocked attempts');
   const names = byClass(guard, 'sec-name');
   assert.deepEqual(names.map((node) => all(node, (child) => child.localName === 'code')[0].textContent),
     ['*.p2p.example.com', 'cloud.example.net', 'time.example.org', 'update.example.org']);
   assert.match(names[0].textContent, /290 times · last 4 minutes ago/);
+  assert.ok(names.every((node) => one(node, 'sec-name-ok').textContent === 'Blocked'), 'each name says it was blocked');
   assert.equal(one(names[3], 'sec-name-when').textContent, '3 times', 'a name never seen last has no time');
   assert.match(guard.textContent, /sees lookups by name only/, 'what Watch can’t see is said');
   assert.ok(!visible(button(el, 'Set up for Camera Bridge (includes Watch)'), el), 'a watched camera is not offered Watch again');

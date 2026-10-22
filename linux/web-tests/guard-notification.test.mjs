@@ -1,18 +1,19 @@
-// The Internet guard's notice on the page (screens/banners.js): a button for each camera that tried, most first and at most three, each
-// opening that camera's page at its Security card (#/camera/<id>/security, screens/camera.js), or, when that camera's page is already on
-// screen, bringing the card into view there without building the page again; a notice from an older bridge (only cameraID) still gets its
-// one button. In the fake browser, with made-up cameras.
+// The Internet guard's notification on the page (notifications.js): its button opens the camera's page at its Security card
+// (#/camera/<id>/security, screens/camera.js), or, when that camera's page is already on screen, brings the card into view there without
+// building the page again. The other actions keep their one button. In the fake browser, with made-up cameras.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { FakeElement, installFakeBrowser } from './support/fake-browser.mjs';
 
 let browser;
 let banners;
+let notifications;
 let cameraPage;
 let store;
 before(async () => {
   browser = installFakeBrowser();
-  banners = await import('../web/js/screens/banners.js');
+  banners = await import('../web/js/notifications.js');
+  notifications = banners;
   cameraPage = await import('../web/js/screens/camera.js');
   store = await import('../web/js/store.js');
 });
@@ -24,17 +25,11 @@ const GARAGE = '0A1B2C3D-0000-4000-8000-000000000013';
 const SHED = '0A1B2C3D-0000-4000-8000-000000000014';
 const NOW = Date.parse('2026-10-18T15:00:00Z');
 
-const guardNotice = (overrides = {}) => ({
-  id: 'internet-guard', kind: 'internetGuard', severity: 'info', title: 'Cameras Tried to Reach the Internet',
-  detail: 'Internet guard blocked 15 lookups from 4 cameras today. Patio New tried 9 times, Doorbell 3 times, Garage 2 times, and 1 more camera.',
-  cameraID: PATIO, cameraName: 'Patio New', date: new Date(NOW).toISOString(), action: 'open-camera',
-  cameras: [
-    { id: PATIO, name: 'Patio New', today: 9, mostAsked: '*.p2p.example.com' },
-    { id: DOOR, name: 'Doorbell', today: 3, mostAsked: null },
-    { id: GARAGE, name: 'Garage', today: 2, mostAsked: 'time.example.org' },
-    { id: SHED, name: 'Shed', today: 1, mostAsked: null },
-  ],
-  ...overrides,
+/** A notification of the Internet guard (the bridge's log entry): a camera seen trying the internet, blocked. */
+const guardEntry = (overrides = {}) => ({
+  id: 'e1', key: 'k', noticeID: `guard-tried-${PATIO}`, kind: 'internetGuard', category: 'security', severity: 'info', title: 'Patio New tried to reach the internet',
+  detail: 'Camera Bridge blocked it. Nothing got out.', cameraID: PATIO, cameraName: 'Patio New', date: new Date(NOW).toISOString(), action: 'open-camera',
+  read: false, toasted: false, ...overrides,
 });
 
 /** Every element under `root` (depth first) that `match` accepts. */
@@ -66,41 +61,31 @@ function watchRequests() {
   return { asked, stop: () => window.removeEventListener(banners.SHOW_SECURITY_EVENT, listener) };
 }
 
-test('the guard’s notice gives a button for each camera that tried, most first and at most three, the first one primary', () => {
-  const banner = banners.noticeBanner(guardNotice());
-  assert.match(banner.textContent, /Patio New tried 9 times, Doorbell 3 times, Garage 2 times, and 1 more camera\./, 'the bridge’s text says who');
-  const shown = buttons(banner);
-  assert.deepEqual(shown.map((node) => node.textContent), ['See what Patio New tried', 'See what Doorbell tried', 'See what Garage tried']);
-  assert.deepEqual(shown.map((node) => node.className), ['btn small primary', 'btn small', 'btn small']);
-  assert.deepEqual(shown.map((node) => node.getAttribute('title')), ['Most asked: *.p2p.example.com', null, 'Most asked: time.example.org'],
-    'each button’s tooltip is the name it asked for most, as the bridge shows it (none when the box listed none)');
-  assert.ok(shown.every((node) => node.getAttribute('type') === 'button'));
-  assert.equal(banners.NOTICE_CAMERA_BUTTONS, 3);
-});
+const open = (entry) => notifications.notificationActions(entry);
 
-test('a button opens that camera’s page at its Security card', () => {
+test('the guard’s notification has one button, to the camera’s Security card', () => {
+  assert.deepEqual(open(guardEntry()).map((action) => action.label), ['See its Security card']);
   location.hash = '#/cameras';
-  const shown = buttons(banners.noticeBanner(guardNotice()));
-  shown[1].click();
+  open(guardEntry({ cameraID: DOOR }))[0].run();
   assert.equal(location.hash, `#/camera/${DOOR}/security`);
   assert.equal(banners.securityAddress(GARAGE), `#/camera/${GARAGE}/security`);
   location.hash = `#/camera/${PATIO}/watch`;   // the recordings of another camera: a page of its own
-  shown[2].click();
+  open(guardEntry({ cameraID: GARAGE }))[0].run();
   assert.equal(location.hash, `#/camera/${GARAGE}/security`);
 });
 
 test('on that camera’s page already, the page is asked to show the card instead, and the address stays', () => {
   const requests = watchRequests();
   try {
-    const shown = buttons(banners.noticeBanner(guardNotice()));
+    const run = open(guardEntry({ cameraID: DOOR }))[0].run;
     for (const hash of [`#/camera/${DOOR}`, `#/camera/${DOOR}/security`, `#/camera/${DOOR.toLowerCase()}`]) {
       location.hash = hash;
-      shown[1].click();
+      run();
       assert.equal(location.hash, hash, hash);
     }
     assert.deepEqual(requests.asked, [DOOR, DOOR, DOOR.toLowerCase()]);
     location.hash = `#/camera/${PATIO}`;
-    shown[1].click();
+    run();
     assert.equal(location.hash, `#/camera/${DOOR}/security`, 'another camera’s page: go to this one');
     assert.equal(requests.asked.length, 3);
   } finally {
@@ -108,37 +93,21 @@ test('on that camera’s page already, the page is asked to show the card instea
   }
 });
 
-test('a notice from an older bridge (no cameras list) still opens the camera that tried most; odd entries get no button', () => {
-  store.store.cameras.set(GARAGE, { id: GARAGE, name: 'Garage (store)' });
-  try {
-    const old = guardNotice({ cameras: undefined, detail: 'Internet guard blocked 15 lookups from 4 cameras today.' });
-    assert.deepEqual(buttons(banners.noticeBanner(old)).map((node) => node.textContent), ['See what Patio New tried']);
-    const odd = guardNotice({ cameras: [null, { id: 'not-an-id', name: 'X' }, { id: GARAGE, name: '' }, { id: DOOR, name: 'Doorbell' }] });
-    assert.deepEqual(buttons(banners.noticeBanner(odd)).map((node) => node.textContent), ['See what Garage (store) tried', 'See what Doorbell tried'],
-      'a camera without a name takes the page’s');
-    assert.equal(buttons(banners.noticeBanner(guardNotice({ cameras: [], cameraID: null }))).length, 0);
-    for (const cameras of [[], [null, { id: 'nope', name: 'X' }]]) {
-      assert.deepEqual(buttons(banners.noticeBanner(guardNotice({ cameras }))).map((node) => node.textContent), ['See what Patio New tried'],
-        'an empty or unusable list falls back to the camera that tried most');
-    }
-    assert.equal(buttons(banners.noticeBanner(guardNotice({ action: null }))).length, 0);
-  } finally {
-    store.store.cameras.clear();
-  }
-});
-
-test('the other actions keep their one button; an action the page does not know gets none', () => {
+test('an entry without a usable camera gets no button; the other actions keep theirs; an unknown action gets none', () => {
+  assert.deepEqual(open(guardEntry({ cameraID: null })), []);
+  assert.deepEqual(open(guardEntry({ cameraID: 'not-an-id' })), []);
+  assert.deepEqual(open(guardEntry({ action: null })), []);
   const storage = { id: 'nvr-storage', kind: 'nvrStorage', severity: 'warning', title: 'Recording Can’t Continue', detail: 'd', date: '', action: 'open-settings' };
-  const shown = buttons(banners.noticeBanner(storage));
-  assert.deepEqual(shown.map((node) => [node.textContent, node.className]), [['Open Recording settings', 'btn small primary']]);
-  shown[0].click();
+  const shown = open(storage);
+  assert.deepEqual(shown.map((action) => action.label), ['Open Recording settings']);
+  shown[0].run();
   assert.equal(location.hash, '#/settings/recording');
-  assert.equal(buttons(banners.noticeBanner({ ...storage, action: 'choose-folder' }))[0].textContent, 'Choose where to record');
-  for (const action of ['open-door', 'toString', 'constructor']) assert.equal(buttons(banners.noticeBanner({ ...storage, action })).length, 0, action);
+  assert.equal(open({ ...storage, action: 'choose-folder' })[0].label, 'Choose where to record');
+  for (const action of ['open-door', 'toString', 'constructor']) assert.equal(open({ ...storage, action }).length, 0, action);
   const other = { id: 'x', kind: 'liveViewNotReceived', severity: 'warning', title: 't', detail: 'd', cameraID: PATIO, cameraName: 'Patio New', action: 'open-camera' };
-  const open = buttons(banners.noticeBanner(other));
-  assert.deepEqual(open.map((node) => node.textContent), ['Open Patio New'], 'another notice that opens a camera opens its page');
-  open[0].click();
+  const opens = open(other);
+  assert.deepEqual(opens.map((action) => action.label), ['Open Patio New'], 'another notice that opens a camera opens its page');
+  opens[0].run();
   assert.equal(location.hash, `#/camera/${PATIO}`);
 });
 
@@ -183,7 +152,7 @@ test('the camera page at #/camera/<id>/security scrolls its Security card into v
     assert.equal(heading.textContent, 'Security');
     assert.equal(heading.getAttribute('tabindex'), '-1', 'the heading can take the focus');
     assert.deepEqual(watch.focused.filter((entry) => entry.el === heading).map((entry) => entry.options), [{ preventScroll: true }]);
-    assert.match(card.textContent, /\*\.p2p\.example\.com3 times · first .* · last .*Likely .* cloud or phone-app connection\./, 'what it tried is explained there');
+    assert.match(card.textContent, /\*\.p2p\.example\.com3 times(?: · first .*)? · last .*Likely .* cloud or phone-app connection\./, 'what it tried is explained there');
 
     // The banner's button on this page: the card comes into view again, nothing is built again.
     window.dispatchEvent(new CustomEvent(banners.SHOW_SECURITY_EVENT, { detail: DOOR }));
@@ -206,19 +175,16 @@ test('the camera page at #/camera/<id>/security scrolls its Security card into v
   }
 });
 
-test('the camera page at #/camera/<id> stays at the top until the banner asks for the card', async () => {
+test('the camera page at #/camera/<id> stays at the top until a notification asks for the card', async () => {
   globalThis.Image = class { set src(value) { this.value = value; } get src() { return this.value; } };
   const watch = watchScrolling();
-  store.store.notices = [guardNotice()];
   const page = await cameraOnPage([DOOR, undefined]);
   try {
     await settle();
     await settle();
     assert.equal(watch.scrolled.length, 0);
     location.hash = `#/camera/${DOOR}`;
-    const button = buttons(page.el).find((node) => node.textContent === 'See what Doorbell tried');
-    assert.ok(button, 'the banner on the camera page has the button');
-    button.click();
+    open(guardEntry({ cameraID: DOOR }))[0].run();
     assert.equal(location.hash, `#/camera/${DOOR}`, 'the page is not built again');
     assert.equal(watch.scrolled.length, 1);
     assert.ok(watch.scrolled[0].el === byClass(page.el, 'sec-card')[0], 'to the Security card');
@@ -226,7 +192,6 @@ test('the camera page at #/camera/<id> stays at the top until the banner asks fo
     page.destroy();
     watch.restore();
     store.store.cameras.clear();
-    store.store.notices = [];
     delete globalThis.Image;
   }
 });

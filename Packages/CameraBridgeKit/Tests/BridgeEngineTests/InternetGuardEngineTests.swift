@@ -736,10 +736,10 @@ import Testing
         ])]))
         await fixture.engine.pollGuardReport()
         let yellow = try #require(fixture.status(camera.id)?.security)
-        #expect(yellow.level == .yellow, "checked again from the box's report, without asking the camera")
+        #expect(yellow.level == .gold, "checked again from the box's report, without asking the camera; blocked attempts do not lower it")
         #expect(yellow.checkedAt == gold.checkedAt, "the camera's readings are as old as they were")
-        #expect(yellow.findings.first?.sentence.contains("7 lookups of internet names in the last 24 hours (dev.hik-connect.com, *.p2p.example.com)") == true)
-        #expect(yellow.internetGuard?.today == 5 && yellow.internetGuard?.last24h == 7)
+        #expect(yellow.findings.first { $0.feature == .internetGuard }?.sentence.contains("7 attempts to reach the internet in the last 24 hours (dev.hik-connect.com, *.p2p.example.com)") == true)
+        #expect(yellow.internetGuard?.today == 5 && yellow.internetGuard?.last24h == 7 && yellow.internetGuard?.last7d == 7, "the 7-day total is every name’s count")
         #expect(yellow.internetGuard?.names.map(\.name) == ["dev.hik-connect.com", "*.p2p.example.com"], "a name that looks like a camera's id is not shown")
 
         // The box stops reporting (its collector is down): what it saw is no longer evidence.
@@ -1475,13 +1475,11 @@ import Testing
         await fixture.tearDown()
     }
 
-    // MARK: The notice
+    // MARK: Alerts
 
-    @Test func theDaysNoticeCountsWhatWasBlocked() async throws {
+    @Test func aCameraSeenTryingIsOneAlertAndAQuietDayRaisesNothing() async throws {
         let box = FakeGuard()
-        var tuning = Self.tuning()
-        tuning.guardNoticeRefresh = .seconds(3600)
-        let fixture = try await fixture(guarded: box, tuning: tuning)
+        let fixture = try await fixture(guarded: box, tuning: Self.tuning())
         defer { fixture.directory.remove() }
         let north = try await watchedCamera(fixture, host: "192.168.77.21", name: "North")
         _ = try await watchedCamera(fixture, host: "192.168.77.22", name: "South")
@@ -1489,23 +1487,37 @@ import Testing
 
         box.report.set(report([GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 0, last24h: 0, names: [])], todayStart: today))
         await fixture.engine.pollGuardReport()
-        #expect(fixture.engine.internetGuardNotice == nil, "nothing was blocked")
+        #expect(fixture.engine.internetGuardAlerts.isEmpty, "nothing was blocked")
 
         box.report.set(report([GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 4, last24h: 4, names: []),
-                               GuardReport.Camera(address: "192.168.77.22", level: .watch, today: 3, last24h: 9, names: [])], todayStart: today))
+                               GuardReport.Camera(address: "192.168.77.22", level: .watch, today: 0, last24h: 0, names: [])], todayStart: today))
         await fixture.engine.pollGuardReport()
-        let notice = try #require(fixture.engine.internetGuardNotice)
-        #expect(notice.sentence == "Internet guard blocked 7 lookups from 2 cameras today.")
-        #expect(notice.cameraID == north.id && notice.cameraName == "North", "the camera page of the one that tried most")
+        let alerts = fixture.engine.internetGuardAlerts
+        #expect(alerts.map(\.cameraID) == [north.id] && alerts.first?.kind == .firstTry)
 
         box.report.set(report([GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 40, last24h: 40, names: [])], todayStart: today))
         await fixture.engine.pollGuardReport()
-        #expect(fixture.engine.internetGuardNotice == notice, "once a day: its figures change at most every hour")
+        #expect(fixture.engine.internetGuardAlerts == alerts, "more blocked attempts change nothing: no daily notice, no new alert")
+    }
 
-        let tomorrow = today.addingTimeInterval(86_400)
-        box.report.set(report([GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 0, last24h: 40, names: [])], todayStart: tomorrow))
+    @Test func aCameraThatStopsBeingWatchedIsOneWarningUntilWatchedAgain() async throws {
+        let box = FakeGuard()
+        let fixture = try await fixture(guarded: box, tuning: Self.tuning())
+        defer { fixture.directory.remove() }
+        let camera = try await watchedCamera(fixture, host: "192.168.77.21", name: "North")
+        box.report.set(report([GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 0, last24h: 0, names: [])]))
         await fixture.engine.pollGuardReport()
-        #expect(fixture.engine.internetGuardNotice == nil, "a new day without anything blocked has none")
+        #expect(fixture.engine.internetGuardAlerts.isEmpty)
+
+        await fixture.engine.changeConfiguration(camera.id) { $0.setupState = nil }   // its DNS no longer asks the bridge
+        await fixture.engine.pollGuardReport()
+        #expect(fixture.engine.internetGuardAlerts.map(\.kind) == [.stoppedAsking] && fixture.engine.internetGuardAlerts.first?.cameraID == camera.id)
+
+        await fixture.engine.changeConfiguration(camera.id) { configuration in
+            configuration.setupState = CameraSetupState(started: Self.now, applied: Self.now, steps: [.init(id: .internetWatch, status: .done)])
+        }
+        await fixture.engine.pollGuardReport()
+        #expect(fixture.engine.internetGuardAlerts.isEmpty, "watched again")
     }
 }
 #endif

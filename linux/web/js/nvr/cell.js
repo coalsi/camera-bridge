@@ -19,6 +19,7 @@
 // A request that was sent is never wasted: its bytes are appended and stay in the model whatever happened to the desire meanwhile.
 import { createStraightenedView, isOn } from '../live/straighten.js';
 import { realTimers } from './clock.js';
+import { aheadFactor } from './speed.js';
 import {
   DEFAULT_POLICY, MESSAGES, bufferSeconds, canSeekInChain, dedupeChains, extendChain, findChainPart, follows, heldRangeAt, keyStepLookup, lastChain,
   makeChain, nextFetches, rangeAfterHole, reconcileChains, seekSeconds, timestampOffsetSeconds,
@@ -498,6 +499,7 @@ export function createCell({
       return;
     }
     if (stale(d)) return;
+    surface.setRate?.(clock.rate ?? 1);
     setCoverage({ kind: clock.mode === 'live' ? 'live' : 'recorded', epoch: d.epoch, playing: true });
     let last = null;                                                                      // { videoMs, at } at the tick before
     let stoppedAt = null;                                                                 // when the picture stopped at the end of what the video holds
@@ -505,12 +507,15 @@ export function createCell({
       await waitFor(TICK_MS);
       if (stale(d)) return;
       if (playerError) { playerError = false; await recover(d); return; }
+      const rate = clock.rate ?? 1;
+      if (surface.rate !== rate) surface.setRate?.(rate);     // a new speed takes hold within a tick
+      const ahead = aheadFactor(rate);
       const positionMs = clock.position();
       const videoSec = surface.currentTime();
       const videoMs = base() + videoSec * 1000;
       // The picture moved less than half as far as time did: the decoder waits for data. At the end of what the video holds it stands up to the
       // margin before the end (a hardware decoder keeps its last frames back until more data comes), so a stop there is the end of what is held.
-      const stalled = last !== null && videoMs - last.videoMs < (timers.now() - last.at) / 2;
+      const stalled = last !== null && videoMs - last.videoMs < ((timers.now() - last.at) * rate) / 2;
       last = { videoMs, at: timers.now() };
       const range = heldRangeAt(surface.held(), videoSec);
       const atHeldEnd = range !== null && (range.end - videoSec) * 1000 <= margin;
@@ -525,12 +530,12 @@ export function createCell({
       const endsBusiness = atHeldEnd && (stoppedAt === null || timers.now() - stoppedAt < END_PROBE_MS + TICK_MS);
       if (!endsBusiness && timers.now() - lastDriftCheck >= DRIFT_CHECK_MS) {
         lastDriftCheck = timers.now();
-        if (Math.abs(videoMs - positionMs) > DRIFT_LIMIT_MS) {
+        if (Math.abs(videoMs - positionMs) > DRIFT_LIMIT_MS * Math.max(1, rate)) {
           restart = { ...d, targetMs: positionMs };
           return;
         }
       }
-      if (hereAheadMs < PREFETCH_BELOW_MS && timers.now() - lastPrefetch >= PREFETCH_EVERY_MS) {
+      if (hereAheadMs < PREFETCH_BELOW_MS * ahead && timers.now() - lastPrefetch >= PREFETCH_EVERY_MS) {
         lastPrefetch = timers.now();
         if (!tail || tail.endMs < videoMs) {
           // What plays cannot be continued: plan it again, so that it can. Once for the same part appended last: a part too short for what
@@ -541,8 +546,8 @@ export function createCell({
             restart = { ...d, targetMs: videoMs };
             return;
           }
-        } else if (tail.endMs - videoMs < PREFETCH_BELOW_MS) {
-          if ((await prefetch(tail, d)) === 'gone') { restart = { ...d, targetMs: positionMs }; return; }
+        } else if (tail.endMs - videoMs < PREFETCH_BELOW_MS * ahead) {
+          if ((await prefetch(tail, d, ahead)) === 'gone') { restart = { ...d, targetMs: positionMs }; return; }
           if (stale(d)) return;
         }
       }
@@ -563,10 +568,10 @@ export function createCell({
   }
 
   /** Fetches the parts after the chain's tail (one request for the list, then the bytes one by one). */
-  async function prefetch(chain, d) {
+  async function prefetch(chain, d, ahead = 1) {
     let list;
     try {
-      list = await catalog.after(cameraId, chain.tailId, { limit: 4, key: planKey });
+      list = await catalog.after(cameraId, chain.tailId, { limit: 4 * ahead, key: planKey });
     } catch (error) {
       if (error?.code === 'gone') return 'gone';
       throw error;

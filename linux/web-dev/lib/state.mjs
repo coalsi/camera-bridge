@@ -6,6 +6,7 @@ import { CAMERA_DEFINITIONS, cameraConfiguration, DAY } from './cameras.mjs';
 import { VirtualArchive } from './archive.mjs';
 import { nightVisionStatus } from './night-vision.mjs';
 import { securityStatus } from './camera-security.mjs';
+import { NotificationLog, categoryOf, keyOf } from './notifications.mjs';
 
 export const BUILTIN = { id: 'builtin', label: 'This box’s storage', path: '/var/lib/camera-bridge/recordings' };
 export const GIB = 1_073_741_824;
@@ -13,6 +14,27 @@ export const GB = 1_000_000_000;
 export const LOW_SPACE_MARGIN = 5 * GIB; // ArchiveConstants.lowSpaceMarginBytes
 export const OTHER_BYTES = 40 * GB; // what the system, settings and the journal use on the data partition
 export const OPTIMIZE_GAP_MS = 3000;
+/** What a made-up AI service said, by event kind: { summary, kind, concern } as the box's `description`. */
+const AI_SAMPLES = {
+  Person: [
+    { summary: 'A person in a red jacket walks up the path to the front door', kind: 'person', concern: 'routine' },
+    { summary: 'Someone tries the door handle and looks through the window', kind: 'person', concern: 'alarm' },
+    { summary: 'A courier leaves a parcel by the door', kind: 'delivery', concern: 'routine' },
+    { summary: 'A person lingers by the side gate for a while', kind: 'person', concern: 'unusual' },
+  ],
+  Vehicle: [
+    { summary: 'A white van parks across the end of the driveway', kind: 'vehicle', concern: 'unusual' },
+    { summary: 'A car drives past without stopping', kind: 'vehicle', concern: 'routine' },
+    { summary: 'A car reverses into the driveway', kind: 'vehicle', concern: 'routine' },
+    { summary: 'A truck idles at the gate', kind: 'vehicle', concern: 'unusual' },
+  ],
+  Motion: [
+    { summary: 'Leaves blow across the porch', kind: 'nothing', concern: 'routine' },
+    { summary: 'A cat crosses the yard', kind: 'animal', concern: 'routine' },
+    { summary: 'Shadows move on the lawn', kind: 'other', concern: 'routine' },
+    { summary: 'Branches sway in the wind', kind: 'nothing', concern: 'routine' },
+  ],
+};
 export const LIVE_GRACE_MS = 120_000; // ArchiveStore.eventLiveGraceMs: an event this new of a recording camera counts as recorded
 export const KEEP_DAYS_RANGE = [1, 365];
 export const MAX_SIZE_RANGE = [10, 100_000];
@@ -55,6 +77,7 @@ export class DevState {
     this.loadingMs = loadingMs;
     this.fixtures = fixtures;
     this.noticeDates = new Map();
+    this.notifications = new NotificationLog();
     this.reset(scenario);
   }
 
@@ -65,6 +88,7 @@ export class DevState {
   /** Back to the start: the seeded history, every camera as its definition says, the settings at their defaults. */
   reset(scenario = 'ok') {
     clearTimeout(this.loadingTimer);
+    this.notifications = new NotificationLog();
     this.archive = new VirtualArchive({ fixtures: this.fixtures, definitions: this.definitions, clock: () => this.serverNow() });
     this.archive.seed();
     this.settings = { nvrFolder: BUILTIN.path, nvrKeepDays: 7, nvrMaxSizeGB: 500 };
@@ -241,7 +265,10 @@ export class DevState {
       const name = names[((slot % 4) + 4) % 4];
       const start = slot * period + offset;
       const end = name === 'Doorbell ring' ? start : start + (8 + (((slot % 7) + 7) % 7) * 9) * 1000;
-      out.push({ id: `${start.toString(16)}-${definition.index}`, cameraID: definition.id, kind: name, start, end: end <= now ? end : null, recorded: recordedAt(start, recording) });
+      const event = { id: `${start.toString(16)}-${definition.index}`, cameraID: definition.id, kind: name, start, end: end <= now ? end : null, recorded: recordedAt(start, recording) };
+      const said = slot % 3 === 0 ? AI_SAMPLES[name]?.[((slot / 3) % 4 + 4) % 4 | 0] : null;   // every third event was described (the box leaves the key out until one is)
+      if (said) event.description = said;
+      out.push(event);
     }
     for (const sent of camera.sentArchive ?? []) {
       if (sent.start < fromMs || sent.start >= toMs) continue;
@@ -383,8 +410,18 @@ export class DevState {
 
   // ---- notices ---------------------------------------------------------------------------------------------------------------------------
 
-  /** The banner (T00 C.7): one storage notice at most, only while a camera records. */
+  /** What is a notification now (the bridge's NoticeResource list): the storage notice, only while a camera records, then what the Internet guard
+   *  found (a watched camera seen trying the internet: blocked, said once). Each carries its `category` and `key`. */
   notices() {
+    const guard = this.cameraList().filter((camera) => camera.definition.security === 'trying').map((camera) => ({
+      id: `guard-tried-${camera.definition.id}`, kind: 'internetGuard', severity: 'info', title: `${camera.definition.name} tried to reach the internet`,
+      detail: 'Camera Bridge blocked it. Nothing got out.', cameraID: camera.definition.id, cameraName: camera.definition.name,
+      date: isoSeconds(this.serverNow()), action: 'open-camera',
+    }));
+    return [...this.storageNotices(), ...guard].map((notice) => ({ ...notice, category: categoryOf(notice.kind), key: keyOf(notice) }));
+  }
+
+  storageNotices() {
     if (!this.cameraList().some((camera) => camera.configuration.nvrEnabled)) return [];
     const pause = this.pause();
     const numbers = this.storageNumbers();

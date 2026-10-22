@@ -1,6 +1,6 @@
 // The cameras' security levels on the dev server, as the bridge answers status.security (BridgeWeb/Resources.swift CameraSecurityResource; the
 // levels, their words and the findings' sentences: BridgeEngine/Security/CameraSecurity.swift). One camera per level (a definition's
-// `security`: red, yellow, green or gold) and one watched camera that keeps trying to reach the internet (`trying`, yellow), checked three
+// `security`: red, yellow, green or gold) and one watched camera that keeps trying to reach the internet (`trying`: its blocked attempts count in its favour, so gold), checked three
 // hours before the server's now; the others have not been checked yet, so the key is absent, as on the bridge until a camera's first check.
 // Findings are worst first; every key is always there, `guard` too (what the Internet guard saw: the dev server plays Camera Bridge OS, so
 // every checked camera has one). POST cameras/:id/security/check answers as the bridge does (checkSecurity).
@@ -13,7 +13,7 @@ const SUMMARIES = {
   red: 'Something on this camera can let it be reached from outside your home.',
   yellow: 'Nothing Camera Bridge read opens this camera to the outside, but something needs work.',
   green: 'Camera Bridge found no cloud turned on, but it can’t confirm everything, so a way out is still possible.',
-  gold: 'Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the Internet guard saw it make no internet lookups in the last 24 hours.',
+  gold: 'Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the Internet guard saw nothing get out in the last 24 hours.',
 };
 
 const finding = (feature, state, level, sentence, { canChange = false, linked = null, service = null } = {}) =>
@@ -22,8 +22,8 @@ const finding = (feature, state, level, sentence, { canChange = false, linked = 
 const WATCHED_QUIET = finding('internetGuard', 'on', 'gold', 'The Internet guard has watched it for the last 24 hours and saw it make no internet lookups.');
 const NOT_WATCHED = finding('internetGuard', 'off', 'green', 'The Internet guard doesn’t watch this camera, so Camera Bridge can’t confirm that nothing gets out.');
 const VIDEO_LOCKED = finding('unauthenticatedVideo', 'off', 'gold', 'Its video needs a password.');
-const TRYING = finding('internetGuard', 'on', 'yellow', 'The Internet guard blocked 112 lookups of internet names in the last 24 hours '
-  + '(*.p2p.example.com, cloud.example.net, time.example.org), but the camera may have another way out.');
+const TRYING = finding('internetGuard', 'on', 'gold', 'The Internet guard blocked 112 attempts to reach the internet in the last 24 hours '
+  + '(*.p2p.example.com, cloud.example.net, time.example.org). Nothing got out.');
 
 /** The findings of each level's camera. */
 export const SECURITY_FINDINGS = {
@@ -66,11 +66,11 @@ export const SECURITY_FINDINGS = {
 };
 
 /** Each fake's level (the key, but for `trying`). */
-const LEVEL = { red: 'red', yellow: 'yellow', green: 'green', gold: 'gold', trying: 'yellow' };
+const LEVEL = { red: 'red', yellow: 'yellow', green: 'green', gold: 'gold', trying: 'gold' };
 
 const MINUTE = 60_000;
-const quiet = () => ({ watched: true, today: 0, last24h: 0, names: [] });
-const notWatched = () => ({ watched: false, today: 0, last24h: 0, names: [] });
+const quiet = () => ({ watched: true, today: 0, last24h: 0, last7d: 0, names: [] });
+const notWatched = () => ({ watched: false, today: 0, last24h: 0, last7d: 0, names: [] });
 const at = (ms) => new Date(Math.floor(ms / 1000) * 1000).toISOString().replace('.000Z', 'Z');
 
 /** status.security.guard of each fake: watched or not, its blocked lookups today and in 24 hours, and its names, most asked first (the bridge's
@@ -80,7 +80,7 @@ const GUARD = {
   yellow: notWatched,
   green: notWatched,
   gold: quiet,
-  trying: (nowMs) => ({ watched: true, today: 47, last24h: 112, names: [
+  trying: (nowMs) => ({ watched: true, today: 47, last24h: 112, last7d: 389, names: [
     { name: '*.p2p.example.com', count: 290, first: at(nowMs - 6 * 24 * 60 * MINUTE), last: at(nowMs - 4 * MINUTE) },
     { name: 'cloud.example.net', count: 75, first: at(nowMs - 5 * 24 * 60 * MINUTE), last: at(nowMs - 120 * MINUTE) },
     { name: 'time.example.org', count: 21, first: at(nowMs - 4 * 24 * 60 * MINUTE), last: at(nowMs - 20 * 60 * MINUTE) },

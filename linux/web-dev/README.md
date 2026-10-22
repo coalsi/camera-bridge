@@ -41,7 +41,7 @@ decodes and seeks like the real thing (ids, anchors, keyframe flags, continuatio
 | Shed | quiet (320x180) | Record off, footage that ended 6 hours ago |
 | New Gate | gop2 | began 25 minutes ago: `typical` is null (under 30 minutes) |
 
-`GET nvr/events` answers a made-up event log: the schedule of each camera's `recentEvents` over the last seven days (8 to 62 s each, a doorbell ring none), `recorded` where the footage is (or, as the bridge says, for an event less than 2 minutes old of a camera that records), plus what `POST /__dev/event` sent. Its pages never split a millisecond (`eventPage`, as the bridge's), it answers 503 `archive_unavailable` in the `folderMissing` scenario and no events without a folder. The waveform is a deterministic daily rhythm with bursts (non-key bytes per second per minute). The drive is 512 GB with 40 GB used by
+`GET nvr/events` answers a made-up event log: the schedule of each camera's `recentEvents` over the last seven days (8 to 62 s each, a doorbell ring none), `recorded` where the footage is (or, as the bridge says, for an event less than 2 minutes old of a camera that records), plus what `POST /__dev/event` sent. Every third event carries a made-up AI `description` ({summary, kind, concern}: person, vehicle, animal, delivery, other, nothing; routine, unusual, alarm) so the Events page and the Monitor's card have something to show. Its pages never split a millisecond (`eventPage`, as the bridge's), it answers 503 `archive_unavailable` in the `folderMissing` scenario and no events without a folder. The waveform is a deterministic daily rhythm with bursts (non-key bytes per second per minute). The drive is 512 GB with 40 GB used by
 other things; the floor is `max(8 GiB, 5%)`. Retention applies at once when a limit is changed (the janitor would take up to 60 s).
 
 ## Reading the picture
@@ -64,7 +64,7 @@ test of "the exact frame appears after a scrub" can tell which frame it got.
 | `noFolder` | no folder: Record on is 409 `folder_required`, storage says `noFolder`, the banner offers `choose-folder`, the archive is empty until a location is chosen (`PATCH nvr/storage {"location":"builtin"}` ends the scenario) |
 | `folderMissing` | recording paused, banner `open-settings`, the plan still lists parts, fragment bytes are 410 `gone`, the location check fails |
 | `diskFull` | free space below the floor: paused, nothing deleted |
-| `lowSpace` | 3.2 GB above the floor: the "almost full" banner, no pause |
+| `lowSpace` | 3.2 GB above the floor: the "almost full" notification, no pause |
 | `notWritable` | paused with "Camera Bridge can’t write to that folder." |
 | `stalled` | paused with "The drive isn’t answering."; reads wait `--stall-ms` (5 s) then 504 `drive_slow`; so does a folder check (8 s) |
 | `noArchive` | the daemon has no archive: R5 to R10 are 503 without `Retry-After` |
@@ -85,3 +85,5 @@ leaves the burst out and reports it as skipped, for a caller that runs it anothe
 because QEMU's user-mode port forwarding resets connections that arrive together; every other check here asks one thing at a time);
 `--only TEXT` runs the checks whose name contains it. The password comes from the environment and is never printed. Exit status 0 when
 nothing failed.
+
+Notifications: the dev server keeps the log in memory (`lib/notifications.mjs`; `/__dev/reset` empties it) and answers `GET notifications`, `POST notifications/shown` and `POST notifications/read`. Living Room (the camera whose Internet guard blocks its attempts) raises the guard's first-try notification, so a fresh sign-in shows one toast; `sh linux/web-tests/run.sh` checks the routes (`notifications-server.test.mjs`).

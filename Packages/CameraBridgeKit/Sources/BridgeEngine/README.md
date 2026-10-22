@@ -1087,14 +1087,14 @@ one table, `InternetGuardText` (`name`, `watch`, `seal`, `watchStep` "Watch its 
   `lastLookupNames` are the last 24 hours' names, newest first. Names are shown as `GuardNames.shown` has them: a part that looks like a
   camera's id (12 or more letters and digits, 4 or more digits) becomes "*". `CameraSecurity.internetGuard` (`CameraGuardActivity`: `watched`,
   `today`, `last24h`, `names`, at most 10, most asked first; nil without a guard) is `status.security.guard` on the web API.
-- **The notice.** `BridgeEngine.internetGuardNotice` (`InternetGuardNotice`: `day`, `lookups`, `cameras`, `cameraID` and `cameraName` of the
-  camera that tried most, `date`, `title`, `sentence` "Internet guard blocked 7 lookups from 2 cameras today."): one a day, from the first
-  blocked lookup of the guard's day; its figures change at most every `guardNoticeRefresh` (1 h); none when nothing was blocked today or the
-  report is no evidence. Only watched cameras count. Since 2026-10-18 it has every camera that tried today, most first (a tie in the
-  bridge's order of cameras): `tried`, each an `InternetGuardNotice.Camera` (`id`, `name`, `today`, `mostAsked`: of the names it was last
-  seen asking for today, the most asked, as `GuardNames.shown` has it; when the box gives no times or none was today, its most asked name;
-  nil when it listed none), and `detail`, the banner's text: the sentence, then "Patio New tried 9 times, Doorbell 3 times, Garage once,
-  and 2 more cameras." (`InternetGuardText.whoTried`, the first three by name). It changes nothing the guard blocks.
+- **Alerts (2026-10-22: notifications).** There is no daily notice any more: a blocked lookup of a watched camera is the guard working, and it
+  counts in the camera's favour (`CameraSecurity.guardFinding`: it never lowers the level; gold still needs a full day watched and a lookup
+  seen, and a blocked one is one). `BridgeEngine.internetGuardAlerts` (`InternetGuardAlert`: `cameraID`, `cameraName`, `kind`, `date`) holds
+  what needs the person: `.firstTry` (a watched camera the box has seen ask for an outside name, now or in its last 7 days: "Patio New tried
+  to reach the internet", "Camera Bridge blocked it. Nothing got out.", once per camera: the web layer's notification log never logs the same
+  event twice) and `.stoppedAsking` (a camera the guard watched at the last report and does not now: a warning, until it is watched again).
+  `CameraGuardActivity.last7d` is the 7-day total behind "Blocked 12 attempts today, 340 in the last 7 days. Nothing got out." A lookup the
+  guard did not block is not raised: the box's report does not say.
 - Tests: `EngineTuning.guardCameraAddress` stands a loopback fake camera for one at 192.168.77.x; nothing else of the guard runs unless the
   test's environment has it. `EngineTuning.securityDNS` stands for the cameras' DNS (it may throw the read's error), and the reads' times are
   shortened through `guardDNSInterval`, `guardDNSReconnectDelay`, `guardDNSPauseMargin` and `guardDNSSpacing`.

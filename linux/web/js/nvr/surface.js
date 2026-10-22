@@ -56,6 +56,7 @@ export class MseSurface {
   #timers;
   #scope;
   #budget;
+  #rate = 1;
   #mediaSource = null;
   #sourceBuffer = null;
   #url = null;
@@ -180,12 +181,22 @@ export class MseSurface {
   /** Starts playing; resolves { presented } when the first frame after the start was shown. Rejects when the browser refuses to play. */
   async play() {
     this.#alive();
+    this.#video.playbackRate = this.#rate;
     const frame = this.#nextFrame(null, PRESENT_TIMEOUT_MS);
     await this.#video.play();
     return frame;
   }
 
   pause() { this.#video.pause(); }
+
+  get rate() { return this.#rate; }
+
+  /** The speed the video plays at (1 to 10, the Monitor's steps); it applies at once and to every later play. */
+  setRate(rate) {
+    this.#rate = rate;
+    this.#video.defaultPlaybackRate = rate;   // a new source (a rebuilt MediaSource) starts at this
+    this.#video.playbackRate = rate;
+  }
 
   /** The video's position in buffer seconds. */
   currentTime() { return this.#video.currentTime; }

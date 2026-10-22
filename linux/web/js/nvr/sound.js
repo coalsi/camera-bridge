@@ -4,6 +4,7 @@
 //
 // Buffer times are the picture's: seconds on the page's time line, (epoch ms - the catalog's baseMs) / 1000, each file placed by its anchor.
 import { bufferSeconds, timestampOffsetSeconds } from './planner.js';
+import { soundAllowed } from './speed.js';
 
 const TICK_MS = 400;
 const AHEAD_SEC = 8;            // keep this much sound ahead of the playhead
@@ -119,7 +120,8 @@ export function createRecordingSound({ catalog, fetcher, clock, doc = document }
 
   async function tick() {
     if (destroyed || busy) return;
-    if (cameraId === null || clock.mode !== 'playing' || catalog.baseMs === undefined) { if (!audio.paused) audio.pause(); return; }
+    // Above 2× the sound is left out (nvr/speed.js): nothing is fetched or played, and it plays again when the speed comes down.
+    if (cameraId === null || clock.mode !== 'playing' || catalog.baseMs === undefined || !soundAllowed(clock.rate)) { if (!audio.paused) audio.pause(); return; }
     busy = true;
     try {
       if (!source && !(await open())) return;
@@ -137,6 +139,7 @@ export function createRecordingSound({ catalog, fetcher, clock, doc = document }
       if (!held) return;
       const now = target();
       if (Math.abs(audio.currentTime - now) > DRIFT_SEC) audio.currentTime = now;
+      if (audio.playbackRate !== (clock.rate ?? 1)) audio.playbackRate = clock.rate ?? 1;
       if (audio.paused) await audio.play().catch(() => {});
       trim(now);
     } catch {
@@ -149,6 +152,7 @@ export function createRecordingSound({ catalog, fetcher, clock, doc = document }
 
   const timer = setInterval(() => { tick(); }, TICK_MS);
   const offClock = clock.onChange?.(() => { tick(); });
+  const offRate = clock.onRate?.(() => { tick(); });
 
   return {
     /** Plays `id`'s recorded sound while the playhead plays (null: none). */
@@ -162,6 +166,7 @@ export function createRecordingSound({ catalog, fetcher, clock, doc = document }
       destroyed = true;
       clearInterval(timer);
       offClock?.();
+      offRate?.();
       teardown();
       audio.remove();
     },

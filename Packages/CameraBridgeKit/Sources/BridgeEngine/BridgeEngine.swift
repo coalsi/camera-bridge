@@ -49,9 +49,9 @@ public final class BridgeEngine {
     public private(set) var recentNetworkNotices: [NetworkNotice] = []
     /// The VPN this Mac is connected to, nil when there is none (or it was not checked yet).
     public private(set) var macVPN: MacVPNStatus?
-    /// Camera Bridge OS's internet guard: the day's "Internet guard blocked N lookups from M cameras today." (nil when nothing was blocked
-    /// today, and always on a bridge without the guard). Set by `pollGuardReport` (BridgeEngine+InternetGuard.swift).
-    public internal(set) var internetGuardNotice: InternetGuardNotice?
+    /// Camera Bridge OS's internet guard: what needs the person (a camera seen trying the internet for the first time, a camera it can no
+    /// longer watch); empty on a bridge without the guard. Set by `pollGuardReport` (BridgeEngine+InternetGuard.swift).
+    public internal(set) var internetGuardAlerts: [InternetGuardAlert] = []
     /// Which cameras may be published to HomeKit (their accessory is advertised and their sensors are bridged); nil: every
     /// camera. A camera outside the set still runs for the app's own viewers (live view, snapshots, events) but has no
     /// accessory, so Home shows it as not responding. Not persisted: the host sets it before `start()` (a host that never

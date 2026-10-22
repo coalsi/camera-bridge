@@ -164,6 +164,8 @@ public final class WebApp: Sendable {
     let auth: AuthStore
     let logs: LogFeed
     let hub: EventHub
+    /// Everything that was a notice, kept in the data directory (`NotificationLog`).
+    let notifications: NotificationLog
     let files: StaticFiles
     let launched: Date
     let log = Log(category: "web")
@@ -187,7 +189,8 @@ public final class WebApp: Sendable {
         self.system = system
         self.logs = logs
         self.auth = auth ?? AuthStore(directory: configuration.dataDirectory, iterations: configuration.passwordIterations)
-        hub = EventHub(backend: backend, interval: configuration.eventInterval)
+        notifications = NotificationLog(directory: configuration.dataDirectory)
+        hub = EventHub(backend: backend, interval: configuration.eventInterval, notifications: notifications)
         files = StaticFiles(directory: configuration.staticDirectory)
         launched = Date()
         wyze = WyzePlugin(backend: backend, cloud: configuration.wyzeTransport.map { WyzeCloud(transport: $0) } ?? WyzeCloud(),

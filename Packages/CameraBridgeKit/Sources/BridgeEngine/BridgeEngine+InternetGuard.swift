@@ -45,6 +45,9 @@ final class InternetGuardState {
     /// The cameras seen online since the bridge started, and those of them that dropped since (`noteGuardConnections`).
     var seenOnline: Set<UUID> = []
     var dropped: Set<UUID> = []
+    /// The cameras the guard watched at the last report, and those that stopped being watched since (a notification until watched again).
+    var watchedBefore: Set<UUID> = []
+    var stoppedAsking: [UUID: Date] = [:]
 }
 
 /// What the Internet guard's reads of a camera's DNS servers decided where the setup's record does not say it
@@ -548,7 +551,7 @@ extension BridgeEngine {
 
     /// Reads the box's report: every camera's level is worked out again from its last readings (`guardEvidenceChanged`: the report may have
     /// changed or gone stale, a day of watching may have passed, the bridge may have another address); a box that reports other cameras
-    /// than the list it took is sent the list again; then the day's notice.
+    /// than the list it took is sent the list again; then the notifications.
     func pollGuardReport() async {
         guard offersInternetGuard, let read = environment.guardReport else { return }
         let report = await read()
@@ -565,7 +568,7 @@ extension BridgeEngine {
             log.warning("The internet guard reports other cameras than it was sent; sending the list again")
             syncInternetGuard(configurations, force: true)
         }
-        refreshInternetGuardNotice(now: now)
+        refreshInternetGuardAlerts(now: now)
     }
 
     /// The guard's evidence for `camera` from the box's last report and `dns`, the camera's DNS servers as they were last read (by its
@@ -614,23 +617,26 @@ extension BridgeEngine {
                              waitsForRestart: waitsForRestart, dnsFromRouter: dnsFromRouter)
     }
 
-    // MARK: The notice
+    // MARK: Alerts
 
-    /// The day's notice from the box's last report: a new one the first time something is blocked on a day, its figures refreshed at most
-    /// every `guardNoticeRefresh`, none when nothing was blocked today or the report is no evidence.
-    func refreshInternetGuardNotice(now: Date) {
+    /// What needs the person from the box's last report: the cameras seen trying the internet (each once, the notification log sees to it),
+    /// and the cameras the guard stopped watching. Blocked lookups raise nothing more; they are the guard working.
+    func refreshInternetGuardAlerts(now: Date) {
         let watched = configurations.compactMap { camera -> (id: UUID, name: String, address: String)? in
             guard Self.internetWatchDone(camera), let address = guardCameraAddress(camera) else { return nil }
             return (camera.id, camera.name, address)
         }
-        guard internetGuard.fresh, let notice = InternetGuardNotice.make(report: internetGuard.report, cameras: watched, now: now) else {
-            if internetGuardNotice != nil { internetGuardNotice = nil }
-            return
+        let watchedNow = Set(watched.map(\.id))
+        let known = Set(configurations.map(\.id))
+        for id in internetGuard.watchedBefore.subtracting(watchedNow) where known.contains(id) { internetGuard.stoppedAsking[id] = now }
+        internetGuard.stoppedAsking = internetGuard.stoppedAsking.filter { known.contains($0.key) && !watchedNow.contains($0.key) }
+        internetGuard.watchedBefore = watchedNow
+        var alerts = internetGuard.fresh ? InternetGuardAlert.firstTries(report: internetGuard.report, cameras: watched, now: now) : []
+        alerts += configurations.compactMap { camera in
+            internetGuard.stoppedAsking[camera.id].map { InternetGuardAlert(cameraID: camera.id, cameraName: camera.name, kind: .stoppedAsking, date: $0) }
         }
-        if let current = internetGuardNotice, current.day == notice.day, now.timeIntervalSince(current.date) < tuning.guardNoticeRefresh.timeInterval {
-            return
-        }
-        if internetGuardNotice?.day != notice.day { log.info("\(notice.sentence)") }
-        internetGuardNotice = notice
+        // Keep each alert's first date, so the notice does not change on every report.
+        alerts = alerts.map { alert in internetGuardAlerts.first { $0.id == alert.id } ?? alert }
+        if alerts != internetGuardAlerts { internetGuardAlerts = alerts }
     }
 }

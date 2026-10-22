@@ -19,6 +19,7 @@ import { labelStyle, showLabel } from '../labels.js';
 import { createFetcher } from '../nvr/fetcher.js';
 import { createCatalog } from '../nvr/catalog.js';
 import { PlaybackClock } from '../nvr/clock.js';
+import { SPEEDS, speedLabel } from '../nvr/speed.js';
 import { createSession } from '../nvr/session.js';
 import { createCell } from '../nvr/cell.js';
 import { MseSurface } from '../nvr/surface.js';
@@ -80,6 +81,10 @@ const correctionText = (c) => (isOn(c) ? `${Number(c.straighten) || 0},${Number(
 export function renderNVR({ params, navigate, setTitle }) {
   setTitle('Monitor');
   const initialMs = parseEpochMs(params?.[0]);
+  // #/nvr/<ms>?camera=<id>&play=1 (the Events page): that camera leads, and the wall plays from the time instead of standing there.
+  const query = new URLSearchParams(params?.[1] ?? '');
+  const queryCamera = /^[0-9A-Fa-f-]{36}$/.test(query.get('camera') ?? '') ? query.get('camera') : null;
+  const playFromAddress = initialMs !== null && query.get('play') === '1';
   // The wall's choices on this browser (nvr-layout.js): a grid of a size, or the mosaic with its smallest width; Fit or Fill; the live quality.
   const prefs = readWallPrefs(readStored, { query: readQuery('tiles'), viewportWidth: window.innerWidth });
   const mosaic = prefs.layout === 'mosaic';
@@ -468,6 +473,12 @@ export function renderNVR({ params, navigate, setTitle }) {
   // Back to live appear.
   const liveButton = h('button', { class: 'btn primary', type: 'button', onclick: () => controller.goLive() }, icon('back'), 'Back to live');
   const readout = h('span', { class: 'nvr-readout', role: 'timer', 'aria-live': 'off' });
+  // Playback speed (1× to 10×) while a recording plays or stands; live is always 1×. The keys , and . step it.
+  const speedButtons = SPEEDS.map((rate) => h('button', {
+    class: 'btn small', type: 'button', 'aria-pressed': 'false', dataset: { rate: String(rate) },
+    'aria-label': `Play at ${speedLabel(rate)}`, onclick: () => controller.setSpeed(rate),
+  }, speedLabel(rate)));
+  const speedGroup = h('div', { class: 'nvr-speed', role: 'group', 'aria-label': 'Playback speed', title: 'Playback speed (, slower, . faster)', hidden: true }, speedButtons);
   const presetButtons = PRESETS.map((preset) => h('button', {
     class: 'btn small', type: 'button', 'aria-pressed': 'false', dataset: { preset },
     onclick: () => { activePreset = preset; writeStored('cb.nvr.zoom', preset); timeline.setPreset(preset); render(); },
@@ -500,6 +511,8 @@ export function renderNVR({ params, navigate, setTitle }) {
     liveButton.disabled = !t.canGoLive;
     setData(readout, 'live', String(atLive));
     setText(readout, readoutText(t));
+    speedGroup.hidden = atLive || !t.canSpeed;
+    for (const button of speedButtons) button.setAttribute('aria-pressed', String(Number(button.dataset.rate) === t.rate));
     syncPresets();
   }
 
@@ -836,7 +849,7 @@ export function renderNVR({ params, navigate, setTitle }) {
     events.banners, bannerHost, notice, grid, emptyHost,
     replace(bottom,
       h('div', { class: 'mon-timeline nvr-controls' },
-        h('div', { class: 'nvr-transport' }, playButton, liveButton, readout, clip.button,
+        h('div', { class: 'nvr-transport' }, playButton, liveButton, readout, speedGroup, clip.button,
           h('div', { class: 'nvr-grid-presets', role: 'group', 'aria-label': 'Timeline range' }, presetButtons),
           h('nav', { class: 'nvr-pager', 'aria-label': 'Camera pages' }, prevButton, pageLabel, nextButton)),
         clip.el,
@@ -876,7 +889,7 @@ export function renderNVR({ params, navigate, setTitle }) {
   controller = createGridController({
     session, catalog, listCameras: cameraList,
     subscribeCameras: (fn) => subscribe((kind) => { if (kind === 'camera' || kind === 'removed') fn(); }),
-    perPage, initialMs, initialPage: memory.page, initialFocus: memory.focusId, playable, paginate: mosaicPages,
+    perPage, initialMs, initialPage: queryCamera ? 0 : memory.page, initialFocus: queryCamera ?? memory.focusId, playable, paginate: mosaicPages,
     navigate, replaceHash: (path) => { try { history.replaceState(history.state, '', `#${path}`); } catch { /* the address stays as it is */ } },
     remember: (state) => { remembered = { ...remembered, ...state }; },
     formatTime: clockText, now: () => Date.now(),
@@ -918,7 +931,7 @@ export function renderNVR({ params, navigate, setTitle }) {
   tickClock();
 
   catalog.start();
-  controller.start().catch((error) => console.error(error));
+  controller.start().then(() => { if (playFromAddress && !destroyed) controller.playAt(initialMs); }).catch((error) => console.error(error));
 
   return {
     el,

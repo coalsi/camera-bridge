@@ -19,13 +19,13 @@ public struct BridgeOverview: Sendable {
     public var streamingHelperInstalled: Bool
     /// The recordings folder as numbers; nil before the first measurement.
     public var nvrStorage: ArchiveStorageStatus?
-    /// The internet guard's notice for the day (`BridgeEngine.internetGuardNotice`); nil when nothing was blocked today or there is no guard.
-    public var internetGuardNotice: InternetGuardNotice?
+    /// What the internet guard found that needs the person (`BridgeEngine.internetGuardAlerts`); empty where there is no guard.
+    public var internetGuardAlerts: [InternetGuardAlert]
 
     public init(state: EngineState, cameras: [CameraStatus], configurations: [CameraConfiguration], sensorsBridge: SensorsBridgeStatus? = nil,
                 localNetworkAccess: LocalNetworkAccess = .unknown, networkNotices: [NetworkNotice] = [], settings: BridgeSettings = BridgeSettings(),
                 webhookProblem: String? = nil, configurationRecovered: Bool = false, streamingHelperInstalled: Bool = false,
-                nvrStorage: ArchiveStorageStatus? = nil, internetGuardNotice: InternetGuardNotice? = nil) {
+                nvrStorage: ArchiveStorageStatus? = nil, internetGuardAlerts: [InternetGuardAlert] = []) {
         self.state = state
         self.cameras = cameras
         self.configurations = configurations
@@ -37,7 +37,7 @@ public struct BridgeOverview: Sendable {
         self.configurationRecovered = configurationRecovered
         self.streamingHelperInstalled = streamingHelperInstalled
         self.nvrStorage = nvrStorage
-        self.internetGuardNotice = internetGuardNotice
+        self.internetGuardAlerts = internetGuardAlerts
     }
 }
 
@@ -138,7 +138,7 @@ public struct EngineBackend: BridgeBackend {
                            localNetworkAccess: engine.localNetworkAccess, networkNotices: engine.recentNetworkNotices, settings: engine.settings,
                            webhookProblem: engine.webhookProblem, configurationRecovered: engine.configurationRecoveredFrom != nil,
                            streamingHelperInstalled: engine.isStreamingHelperInstalled, nvrStorage: engine.nvrStorage,
-                           internetGuardNotice: engine.internetGuardNotice)
+                           internetGuardAlerts: engine.internetGuardAlerts)
         }
     }
 

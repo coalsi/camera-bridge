@@ -25,12 +25,12 @@ test('status.security: one camera per level and one watched camera that keeps tr
   const { cameras } = (await server.api.get('cameras')).json;
   const byName = Object.fromEntries(cameras.map((entry) => [entry.name, entry.status.security]));
   assert.deepEqual(Object.entries(byName).filter(([, security]) => security).map(([name, security]) => [name, security.level]),
-    [['Front Door', 'red'], ['Driveway', 'yellow'], ['Garage', 'green'], ['Back Yard', 'gold'], ['Living Room', 'yellow']]);
+    [['Front Door', 'red'], ['Driveway', 'yellow'], ['Garage', 'green'], ['Back Yard', 'gold'], ['Living Room', 'gold']]);
   for (const [name, security] of Object.entries(byName)) {
     if (!security) continue;
     assert.deepEqual(Object.keys(security).sort(), [...KEYS].sort(), `${name}: every key is there`);
     for (const entry of security.findings) assert.deepEqual(Object.keys(entry).sort(), [...FINDING_KEYS].sort());
-    assert.deepEqual(Object.keys(security.guard).sort(), ['last24h', 'names', 'today', 'watched']);
+    assert.deepEqual(Object.keys(security.guard).sort(), ['last24h', 'last7d', 'names', 'today', 'watched']);
     for (const entry of security.guard.names) assert.deepEqual(Object.keys(entry).sort(), ['count', 'first', 'last', 'name']);
   }
   const trying = byName['Living Room'];
@@ -38,7 +38,8 @@ test('status.security: one camera per level and one watched camera that keeps tr
   assert.ok(trying.guard.today > 0 && trying.guard.last24h >= trying.guard.today);
   assert.ok(trying.guard.names.length >= 3);
   assert.ok(trying.guard.names.every((entry) => /(^|\.)example\.(com|net|org)$/.test(entry.name)), 'documentation names only');
-  assert.equal(trying.findings.find((entry) => entry.feature === 'internetGuard').level, 'yellow');
+  assert.equal(trying.findings.find((entry) => entry.feature === 'internetGuard').level, 'gold', 'blocked attempts do not lower the level');
+  assert.equal(trying.guard.last7d, 389);
   assert.equal(byName.Garage.guard.watched, false);
   assert.equal(byName['Back Yard'].guard.watched, true);
   assert.equal(byName['Back Yard'].guard.last24h, 0);

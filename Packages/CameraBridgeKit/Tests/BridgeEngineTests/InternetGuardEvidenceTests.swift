@@ -277,83 +277,30 @@ import Testing
         #expect(CameraSecurity.assess(readings, internetGuard: nil, checkedAt: Self.now).internetGuard == nil, "no guard on this bridge")
     }
 
-    // MARK: The notice
+    // MARK: What needs the person
 
-    @Test func theNoticeSaysWhatWasBlockedToday() throws {
+    /// A watched camera seen asking for an outside name (blocked) is a first try; one that never asked, or that the bridge does not watch,
+    /// is not. The text says it was blocked.
+    @Test func aWatchedCameraSeenTryingIsAFirstTry() throws {
         let ids = (UUID(), UUID(), UUID())
-        let cameras = [(id: ids.0, name: "North", address: "192.168.77.21"), (id: ids.1, name: "South", address: "192.168.77.22"),
+        let cameras = [(id: ids.0, name: "North", address: "192.168.77.21"), (id: ids.1, name: "Patio New", address: "192.168.77.22"),
                        (id: ids.2, name: "Yard", address: "192.168.77.23")]
-        let report = report([GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 2, last24h: 2, names: []),
+        let report = report([GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 0, last24h: 0, names: []),
                              GuardReport.Camera(address: "192.168.77.22", level: .watch, today: 5, last24h: 5, names: []),
-                             GuardReport.Camera(address: "192.168.77.23", level: .watch, today: 0, last24h: 8, names: []),
+                             GuardReport.Camera(address: "192.168.77.23", level: .watch, today: 0, last24h: 0,
+                                                names: [GuardReport.Lookup(name: "old.example.com", count: 3)]),
                              GuardReport.Camera(address: "192.168.77.24", level: .watch, today: 50, last24h: 50, names: [])])
-        let notice = try #require(InternetGuardNotice.make(report: report, cameras: cameras, now: Self.now))
-        #expect(notice.lookups == 7 && notice.cameras == 2 && notice.cameraID == ids.1 && notice.cameraName == "South")
-        #expect(notice.day == Self.now.addingTimeInterval(-8 * 3600) && notice.date == Self.now)
-        #expect(notice.sentence == "Internet guard blocked 7 lookups from 2 cameras today.", "a camera the bridge doesn't watch is not counted")
-        #expect(notice.title == "Cameras Tried to Reach the Internet")
-        #expect(notice.tried.map(\.id) == [ids.1, ids.0], "a camera that tried nothing today is not named")
-        #expect(notice.detail == "Internet guard blocked 7 lookups from 2 cameras today. South tried 5 times, North 2 times.")
-
-        let one = try #require(InternetGuardNotice.make(report: self.report([GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 1,
-                                                                                                    last24h: 1, names: [])]), cameras: cameras, now: Self.now))
-        #expect(one.sentence == "Internet guard blocked 1 lookup from 1 camera today." && one.title == "A Camera Tried to Reach the Internet")
-        #expect(one.detail == "Internet guard blocked 1 lookup from 1 camera today. North tried once.")
-        #expect(one.tried == [InternetGuardNotice.Camera(id: ids.0, name: "North", today: 1, mostAsked: nil)], "the box listed no names")
-        #expect(InternetGuardNotice.make(report: self.report([]), cameras: cameras, now: Self.now) == nil)
-        #expect(InternetGuardNotice.make(report: nil, cameras: cameras, now: Self.now) == nil)
+        let alerts = InternetGuardAlert.firstTries(report: report, cameras: cameras, now: Self.now)
+        #expect(alerts.map(\.cameraID) == [ids.1, ids.2], "a quiet camera and a camera the bridge doesn’t watch raise nothing")
+        #expect(alerts[0].title == "Patio New tried to reach the internet" && alerts[0].detail == "Camera Bridge blocked it. Nothing got out.")
+        #expect(alerts[0].id == "guard-tried-\(ids.1.uuidString)" && !alerts[0].isWarning && alerts[0].date == Self.now)
+        #expect(InternetGuardAlert.firstTries(report: self.report([]), cameras: cameras, now: Self.now).isEmpty)
+        #expect(InternetGuardAlert.firstTries(report: nil, cameras: cameras, now: Self.now).isEmpty)
     }
 
-    /// Every camera that tried is in the notice, most first (a tie in the bridge's order of cameras); the text names the first three and
-    /// counts the rest; the camera that tried most is still `cameraID` for a page that knows only that.
-    @Test func theNoticeNamesEveryCameraThatTriedMostFirst() throws {
-        let names = ["Patio New", "Doorbell", "Garage", "Side Gate", "Shed"]
-        let ids = names.map { _ in UUID() }
-        let cameras = names.indices.map { (id: ids[$0], name: names[$0], address: "192.168.77.\(21 + $0)") }
-        let counts = [3, 9, 1, 1, 2]
-        let report = report(counts.indices.map { GuardReport.Camera(address: "192.168.77.\(21 + $0)", level: .watch, today: counts[$0], last24h: counts[$0],
-                                                                    names: []) })
-        let notice = try #require(InternetGuardNotice.make(report: report, cameras: cameras, now: Self.now))
-        #expect(notice.tried.map(\.name) == ["Doorbell", "Patio New", "Shed", "Garage", "Side Gate"], "most first; Garage before Side Gate, as the bridge lists them")
-        #expect(notice.tried.map(\.today) == [9, 3, 2, 1, 1])
-        #expect(notice.lookups == 16 && notice.cameras == 5 && notice.cameraID == ids[1] && notice.cameraName == "Doorbell")
-        #expect(notice.detail == "Internet guard blocked 16 lookups from 5 cameras today. Doorbell tried 9 times, Patio New 3 times, Shed 2 times, "
-                + "and 2 more cameras.")
-
-        let four = try #require(InternetGuardNotice.make(report: report, cameras: Array(cameras.prefix(4)), now: Self.now))
-        #expect(four.detail.hasSuffix("Doorbell tried 9 times, Patio New 3 times, Garage once, and 1 more camera."))
-        let three = try #require(InternetGuardNotice.make(report: report, cameras: Array(cameras.prefix(3)), now: Self.now))
-        #expect(three.detail.hasSuffix("Doorbell tried 9 times, Patio New 3 times, Garage once."), "three are all named")
-
-        #expect(InternetGuardText.whoTried([]) == nil)
-        let made = InternetGuardNotice(day: Self.now, lookups: 4, cameras: 1, cameraID: ids[0], cameraName: "Patio New", date: Self.now)
-        #expect(made.tried.isEmpty && made.detail == made.sentence, "a notice made without its cameras says what it did before")
-    }
-
-    /// Each camera's most asked name is shown as the Security card shows it (a part that looks like its id is "*", the same shown name
-    /// counted once), and is one it asked for today when the box says when.
-    @Test func eachCameraOfTheNoticeHasItsMostAskedNameAsShown() throws {
-        let today = Self.now.addingTimeInterval(-3600), lastWeek = Self.now.addingTimeInterval(-3 * 86_400)
-        let cameras = [(id: UUID(), name: "Patio New", address: "192.168.77.21"), (id: UUID(), name: "Doorbell", address: "192.168.77.22"),
-                       (id: UUID(), name: "Garage", address: "192.168.77.23")]
-        let report = report([
-            GuardReport.Camera(address: "192.168.77.21", level: .watch, today: 9, last24h: 9, names: [
-                GuardReport.Lookup(name: "old.example.com", count: 40, first: lastWeek, last: lastWeek),
-                GuardReport.Lookup(name: "time.example.org", count: 6, first: lastWeek, last: today),
-                GuardReport.Lookup(name: "a1b2c3d4e5f6.p2p.example.com", count: 4, first: today, last: today),
-                GuardReport.Lookup(name: "f6e5d4c3b2a1.p2p.example.com", count: 4, first: today, last: today),
-            ]),
-            GuardReport.Camera(address: "192.168.77.22", level: .watch, today: 3, last24h: 3, names: [
-                GuardReport.Lookup(name: "cloud.example.net", count: 2),
-                GuardReport.Lookup(name: "x1y2z3w4v5u6t7.devices.example.net", count: 1),
-            ]),
-            GuardReport.Camera(address: "192.168.77.23", level: .watch, today: 1, last24h: 1, names: [
-                GuardReport.Lookup(name: "older.example.com", count: 5, first: lastWeek, last: lastWeek),
-            ]),
-        ])
-        let notice = try #require(InternetGuardNotice.make(report: report, cameras: cameras, now: Self.now))
-        #expect(notice.tried.map(\.mostAsked) == ["*.p2p.example.com", "cloud.example.net", "older.example.com"],
-                "today's most asked, its id hidden and the two ids counted as one name; without times the box's first; none today: the most asked")
+    @Test func aCameraTheGuardCanNoLongerWatchIsAWarning() {
+        let alert = InternetGuardAlert(cameraID: UUID(), cameraName: "Doorbell", kind: .stoppedAsking, date: Self.now)
+        #expect(alert.isWarning && alert.id.hasPrefix("guard-away-") && alert.title == "The Internet guard can’t watch Doorbell")
     }
 
     @Test func theWordsComeFromOneTable() {
