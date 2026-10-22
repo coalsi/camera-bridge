@@ -6,9 +6,14 @@ import Foundation
 /// secret store as `plugin.box-identity` and in nothing else: not `config.json`, logs, answers of the web API or the state file.
 struct BoxIdentity: Sendable {
     static let secretID = "box-identity"
-    let key: Curve25519.Signing.PrivateKey
+    /// The 32-byte seed (Sendable on every platform; swift-crypto's key type is not on Linux).
+    private let seed: Data
+    var key: Curve25519.Signing.PrivateKey {
+        // The seed was made from or checked as a key, so it always reads back.
+        (try? Curve25519.Signing.PrivateKey(rawRepresentation: seed)) ?? Curve25519.Signing.PrivateKey()
+    }
 
-    init(key: Curve25519.Signing.PrivateKey = Curve25519.Signing.PrivateKey()) { self.key = key }
+    init(key: Curve25519.Signing.PrivateKey = Curve25519.Signing.PrivateKey()) { self.seed = key.rawRepresentation }
 
     /// The stored identity, or nil when none is stored (or it is damaged).
     static func load(from backend: any BridgeBackend) async throws -> BoxIdentity? {

@@ -1,6 +1,9 @@
 import BridgeSupport
 import Crypto
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Synchronization
 
 /// What the website said or why it could not be reached. `message` is a sentence for the person.
