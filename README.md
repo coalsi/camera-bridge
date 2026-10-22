@@ -1,15 +1,20 @@
 <p align="center"><img src="docs/brand/camera-bridge-logo.svg" width="128" height="128" alt="Camera Bridge logo: the Golden Gate Bridge seen through a camera lens"></p>
 
-# Camera Bridge
+# Camera Bridge OS
 
-Camera Bridge brings the network cameras you already own into the Apple Home app, with HomeKit Secure Video recording,
-live view, motion and doorbell notifications. It speaks to cameras over standard protocols (RTSP and ONVIF) and shows up
-in Home as ordinary camera accessories.
+**A local NVR for the cameras you already own, with an AI assistant that tells you what happened, and every camera in Apple
+Home.**
 
-**Camera Bridge OS** (beta) is the way to run it for now: a small Linux system for an Intel mini PC that brings your
-cameras into Apple Home, shows every camera live on a web page, and records them around the clock. You set it all up
-from a browser at `http://camera-bridge.local`; it needs no keyboard, screen or Mac. (A new
-[Camera Bridge for Mac](#camera-bridge-for-mac) is coming soon.)
+Camera Bridge OS turns a small Intel mini PC into a network video recorder:
+- It records your cameras around the clock.
+- It shows them all live on one page.
+- It puts every event in one list, each with a picture and an optional one-line AI description such as "A delivery driver
+  leaves a package at the front door".
+- It keeps your cameras off the internet.
+- It brings each camera into the Apple Home app with HomeKit Secure Video.
+
+It runs at home, with no cloud account, no subscription and no hub to buy. You set it all up from a browser at
+`http://camera-bridge.local`, and it needs no keyboard or screen.
 
 <p align="center"><img src="docs/screenshots/os/monitor.jpg" width="900" alt="The Monitor: every camera live, the recordings timeline and the events list with AI descriptions"></p>
 
@@ -18,44 +23,58 @@ license: see [License](#license).
 
 Website: <https://www.camera-bridge.app> · Documentation: <https://docs.camera-bridge.app>
 
-## Camera Bridge OS (beta)
+> **Beta.** Releases are tagged `os-v*` on [GitHub Releases](https://github.com/coalsi/camera-bridge/releases). Versions before
+> 1.0 are betas (pre-releases) while the interface is refined. They run every day on the reference box below, and a box on a
+> beta updates itself to the next one.
 
-Releases are tagged `os-v*` on [GitHub Releases](https://github.com/coalsi/camera-bridge/releases). Versions before 1.0 are
-**betas** (published as pre-releases) while the interface is being refined: they run every day on the reference box below,
-and a box on a beta updates itself to the next one. 1.0 will be the first full release.
+## What it does
 
-### What it does
+### A real NVR
+- **Records around the clock** to the box's SSD or a drive you attach. Each camera has a Record switch, with limits on how
+  long and how much to keep. Recordings keep the camera's own video, not a re-encoded copy.
+- **Monitor:** every camera live on one wall, with sound and real live video over a single connection. Below it is one timeline
+  for all cameras: scrub back hours and play at 1×, 2×, 3×, 5× or 10×.
+- **Saved clips** as MP4 with sound, labelled with the camera's name and the time, from one camera or several at once.
+- **One label everywhere:** the camera's name and the date and time look the same on the Monitor, in Apple Home and in saved
+  clips. The bridge keeps every camera's clock on its time zone.
 
-- Publishes every camera to Apple Home as its own accessory, with **HomeKit Secure Video** recording, live view,
-  snapshots, two-way audio where the camera has it, and doorbells that ring like HomeKit doorbells.
-- **Monitor:** a wall of every camera with real live video and sound (the cameras' own video, not re-encoded, over one
-  connection), an activity timeline and notices. Click a camera to fill the wall with it.
-- **Records around the clock** (a Record switch per camera, with limits on age and size) to the box's SSD or a drive you
-  attach. Scrub every camera on one timeline, hear the recorded sound, and save clips as MP4 with sound.
-- **One label everywhere:** the camera's name and the date and time look the same on the Monitor, in Apple Home and burned
-  into saved clips, and one switch turns off each camera's own on-screen clock and text (Hikvision, Reolink, ONVIF). The
-  bridge keeps the cameras' clocks on its time zone, daylight saving included.
-- Motion, person, vehicle, animal and package events become Home notifications and recording triggers, from the camera
-  itself (ONVIF events and native event interfaces) or from built-in motion detection.
-- Finds ONVIF cameras on your network, joins Wi-Fi by itself (or opens a setup hotspot for your phone), installs itself
-  to the PC's internal disk, and updates itself from signed releases with automatic rollback if a new version does not
-  start properly.
-- **Events page:** every camera's events in one list, each with a picture, its type and, if you turn it on, a short AI
-  description ("A person stands near the pool fence"). Filter by camera, type, what the AI saw or how much it matters, and
-  click one to play it from just before it began. Playback runs at 1×, 2×, 3×, 5× or 10×.
-- **AI descriptions (optional, off by default):** with your own key for Claude or any OpenAI-compatible service (a model at
-  home works too), each event gets one sentence, a kind and an importance. Only up to five small still pictures per event
-  are sent, only for cameras you switch on, with a daily limit.
-- **Internet guard:** points each camera's DNS at the box, sees every name the camera tries to reach and blocks the internet
-  ones, so a camera stays local without changing your router. Each camera's Security card shows what it tried and that it
-  was blocked.
-- **Notifications** appear in the corner of the page and fade away, once per thing that happened on every device, and the
+### An AI assistant for your events (optional)
+- **Events page:** every camera's events in one list, newest first. Each event has a picture from the recording, its type
+  (motion, person, vehicle, animal, package, face, doorbell) and the AI's sentence. Click one to play it from just before it
+  began.
+- **AI descriptions:** with your own key for Claude or any OpenAI-compatible service, each event gets a short sentence, what it
+  saw (person, vehicle, animal, delivery…) and how much it matters (routine, unusual, alarm). Alarm and unusual events stand
+  out, and you can filter by any of it or search the sentences. A model on your own network (Ollama, LM Studio) keeps even
+  that at home.
+- **Off by default, and small:** only up to five small still pictures per event are sent, only for cameras you switch on, with a
+  daily limit you set. A description usually arrives about 8 seconds after the motion starts.
+
+### Private and secure by design
+- **Internet guard:** the box points each camera's DNS at itself. It sees every name the camera tries to reach and blocks the
+  internet ones, so a camera stays local without changing your router. Each camera's Security card lists what it tried and
+  that it was blocked, and a camera never loses points for being blocked.
+- **Camera setup in one step:** for each camera it turns off the maker's cloud, P2P and UPnP, sets strong video settings,
+  sets the camera's clock and time zone, and points its DNS at the bridge. It shows every change first and can put everything
+  back.
+- No telemetry and no account. The only things that leave the box are update checks, the time server, and (only if you turn
+  them on) AI descriptions.
+
+### Apple Home, built in
+- Every camera becomes its own Home accessory with **HomeKit Secure Video**, live view, snapshots, two-way audio where the
+  camera has it, and doorbells that ring like HomeKit doorbells.
+- Motion, person, vehicle, animal and package events become Home notifications and recording triggers. They come from the
+  camera itself (ONVIF events and makers' own interfaces) or from the box's built-in motion detection.
+- A camera you turn off stays in Home, with a "Camera off" picture, so your rooms and automations keep working.
+
+### Easy to live with
+- **Notifications** appear in the corner of the page and fade away, once per thing that happened, on every device. The
   Notifications page keeps them all.
-- **Straighten the picture** for panorama cameras whose horizon bends, everywhere the camera is seen, while recordings keep
-  the original.
-- Imports your cameras from the earlier Camera Bridge for Mac app.
+- **Straighten the picture** for panorama cameras whose horizon bends. It applies everywhere the camera is seen, and recordings
+  keep the original.
+- Finds ONVIF cameras on your network and joins Wi-Fi by itself (or opens a setup hotspot for your phone). It installs itself to
+  the PC's internal disk and updates itself from signed releases, with automatic rollback if a new version doesn't start.
 
-### Screenshots
+## Screenshots
 
 Taken on a real box with real cameras (more, with what each shows, in [docs/screenshots/os](docs/screenshots/os)).
 
@@ -65,7 +84,7 @@ Taken on a real box with real cameras (more, with what each shows, in [docs/scre
 | <img src="docs/screenshots/os/cameras.jpg" alt="Cameras list"><br>**Cameras:** status, security, video and Apple Home at a glance | <img src="docs/screenshots/os/notifications.jpg" alt="Notifications page"><br>**Notifications:** everything worth knowing, kept in one place |
 | <img src="docs/screenshots/os/ai-settings.jpg" alt="AI descriptions settings"><br>**AI descriptions:** your own key, your choice of service, a daily limit | <img src="docs/screenshots/os/system.jpg" alt="System page"><br>**System:** updates, Wi-Fi, recording drive and SSH |
 
-### Minimum requirements
+## Minimum requirements
 
 Camera Bridge OS is tuned for its reference box, a **Beelink Mini S (Intel N150, 12 GB, 512 GB SSD)**, which records five
 cameras around the clock at about a quarter of its processor. That box is the minimum.
@@ -87,7 +106,7 @@ You also need:
 
 Details, storage advice and BIOS settings: [docs/linux/HARDWARE.md](docs/linux/HARDWARE.md).
 
-### Install
+## Install
 
 1. Download `camera-bridge-os-<version>-amd64.img.xz` from the newest `os-v*` release and write it to a USB stick with
    balenaEtcher.
@@ -156,7 +175,7 @@ Layout:
 
 ## Support the project
 
-Camera Bridge is made by one person and is free for everyone at home. If it saves you an NVR or a cloud camera plan, you
+Camera Bridge is made by one person and is free for everyone at home. If it saves you a store-bought NVR or a cloud camera plan, you
 can [sponsor it on GitHub](https://github.com/sponsors/coalsi) or [support it on Ko-fi](https://ko-fi.com/coreysilvia). You can also help by starring the repository, reporting a
 camera that works (or doesn't) with a [camera support request](https://github.com/coalsi/camera-bridge/issues/new?template=camera_support_request.yml),
 and sending pull requests.
