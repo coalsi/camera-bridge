@@ -61,7 +61,7 @@ import Testing
         await engine.resume()
         #expect(engine.state == .running && engine.bridge != nil && engine.sensorsBridge != nil)
         #expect(await fixture.until { advertiser.count(SensorsBridge.bonjourServiceName) == 1 })
-        #expect(advertiser.count("Shed") == 0, "a disabled camera has no accessory")
+        #expect(await fixture.until { advertiser.count("Shed") == 1 }, "a disabled camera keeps only its Camera off accessory")
         await fixture.tearDown()
     }
 }

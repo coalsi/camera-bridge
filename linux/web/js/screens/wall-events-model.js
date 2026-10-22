@@ -89,6 +89,7 @@ export function gatherEvents({ cameras = [], live = [], archived = [] } = {}) {
     });
   }
   for (const camera of cameras) {
+    if (camera?.isEnabled === false) continue;   // turned off: nothing new is seen (its archived events above stay)
     const recent = Array.isArray(camera?.status?.recentEvents) ? camera.status.recentEvents : [];
     for (const record of recent) {
       const at = Date.parse(record?.date);

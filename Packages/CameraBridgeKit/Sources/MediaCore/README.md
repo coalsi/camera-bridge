@@ -17,6 +17,9 @@ the per-camera `MediaHub`. Depends on BridgeSupport only (Foundation, Synchroniz
 
 ## Additions beyond the contract
 
+Camera off still (2026-10-22, docs/CONTRACT_CHANGES.md): `MediaCodecs.cameraOffJPEG(cameraName:width:height:)` (a requirement with a default that throws
+`MediaCodecError.unsupported`): the dark "Camera off" picture Apple Home gets for a camera that is turned off, exactly `width` × `height`, as JPEG.
+
 Snapshot decoders (2026-10-02, docs/CONTRACT_CHANGES.md): `MediaCodecs.makeSnapshotDecoder(format:)` (a protocol requirement with
 a default that returns `makeVideoDecoder(format:)`; the Apple implementation logs its routine session creation at debug level, not info).
 

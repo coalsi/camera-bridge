@@ -83,6 +83,8 @@ public final class BridgeEngine {
     @ObservationIgnored private var aiServiceGeneration = 0
     @ObservationIgnored private var loaded = false
     @ObservationIgnored private(set) var runtimes: [UUID: CameraRuntime] = [:]
+    /// The cameras that are turned off keep only their HomeKit accessory, showing a "Camera off" picture (`CameraOffAccessory`).
+    @ObservationIgnored private(set) var offAccessories: [UUID: CameraOffAccessory] = [:]
     /// The pre-optimization encoder/smart-codec values `optimizeForHomeKit` can still undo, per camera.
     @ObservationIgnored var homeKitOptimizationSnapshots: [UUID: HomeKitOptimizationSnapshot] = [:]
     /// The cameras' security checks: the last result of each camera (in memory only), those under way and those scheduled.
@@ -534,7 +536,7 @@ public final class BridgeEngine {
             await router.register(camera)
             await bridge?.update(cameras: bridgedConfigurations)
             if isActive { await startSensorsBridge() }   // the first camera starts it
-            if isActive, camera.isEnabled { await startRuntimes([camera]) }
+            if isActive { if camera.isEnabled { await startRuntimes([camera]) } else { await startOffAccessories([camera]) } }
             await refreshStatus()
         }
     }
@@ -578,11 +580,12 @@ public final class BridgeEngine {
                 if password != nil || typedStreamCredentials || Self.needsRestart(old, camera, paired: paired) {
                     log.notice("Restarting \(camera.name) with its new settings")
                     await stopRuntime(camera.id)
-                    if camera.isEnabled { await startRuntimes([camera]) }
+                    if camera.isEnabled { await startRuntimes([camera]) } else { await startOffAccessories([camera]) }
                 } else {
                     if old.motionSensitivity != camera.motionSensitivity, let runtime = runtimes[camera.id] {
                         await runtime.updateMotionSensitivity(camera.motionSensitivity)
                     }
+                    if old.name != camera.name { offAccessories[camera.id]?.rename(camera.name) }
                     if old.timestampOverlay != camera.timestampOverlay || old.name != camera.name, let runtime = runtimes[camera.id] {
                         runtime.updateTimestampOverlay(camera.timestampOverlay, cameraName: camera.name)
                     }
@@ -680,18 +683,18 @@ public final class BridgeEngine {
             try await ensureLoaded()
             guard let camera = configurations.first(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
             let store = HAPStorage.store(for: cameraID, dataDirectory: environment.dataDirectory, secrets: environment.platform.secrets)
-            let wasRunning = runtimes[cameraID] != nil
+            let wasRunning = runtimes[cameraID] != nil || offAccessories[cameraID] != nil
             if wasRunning { await stopRuntime(cameraID) }
             do {
                 _ = try await Self.offMain { try store.replaceIdentity() }
             } catch {
                 log.error("The HomeKit pairing of \(camera.name) could not be reset: \(error)")
-                if wasRunning, isActive { await startRuntimes([camera]) }
+                if wasRunning, isActive { if camera.isEnabled { await startRuntimes([camera]) } else { await startOffAccessories([camera]) } }
                 throw error
             }
             invalidateStoredIdentity(cameraID)
             log.notice("HomeKit pairing of \(camera.name) was reset; it has a new setup code")
-            if wasRunning, isActive { await startRuntimes([camera]) }
+            if wasRunning, isActive { if camera.isEnabled { await startRuntimes([camera]) } else { await startOffAccessories([camera]) } }
             await refreshStatus()
         }
     }
@@ -1782,6 +1785,7 @@ public final class BridgeEngine {
         await startWebhookReporting(storedSettings)
         nvr.start(settings: storedSettings)   // returns at once: repair and catalog load run in the background (the daemon waits for this function)
         await startRuntimes(configurations.filter(\.isEnabled))
+        await startOffAccessories(configurations.filter { !$0.isEnabled })
         startNetworkMonitoring()
         startHeartbeat()
         startDailySecurityChecks()
@@ -1809,9 +1813,12 @@ public final class BridgeEngine {
         await nvr.detachAll()   // recorders flush and close while the hubs still deliver (`stopServices` clears `runtimes` without `stopRuntime`)
         let running = Array(runtimes.values)
         runtimes.removeAll()
+        let off = Array(offAccessories.values)
+        offAccessories.removeAll()
         statusInputsChanged()
         await withTaskGroup(of: Void.self) { group in
             for runtime in running { group.addTask { await runtime.stop() } }
+            for accessory in off { group.addTask { await accessory.stop() } }
         }
         await nvr.stop()
         await stopSensorsBridge()
@@ -1826,6 +1833,29 @@ public final class BridgeEngine {
         statusInputsChanged()
         if !running.isEmpty || target == .paused { log.notice(target == .paused ? "Bridge paused" : "Bridge stopped") }
         await refreshStatus()
+    }
+
+    /// Brings up the "Camera off" accessory of each camera in `cameras` (turned off, allowed to publish, none yet): no connection to the
+    /// camera, only Apple Home's view of it. A camera whose accessory moved to another port keeps that port; a failure is logged (the
+    /// next start of the bridge, or turning the camera on and off, tries again).
+    func startOffAccessories(_ cameras: [CameraConfiguration]) async {
+        for camera in cameras where !camera.isEnabled && offAccessories[camera.id] == nil && mayPublish(camera.id) {
+            let accessory = CameraOffAccessory(configuration: camera, dependencies: .init(environment: environment, tuning: tuning,
+                                                                                         onChange: { [changes] in changes.notify() }))
+            offAccessories[camera.id] = accessory
+            do {
+                let port = try await accessory.start(port: camera.hapPort, reserved: reservedPorts(excluding: camera.id))
+                if port != camera.hapPort, port != 0, let index = configurations.firstIndex(where: { $0.id == camera.id }) {
+                    configurations[index].hapPort = port
+                    await persist()
+                }
+            } catch {
+                offAccessories[camera.id] = nil
+                await accessory.stop()
+                log.error("The HomeKit accessory of \(camera.name) (turned off) could not start: \(error)")
+            }
+        }
+        statusInputsChanged()
     }
 
     /// Starts the runtimes of `cameras` concurrently; a camera whose accessory moved to another port keeps that port. A
@@ -1966,6 +1996,7 @@ public final class BridgeEngine {
     func stopRuntime(_ cameraID: UUID, within limit: Duration? = nil) async {
         cancelAccessoryRetries(cameraID)
         await nvr.detach(cameraID)   // before the runtime stops: the recorder flushes its group and closes the file
+        if let off = offAccessories.removeValue(forKey: cameraID) { await off.stop(); invalidateStoredIdentity(cameraID) }
         guard let runtime = runtimes.removeValue(forKey: cameraID) else { return }
         if let limit {
             _ = try? await withDeadline(limit, followsCancellation: false) { await runtime.stop() }
@@ -2469,7 +2500,7 @@ public final class BridgeEngine {
                     status.setupURI = identity.uri
                     status.isPaired = identity.paired
                 }
-                status.hapPort = nil
+                status.hapPort = await offAccessories[camera.id]?.hapPort
                 if !camera.isEnabled {
                     status.connection = .disabled
                 } else if !isActive, status.lastError == nil {

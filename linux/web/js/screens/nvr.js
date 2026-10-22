@@ -84,6 +84,8 @@ export function renderNVR({ params, navigate, setTitle }) {
   // #/nvr/<ms>?camera=<id>&play=1 (the Events page): that camera leads, and the wall plays from the time instead of standing there.
   const query = new URLSearchParams(params?.[1] ?? '');
   const queryCamera = /^[0-9A-Fa-f-]{36}$/.test(query.get('camera') ?? '') ? query.get('camera') : null;
+  // A camera that is turned off has no live view and is not on the wall; only one named in the address (an Events row's recording) is, to play it.
+  const wallCameras = () => cameraList().filter((camera) => camera.isEnabled !== false || camera.id === queryCamera);
   const playFromAddress = initialMs !== null && query.get('play') === '1';
   // The wall's choices on this browser (nvr-layout.js): a grid of a size, or the mosaic with its smallest width; Fit or Fill; the live quality.
   const prefs = readWallPrefs(readStored, { query: readQuery('tiles'), viewportWidth: window.innerWidth });
@@ -138,7 +140,7 @@ export function renderNVR({ params, navigate, setTitle }) {
   // Saving a clip: the playhead is the end (the newest recorded moment while live or on snapshots). On the wall the person ticks the cameras (any
   // of every page); with one camera filling the wall, the clip is that camera's.
   const clip = createClip({
-    cameras: () => cameraList().filter((camera) => soloId === null || camera.id === soloId)
+    cameras: () => wallCameras().filter((camera) => soloId === null || camera.id === soloId)
       .map((camera) => ({ id: camera.id, name: camera.name, pictureCorrection: camera.pictureCorrection })),
     endMs: () => { const t = controller?.view().transport; return !t || t.mode === 'snapshots' || t.mode === 'live' ? catalog.serverNow() : t.positionMs; },
     onChange: () => { if (controller) render(); },
@@ -866,7 +868,7 @@ export function renderNVR({ params, navigate, setTitle }) {
       // The first draw after the page is in place measures the wall; a new size, smallest width or picture shape makes new pages. Not while
       // one camera fills the wall: its column beside the events changes the wall's height, and new pages could take that camera away.
       if (!wallBox) takeWallSize(measureWall());
-      if (mosaicKey(cameraList()) !== paginatedKey) controller.relayout();
+      if (mosaicKey(wallCameras()) !== paginatedKey) controller.relayout();
     }
     const view = controller.view();
     lastView = view;
@@ -887,7 +889,7 @@ export function renderNVR({ params, navigate, setTitle }) {
   }
 
   controller = createGridController({
-    session, catalog, listCameras: cameraList,
+    session, catalog, listCameras: wallCameras,
     subscribeCameras: (fn) => subscribe((kind) => { if (kind === 'camera' || kind === 'removed') fn(); }),
     perPage, initialMs, initialPage: queryCamera ? 0 : memory.page, initialFocus: queryCamera ?? memory.focusId, playable, paginate: mosaicPages,
     navigate, replaceHash: (path) => { try { history.replaceState(history.state, '', `#${path}`); } catch { /* the address stays as it is */ } },

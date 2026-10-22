@@ -150,7 +150,7 @@ export function createEventsPage({ query = '', load = loadEvents, thumbs = creat
     const { fromMs, toMs } = queryRange(filters, at);
     archive.want({ cameraIds: filters.cameras.length ? filters.cameras : list.map((camera) => camera.id), fromMs, toMs });
     const all = gatherEvents({ cameras: list, archived: archive.events() }).sort((a, b) => b.at - a.at || a.cameraName.localeCompare(b.cameraName) || a.label.localeCompare(b.label));
-    syncOptions(list, typeChoices(all));
+    syncOptions(list.filter((camera) => camera.isEnabled !== false), typeChoices(all));   // a camera that is turned off is no filter; its recordings' events stay listed
     const matching = filterEvents(all, filters, { now: at });
     const { shown, held } = holdNewEvents(matching, known, { hold: scrolledDown() && !holdOpen });
     holdOpen = false;                // asking to see the held events is once

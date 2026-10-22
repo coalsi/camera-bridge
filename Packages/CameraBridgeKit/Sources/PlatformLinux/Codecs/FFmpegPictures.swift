@@ -69,6 +69,17 @@ enum FFmpegPictures {
         return output
     }
 
+    /// The still for a camera that is turned off (`MediaCodecs.cameraOffJPEG`): a dark picture of exactly `width × height` with a camera
+    /// drawn from boxes and, when this ffmpeg can draw text and has a font, "Camera off", "Turn it on in Camera Bridge" and the name.
+    static func cameraOff(cameraName: String, width: Int, height: Int, runtime: FFmpegRuntime) throws -> Data {
+        guard (16...8_192).contains(width), (16...8_192).contains(height) else { throw MediaCodecError.unsupported("cannot draw a \(width)×\(height) picture") }
+        let output = try FFmpegOneShot.run(runtime: runtime, label: "camera off",
+                                           arguments: FFmpegArguments.cameraOff(width: width, height: height, name: cameraName, font: runtime.overlayFont()),
+                                           input: nil, timeout: timeout)
+        guard output.count > 4, output.prefix(2) == Data([0xFF, 0xD8]) else { throw MediaCodecError.noFrame }
+        return output
+    }
+
     /// Straightens a JPEG (or PNG) by `correction` as a JPEG of the same size ("Straighten the picture": snapshots); an off
     /// correction hands it back as it is. The four maps of the per-plane warp are `maps`' (made once for each picture size and
     /// correction, in a private temporary directory, and used again by the next snapshot of the same), and one ffmpeg child does the

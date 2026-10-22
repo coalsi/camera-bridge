@@ -36,6 +36,10 @@ public protocol MediaCodecs: Sendable {
     /// The default ignores `quality` (the codec service's own).
     func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data
     func silentAACFrames(duration: Duration, sampleRate: Int, channels: Int, startPTS: MediaTime, wallClock: Date) throws -> [EncodedAudioFrame]
+    /// The still Apple Home shows for a camera that is turned off: a dark picture of exactly `width` × `height` with a camera-off
+    /// icon and the words "Camera off", "Turn it on in Camera Bridge" and `cameraName`, as JPEG. Throws `unsupported` where the
+    /// codecs cannot draw one.
+    func cameraOffJPEG(cameraName: String, width: Int, height: Int) throws -> Data
     /// Demo camera / tests: moving test pattern (+ optional tone), H.264 at the given fps/GOP.
     func makeSyntheticSource(displayName: String, width: Int, height: Int, fps: Int, keyframeInterval: Duration,
                              audio: AudioCodec?, audioSampleRate: Int) -> any MediaSource
@@ -53,6 +57,10 @@ extension MediaCodecs {
     }
 
     public var supportsPictureCorrection: Bool { false }
+
+    public func cameraOffJPEG(cameraName: String, width: Int, height: Int) throws -> Data {
+        throw MediaCodecError.unsupported("these codecs cannot draw the camera-off picture")
+    }
 
     public func makeVideoTranscoder(output: VideoEncoderSettings, overlay: (any TimestampOverlayProviding)?,
                                     correction: (any PictureCorrectionProviding)?) throws -> any VideoTranscoding {

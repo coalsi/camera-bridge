@@ -127,6 +127,10 @@ public final class FFmpegMediaCodecs: MediaCodecs {
         return try FFmpegPictures.correctJPEG(jpeg, correction: correction, runtime: runtime, maps: snapshotMaps)
     }
 
+    public func cameraOffJPEG(cameraName: String, width: Int, height: Int) throws -> Data {
+        try FFmpegPictures.cameraOff(cameraName: cameraName, width: width, height: height, runtime: runtime)
+    }
+
     public func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data {
         try FFmpegPictures.resize(jpeg, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality, runtime: runtime)
     }

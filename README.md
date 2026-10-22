@@ -11,6 +11,8 @@ cameras into Apple Home, shows every camera live on a web page, and records them
 from a browser at `http://camera-bridge.local`; it needs no keyboard, screen or Mac. (A new
 [Camera Bridge for Mac](#camera-bridge-for-mac) is coming soon.)
 
+<p align="center"><img src="docs/screenshots/os/monitor.jpg" width="900" alt="The Monitor: every camera live, the recordings timeline and the events list with AI descriptions"></p>
+
 Camera Bridge is **free for personal and noncommercial use**, and the source is available here. Commercial use needs a
 license: see [License](#license).
 
@@ -38,7 +40,30 @@ and a box on a beta updates itself to the next one. 1.0 will be the first full r
 - Finds ONVIF cameras on your network, joins Wi-Fi by itself (or opens a setup hotspot for your phone), installs itself
   to the PC's internal disk, and updates itself from signed releases with automatic rollback if a new version does not
   start properly.
+- **Events page:** every camera's events in one list, each with a picture, its type and, if you turn it on, a short AI
+  description ("A person stands near the pool fence"). Filter by camera, type, what the AI saw or how much it matters, and
+  click one to play it from just before it began. Playback runs at 1×, 2×, 3×, 5× or 10×.
+- **AI descriptions (optional, off by default):** with your own key for Claude or any OpenAI-compatible service (a model at
+  home works too), each event gets one sentence, a kind and an importance. Only up to five small still pictures per event
+  are sent, only for cameras you switch on, with a daily limit.
+- **Internet guard:** points each camera's DNS at the box, sees every name the camera tries to reach and blocks the internet
+  ones, so a camera stays local without changing your router. Each camera's Security card shows what it tried and that it
+  was blocked.
+- **Notifications** appear in the corner of the page and fade away, once per thing that happened on every device, and the
+  Notifications page keeps them all.
+- **Straighten the picture** for panorama cameras whose horizon bends, everywhere the camera is seen, while recordings keep
+  the original.
 - Imports your cameras from the earlier Camera Bridge for Mac app.
+
+### Screenshots
+
+Taken on a real box with real cameras (more, with what each shows, in [docs/screenshots/os](docs/screenshots/os)).
+
+| | |
+|---|---|
+| <img src="docs/screenshots/os/events.jpg" alt="Events page"><br>**Events:** every camera's events with pictures, AI descriptions and filters | <img src="docs/screenshots/os/camera.jpg" alt="A camera's page"><br>**A camera:** live preview, status, recording and security |
+| <img src="docs/screenshots/os/cameras.jpg" alt="Cameras list"><br>**Cameras:** status, security, video and Apple Home at a glance | <img src="docs/screenshots/os/notifications.jpg" alt="Notifications page"><br>**Notifications:** everything worth knowing, kept in one place |
+| <img src="docs/screenshots/os/ai-settings.jpg" alt="AI descriptions settings"><br>**AI descriptions:** your own key, your choice of service, a daily limit | <img src="docs/screenshots/os/system.jpg" alt="System page"><br>**System:** updates, Wi-Fi, recording drive and SSH |
 
 ### Minimum requirements
 

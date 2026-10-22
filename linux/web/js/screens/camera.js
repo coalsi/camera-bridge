@@ -729,7 +729,7 @@ export function renderCamera({ params, navigate, setTitle }) {
         usesAddress ? [h('dt', null, 'Address'), h('dd', null, `${e.host}${e.useHTTPS ? ' (HTTPS)' : ''}`)] : null,
         camera.username ? [h('dt', null, 'User'), h('dd', null, camera.username)] : null,
         camera.integration ? [h('dt', null, 'Service'), h('dd', null, camera.integration.service)] : null),
-      switchRow({ title: 'Turned on', desc: 'Turn off to stop streaming without removing the camera from the Home app.', checked: camera.isEnabled, onchange: (v) => { save({ isEnabled: v }, { now: true }); } }),
+      switchRow({ title: 'Turned on', desc: 'Turn off to stop streaming without removing the camera. It stays in Apple Home and shows a “Camera off” picture there.', checked: camera.isEnabled, onchange: (v) => { save({ isEnabled: v }, { now: true }); } }),
       h('div', { class: 'row' },
         usesAddress ? h('button', { class: 'btn small', type: 'button', onclick: changeConnection }, 'Change address…') : null,
         camera.username || camera.vendor === 'rtsp' ? h('button', { class: 'btn small', type: 'button', onclick: changePassword }, 'Change password…') : null));

@@ -1122,3 +1122,17 @@ Some cameras take credentials in their stream URL's query (`?user=admin&password
 - In the path, the saved URL loses each credential assignment and keeps the rest of its segment (`/channel=1&stream=0.sdp`,
   `/channel=1_stream=0.sdp`, `/snapshot.cgi`); a segment that was only credentials goes. `Redact.url` keeps masking only the secret
   values there (a path's `user=admin` shows in logs, as before).
+
+## A camera that is turned off (2026-10-22, docs/CONTRACT_CHANGES.md)
+
+A camera with `isEnabled == false` has no `CameraRuntime`: no ingest, events, recording or AI. Before, it had no HomeKit accessory either (Home
+showed it as not responding). Now `CameraOffAccessory` (Runtime) keeps the accessory published, on the camera's port and in its own HAP store,
+so Home keeps the camera, its room, automations and pairing:
+- **Snapshots** are the "Camera off" still (`CameraOffStill`: `MediaCodecs.cameraOffJPEG`, exactly the size Home asks for, clamped to 16...4096,
+  made once per name and size, the newest 8 kept). A rename (`rename`) shows in later pictures.
+- **Live view** fails the way an offline camera's does: `setStreamingAvailable(false)`, and a request that comes anyway is refused. The still is
+  not streamed as video (`makeSyntheticSource` could, but it needs the whole RTP pipeline for a picture that does not move).
+- **Sensors** stay quiet: the controller is never registered on the event router, and its sensor status is not active.
+- **HomeKit Secure Video** records nothing: the recording delegate refuses every stream.
+Started with the bridge, on add and on update (`startOffAccessories`); `stopRuntime` and `stopServices` stop it. Turning the camera on stops it
+and starts the runtime (same port, no bridge restart). Not done: no retry after a failed start, and no re-advertising after a wake.

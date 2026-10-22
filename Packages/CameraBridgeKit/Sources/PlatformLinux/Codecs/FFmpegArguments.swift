@@ -375,6 +375,27 @@ enum FFmpegArguments {
                   "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "\(quality.map(mjpegScale) ?? 5)", "-f", "mjpeg", "pipe:1"]
     }
 
+    /// One dark picture of `width × height` as a JPEG on stdout: a camera (body and lens) from boxes, and with a `font` the words of the
+    /// camera-off still. The texts are quoted filter values read literally (`expansion=none`), so a camera name cannot change the graph.
+    static func cameraOff(width: Int, height: Int, name: String, font: String?) -> [String] {
+        let unit = Double(min(width, height * 16 / 9))
+        func px(_ fraction: Double) -> Int { max(2, Int((unit * fraction).rounded())) }
+        let iconWidth = px(0.16), iconHeight = Int(Double(iconWidth) * 0.7), lens = max(4, iconHeight / 2)
+        let x = (width - iconWidth) / 2, y = Int(Double(height) * 0.30), thick = max(2, px(0.008))
+        var filters = ["drawbox=x=\(x):y=\(y):w=\(iconWidth):h=\(iconHeight):color=0x9e9eab:t=\(thick)",
+                       "drawbox=x=\((width - lens) / 2):y=\(y + (iconHeight - lens) / 2):w=\(lens):h=\(lens):color=0x9e9eab:t=\(thick)"]
+        if let font, isUsablePath(font) {
+            func text(_ line: String, size: Double, color: String, at fraction: Double) -> String {
+                "drawtext=fontfile=\(optionValue(font)):text=\(optionValue(String(line.prefix(80)).replacingOccurrences(of: "\n", with: " "))):expansion=none"
+                    + ":fontsize=\(px(size)):fontcolor=\(color):x=(w-tw)/2:y=h*\(fraction)"
+            }
+            filters += [text("Camera off", size: 0.052, color: "white", at: 0.50), text("Turn it on in Camera Bridge", size: 0.028, color: "0xd1d1d1", at: 0.62),
+                        text(name, size: 0.026, color: "0x9e9eab", at: 0.70)]
+        }
+        return common + ["-f", "lavfi", "-i", "color=c=0x171719:s=\(width)x\(height):d=1", "-vf", (filters + ["format=yuvj420p"]).joined(separator: ","),
+                         "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "3", "-f", "mjpeg", "pipe:1"]
+    }
+
     /// A quality of 0…1 on mjpeg's `-q:v` scale (2 best, 31 worst).
     static func mjpegScale(_ quality: Double) -> Int {
         min(31, max(2, Int(((1 - min(max(quality, 0), 1)) * 29).rounded()) + 2))

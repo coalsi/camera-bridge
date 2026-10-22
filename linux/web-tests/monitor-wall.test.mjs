@@ -337,7 +337,7 @@ async function until(check, what = 'it never happened') {
  * monitor.css gives it (cover while the wall fills, contain otherwise). -> { page, tile(id), store, update(id, change), key(event), close() }
  * A tile is { el, media, video (its live video) }.
  */
-async function openMonitor(cameras, { zoomWebGL = false } = {}) {
+async function openMonitor(cameras, { zoomWebGL = false, params = [] } = {}) {
   const browser = installFakeBrowser();
   recordingCanvases(browser.document, { webgl: zoomWebGL ? (canvas) => (canvas.className === 'zoom-canvas' ? fakeGL(canvas) : null) : null });
   const create = browser.document.createElement;
@@ -370,14 +370,14 @@ async function openMonitor(cameras, { zoomWebGL = false } = {}) {
   const { store, putCamera } = await import('../web/js/store.js');
   const { renderNVR } = await import('../web/js/screens/nvr.js');
   store.cameras = new Map(cameras.map((camera) => [camera.id, camera]));
-  const page = renderNVR({ params: [], navigate() {}, setTitle() {} });
+  const page = renderNVR({ params, navigate() {}, setTitle() {} });
   const tile = (id) => {
     const el = elementsUnder(page.el, (node) => node.localName === 'article' && node.dataset.id === id)[0];
     if (!el) return null;
     const media = el.childNodes.find((node) => node.classList?.contains('nvr-media'));
     return { el, media, video: media.childNodes.find((node) => node.localName === 'video') };
   };
-  await until(() => cameras.every((camera) => tile(camera.id)), 'the tiles were never drawn');
+  await until(() => cameras.filter((camera) => camera.isEnabled !== false).every((camera) => tile(camera.id)), 'the tiles were never drawn');
   let closed = false;
   return {
     page, tile, store,
@@ -531,5 +531,23 @@ test('a straightened picture takes the wall’s Fit or Fill at once, even while 
     assert.equal(canvas.style.objectFit, 'contain', 'and Fit again');
   } finally {
     monitor.close();
+  }
+});
+
+test('a camera that is turned off has no tile on the wall; one named in the address (an Events row) is there to play its recording', async () => {
+  const off = { ...monitorCamera(GARAGE_ID, 'Garage', null), isEnabled: false, status: { connection: 'disabled' } };
+  const monitor = await openMonitor([monitorCamera(BACKYARD_ID, 'Backyard', null), off]);
+  try {
+    assert.ok(monitor.tile(BACKYARD_ID), 'the camera that is on is there');
+    assert.equal(monitor.tile(GARAGE_ID), null, 'the one that is off is not');
+    assert.equal(elementsUnder(monitor.page.el, (node) => node.localName === 'article').length, 1, 'one tile only');
+  } finally {
+    monitor.close();
+  }
+  const opened = await openMonitor([monitorCamera(BACKYARD_ID, 'Backyard', null), off], { params: [String(Date.now() - 60_000), `camera=${GARAGE_ID}&play=1`] });
+  try {
+    assert.ok(opened.tile(GARAGE_ID), 'the camera an Events row names is on the wall, to play from');
+  } finally {
+    opened.close();
   }
 });

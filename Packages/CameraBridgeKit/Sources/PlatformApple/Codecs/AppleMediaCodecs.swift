@@ -41,6 +41,10 @@ public final class AppleMediaCodecs: MediaCodecs {
         return try JPEGSnapshot.jpeg(from: picture.pixelBuffer, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality)
     }
 
+    public func cameraOffJPEG(cameraName: String, width: Int, height: Int) throws -> Data {
+        try CameraOffPicture.jpeg(cameraName: cameraName, width: width, height: height)
+    }
+
     public func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?) throws -> Data {
         try JPEGSnapshot.resize(jpeg, maxWidth: maxWidth, maxHeight: maxHeight)
     }
