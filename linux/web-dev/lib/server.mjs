@@ -186,6 +186,29 @@ export function createDevServer(options) {
 
   const systemInfo = () => json({ product: 'Camera Bridge OS', version: '0.0-dev', build: 'development', mode: 'development', osName: 'Dev server', canUpdate: false, canReboot: false, canInstall: false, canManage: false });
 
+  // The secure address (BridgeWeb/WebApp+SecureAddress.swift): a ready address with a certificate, a redirect switch and a rebind self-test.
+  // `POST /__dev/secure` {state: 'ready' | 'waiting' | 'error', router: 'open' | 'blocked'} changes what the card shows.
+  const secure = { state: 'ready', redirect: true, router: 'open', rebind: null };
+  function secureReport() {
+    const host = 'k7f2q9.box.camera-bridge.app';
+    const ready = secure.state === 'ready';
+    const expires = new Date(state.serverNow() + 60 * 86_400_000);
+    return {
+      available: true, state: secure.state, host, url: `https://${host}`, address: '192.168.77.5',
+      expiresOn: ready ? expires.toISOString() : null, renewsOn: ready ? new Date(expires.getTime() - 30 * 86_400_000).toISOString() : null,
+      redirect: secure.redirect, redirectActive: ready && secure.redirect,
+      problem: secure.state === 'error' ? { code: 'no_internet', message: 'The Camera Bridge website can’t be reached. Check that the box has internet.' } : null,
+      rebind: secure.rebind,
+    };
+  }
+  function secureCheck() {
+    const blocked = secure.router === 'blocked';
+    secure.rebind = blocked
+      ? { state: 'blocked', message: 'Your router doesn’t give out names that point inside your home (DNS rebind protection).', checkedAt: new Date(state.serverNow()).toISOString() }
+      : { state: 'ok', message: 'Your router gives out the secure address.', checkedAt: new Date(state.serverNow()).toISOString() };
+    return json({ rebind: secure.rebind });
+  }
+
   function snapshot(ctx) {
     const camera = findCamera(ctx);
     const name = typeof camera.definition.fixture === 'string' ? camera.definition.fixture : 'gop2';
@@ -231,6 +254,14 @@ export function createDevServer(options) {
     }],
     ['POST', 'notifications/read', 'session', true, (ctx) => { state.notifications.markRead(ctx.body.ids); return json({ unread: state.notifications.unread }); }],
     ['GET', 'system', 'session', false, systemInfo],
+    ['GET', 'system/secure-address', 'session', false, () => json(secureReport())],
+    ['POST', 'system/secure-address/redirect', 'session', true, (ctx) => {
+      if (typeof ctx.body.enabled !== 'boolean') throw ApiError.invalid('“enabled” is missing.', 'enabled');
+      secure.redirect = ctx.body.enabled;
+      return json(secureReport());
+    }],
+    ['POST', 'system/secure-address/check', 'session', true, secureCheck],
+    ['POST', 'system/secure-address/retry', 'session', true, () => json(secureReport())],
     ['GET', 'events', 'session', false, () => ({ events: true })],
     ...NVR_ROUTES.map(([method, pattern, handler, takesBody]) => [method, pattern, 'session', takesBody, (ctx) => handler(app, ctx)]),
   ];
@@ -317,6 +348,9 @@ export function createDevServer(options) {
       const camera = state.cameraList().find((c) => c.definition.id === input.id);
       if (!camera) throw ApiError.invalid('No camera has that id.', 'id');
       setNightVisionFailure(camera, input.fail);
+    } else if (url.pathname === '/__dev/secure') {
+      if (['ready', 'waiting', 'error', 'off'].includes(input.state)) secure.state = input.state;
+      if (['open', 'blocked'].includes(input.router)) { secure.router = input.router; secure.rebind = null; }
     } else if (url.pathname === '/__dev/options') {
       for (const [name, value] of Object.entries(input)) if (typeof config[name] === 'number' && Number.isFinite(value)) config[name] = value;
     } else {

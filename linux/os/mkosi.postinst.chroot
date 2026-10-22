@@ -47,6 +47,8 @@ systemctl enable \
     camera-bridge-banner.timer \
     camera-bridge-banner.service \
     camera-bridge-guard.service \
+    camera-bridge-tls.service \
+    nginx.service \
     fstrim.timer
 
 # Debian ships two chrony units that conflict; with both enabled either may win. We want the one that can set the clock.

@@ -49,6 +49,11 @@ public protocol SystemControlling: Sendable {
     func setGuardedCameras(_ cameras: [GuardedCamera]) async throws
     /// What the internet guard saw; `GuardReport.unavailable` where there is none (or it has not reported yet).
     func guardReport() async -> GuardReport
+    /// The certificate of the secure address (`status/tls.json`); nil where this system has no TLS front (a plain program, an older image).
+    func certificateStatus() async -> CertificateStatus?
+    /// Asks the system to get (or renew) the certificate for `host` with the box key `privateKeyPEM`; returns once the system took the request.
+    /// `certificateStatus()` follows it.
+    func obtainCertificate(name: String, host: String, privateKeyPEM: String) async throws
 }
 
 extension SystemControlling {
@@ -93,6 +98,29 @@ extension SystemControlling {
     public func setGuardedCameras(_ cameras: [GuardedCamera]) async throws { throw SystemError("The internet guard is part of Camera Bridge OS.") }
 
     public func guardReport() async -> GuardReport { .unavailable }
+
+    public func certificateStatus() async -> CertificateStatus? { nil }
+
+    public func obtainCertificate(name: String, host: String, privateKeyPEM: String) async throws {
+        throw SystemError("The secure address is part of Camera Bridge OS.")
+    }
+}
+
+/// The certificate the TLS front serves, as the system reports it.
+public struct CertificateStatus: Codable, Sendable, Equatable {
+    /// `none` (no certificate yet), `working` (being obtained), `ready`, `failed` (the last try failed; an earlier certificate may remain).
+    public var state: String
+    public var message: String?
+    /// The host name the certificate is for, and when it expires; nil without a certificate.
+    public var host: String?
+    public var notAfter: Date?
+
+    public init(state: String, message: String? = nil, host: String? = nil, notAfter: Date? = nil) {
+        self.state = state
+        self.message = message
+        self.host = host
+        self.notAfter = notAfter
+    }
 }
 
 /// A Wi-Fi network in range.

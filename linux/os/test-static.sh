@@ -6,7 +6,7 @@
 #
 # Checks: shellcheck + bash -n on every script, the go2rtc pins (fetch-go2rtc.sh), the pins of our helpers (linux/helpers),
 # the nftables ruleset (nft -c), every systemd unit (systemd-analyze verify), sysusers/tmpfiles/repart definitions, the mkosi
-# configuration (mkosi summary), the stub daemon's syntax, the internet guard's DNS configuration (dnsmasq --test).
+# configuration (mkosi summary), the stub daemon's syntax, the internet guard's DNS configuration (dnsmasq --test), the secure address's scripts and TLS front (test-tls.sh, nginx -t).
 # What this does NOT prove: that the image boots (see test-vm.sh) or works on real hardware (docs/linux/BUILDING.md).
 # shellcheck disable=SC2016,SC2001
 set -euo pipefail
@@ -35,7 +35,7 @@ helper_scripts=(../helpers/wyze-lake/build.sh ../helpers/wyze-lake/test/run.sh
                 ../helpers/eufy-bridge/test/integration/run.sh ../helpers/eufy-bridge/test/integration/container.sh
                 ../helpers/eufy-bridge/test/integration/go2rtc.sh)
 scripts=(build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken
-         mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk mkosi.extra/usr/sbin/cb-guard
+         mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk mkosi.extra/usr/sbin/cb-guard mkosi.extra/usr/sbin/cb-tls test-tls.sh
          mkosi.extra/usr/lib/camera-bridge/lib.sh "${helper_scripts[@]}")
 while IFS= read -r f; do scripts+=("$f"); done < <(find mkosi.extra/usr/lib/camera-bridge -name 'cb-*' -type f | sort)
 
@@ -43,7 +43,7 @@ for f in "${scripts[@]}"; do [ -f "$f" ] || continue; check "bash -n $f" bash -n
 # (C.UTF-8: shellcheck cannot print the non-ASCII characters some scripts contain in the C locale)
 check "shellcheck (all scripts)" env LC_ALL=C.UTF-8 shellcheck -x "${scripts[@]}"
 check "stub daemon parses" python3 -c "import ast; ast.parse(open('stub/camerabridged-stub').read())"
-check "scripts are executable" bash -c 'for f in build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh '"${helper_scripts[*]}"' test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
+check "scripts are executable" bash -c 'for f in build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh '"${helper_scripts[*]}"' test-static.sh test-vm.sh test-tls.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
 
 # --- the go2rtc helper: a pinned commit, toolchain digest and checksums; installed where the engine looks ---------------------
 check "fetch-go2rtc.sh pins a full commit hash" grep -Eq '^GO2RTC_COMMIT="[0-9a-f]{40}"' fetch-go2rtc.sh
@@ -135,6 +135,14 @@ check "every allowed request is in the README's table" bash -c 'jobs=$(sed -n "s
 check "the guard is applied at boot" grep -q "camera-bridge-guard.service" mkosi.postinst.chroot
 check "the guard's collector cannot hang with its lock" grep -Eq "^TimeoutStartSec=[0-9]+min$" /usr/lib/systemd/system/camera-bridge-guard-collect.service
 check "the guard's log is read in a folder only root can change" bash -c 'grep -q "^d /run/camera-bridge/guard/work 0700 root root -" /usr/lib/tmpfiles.d/camera-bridge.conf && grep -q "^WORKDIR=\$RUN/work" /usr/sbin/cb-guard'
+
+# --- the secure address: its certificate script and hook (test-tls.sh), the TLS front's configuration, its units -----------------------
+check "the secure address's scripts pass their self-test (test-tls.sh)" bash test-tls.sh
+check "the TLS front's configuration is valid (nginx -t, with a throw-away certificate)" bash -c '
+    d=$(mktemp -d) && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout $d/k.pem -out $d/c.pem -days 1 -subj /CN=t 2>/dev/null &&
+    sed -e "s|/srv/system/tls/fullchain.pem|$d/c.pem|; s|/srv/system/tls/privkey.pem|$d/k.pem|; s|^pid .*|pid $d/nginx.pid;|" mkosi.extra/etc/nginx/nginx.conf >$d/nginx.conf &&
+    mkdir -p /run/nginx-tls && nginx -t -c $d/nginx.conf'
+check "the certificate status is published before the daemon starts and nginx waits for a certificate" bash -c 'u=/usr/lib/systemd/system/camera-bridge-tls.service; grep -q "^Before=camerabridged.service" $u && grep -q "camera-bridge-tls.service" mkosi.postinst.chroot && grep -q "nginx.service" mkosi.postinst.chroot'
 
 # --- sysusers / tmpfiles / repart definitions ---------------------------------------------------------------------------
 tmp=$(mktemp -d)

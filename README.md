@@ -56,6 +56,10 @@ Website: <https://www.camera-bridge.app> · Documentation: <https://docs.camera-
 - **Camera setup in one step:** for each camera it turns off the maker's cloud, P2P and UPnP, sets strong video settings,
   sets the camera's clock and time zone, and points its DNS at the bridge. It shows every change first and can put everything
   back.
+- **Secure address:** every box gets a trusted `https://<random name>.box.camera-bridge.app` address with a real certificate
+  (Let's Encrypt, renewed by the box itself). It works in every browser at home with nothing to install. Only the name and a
+  home address go through camera-bridge.app; video and the page never leave your network. The plain
+  `http://camera-bridge.local` sends browsers there, and a switch in Settings › System turns that off.
 - No telemetry and no account. The only things that leave the box are update checks, the time server, and (only if you turn
   them on) AI descriptions.
 

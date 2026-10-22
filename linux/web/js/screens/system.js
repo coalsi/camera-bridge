@@ -10,6 +10,7 @@ import { banners } from './banners.js';
 import { inlineError, switchRow } from './common.js';
 import { askToPowerOff, powerOff as sendPowerOff } from '../power.js';
 import { isBeta } from '../release-notes.js';
+import { secureAddressSection } from './secure-address.js';
 
 /** An update in words: "beta build 0.1.109" while the system is in beta, "version 1.0.0" from 1.0 (`capital`: at the start of a sentence). */
 export function updateLabel(version, capital = false) {
@@ -48,6 +49,7 @@ export function renderSystem() {
   let copyData = true;
   let busy = '';
   let destroyed = false;
+  const secure = secureAddressSection();
   let pollTimer = null;
   let polls = 0;
 
@@ -402,10 +404,10 @@ export function renderSystem() {
   }
 
   function draw() {
-    replace(root, boxCard(), restartCard(), updateCard(), wifiCard(), sshCard(), driveCard(), installCard(), resetCard());
+    replace(root, boxCard(), restartCard(), updateCard(), wifiCard(), secure.el, sshCard(), driveCard(), installCard(), resetCard());
   }
 
   replace(root, h('div', { class: 'checking' }, spinner()));
   load();
-  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'System')), bannerHost, root), destroy() { destroyed = true; clearTimeout(pollTimer); bannerHost.destroy(); } };
+  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'System')), bannerHost, root), destroy() { destroyed = true; secure.destroy(); clearTimeout(pollTimer); bannerHost.destroy(); } };
 }

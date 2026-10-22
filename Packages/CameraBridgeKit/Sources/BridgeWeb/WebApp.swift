@@ -177,13 +177,20 @@ public final class WebApp: Sendable {
     let eufy: EufyPlugin
     /// What the NVR routes remember between requests (`WebApp+NVR.swift`): admission counters, per-file playback information, folder checks.
     let archiveState = ArchiveWebState()
+    /// The secure address (`SecureAddress/`): the box's HTTPS name, its certificate and the redirect to it.
+    let secureAddress: SecureAddressService
 
     struct StreamCounts {
         var live = 0
         var events = 0
     }
 
-    public init(configuration: WebConfiguration, backend: any BridgeBackend, system: any SystemControlling, logs: LogFeed, auth: AuthStore? = nil) {
+    public convenience init(configuration: WebConfiguration, backend: any BridgeBackend, system: any SystemControlling, logs: LogFeed, auth: AuthStore? = nil) {
+        self.init(configuration: configuration, backend: backend, system: system, logs: logs, auth: auth, secureAddress: nil)
+    }
+
+    init(configuration: WebConfiguration, backend: any BridgeBackend, system: any SystemControlling, logs: LogFeed, auth: AuthStore?, secureAddress: SecureAddressService?) {
+        self.secureAddress = secureAddress ?? SecureAddressService(backend: backend, system: system, directory: configuration.dataDirectory)
         self.configuration = configuration
         self.backend = backend
         self.system = system
@@ -200,13 +207,16 @@ public final class WebApp: Sendable {
 
     func startEvents() {
         hub.start()
-        let wyze = wyze, eufy = eufy
+        let wyze = wyze, eufy = eufy, secureAddress = secureAddress
+        Task { await secureAddress.start() }
         Task { await wyze.start() }
         Task { await eufy.start() }
     }
 
     func stopEvents() {
         hub.stop()
+        let secureAddress = secureAddress
+        Task { await secureAddress.stop() }
     }
 
     // MARK: Stream slots
@@ -238,6 +248,7 @@ public final class WebApp: Sendable {
     // MARK: Handling
 
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
+        let request = SecureAddressRules.normalized(request)
         var response = await dispatch(request)
         Self.addSecurityHeaders(to: &response, isAPI: request.path.hasPrefix("/api/"))
         log.debug("\(request.method) \(request.path) -> \(response.status)")
@@ -245,7 +256,18 @@ public final class WebApp: Sendable {
     }
 
     private func dispatch(_ request: HTTPRequest) async -> HTTPResponse {
-        guard Self.hostAllowed(request, extra: configuration.allowedHosts) else {
+        let secure = secureAddress.snapshot.current
+        let hotspotOpen = secure.redirect && secure.certificateValid && system.setupHotspot() != nil
+        if let target = SecureAddressRules.redirectTarget(for: request, host: secure.host, enabled: secure.redirect, certificateValid: secure.certificateValid,
+                                                          hotspotOpen: hotspotOpen) {
+            var response = HTTPResponse.text("", status: 302)
+            response.headers["Location"] = target
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        }
+        // The box's own secure name is allowed besides the usual ones (and only that one, never a pattern).
+        let extraHosts = secure.host.map { configuration.allowedHosts + [$0] } ?? configuration.allowedHosts
+        guard Self.hostAllowed(request, extra: extraHosts) else {
             // While the setup hotspot is open every name points at the box: a phone that checks for a captive portal is sent to the setup page.
             if let hotspot = system.setupHotspot() { return Self.captiveRedirect(to: hotspot) }
             return .text("Unrecognised host name. Use the bridge’s IP address or its .local name.\n", status: 421)
@@ -282,7 +304,7 @@ public final class WebApp: Sendable {
         }
         let unsafe = !["GET", "HEAD"].contains(request.method)
         if unsafe {
-            guard Self.originAllowed(request, secure: configuration.secureCookies) else {
+            guard Self.originAllowed(request, secure: request.isSecure || configuration.secureCookies) else {
                 throw APIError(status: 403, code: "cross_origin", message: "This request came from another site, so it was refused.")
             }
             if !request.body.isEmpty {

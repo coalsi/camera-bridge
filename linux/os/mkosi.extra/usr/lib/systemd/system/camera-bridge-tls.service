@@ -1,0 +1,16 @@
+[Unit]
+Description=Publish the secure address's certificate status
+Documentation=https://github.com/coalsi/camera-bridge
+# Writes /run/camera-bridge/status/tls.json from /srv/system/tls (cb-tls refresh) before the daemon reads it, so a certificate that is in place
+# is not asked for again after every boot.
+After=srv.mount camera-bridge-datadirs.service camera-bridge-factory-reset.service
+Before=camerabridged.service
+ConditionPathExists=/usr/sbin/cb-tls
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/cb-tls refresh
+
+[Install]
+WantedBy=multi-user.target

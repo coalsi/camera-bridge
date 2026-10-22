@@ -47,6 +47,8 @@ final class FakeBackend: BridgeBackend {
         var afterUpdate: (@Sendable (inout State, CameraConfiguration) -> Void)?
         var statusOverrides: [UUID: CameraStatus] = [:]
         var calls: [String] = []
+        /// This machine's IPv4 addresses.
+        var localAddresses = ["192.0.2.10"]
         var passwords: [UUID: String] = [:]
         var probeCalls: [(vendor: CameraVendor?, host: String, username: String, password: String)] = []
         var sensorsBridge: SensorsBridgeStatus?
@@ -174,7 +176,7 @@ final class FakeBackend: BridgeBackend {
         return try read { $0.aiTry }.get()
     }
     func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer { read { $0.ports["\(host):\(port)"] ?? .silent } }
-    func localIPv4Addresses() async -> [String] { ["192.0.2.10"] }
+    func localIPv4Addresses() async -> [String] { read { $0.localAddresses } }
     func triggerTestMotion(cameraID: UUID) async { write { $0.calls.append("motion") } }
     func pause() async { write { $0.state = .paused } }
     func resume() async { write { $0.state = .running } }
@@ -248,8 +250,17 @@ final class FakeSystem: SystemControlling {
     /// The setup hotspot while the test says it is open.
     let hotspot = Box<SetupHotspot?>(nil)
     let mode: String
+    /// The certificate the TLS front has (nil: this system has no TLS front), and the hosts a certificate was asked for.
+    let certificate = Box<CertificateStatus?>(nil)
+    let obtained = Box<[String]>([])
 
     init(mode: String = "installed") { self.mode = mode }
+
+    func certificateStatus() async -> CertificateStatus? { certificate.value }
+
+    func obtainCertificate(name: String, host: String, privateKeyPEM: String) async throws {
+        obtained.update { $0.append(host) }
+    }
 
     func info() async -> SystemInfo {
         SystemInfo(product: "Camera Bridge OS", version: "0.1", build: "test", mode: mode, hostname: "camera-bridge", canUpdate: true, canReboot: true,

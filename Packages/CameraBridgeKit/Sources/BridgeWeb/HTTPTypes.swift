@@ -11,6 +11,8 @@ public struct HTTPRequest: Sendable {
     public var body: Data
     /// IP literal of the peer (no port).
     public var remoteAddress: String
+    /// The request came through the box's TLS front over HTTPS (`SecureAddressRules.normalized`); false for a plain request.
+    public var isSecure = false
 
     public init(method: String, target: String, version: String = "HTTP/1.1", headers: HTTPHeaders = HTTPHeaders(), body: Data = Data(),
                 remoteAddress: String = "127.0.0.1") {

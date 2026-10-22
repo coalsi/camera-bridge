@@ -23,7 +23,7 @@ export CB_TAG=cb-system
 REQUESTS=$CB_RUN/requests
 JOBS=$CB_RUN/jobs
 MAX_REQUEST_BYTES=65536
-ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget wifi-scan wifi-join wifi-forget guard-set"
+ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget wifi-scan wifi-join wifi-forget guard-set tls-obtain"
 # Jobs that change disks or the running system image take this lock; only one at a time.
 HEAVY_JOBS=" update-apply install-to-disk factory-reset drive-use drive-forget "
 
@@ -45,6 +45,7 @@ refresh_status() {
     local extra
     extra=$(system_status)
     cb_status system ok "system state" "$extra"
+    /usr/sbin/cb-tls refresh 2>/dev/null || true   # status/tls.json (the secure address's certificate)
 }
 
 # --- SSH --------------------------------------------------------------------------------------------------------------
@@ -111,6 +112,7 @@ cmd_auto_update() {
 wipe_settings() {
     cb_wipe_dir_contents "$CB_DATA" || true   # -xdev: a recording drive mounted below it is left alone
     rm -f "$CB_SYSTEM/first-boot-done" "$CB_SYSTEM/auto-update" "$SSH_DIR/enabled"
+    rm -rf "$CB_SYSTEM/tls"   # the secure address's certificate, key and account: the box registers anew
     rm -rf "$CB_SYSTEM/guard"   # the internet guard's list of watched cameras and what they asked for
     sync
 }
@@ -224,7 +226,7 @@ run_job() {
 }
 
 run_job_body() {
-    local name=$1 args=$2 tmp value device phrase
+    local name=$1 args=$2 tmp value device phrase rc
     case $name in
         ssh-enable)
             tmp=$(mktemp)
@@ -283,6 +285,16 @@ run_job_body() {
         wifi-forget) /usr/sbin/cb-wifi --forget "$(jq -r '.ssid // ""' "$args")" ;;
         # The internet guard's list of watched cameras; cb-guard checks every address (private ranges only, at most 64, level watch).
         guard-set) /usr/sbin/cb-guard set "$args" ;;
+        # The secure address's certificate (cb-tls). The box key arrives in the request (root-only folder), is used by cb-tls-hook to sign calls to
+        # the website, and is removed when the job ends.
+        tls-obtain)
+            tmp=$(mktemp "$JOBS/.tlskey.XXXXXX")
+            jq -r '.privateKey // empty' "$args" >"$tmp"
+            rc=0
+            /usr/sbin/cb-tls issue --name "$(jq -r '.name // ""' "$args")" --host "$(jq -r '.host // ""' "$args")" --key "$tmp" || rc=$?
+            rm -f "$tmp"
+            return "$rc"
+            ;;
         *) cb_die "unhandled job $name" ;;
     esac
 }

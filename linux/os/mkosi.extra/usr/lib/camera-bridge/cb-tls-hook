@@ -1,0 +1,80 @@
+#!/bin/bash
+# cb-tls-hook: lego's "exec" DNS provider in RAW mode (cb-tls). Sets or clears the TXT value of this box's _acme-challenge name through the
+# Camera Bridge website, signing the call with the box's Ed25519 key. Called as:
+#   cb-tls-hook present -- FQDN VALUE      POST /api/v1/box/acme   {"value": VALUE}
+#   cb-tls-hook cleanup -- FQDN VALUE      DELETE /api/v1/box/acme
+# Environment: CB_TLS_KEY (the key, PKCS#8 PEM), CB_TLS_NAME (the box name), CB_TLS_STATE (a root-only folder; the last timestamp and the
+# last error are kept there), CB_TLS_BASE (default https://www.camera-bridge.app/api/v1/box), CB_TLS_NOW (tests: epoch milliseconds).
+# Format (docs/superpowers/specs/2026-10-22-https-certificate-design.md and the website's API): headers X-CB-Name, X-CB-Timestamp (unix
+# milliseconds, strictly greater than the one before), X-CB-Signature (base64 Ed25519 over METHOD\nPATH\nTIMESTAMP\nSHA256hex(body)).
+# The key is never printed or logged.
+set -euo pipefail
+# (tests put their stand-ins for lego and curl in front with CB_TLS_TEST_PATH)
+export PATH=${CB_TLS_TEST_PATH:-/usr/sbin:/usr/bin:/sbin:/bin}
+export LC_ALL=C
+
+BASE=${CB_TLS_BASE:-https://www.camera-bridge.app/api/v1/box}
+STATE=${CB_TLS_STATE:?}
+KEY=${CB_TLS_KEY:?}
+NAME=${CB_TLS_NAME:?}
+
+say_error() { # say_error SENTENCE: for cb-tls to show; and the exit
+    printf '%s\n' "$1" >"$STATE/last-error"
+    printf 'cb-tls-hook: %s\n' "$1" >&2
+    exit 1
+}
+
+timestamp() { # strictly greater than the last one this hook sent
+    local now last=0 file=$STATE/last-timestamp
+    now=${CB_TLS_NOW:-$(date +%s%3N)}
+    [ ! -s "$file" ] || last=$(cat "$file")
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    [ "$now" -gt "$last" ] || now=$((last + 1))
+    printf '%s\n' "$now" >"$file"
+    printf '%s' "$now"
+}
+
+call() { # call METHOD ENDPOINT BODY
+    local method=$1 endpoint=$2 body=$3 path ts digest signature status response message
+    path=$(printf '%s' "$BASE" | sed -E 's#^https?://[^/]+##')/$endpoint
+    ts=$(timestamp)
+    digest=$(printf '%s' "$body" | openssl dgst -sha256 -hex | sed 's/^.* //')
+    # (Ed25519 signs a whole message from a file; openssl cannot take it from a pipe)
+    message=$(mktemp "$STATE/.message.XXXXXX")
+    printf '%s\n%s\n%s\n%s' "$method" "$path" "$ts" "$digest" >"$message"
+    signature=$(openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$message" 2>/dev/null | openssl base64 -A) || signature=""
+    rm -f "$message"
+    [ -n "$signature" ] || say_error "The box could not sign its request."
+    response=$(mktemp "$STATE/.hook.XXXXXX")
+    local args=(-sS --max-time 30 -o "$response" -w '%{http_code}' -X "$method" -H "X-CB-Name: $NAME" -H "X-CB-Timestamp: $ts" -H "X-CB-Signature: $signature")
+    [ -z "$body" ] || args+=(-H 'Content-Type: application/json' --data-binary "$body")
+    status=$(curl "${args[@]}" "$BASE/$endpoint" 2>/dev/null) || { rm -f "$response"; say_error "The Camera Bridge website can’t be reached."; }
+    if [ "${status:0:1}" != 2 ]; then
+        local said
+        said=$(jq -r '.error // empty' "$response" 2>/dev/null | head -c 160 | tr -d '\000-\010\013-\037' || true)
+        rm -f "$response"
+        case $status in
+            503) say_error "The secure address service isn’t ready yet." ;;
+            429) say_error "The secure address service has had too many requests from this box today." ;;
+            *)   say_error "The Camera Bridge website refused the request${said:+: $said}." ;;
+        esac
+    fi
+    rm -f "$response"
+}
+
+main() {
+    local action=${1:-} value
+    shift || true
+    if [ "${1:-}" = -- ]; then shift; fi   # then: FQDN VALUE
+    case $action in
+        present)
+            value=${2:?}
+            [[ "$value" =~ ^[A-Za-z0-9_-]{20,100}$ ]] || say_error "The challenge value is not one the website takes."
+            call POST acme "$(jq -cn --arg value "$value" '{value: $value}')"
+            ;;
+        cleanup) call DELETE acme "" ;;
+        *) printf 'usage: cb-tls-hook present|cleanup -- FQDN VALUE\n' >&2; exit 2 ;;
+    esac
+}
+
+main "$@"

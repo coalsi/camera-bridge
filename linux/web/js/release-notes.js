@@ -15,6 +15,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.115',
+    date: '2026-10-22',
+    title: 'A secure address with a lock, and cameras you can turn off',
+    items: [
+      'A secure address: your bridge gets its own https address (shown in Settings › System) with a real certificate, so browsers show a lock instead of “Not secure”. Open it once and install the app from there. The bridge renews the certificate by itself, and the plain camera-bridge.local address sends you there (a switch in the same card turns that off).',
+      'Only the bridge’s name and its home address go through camera-bridge.app to make this work; video and the pages never leave your network. If your router blocks names that point inside the home, the card says so and how to allow it.',
+      'A camera you turn off leaves the Monitor and stays in Apple Home with a “Camera off” picture, so rooms and automations keep working. Its recordings stay on the Events page.',
+    ],
+  },
+  {
     version: '0.1.114',
     date: '2026-10-22',
     title: 'An Events page, notifications that fade away, and faster playback',

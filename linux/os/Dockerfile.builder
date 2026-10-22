@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssh-client iproute2 procps \
     && rm -rf /var/lib/apt/lists/*
 # The image's DNS server for the internet guard (camera-bridge-dns.service): test-static.sh checks its unit and its configuration.
-RUN apt-get update && apt-get install -y --no-install-recommends dnsmasq-base \
+# (nginx, the TLS front of the secure address: nginx -t checks its configuration; the service is never started here.)
+RUN apt-get update && apt-get install -y --no-install-recommends dnsmasq-base nginx \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src

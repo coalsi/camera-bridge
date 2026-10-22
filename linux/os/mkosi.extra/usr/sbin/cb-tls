@@ -1,0 +1,163 @@
+#!/bin/bash
+# shellcheck disable=SC1112,SC2015
+# cb-tls: the secure address's certificate on Camera Bridge OS (docs/superpowers/specs/2026-10-22-https-certificate-design.md). Run as root.
+#
+#   cb-tls issue --name NAME --host HOST --key KEYFILE   (the tls-obtain job) get a certificate for HOST (NAME.box.camera-bridge.app) from
+#                                                       Let's Encrypt with lego and the DNS challenge, or renew it when 30 days or less are
+#                                                       left; install it for the TLS front (nginx) and restart that. KEYFILE is the box's
+#                                                       Ed25519 key (PKCS#8 PEM): cb-tls-hook signs the website's calls with it.
+#   cb-tls refresh                                       (boot, and after every system job) write status/tls.json from what is installed
+#   cb-tls status                                        print that status
+#
+# Files, all root-only (/srv/system/tls is 0700; nginx's master process, which is root, reads the certificate and key; no other process can):
+#   fullchain.pem, privkey.pem   what the TLS front serves        host    the name they are for        lego/   lego's account and copies
+# status/tls.json: {state: none | working | ready | failed, message, host, notAfter, updatedAt}; no secret is in it.
+# /etc/camera-bridge/tls.conf may set ACME_SERVER (the CA's directory URL; the default is Let's Encrypt) and ACME_EMAIL.
+set -euo pipefail
+# (tests put their stand-ins for lego and curl in front with CB_TLS_TEST_PATH)
+export PATH=${CB_TLS_TEST_PATH:-/usr/sbin:/usr/bin:/sbin:/bin}
+export CB_TAG=cb-tls
+export LC_ALL=C
+
+# Tests only (linux/os/test-tls.sh): CB_TLS_ROOT is a folder that stands in for /; systemd and nginx are left alone then.
+ROOT=${CB_TLS_ROOT:-}
+CB_LIB=/usr/lib/camera-bridge/lib.sh
+[ -z "$ROOT" ] || CB_LIB=$(dirname "${BASH_SOURCE[0]}")/../lib/camera-bridge/lib.sh
+# shellcheck source=../lib/camera-bridge/lib.sh
+. "$CB_LIB"
+CB_STATUS=$ROOT$CB_STATUS
+TLS=$ROOT$CB_SYSTEM/tls
+HOOK=${CB_TLS_HOOK:-/usr/lib/camera-bridge/cb-tls-hook}
+[ -z "$ROOT" ] || HOOK=${CB_TLS_HOOK:-$(dirname "${BASH_SOURCE[0]}")/../lib/camera-bridge/cb-tls-hook}
+ACME_SERVER=https://acme-v02.api.letsencrypt.org/directory
+ACME_EMAIL=certificates@camera-bridge.app
+CONF=$ROOT/etc/camera-bridge/tls.conf
+# shellcheck disable=SC1090
+[ ! -f "$CONF" ] || . "$CONF"
+RENEW_DAYS=30
+
+NAME_RE='^[a-z0-9]{4,16}$'
+
+installed_host() { [ -s "$TLS/host" ] && [ -s "$TLS/fullchain.pem" ] && [ -s "$TLS/privkey.pem" ] && cat "$TLS/host"; }
+
+not_after() { # not_after FILE: the end of the certificate as an ISO time, or nothing
+    local line
+    line=$(openssl x509 -noout -enddate -in "$1" 2>/dev/null) || return 1
+    date -u -d "${line#notAfter=}" +%Y-%m-%dT%H:%M:%SZ
+}
+
+write_status() { # write_status STATE MESSAGE
+    local host="" after=""
+    if host=$(installed_host); then after=$(not_after "$TLS/fullchain.pem" || true); else host=""; fi
+    cb_status tls "$1" "$2" "$(jq -n --arg host "$host" --arg after "$after" '{host: (if $host == "" then null else $host end), notAfter: (if $after == "" then null else $after end)}')"
+}
+
+cmd_refresh() {
+    local state="none" message="no certificate yet" prev=""
+    if installed_host >/dev/null; then state=ready; message="certificate installed"; fi
+    prev=$(jq -r '.state // ""' "$CB_STATUS/tls.json" 2>/dev/null || true)
+    if [ "$prev" = failed ] || [ "$prev" = working ]; then
+        state=$prev
+        message=$(jq -r '.message // ""' "$CB_STATUS/tls.json" 2>/dev/null || true)
+    fi
+    write_status "$state" "$message"
+}
+
+cmd_status() {
+    [ -f "$CB_STATUS/tls.json" ] || cmd_refresh
+    cat "$CB_STATUS/tls.json"
+}
+
+fail() { # fail MESSAGE: the plain sentence the page shows; the earlier certificate, if any, stays
+    write_status failed "$1"
+    cb_log "error: $1"
+    exit 1
+}
+
+why() { # why LEGO_LOG: a plain sentence for what went wrong
+    local hook_error=""
+    [ -s "$TLS/last-error" ] && hook_error=$(head -c 200 "$TLS/last-error" | tr -d '\000-\010\013-\037')
+    if [ -n "$hook_error" ]; then printf '%s' "$hook_error"; return; fi
+    if grep -Eqi 'no such host|dial tcp|i/o timeout|connection refused|network is unreachable|temporary failure' "$1"; then
+        printf 'The box could not reach the internet or Let’s Encrypt.'
+    elif grep -Eqi 'rateLimited|too many certificates' "$1"; then
+        printf 'Let’s Encrypt is limiting new certificates for now. The box tries again later.'
+    elif grep -Eqi 'propagat|timed out|NXDOMAIN|time limit exceeded' "$1"; then
+        printf 'The name could not be proven in time. The box tries again later.'
+    else
+        printf 'Getting the certificate failed. The box tries again later.'
+    fi
+}
+
+install_certificate() { # install_certificate HOST: copy lego's files to where the TLS front reads them
+    local host=$1 crt key
+    crt=$TLS/lego/certificates/$host.crt
+    key=$TLS/lego/certificates/$host.key
+    [ -s "$crt" ] && [ -s "$key" ] || fail "The certificate was not made."
+    openssl x509 -noout -checkend 0 -in "$crt" >/dev/null 2>&1 || fail "The certificate that came back has already expired."
+    openssl x509 -noout -ext subjectAltName -in "$crt" 2>/dev/null | grep -q "DNS:$host" || fail "The certificate that came back is for another name."
+    install -m 0600 "$crt" "$TLS/.fullchain.new"
+    install -m 0600 "$key" "$TLS/.privkey.new"
+    mv -f "$TLS/.privkey.new" "$TLS/privkey.pem"
+    mv -f "$TLS/.fullchain.new" "$TLS/fullchain.pem"
+    printf '%s\n' "$host" >"$TLS/.host.new"
+    chmod 0600 "$TLS/.host.new"
+    mv -f "$TLS/.host.new" "$TLS/host"
+}
+
+restart_front() {
+    [ -n "$ROOT" ] && return 0
+    # (the unit starts only when a certificate exists: ConditionPathExists in its drop-in)
+    systemctl restart nginx.service || cb_log "nginx did not start; the plain address keeps working"
+}
+
+cmd_issue() {
+    local name="" host="" keyfile=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --name) name=${2:?}; shift 2 ;;
+            --host) host=${2:?}; shift 2 ;;
+            --key) keyfile=${2:?}; shift 2 ;;
+            *) cb_die "unknown option: $1" ;;
+        esac
+    done
+    [[ "$name" =~ $NAME_RE ]] || cb_die "not a box name"
+    [ "$host" = "$name.box.camera-bridge.app" ] || cb_die "not this box's secure address"
+    [ -f "$keyfile" ] && head -n 1 "$keyfile" | grep -q '^-----BEGIN PRIVATE KEY-----$' || cb_die "no usable key"
+
+    install -d -m 0700 "$TLS" "$TLS/lego"
+    rm -f "$TLS/last-error"
+    write_status working "getting the certificate"
+    local log
+    log=$(mktemp "$TLS/.lego.XXXXXX")
+    # shellcheck disable=SC2064
+    trap "rm -f '$log'" EXIT
+    local common=(--accept-tos --email "$ACME_EMAIL" --server "$ACME_SERVER" --domains "$host" --dns exec --path "$TLS/lego" --key-type ec256)
+    local action=(run)
+    if [ -s "$TLS/lego/certificates/$host.crt" ]; then action=(renew --days "$RENEW_DAYS" --no-random-sleep); fi
+    # lego's exec provider calls the hook as: HOOK present -- FQDN VALUE (and cleanup). The hook signs the website calls with the box key.
+    if ! env EXEC_PATH="$HOOK" EXEC_MODE=RAW EXEC_PROPAGATION_TIMEOUT=240 EXEC_POLLING_INTERVAL=5 \
+            CB_TLS_KEY="$keyfile" CB_TLS_NAME="$name" CB_TLS_STATE="$TLS" \
+            lego "${common[@]}" "${action[@]}" >"$log" 2>&1; then
+        sed 's/^/lego: /' "$log" | tail -n 20 | while IFS= read -r line; do cb_log "$line"; done
+        fail "$(why "$log")"
+    fi
+    install_certificate "$host"
+    restart_front
+    write_status ready "certificate installed"
+    cb_log "certificate for $host installed"
+}
+
+main() {
+    local cmd=${1:-}
+    shift || true
+    case $cmd in
+        issue)   cmd_issue "$@" ;;
+        refresh) install -d -m 0700 "$TLS"; cmd_refresh ;;
+        status)  cmd_status ;;
+        ''|-h|--help|help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+        *) cb_die "unknown command: $cmd" ;;
+    esac
+}
+
+main "$@"

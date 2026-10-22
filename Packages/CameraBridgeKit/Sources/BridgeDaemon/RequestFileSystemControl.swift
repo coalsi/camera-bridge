@@ -22,6 +22,7 @@ import Darwin
 ///     status/install-candidates.json  {disks: [{name, path, model, sizeBytes, partitions, eligible, problems, phrase, ...}]}
 ///     status/install-to-disk.json   {state, step, device, message, updatedAt}
 ///     status/system.json            {version, sshEnabled, autoUpdate, bootEntry, updatedAt}
+///     status/tls.json               {state: none | working | ready | failed, message, host, notAfter, updatedAt}
 ///     status/guard.json             {available, running, timeZone, todayStart, cameras: [{address, level, since, today, last24h, names: [...], local}], updatedAt}
 ///
 /// Nothing here waits without a bound: a check for updates gives up after 60 seconds, a request nobody picks up within 15 seconds
@@ -51,12 +52,13 @@ public struct RequestFileSystemControl: SystemControlling {
         case wifiJoin = "wifi-join"
         case wifiForget = "wifi-forget"
         case guardSet = "guard-set"
+        case tlsObtain = "tls-obtain"
     }
 
     /// The files the system publishes.
     private enum StatusFile {
         case job(Request)
-        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, wifi, wifiNetworks, internetGuard
+        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, wifi, wifiNetworks, internetGuard, tls
 
         var name: String {
             switch self {
@@ -70,6 +72,7 @@ public struct RequestFileSystemControl: SystemControlling {
             case .wifi: "wifi.json"
             case .wifiNetworks: "wifi-networks.json"
             case .internetGuard: "guard.json"
+            case .tls: "tls.json"
             }
         }
     }
@@ -145,10 +148,14 @@ public struct RequestFileSystemControl: SystemControlling {
     private let timing: Timing
     private let now: @Sendable () -> Date
     private let fallback: UnavailableSystemControl
+    /// The image's TLS helper; where it is missing the system has no TLS front (an older image).
+    private let tlsHelper: String
     private let log = Log(category: "system")
 
     public init(requestDirectory: URL, statusDirectory: URL, product: String, version: String, build: String,
-                facts: HostFacts = .current(), timing: Timing = Timing(), now: @escaping @Sendable () -> Date = { Date() }) {
+                facts: HostFacts = .current(), timing: Timing = Timing(), now: @escaping @Sendable () -> Date = { Date() },
+                tlsHelper: String = "/usr/sbin/cb-tls") {
+        self.tlsHelper = tlsHelper
         self.requestDirectory = requestDirectory
         self.statusDirectory = statusDirectory
         self.product = product
@@ -617,6 +624,42 @@ public struct RequestFileSystemControl: SystemControlling {
         guard inet_ntop(AF_INET6, &v6, &buffer, socklen_t(buffer.count)) != nil else { return nil }
         return String(decoding: buffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self).lowercased()
     }
+
+    // MARK: The secure address
+
+    private struct TLSFile: Decodable {
+        var state: String?
+        var message: String?
+        var host: String?
+        var notAfter: String?
+    }
+
+    public func certificateStatus() async -> CertificateStatus? {
+        guard isAvailable, FileManager.default.fileExists(atPath: tlsHelper) else { return nil }
+        guard let file: TLSFile = read(.tls) else { return CertificateStatus(state: "none") }
+        let state = ["none", "working", "ready", "failed"].contains(file.state ?? "") ? file.state! : "none"
+        return CertificateStatus(state: state, message: file.message.map(Self.sentence), host: file.host, notAfter: JobFile.parse(file.notAfter))
+    }
+
+    public func obtainCertificate(name: String, host: String, privateKeyPEM: String) async throws {
+        try requireAvailable("The secure address is part of Camera Bridge OS.")
+        guard Self.isBoxName(name), Self.isBoxHost(host, name: name) else { throw SystemError("That isn’t a secure address this box can use.") }
+        guard privateKeyPEM.hasPrefix("-----BEGIN PRIVATE KEY-----\n"), privateKeyPEM.utf8.count < 400 else { throw SystemError("The box’s key isn’t usable.") }
+        struct Body: Encodable {
+            var name: String
+            var host: String
+            var privateKey: String
+        }
+        try submit(.tlsObtain, Body(name: name, host: host, privateKey: privateKeyPEM))
+        try await awaitPickup(.tlsObtain)
+    }
+
+    /// A box name as the website makes it (lowercase letters and digits, 4 to 16), and its host under `box.camera-bridge.app`.
+    static func isBoxName(_ name: String) -> Bool {
+        (4...16).contains(name.utf8.count) && name.utf8.allSatisfy { ($0 >= 0x61 && $0 <= 0x7A) || ($0 >= 0x30 && $0 <= 0x39) }
+    }
+
+    static func isBoxHost(_ host: String, name: String) -> Bool { host == "\(name).box.camera-bridge.app" }
 
     // MARK: Writing requests
 

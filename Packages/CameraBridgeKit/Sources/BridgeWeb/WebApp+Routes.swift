@@ -83,6 +83,10 @@ extension WebApp {
         Route("POST", "system/recording-drive", takesBody: true) { app, ctx in try await app.systemUseRecordingDrive(ctx) },
         Route("POST", "system/recording-drive/forget", takesBody: true) { app, ctx in try await app.systemForgetRecordingDrive(ctx) },
         Route("POST", "system/poweroff", takesBody: true) { app, ctx in try await app.systemPowerOff(ctx) },
+        Route("GET", "system/secure-address") { app, _ in .json(await app.secureAddress.report()) },
+        Route("POST", "system/secure-address/redirect", takesBody: true) { app, ctx in try await app.secureAddressRedirect(ctx) },
+        Route("POST", "system/secure-address/check", takesBody: true) { app, _ in .json(["rebind": await app.secureAddress.checkRebind()]) },
+        Route("POST", "system/secure-address/retry", takesBody: true) { app, _ in await app.secureAddress.retryNow(); return .json(await app.secureAddress.report()) },
         Route("POST", "system/ssh", takesBody: true) { app, ctx in try await app.systemSSH(ctx) },
         Route("POST", "system/auto-update", takesBody: true) { app, ctx in try await app.systemAutomaticUpdates(ctx) },
         Route("POST", "system/factory-reset", takesBody: true) { app, ctx in try await app.systemFactoryReset(ctx) },
@@ -229,7 +233,7 @@ extension WebApp {
             throw authError(failure)
         }
         log.notice("the administrator password was set")
-        return try await startSession(status: 201)
+        return try await startSession(status: 201, secure: ctx.request.isSecure)
     }
 
     func login(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -242,10 +246,10 @@ extension WebApp {
             throw authError(.wrongPassword)
         }
         await auth.recordLogin(address: address, success: true)
-        return try await startSession(status: 200)
+        return try await startSession(status: 200, secure: ctx.request.isSecure)
     }
 
-    private func startSession(status: Int) async throws -> HTTPResponse {
+    private func startSession(status: Int, secure: Bool) async throws -> HTTPResponse {
         let created: (token: String, session: AuthStore.Session)
         do {
             created = try await auth.createSession()
@@ -253,7 +257,7 @@ extension WebApp {
             throw authError(failure)
         }
         var response = HTTPResponse.json(SignedIn(csrfToken: created.session.csrfToken, bridgeName: await auth.bridgeName), status: status)
-        response.headers.add("Set-Cookie", sessionCookie(token: created.token, secure: false))
+        response.headers.add("Set-Cookie", sessionCookie(token: created.token, secure: secure))
         return response
     }
 

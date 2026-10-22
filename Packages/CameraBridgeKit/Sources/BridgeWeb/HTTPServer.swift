@@ -188,7 +188,10 @@ public actor HTTPServer {
         }
         let address = connection.remoteAddress
         // Per peer: close this peer's oldest idle connection to admit the newcomer, else refuse the newcomer.
-        while slots.values.filter({ $0.connection.remoteAddress == address }).count >= limits.maxConnectionsPerAddress {
+        // The TLS front (nginx, on this box) connects from loopback for every https client and caps each client itself
+        // (`limit_conn`), so loopback is held only by `maxConnections`.
+        while !SecureAddressRules.isLoopback(address),
+              slots.values.filter({ $0.connection.remoteAddress == address }).count >= limits.maxConnectionsPerAddress {
             guard evictOldest(where: { $0.connection.remoteAddress == address }) else {
                 log.debug("web connection from \(address) refused: it already has \(limits.maxConnectionsPerAddress) busy connections")
                 connection.close()
