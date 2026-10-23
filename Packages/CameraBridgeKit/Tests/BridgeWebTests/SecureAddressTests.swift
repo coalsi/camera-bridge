@@ -194,9 +194,35 @@ final class FakeBoxServer: BoxTransport {
         #expect(report.state == "error" && report.problem?.code == "service_not_ready" && report.problem?.message.contains("isn’t ready yet") == true)
         rig.server.registerAnswer.set((201, #"{"name":"k7f2q9","host":"k7f2q9.box.camera-bridge.app"}"#))
         rig.server.unreachable.set(true)
+        rig.clock.update { $0 = $0.addingTimeInterval(601) }   // past the first wait after a failure
         await rig.service.tick()
         report = await rig.service.report()
         #expect(report.problem?.code == "no_internet")
+    }
+
+    @Test func aFailingWebsiteIsLeftAloneLongerEachTimeAndTooManyRequestsWaitsForTheNextDay() async throws {
+        let rig = try rig()
+        defer { rig.directory.remove() }
+        rig.system.certificate.set(CertificateStatus(state: "none"))
+        rig.server.answer.set((500, #"{"error":"Something went wrong on the server."}"#))
+        await rig.service.tick()   // registers, then the address fails
+        let afterFirst = rig.server.seen.value.count
+        #expect(rig.server.seen.value.last?.path.hasSuffix("/address") == true, "the address was asked and failed")
+        for _ in 0..<5 {   // a minute apart, as the service runs: nothing is asked while it waits
+            rig.clock.update { $0 = $0.addingTimeInterval(60) }
+            await rig.service.tick()
+        }
+        #expect(rig.server.seen.value.count == afterFirst, "no call during the 10-minute wait")
+        rig.clock.update { $0 = $0.addingTimeInterval(301) }
+        await rig.service.tick()
+        #expect(rig.server.seen.value.count > afterFirst, "asked again after the wait")
+
+        // Too many requests: left alone until the website's next day (UTC), at least an hour.
+        let noon = Self.now   // 2026-10-17 08:00 UTC
+        #expect(SecureAddressRules.websiteWait(after: .rateLimited, failures: 1, now: noon) == Date(timeIntervalSince1970: 1_792_281_900))
+        let lateNight = Date(timeIntervalSince1970: 1_792_281_000)   // 23:50 UTC
+        #expect(SecureAddressRules.websiteWait(after: .rateLimited, failures: 1, now: lateNight) == lateNight.addingTimeInterval(3600))
+        #expect(SecureAddressRules.websiteWait(after: .refused, failures: 2, now: noon) == noon.addingTimeInterval(1800))
     }
 
     @Test func theRedirectSwitchIsKept() async throws {

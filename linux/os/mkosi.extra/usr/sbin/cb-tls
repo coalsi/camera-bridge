@@ -135,8 +135,8 @@ cmd_issue() {
     local common=(--accept-tos --email "$ACME_EMAIL" --server "$ACME_SERVER" --domains "$host" --dns exec --path "$TLS/lego" --key-type ec256)
     local action=(run)
     if [ -s "$TLS/lego/certificates/$host.crt" ]; then action=(renew --days "$RENEW_DAYS" --no-random-sleep); fi
-    # lego's exec provider calls the hook as: HOOK present -- FQDN VALUE (and cleanup). The hook signs the website calls with the box key.
-    if ! env EXEC_PATH="$HOOK" EXEC_MODE=RAW EXEC_PROPAGATION_TIMEOUT=240 EXEC_POLLING_INTERVAL=5 \
+    # lego's exec provider (default mode, not RAW: RAW passes the token and key authorization, not the TXT value) calls the hook as: HOOK present FQDN VALUE (and cleanup). The hook signs the website calls with the box key.
+    if ! env EXEC_PATH="$HOOK" EXEC_PROPAGATION_TIMEOUT=240 EXEC_POLLING_INTERVAL=5 \
             CB_TLS_KEY="$keyfile" CB_TLS_NAME="$name" CB_TLS_STATE="$TLS" \
             lego "${common[@]}" "${action[@]}" >"$log" 2>&1; then
         sed 's/^/lego: /' "$log" | tail -n 20 | while IFS= read -r line; do cb_log "$line"; done

@@ -15,6 +15,15 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.116',
+    date: '2026-10-23',
+    title: 'The secure address gets its certificate reliably',
+    items: [
+      'The secure address now gets its certificate on the first try: the box hands the website the right value to prove the name.',
+      'When the Camera Bridge website has trouble, the box waits longer between tries (10 minutes, then up to 6 hours) instead of asking every minute, and after “too many requests” it waits until the next day.',
+    ],
+  },
+  {
     version: '0.1.115',
     date: '2026-10-22',
     title: 'A secure address with a lock, and cameras you can turn off',

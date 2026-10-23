@@ -103,6 +103,7 @@ actor SecureAddressService {
         available = status != nil
         guard let status else { return refreshSnapshot() }
         problem = nil
+        if let wait = state.websiteWaitUntil, wait > now() { return refreshSnapshot() }   // left alone after the website failed
         do {
             if state.name == nil { try await register() }
             guard let name = state.name, let host = state.host else { return refreshSnapshot() }
@@ -111,8 +112,14 @@ actor SecureAddressService {
                 problem = Problem(code: "certificate", message: "The certificate could not be obtained: \(message)")
             }
             try await requestCertificateIfDue(status, name: name, host: host)
+            state.websiteFailures = nil
+            state.websiteWaitUntil = nil
         } catch let error as BoxClientError {
             problem = Self.problem(for: error)
+            // Every failed answer (a server error reads as `refused`) waits: never once a minute.
+            let failures = (state.websiteFailures ?? 0) + 1
+            state.websiteFailures = failures
+            state.websiteWaitUntil = SecureAddressRules.websiteWait(after: error.kind, failures: failures, now: now())
             log.warning("secure address: \(error.message)")
         } catch {
             problem = Problem(code: "refused", message: "The secure address could not be set up. The box will try again.")
@@ -193,6 +200,7 @@ actor SecureAddressService {
     /// Forget the waits and try now (the page's "Try again").
     func retryNow() async {
         state.nextAttempt = nil
+        state.websiteWaitUntil = nil
         await tick()
     }
 

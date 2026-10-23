@@ -11,6 +11,18 @@ enum SecureAddressRules {
         return steps[min(max(attempts - 1, 0), steps.count - 1)]
     }
 
+    /// How long to leave the website alone after it failed: "too many requests" waits for the website's next day (UTC midnight, at least
+    /// an hour); anything else grows like `retryDelay` (10 min to 6 h), so a broken website is not asked every minute.
+    static func websiteWait(after kind: BoxClientError.Kind, failures: Int, now: Date) -> Date {
+        if kind == .rateLimited {
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = TimeZone(identifier: "UTC")!
+            let midnight = utc.nextDate(after: now, matching: DateComponents(hour: 0, minute: 5), matchingPolicy: .nextTime) ?? now.addingTimeInterval(86_400)
+            return max(midnight, now.addingTimeInterval(3600))
+        }
+        return now.addingTimeInterval(retryDelay(attempts: failures))
+    }
+
     /// Whether a certificate must be asked for now.
     static func needsCertificate(_ status: CertificateStatus, host: String, now: Date) -> Bool {
         guard status.state != "working" else { return false }

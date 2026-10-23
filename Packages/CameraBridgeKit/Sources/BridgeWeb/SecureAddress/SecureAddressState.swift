@@ -15,6 +15,10 @@ struct SecureAddressState: Codable, Equatable, Sendable {
     /// Certificate tries since the last success, and when the next may be asked for.
     var attempts: Int = 0
     var nextAttempt: Date?
+    /// The website's failures in a row (no answer, not ready, a server error, too many requests) and when to ask it again: optional, so a
+    /// state file from before them still reads.
+    var websiteFailures: Int?
+    var websiteWaitUntil: Date?
 
     static let fileName = "secure-address.json"
 

@@ -59,7 +59,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 if [ -n "${FAKE_LEGO_FAIL:-}" ]; then echo "$FAKE_LEGO_FAIL" >&2; exit 1; fi
-"$EXEC_PATH" present -- "_acme-challenge.$domain." "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG" || exit 1
+"$EXEC_PATH" present "_acme-challenge.$domain." "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG" || exit 1
 mkdir -p "$path/certificates"
 [ -n "${FAKE_LEGO_KEEP:-}" ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$path/certificates/$domain.key" \
     -out "$path/certificates/$domain.crt" -days "${FAKE_LEGO_DAYS:-89}" -subj "/CN=$domain" -addext "subjectAltName=DNS:$domain" 2>/dev/null
@@ -124,8 +124,8 @@ tls issue --name "$NAME" --host "$HOST" --key "$KEY" >/dev/null 2>&1 && pass "is
 expect "status: ready, for the host, with an end date" "$(tstatus '[.state, .host, (.notAfter | test("^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))]')" "[\"ready\",\"$HOST\",true]"
 expect "the files for the TLS front are installed" "$(ls "$root/srv/system/tls" | grep -E '^(fullchain.pem|privkey.pem|host)$' | tr '\n' ' ')" "fullchain.pem host privkey.pem "
 expect "key and certificate are root-only (0600), the folder 0700" "$(stat -c %a "$root/srv/system/tls/privkey.pem" "$root/srv/system/tls/fullchain.pem" "$root/srv/system/tls" | tr '\n' ' ')" "600 600 700 "
-expect "lego asked for the DNS challenge through exec, in RAW mode, for this host only" \
-    "$(grep -c -- "--dns exec" "$STUB_LOG/lego.args") $(grep -c -- "--domains $HOST " "$STUB_LOG/lego.args") $(head -1 "$STUB_LOG/lego.env") $(grep -c -- ' run' "$STUB_LOG/lego.args")" "1 1 EXEC_MODE=RAW 1"
+expect "lego asked for the DNS challenge through exec, in its default mode (the hook gets the TXT value), for this host only" \
+    "$(grep -c -- "--dns exec" "$STUB_LOG/lego.args") $(grep -c -- "--domains $HOST " "$STUB_LOG/lego.args") $(head -1 "$STUB_LOG/lego.env") $(grep -c -- ' run' "$STUB_LOG/lego.args")" "1 1 EXEC_MODE= 1"
 expect "lego used the Let's Encrypt directory" "$(grep -c 'acme-v02.api.letsencrypt.org/directory' "$STUB_LOG/lego.args")" 1
 expect "the website was told to set and clear the challenge, both signed" "$(for m in "$STUB_LOG"/*.method; do cat "$m"; printf ' '; done)" "POST DELETE "
 expect "lego's log is not left behind" "$(ls -A "$root/srv/system/tls" | grep -c '^\.lego' || true)" 0
