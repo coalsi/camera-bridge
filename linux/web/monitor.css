@@ -349,3 +349,8 @@ div.ev-row { cursor: default; }
   .ev-thumb { width: 96px; }
   .ev-label { width: 100%; }
 }
+
+/* Moving tiles: drag one onto another's place (nvr-reorder.js). The tile being moved fades; the place it would take shows a ring and a bar. */
+.monitor .nvr-grid:not([data-solo="true"]) .nvr-tile { -webkit-touch-callout: none; }
+.monitor .nvr-tile[data-reorder="dragging"] { opacity: 0.45; cursor: grabbing; user-select: none; }
+.monitor .nvr-tile[data-reorder="drop"] { border-color: var(--mon-accent, #e0483e); box-shadow: 0 0 0 3px var(--mon-accent, #e0483e); }

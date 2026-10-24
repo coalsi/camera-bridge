@@ -3,9 +3,11 @@
 // It opens on snapshots: no MediaSource, decoder or byte fetch exists until the first scrub, Play or tile open. The rules are in
 // nvr-model.js (pure) and nvr-controller.js (no DOM); this file builds the session, the cells and the DOM, and draws what the controller says.
 import { get, getBytes } from '../api.js';
-import { h, replace, svg } from '../dom.js';
+import { h, replace, svg, toast } from '../dom.js';
 import { icon } from '../icons.js';
-import { cameraList, store, subscribe } from '../store.js';
+import { cameraList, saveCameraOrder, store, subscribe } from '../store.js';
+import { placeAt } from '../camera-order.js';
+import { attachReorder } from './nvr-reorder.js';
 import { stampText } from '../stamp.js';
 import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
 import { createZoom } from '../live/zoom.js';
@@ -31,7 +33,7 @@ import {
   loadPicture, parseEpochMs, sameLocalDay,
 } from './nvr-model.js';
 import {
-  MOSAIC_MAX_TILES, MOSAIC_MIN_WIDTHS, WALL_GAP, layoutMosaicPage, packMosaic, packingBox, pictureAspect, pictureFit, readWallPrefs, wallCells, writeWallPref,
+  MOSAIC_ACROSS, MOSAIC_MAX_TILES, WALL_GAP, layoutMosaicPage, packMosaic, packingBox, pictureAspect, pictureFit, readWallPrefs, wallCells, writeWallPref,
 } from './nvr-layout.js';
 import { createGridController } from './nvr-controller.js';
 import { createClip } from '../nvr/clip.js';
@@ -93,7 +95,7 @@ export function renderNVR({ params, navigate, setTitle }) {
   // The mosaic's pages hold as many cameras as fit (up to 16): the session is made for 16, and the controller asks the mosaic for the pages.
   const perPage = mosaic ? MOSAIC_MAX_TILES : prefs.tiles;
   let fit = prefs.fit;
-  let minWidth = prefs.minWidth;
+  let across = prefs.across;
   const playable = typeof window.MediaSource !== 'undefined' || typeof window.ManagedMediaSource !== 'undefined';
   const memory = remembered;
   remembered = { ...memory, opened: null };
@@ -375,7 +377,7 @@ export function renderNVR({ params, navigate, setTitle }) {
 
   function mosaicKey(cameras) {
     if (!packBox) return 'unmeasured';
-    return `${packBox.width}x${packBox.height}@${minWidth}:${cameras.map((camera) => `${camera.id}=${aspectOf(camera).toFixed(3)}`).join(',')}`;
+    return `${packBox.width}x${packBox.height}@${across}:${cameras.map((camera) => `${camera.id}=${aspectOf(camera).toFixed(3)}`).join(',')}`;
   }
 
   /** The controller's paginate: the mosaic's page lengths for the whole camera list, or null (a grid, or a wall not measured yet). */
@@ -386,7 +388,7 @@ export function renderNVR({ params, navigate, setTitle }) {
     if (!packBox) return null;
     if (packed.key !== key) {
       packed.key = key;
-      packed.lengths = packMosaic(cameras.map(aspectOf), { ...packBox, gap: WALL_GAP, minWidth })?.pages.map((page) => page.count) ?? null;
+      packed.lengths = packMosaic(cameras.map(aspectOf), { ...packBox, gap: WALL_GAP, across })?.pages.map((page) => page.count) ?? null;
     }
     return packed.lengths;
   }
@@ -395,10 +397,10 @@ export function renderNVR({ params, navigate, setTitle }) {
   function mosaicLayout(tiles) {
     const byId = new Map(cameraList().map((camera) => [camera.id, camera]));
     const aspects = tiles.map((tile) => (byId.has(tile.id) ? aspectOf(byId.get(tile.id)) : null));
-    const key = `${wallBox.width}x${wallBox.height}@${minWidth}:${aspects.map((a) => a?.toFixed(3)).join(',')}`;
+    const key = `${wallBox.width}x${wallBox.height}@${across}:${aspects.map((a) => a?.toFixed(3)).join(',')}`;
     if (pageLayout.key !== key) {
       pageLayout.key = key;
-      pageLayout.layout = layoutMosaicPage(aspects, { ...wallBox, gap: WALL_GAP, minWidth });
+      pageLayout.layout = layoutMosaicPage(aspects, { ...wallBox, gap: WALL_GAP, across });
     }
     return pageLayout.layout;
   }
@@ -537,11 +539,11 @@ export function renderNVR({ params, navigate, setTitle }) {
   } },
   sizes.map((size) => h('option', { value: String(size), selected: !mosaic && size === prefs.tiles }, GRID_LABELS[size] ?? `${size} cameras`)),
   h('option', { value: 'mosaic', selected: mosaic }, 'Mosaic'));
-  // The mosaic: no tile narrower than this. The cameras that do not fit go on the next page.
-  const minWidthSelect = h('select', { class: 'mon-min-width', 'aria-label': 'Smallest tile width', onchange: (event) => {
-    minWidth = writeWallPref(writeStored, 'minWidth', event.target.value) ?? minWidth;
+  // The mosaic: how many cameras go across. The cameras that do not fit go on the next page.
+  const acrossSelect = h('select', { class: 'mon-min-width', 'aria-label': 'Cameras across the mosaic', onchange: (event) => {
+    across = writeWallPref(writeStored, 'across', event.target.value) ?? across;
     render();
-  } }, MOSAIC_MIN_WIDTHS.map((width) => h('option', { value: String(width), selected: width === minWidth }, `Min ${width} px`)));
+  } }, MOSAIC_ACROSS.map((count) => h('option', { value: String(count), selected: count === across }, `Mosaic: ${count} across`)));
   // A grid's pictures: whole, with black bars where the shapes differ (Fit), or filling the tile, the edges cut (Fill).
   const fitSelect = h('select', { class: 'mon-fit', 'aria-label': 'Picture in each tile', onchange: (event) => {
     fit = writeWallPref(writeStored, 'fit', event.target.value) ?? fit;
@@ -838,6 +840,7 @@ export function renderNVR({ params, navigate, setTitle }) {
   // MARK: The page
 
   const grid = h('div', { class: 'nvr-grid', dataset: { count: String(perPage) } });
+  const orderNote = h('div', { class: 'sr-only', role: 'status', 'aria-live': 'polite' });   // says where a camera moved to
   const emptyHost = h('div', { class: 'mon-none', hidden: true },
     h('p', null, 'No cameras yet.'), h('a', { class: 'btn primary', href: '#/add' }, icon('plus'), 'Add a camera'));
   const bannerHost = banners();
@@ -847,8 +850,8 @@ export function renderNVR({ params, navigate, setTitle }) {
   const el = h('section', { class: 'monitor nvr-page', 'aria-label': 'Monitor' },
     h('div', { class: 'mon-head' },
       h('h1', null, 'Monitor'), allButton, cameraLink, bigClock,
-      h('div', { class: 'mon-actions' }, liveOn ? qualitySelect : null, sizeSelect, mosaic ? minWidthSelect : fitSelect, events.soundButton, fullButton)),
-    events.banners, bannerHost, notice, grid, emptyHost,
+      h('div', { class: 'mon-actions' }, liveOn ? qualitySelect : null, sizeSelect, mosaic ? acrossSelect : fitSelect, events.soundButton, fullButton)),
+    events.banners, bannerHost, notice, grid, orderNote, emptyHost,
     replace(bottom,
       h('div', { class: 'mon-timeline nvr-controls' },
         h('div', { class: 'nvr-transport' }, playButton, liveButton, readout, speedGroup, clip.button,
@@ -890,7 +893,7 @@ export function renderNVR({ params, navigate, setTitle }) {
 
   controller = createGridController({
     session, catalog, listCameras: wallCameras,
-    subscribeCameras: (fn) => subscribe((kind) => { if (kind === 'camera' || kind === 'removed') fn(); }),
+    subscribeCameras: (fn) => subscribe((kind) => { if (kind === 'camera' || kind === 'removed' || kind === 'order') fn(); }),
     perPage, initialMs, initialPage: queryCamera ? 0 : memory.page, initialFocus: queryCamera ?? memory.focusId, playable, paginate: mosaicPages,
     navigate, replaceHash: (path) => { try { history.replaceState(history.state, '', `#${path}`); } catch { /* the address stays as it is */ } },
     remember: (state) => { remembered = { ...remembered, ...state }; },
@@ -909,6 +912,8 @@ export function renderNVR({ params, navigate, setTitle }) {
     if (!typing && clip.key(event)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
     if (!typing && event.key === 'Escape' && zoom?.zoomed()) { event.preventDefault(); zoom.reset(); return; }
     if (!typing && event.key === 'Escape' && soloId !== null && !document.fullscreenElement) { event.preventDefault(); setSolo(null); return; }
+    // Alt + an arrow key on a focused tile moves the tile (attachReorder), not the timeline a minute.
+    if (event.altKey && event.key.startsWith('Arrow') && target?.closest('.nvr-tile') && canReorder()) return;
     const action = keyAction(event, { typing, activatable });
     if (!action || !controller.canAct()) return;
     event.preventDefault();
@@ -919,6 +924,38 @@ export function renderNVR({ params, navigate, setTitle }) {
   function onVisibility() {
     if (document.hidden) { snapshots.pause(); controller.suspend(); } else { snapshots.resume(); controller.resume(); }
   }
+
+  // Moving the tiles: drag one onto another's place, or Alt + arrow on a focused tile. The whole new order is saved with one PATCH.
+  function moveCamera(id, targetId) {
+    const ids = cameraList().map((camera) => camera.id);
+    const next = placeAt(ids, id, targetId);
+    if (next === ids) return;
+    saveCameraOrder(next, { onError: (error) => toast(`The camera order was not saved. ${error.message}`, 'error') });
+    setTimeout(() => { if (!destroyed && (!document.activeElement || document.activeElement === document.body)) tileParts.get(id)?.link.focus(); }, 60);
+  }
+  function canReorder() { return soloId === null && !clip.choosing() && wallCameras().length > 1; }
+  const stopReorder = attachReorder(grid, {
+    tileId: (node) => node?.closest?.('.nvr-tile')?.dataset.id ?? null,
+    targetAt: (x, y) => document.elementFromPoint(x, y)?.closest?.('.nvr-tile')?.dataset.id ?? null,
+    mark: (id, kind) => { const parts = tileParts.get(id); if (parts) setData(parts.el, 'reorder', kind ?? ''); },
+    enabled: canReorder,
+    commit: (id, targetId) => {
+      const shown = wallCameras();
+      orderNote.textContent = `${nameOf(id)} moved to position ${shown.findIndex((camera) => camera.id === targetId) + 1} of ${shown.length}`;
+      moveCamera(id, targetId);
+    },
+    step: (id, delta) => {
+      const shown = wallCameras();
+      const at = shown.findIndex((camera) => camera.id === id);
+      const to = at + delta;
+      if (at < 0) return null;
+      if (to < 0 || to >= shown.length) return `${nameOf(id)} is already ${delta < 0 ? 'first' : 'last'}`;
+      moveCamera(id, shown[to].id);
+      return `${nameOf(id)} moved to position ${to + 1} of ${shown.length}`;
+    },
+    announce: (text) => { orderNote.textContent = text; },
+  });
+  const nameOf = (id) => cameraList().find((camera) => camera.id === id)?.name ?? 'Camera';
 
   document.addEventListener('keydown', onKeyDown, true);
   document.addEventListener('visibilitychange', onVisibility);
@@ -940,6 +977,7 @@ export function renderNVR({ params, navigate, setTitle }) {
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      stopReorder();
       document.removeEventListener('keydown', onKeyDown, true);
       document.removeEventListener('visibilitychange', onVisibility);
       document.removeEventListener('fullscreenchange', showFullScreen);

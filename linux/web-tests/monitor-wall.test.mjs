@@ -4,8 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  DEFAULT_ASPECT, DEFAULT_MOSAIC_MIN_WIDTH, MOSAIC_MAX_TILES, MOSAIC_MIN_WIDTHS, PACK_SLACK, WALL_GAP, WALL_KEYS,
-  gridShape, layoutMosaicPage, packMosaic, packingBox, pictureAspect, pictureFit, readWallPrefs, wallCells, writeWallPref,
+  DEFAULT_ASPECT, DEFAULT_MOSAIC_ACROSS, MOSAIC_ACROSS, MOSAIC_MAX_TILES, PACK_SLACK, WALL_GAP, WALL_KEYS,
+  acrossFromMinWidth, gridShape, layoutMosaicPage, packMosaic, packingBox, pictureAspect, pictureFit, readWallPrefs, wallCells, writeWallPref,
 } from '../web/js/screens/nvr-layout.js';
 import { PAGE_SIZES } from '../web/js/screens/nvr-model.js';
 import { installFakeBrowser, makeStorage } from './support/fake-browser.mjs';
@@ -92,14 +92,15 @@ function checkPage(tiles, aspects, box, gap = 8) {
   for (const row of rows) assert.equal(new Set(row.map((tile) => tile.height)).size, 1, 'a row is one height');
   const widths = rows.map((row) => row.reduce((sum, tile) => sum + tile.width, 0) + (row.length - 1) * gap);
   const used = rows.reduce((sum, row) => sum + row[0].height, 0) + (rows.length - 1) * gap;
-  const acrossFull = rows.every((row, r) => widths[r] >= box.width - row.length - 1);
+  // A last row with fewer cameras than the one above is no taller than it and is not stretched to the width.
+  const acrossFull = rows.every((row, r) => (r === rows.length - 1 && r > 0 && row.length < rows[0].length) || widths[r] >= box.width - row.length - 1);
   const downFull = used >= box.height - rows.length - 1;
   assert.ok(acrossFull || downFull, `the tiles fill the width (${widths.join(', ')} of ${box.width}) or the height (${used} of ${box.height})`);
 }
 
 test('four wide cameras on a wide wall are two rows of two that fill it', () => {
   const box = { width: 1608, height: 908 };
-  const layout = layoutMosaicPage([WIDE, WIDE, WIDE, WIDE], { ...box, gap: 8, minWidth: 320 });
+  const layout = layoutMosaicPage([WIDE, WIDE, WIDE, WIDE], { ...box, gap: 8, across: 2 });
   assert.equal(layout.fits, true);
   checkPage(layout.tiles, [WIDE, WIDE, WIDE, WIDE], box);
   assert.deepEqual(layout.tiles.map((tile) => [tile.left, tile.top]), [[0, 0], [808, 0], [0, 458], [808, 458]]);
@@ -107,76 +108,97 @@ test('four wide cameras on a wide wall are two rows of two that fill it', () => 
 });
 
 test('one camera fills as much of the wall as its shape allows, centred', () => {
-  const layout = layoutMosaicPage([4 / 3], { width: 1600, height: 900, gap: 8, minWidth: 640 });
+  const layout = layoutMosaicPage([4 / 3], { width: 1600, height: 900, gap: 8, across: 3 });
   assert.equal(layout.tiles.length, 1);
   assert.deepEqual(layout.tiles[0], { index: 0, left: 200, top: 0, width: 1200, height: 900 });
-  assert.equal(layoutMosaicPage([], { width: 1600, height: 900, gap: 8, minWidth: 320 }).tiles.length, 0);
+  assert.equal(layoutMosaicPage([], { width: 1600, height: 900, gap: 8, across: 3 }).tiles.length, 0);
 });
 
-test('rows are justified: on a tall wall every row of a mixed page fills the width', () => {
+test('rows are justified: on a tall wall every full row of a mixed page fills the width', () => {
   const aspects = [WIDE, 4 / 3, 0.75, WIDE, 2, WIDE, 4 / 3];
   const box = { width: 1400, height: 1400 };
-  const layout = layoutMosaicPage(aspects, { ...box, gap: WALL_GAP, minWidth: 240 });
+  const layout = layoutMosaicPage(aspects, { ...box, gap: WALL_GAP, across: 3 });
   assert.equal(layout.fits, true);
   checkPage(layout.tiles, aspects, box, WALL_GAP);
   const rows = rowsOf(layout.tiles);
   assert.ok(rows.length > 1, 'more than one row');
-  for (const row of rows) {
+  for (const row of rows.slice(0, -1)) {
     const used = row.reduce((sum, tile) => sum + tile.width, 0) + (row.length - 1) * WALL_GAP;
     assert.ok(used >= box.width - row.length - 1, `the row is ${used} px of ${box.width}`);
   }
   assert.deepEqual(layout.tiles.map((tile) => tile.index), [0, 1, 2, 3, 4, 5, 6], 'in list order');
 });
 
-test('the mosaic never puts a tile under the chosen width: what does not fit goes on the next page', () => {
+test('the mosaic puts the chosen number of cameras across; only the last row may hold fewer', () => {
   const nine = Array(9).fill(WIDE);
-  const box = { width: 1208, height: 700 };
-  const big = packMosaic(nine, { ...box, gap: 8, minWidth: 480 });
-  assert.deepEqual(big.pages.map((page) => [page.start, page.count]), [[0, 4], [4, 4], [8, 1]]);
-  for (const page of big.pages) {
-    checkPage(page.layout.tiles, nine.slice(page.start, page.start + page.count), box);
-    for (const tile of page.layout.tiles) assert.ok(tile.width >= 480, `${tile.width} px`);
-    assert.equal(page.layout.fits, true);
+  const box = { width: 1208, height: 2000 };
+  for (const across of MOSAIC_ACROSS) {
+    const packed = packMosaic(nine, { ...box, gap: 8, across });
+    assert.deepEqual(packed.pages.map((page) => page.count), [9], `${across} across: one tall page`);
+    const rows = rowsOf(packed.pages[0].layout.tiles);
+    assert.deepEqual(rows.map((row) => row.length), Array.from({ length: Math.ceil(9 / across) }, (_, r) => Math.min(across, 9 - r * across)));
+    checkPage(packed.pages[0].layout.tiles, nine, box);
   }
-  const small = packMosaic(nine, { ...box, gap: 8, minWidth: 240 });
-  assert.deepEqual(small.pages.map((page) => page.count), [9], 'three rows of three fit at 240 px');
-  checkPage(small.pages[0].layout.tiles, nine, box);
-  assert.ok(small.pages[0].layout.tiles.every((tile) => tile.width >= 390), 'as large as they can be');
+  const rows = rowsOf(packMosaic(nine, { ...box, gap: 8, across: 4 }).pages[0].layout.tiles);
+  assert.ok(rows[2][0].height <= rows[1][0].height, 'the short last row is no taller than the row above');
+  assert.ok(rows[0][0].width > rows[0][0].height, 'tiles keep their own shape');
+});
+
+test('a page ends on a full row and what does not fit goes on the next page', () => {
+  const nine = Array(9).fill(WIDE);
+  const box = { width: 1208, height: 450 };    // a 3-across row of 16:9 cameras is about 220 px high: two rows would not fit
+  const packed = packMosaic(nine, { ...box, gap: 8, across: 3 });
+  assert.deepEqual(packed.pages.map((page) => [page.start, page.count]), [[0, 3], [3, 3], [6, 3]]);
+  for (const page of packed.pages) checkPage(page.layout.tiles, nine.slice(page.start, page.start + page.count), box);
+  const eleven = packMosaic(Array(11).fill(WIDE), { width: 1208, height: 700, gap: 8, across: 4 });
+  assert.ok(eleven.pages.slice(0, -1).every((page) => page.count % 4 === 0), 'every page but the last ends on a full row');
+  assert.equal(eleven.pages.reduce((sum, page) => sum + page.count, 0), 11);
 });
 
 test('a page holds at most 16 cameras, every camera is on one page in list order', () => {
   const twenty = Array(20).fill(WIDE);
-  const packed = packMosaic(twenty, { width: 4000, height: 3000, gap: 8, minWidth: 240 });
+  const packed = packMosaic(twenty, { width: 4000, height: 6000, gap: 8, across: 4 });
   assert.deepEqual(packed.pages.map((page) => page.count), [MOSAIC_MAX_TILES, 4]);
   assert.deepEqual(packed.pages.map((page) => page.start), [0, 16]);
-  const capped = packMosaic(twenty, { width: 4000, height: 3000, gap: 8, minWidth: 240, maxPerPage: 6 });
+  const odd = packMosaic(twenty, { width: 4000, height: 9000, gap: 8, across: 3 });
+  assert.deepEqual(odd.pages.map((page) => page.count), [15, 5], 'a multiple of 3 up to 16');
+  const capped = packMosaic(twenty, { width: 4000, height: 6000, gap: 8, across: 2, maxPerPage: 6 });
   assert.deepEqual(capped.pages.map((page) => page.count), [6, 6, 6, 2]);
 });
 
 test('cameras of every shape keep theirs and stay inside a short wall', () => {
   const aspects = [WIDE, 0.75, 4 / 3, 32 / 9, 9 / 16, WIDE, 1, 4 / 3];
   for (const box of [{ width: 1200, height: 420 }, { width: 700, height: 900 }, { width: 1920, height: 760 }]) {
-    for (const minWidth of MOSAIC_MIN_WIDTHS) {
-      const packed = packMosaic(aspects, { ...box, gap: 8, minWidth });
-      assert.equal(packed.pages.reduce((sum, page) => sum + page.count, 0), aspects.length, `${box.width}×${box.height} at ${minWidth}`);
+    for (const across of MOSAIC_ACROSS) {
+      const packed = packMosaic(aspects, { ...box, gap: 8, across });
+      assert.equal(packed.pages.reduce((sum, page) => sum + page.count, 0), aspects.length, `${box.width}×${box.height} ${across} across`);
       for (const page of packed.pages) {
         assert.ok(page.count >= 1);
-        const own = aspects.slice(page.start, page.start + page.count);
-        checkPage(page.layout.tiles, own, box);
-        if (page.count > 1) for (const tile of page.layout.tiles) assert.ok(tile.width >= minWidth, `${tile.width} < ${minWidth}`);
+        checkPage(page.layout.tiles, aspects.slice(page.start, page.start + page.count), box);
       }
     }
   }
 });
 
-test('a wall narrower than the chosen width shows one camera a page, still inside the wall', () => {
-  const packed = packMosaic([WIDE, WIDE, 4 / 3], { width: 300, height: 600, gap: 8, minWidth: 400 });
-  assert.deepEqual(packed.pages.map((page) => page.count), [1, 1, 1]);
-  for (const page of packed.pages) {
-    assert.equal(page.layout.fits, false);
-    checkPage(page.layout.tiles, [[WIDE, WIDE, 4 / 3][page.start]], { width: 300, height: 600 });
-    assert.equal(page.layout.tiles[0].width, 300);
-  }
+test('a wall too short for one row still shows it, made smaller to fit', () => {
+  const packed = packMosaic([WIDE, WIDE, 4 / 3], { width: 900, height: 100, gap: 8, across: 3 });
+  assert.deepEqual(packed.pages.map((page) => page.count), [3]);
+  assert.equal(packed.pages[0].layout.fits, false);
+  checkPage(packed.pages[0].layout.tiles, [WIDE, WIDE, 4 / 3], { width: 900, height: 100 });
+});
+
+test('an old kept minimum width is read as the nearest count across; the count is 2, 3 or 4, 3 by default', () => {
+  assert.deepEqual(MOSAIC_ACROSS, [2, 3, 4]);
+  assert.equal(DEFAULT_MOSAIC_ACROSS, 3);
+  assert.deepEqual([240, 320, 400, 480, 640].map(acrossFromMinWidth), [4, 3, 3, 2, 2]);
+  assert.equal(acrossFromMinWidth('300'), null);
+  const { read } = storageFns();
+  assert.equal(readWallPrefs(read).across, 3);
+  const old = storageFns();
+  old.storage.setItem('cb.monitor.mosaicMinWidth', '640');
+  assert.equal(readWallPrefs(old.read).across, 2, 'nobody’s wall breaks');
+  old.storage.setItem('cb.monitor.mosaicAcross', '4');
+  assert.equal(readWallPrefs(old.read).across, 4, 'the new choice wins');
 });
 
 // MARK: Packing again
@@ -196,7 +218,7 @@ test('the pages are packed again when the wall gets narrower, wider or shorter, 
 
 test('a notice that comes and goes with the page’s cameras packs the wall once more, not again and again', () => {
   // Safari plays 4 recordings at a time: a page of more shows the notice above the wall, 54 px with its gap (the reviewer's case: a 1786 px
-  // window, the wall 1530 px wide, Min 400, eight 16:9 cameras, a 480 px wall).
+  // window, the wall 1530 px wide, 3 across, eight 16:9 cameras, a 480 px wall).
   const aspects = Array(8).fill(WIDE);
   let box = null;
   let notice = false;
@@ -205,7 +227,7 @@ test('a notice that comes and goes with the page’s cameras packs the wall once
   for (let frame = 0; frame < 12; frame += 1) {
     const next = packingBox(box, { width: 1530, height: 480 - (notice ? 54 : 0) });
     if (next !== box) { box = next; packs += 1; }
-    const first = packMosaic(aspects, { ...box, gap: WALL_GAP, minWidth: 400 }).pages[0].count;
+    const first = packMosaic(aspects, { ...box, gap: WALL_GAP, across: 3 }).pages[0].count;
     shown.push(first);
     notice = first > 4;
   }
@@ -231,10 +253,10 @@ test('the mosaic never draws over the controls under it, and the security mark m
 });
 
 test('a wall that has no size yet packs nothing (the page then uses its fixed pages)', () => {
-  assert.equal(packMosaic([WIDE], { width: 0, height: 600, minWidth: 320 }), null);
-  assert.equal(packMosaic([WIDE], { width: 800, height: Number.NaN, minWidth: 320 }), null);
-  assert.deepEqual(packMosaic([], { width: 800, height: 600, minWidth: 320 }).pages, []);
-  const odd = packMosaic([Number.NaN, -1, 0, Infinity], { width: 1600, height: 900, gap: 8, minWidth: 240 });
+  assert.equal(packMosaic([WIDE], { width: 0, height: 600, across: 3 }), null);
+  assert.equal(packMosaic([WIDE], { width: 800, height: Number.NaN, across: 3 }), null);
+  assert.deepEqual(packMosaic([], { width: 800, height: 600, across: 3 }).pages, []);
+  const odd = packMosaic([Number.NaN, -1, 0, Infinity], { width: 1600, height: 900, gap: 8, across: 4 });
   assert.equal(odd.pages[0].count, 4, 'a shape that makes no sense counts as 16:9');
   checkPage(odd.pages[0].layout.tiles, [WIDE, WIDE, WIDE, WIDE], { width: 1600, height: 900 });
 });
@@ -249,22 +271,20 @@ function storageFns(storage = makeStorage()) {
   };
 }
 
-test('with nothing kept the wall is a grid of nine (two on a phone), fitted, Full quality, mosaic at 320 px', () => {
+test('with nothing kept the wall is a grid of nine (two on a phone), fitted, Full quality, mosaic 3 across', () => {
   const { read } = storageFns();
-  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, minWidth: DEFAULT_MOSAIC_MIN_WIDTH, fit: 'fit', quality: 'main' });
+  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'main' });
   assert.equal(readWallPrefs(read, { viewportWidth: 390 }).tiles, 2);
-  assert.equal(DEFAULT_MOSAIC_MIN_WIDTH, 320);
-  assert.deepEqual(MOSAIC_MIN_WIDTHS, [240, 320, 400, 480, 640]);
 });
 
 test('every choice is kept and read back the next time the Monitor opens', () => {
   const { storage, read, write } = storageFns();
   assert.equal(writeWallPref(write, 'quality', 'sub'), 'sub');
   assert.equal(writeWallPref(write, 'layout', 'mosaic'), 'mosaic');
-  assert.equal(writeWallPref(write, 'minWidth', 480), 480);
+  assert.equal(writeWallPref(write, 'across', 4), 4);
   assert.equal(writeWallPref(write, 'fit', 'fill'), 'fill');
   assert.equal(writeWallPref(write, 'tiles', '12'), 12);
-  assert.deepEqual(readWallPrefs(read), { layout: 'mosaic', tiles: 12, tilesChosen: true, minWidth: 480, fit: 'fill', quality: 'sub' });
+  assert.deepEqual(readWallPrefs(read), { layout: 'mosaic', tiles: 12, tilesChosen: true, across: 4, fit: 'fill', quality: 'sub' });
   assert.equal(storage.getItem(WALL_KEYS.quality), 'sub');
   assert.equal(storage.getItem(WALL_KEYS.tiles), '12');
   assert.equal(WALL_KEYS.tiles, 'cb.nvr.tiles', 'the grid size keeps the key it always had');
@@ -277,26 +297,26 @@ test('every choice is kept and read back the next time the Monitor opens', () =>
 
 test('a value that makes no sense is not kept, and one found in storage counts as nothing kept', () => {
   const { storage, read, write } = storageFns();
-  for (const [name, value] of [['quality', 'ultra'], ['layout', 'spiral'], ['minWidth', 100], ['minWidth', '320px'], ['fit', 'stretch'], ['tiles', 17], ['tiles', 'abc'], ['nothing', 1]]) {
+  for (const [name, value] of [['quality', 'ultra'], ['layout', 'spiral'], ['across', 5], ['across', '3px'], ['minWidth', 320], ['fit', 'stretch'], ['tiles', 17], ['tiles', 'abc'], ['nothing', 1]]) {
     assert.equal(writeWallPref(write, name, value), null, `${name} ${value}`);
   }
   assert.equal(storage.length, 0);
   for (const key of Object.values(WALL_KEYS)) storage.setItem(key, 'garbage');
-  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, minWidth: 320, fit: 'fit', quality: 'main' });
+  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'main' });
 });
 
 test('?tiles= wins over what is kept and shows that grid', () => {
   const { read, write } = storageFns();
   writeWallPref(write, 'layout', 'mosaic');
   writeWallPref(write, 'tiles', 4);
-  assert.deepEqual(readWallPrefs(read, { query: '16' }), { layout: 'grid', tiles: 16, tilesChosen: true, minWidth: 320, fit: 'fit', quality: 'main' });
+  assert.deepEqual(readWallPrefs(read, { query: '16' }), { layout: 'grid', tiles: 16, tilesChosen: true, across: 3, fit: 'fit', quality: 'main' });
   assert.equal(readWallPrefs(read, { query: 'x' }).layout, 'mosaic', 'a query that is not a tile count changes nothing');
 });
 
 test('blocked storage: the wall opens with the defaults and a choice simply is not kept', () => {
   const { read, write } = storageFns(makeStorage({ broken: true }));
   assert.equal(writeWallPref(write, 'quality', 'sub'), 'sub');
-  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, minWidth: 320, fit: 'fit', quality: 'main' });
+  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'main' });
 });
 
 // MARK: Straightened pictures

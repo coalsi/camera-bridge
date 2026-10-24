@@ -194,7 +194,7 @@ export function renderCameras() {
 
   const stop = subscribe((kind, detail) => {
     if (kind === 'camera' && detail && rows.has(detail.id)) { rows.get(detail.id).update(detail); describe(cameraList()); }
-    else if (kind === 'camera' || kind === 'removed') renderAll();
+    else if (kind === 'camera' || kind === 'removed' || kind === 'order') renderAll();
     else if (kind === 'doorbell') toast(`${detail.name}: doorbell ring`);
   });
 

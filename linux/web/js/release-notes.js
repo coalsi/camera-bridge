@@ -15,6 +15,15 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.117',
+    date: '2026-10-23',
+    title: 'Put your cameras in your own order, and choose the mosaic by columns',
+    items: [
+      'Drag a camera on the Monitor to a new place (press and hold on a phone; with the keyboard, Alt and an arrow key on a selected camera). The order is kept on the bridge, so every device shows the same one, and the Cameras list and the Events page follow it.',
+      'Mosaic: choose 2, 3 or 4 cameras across. Each camera keeps its own picture shape.',
+    ],
+  },
+  {
     version: '0.1.116',
     date: '2026-10-23',
     title: 'The secure address gets its certificate reliably',

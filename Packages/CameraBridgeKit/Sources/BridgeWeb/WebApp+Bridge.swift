@@ -10,7 +10,7 @@ extension WebApp {
 
     func getSettings() async -> HTTPResponse {
         let overview = await backend.overview()
-        return .json(SettingsResource(settings: overview.settings, bridgeName: await auth.bridgeName, webhookProblem: overview.webhookProblem,
+        return .json(SettingsResource(settings: overview.settings, cameras: overview.configurations, bridgeName: await auth.bridgeName, webhookProblem: overview.webhookProblem,
                                       aiKey: await backend.aiKeyStatus(), aiStatus: await backend.aiStatus()))
     }
 
@@ -24,6 +24,7 @@ extension WebApp {
         var logLevel: String?
         var motionShadowTest: Bool?
         var timeZone: String?
+        var cameraOrder: [UUID]?
         var ai: AIPatch?
     }
 
@@ -55,6 +56,14 @@ extension WebApp {
             throw APIError.badRequest("That is not a time zone.", field: "timeZone")
         }
         let zone = patch.timeZone
+        var cleaned: [UUID]?
+        if let wanted = patch.cameraOrder {
+            // Only cameras that exist, each once; a stale id from another browser's drag is dropped, not an error.
+            let known = Set(await backend.overview().configurations.map(\.id))
+            var seen = Set<UUID>()
+            cleaned = wanted.filter { known.contains($0) && seen.insert($0).inserted }
+        }
+        let order = cleaned
         let token = patch.regenerateWebhookToken == true ? Secrets.hex(Secrets.randomBytes(16)) : nil
         let (basePort, sensorsPort, webhookEnabled, webhookPort, shadow) = (patch.basePort, patch.sensorsBridgePort, patch.webhookEnabled, patch.webhookPort, patch.motionShadowTest)
         let newLevel = level
@@ -69,6 +78,7 @@ extension WebApp {
                 if let newLevel { settings.logLevel = newLevel }
                 if let shadow { settings.motionShadowTest = shadow }
                 if let zone { settings.timeZone = zone }
+                if let order { settings.cameraOrder = order }
                 ai?.apply(to: &settings.ai)
             }
         } catch {

@@ -288,6 +288,9 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
     /// How events are described by an AI service: which service and model, its address, the daily limit. Nothing secret: the key is in the
     /// platform `SecretStore` (`BridgeEngine.setAIKey(_:)`).
     public var ai: AIDescriptionSettings
+    /// The order the person put the cameras in (dragging on the Monitor): camera ids, first to last. Empty until they do. Cameras not listed come
+    /// after the listed ones, by name; ids of cameras that no longer exist are ignored (`orderedIDs(of:)`).
+    public var cameraOrder: [UUID]
 
     public static let nvrKeepDaysRange = 1...365
     public static let nvrMaxSizeGBRange = 10...100_000
@@ -317,11 +320,23 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         timeZone = nil
         plugins = [:]
         ai = AIDescriptionSettings()
+        cameraOrder = []
+    }
+
+    /// The ids of `cameras` in the saved order: the listed ones first, then the others by name (numbers in names by value, the same sort the page
+    /// used before there was an order). Ids in `cameraOrder` that are not in `cameras`, and repeats, are ignored.
+    public func orderedIDs(of cameras: [CameraConfiguration]) -> [UUID] {
+        let known = Set(cameras.map(\.id))
+        var seen = Set<UUID>()
+        let listed = cameraOrder.filter { known.contains($0) && seen.insert($0).inserted }
+        let rest = cameras.filter { !seen.contains($0.id) }
+            .sorted { $0.name.compare($1.name, options: [.caseInsensitive, .numeric, .diacriticInsensitive]) == .orderedAscending }
+        return listed + rest.map(\.id)
     }
 
     private enum CodingKeys: String, CodingKey {
         case webhookEnabled, webhookPort, webhookToken, keepMacAwake, sensorsBridgePort, logLevel, basePort, motionShadowTest
-        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone, plugins, ai
+        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone, plugins, ai, cameraOrder
     }
 
     public init(from decoder: any Decoder) throws {
@@ -357,6 +372,7 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         }
         plugins = value(.plugins, default: plugins)
         ai = value(.ai, default: ai)
+        cameraOrder = value(.cameraOrder, default: cameraOrder)
         if !unreadable.isEmpty {
             Log(category: "Engine").warning("Unreadable settings \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }

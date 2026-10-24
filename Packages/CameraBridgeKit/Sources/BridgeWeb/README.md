@@ -48,6 +48,8 @@ Labels (2026-10-14, docs/CONTRACT_CHANGES.md): `BridgeBackend.setCleanPicture(ca
 
 Camera clocks (2026-10-14, docs/CONTRACT_CHANGES.md): `BridgeBackend.setCameraClockShown(cameraID:shown:)` and `BridgeBackend.setCameraTimeZone(cameraID:)` (extension defaults throw), routes `POST cameras/:id/camera-clock` and `POST cameras/:id/camera-time-zone`, and `timeZone` in the settings resource.
 
+Camera order (2026-10-23, docs/CONTRACT_CHANGES.md): `cameraOrder` (camera ids, first to last) in the settings resource, read by `GET settings` (ids of cameras that are gone left out) and set by `PATCH settings` (unknown ids and repeats dropped, anything but a list of ids is a 400). It is `BridgeSettings.cameraOrder`; `BridgeSettings.orderedIDs(of:)` lists cameras by it, the rest by name. The page's Monitor and Cameras list follow it.
+
 Live video (2026-10-14, docs/CONTRACT_CHANGES.md): `BridgeBackend.liveVideo(cameraID:stream:displayWidth:)` (an extension default throws `EngineError.cameraNotRunning`, so existing conformers compile) and the route `GET /api/v1/live` (`WebApp+LiveVideo.swift`: one answer carries every asked camera's own video as fragmented MP4, framed per camera; `LiveMP4Remuxer` in BridgeEngine makes the fragments).
 
 Recording drive (2026-10-13, docs/CONTRACT_CHANGES.md): `SystemControlling.recordingDrives()`, `SystemControlling.useRecordingDrive(targetID:phrase:keepData:)` and `SystemControlling.forgetRecordingDrive()` (extension defaults refuse, so existing conformers compile), `RecordingDriveReport`, `InstallTarget.isRecordingDrive` and `InstallTarget.inUse`; the routes are in `docs/linux/ARCHITECTURE.md`.

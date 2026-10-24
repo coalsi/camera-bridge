@@ -570,10 +570,12 @@ struct SettingsResource: Encodable {
     var logLevel: String
     var motionShadowTest: Bool
     var timeZone: String?
+    /// The cameras' ids in the order the person chose, stale ids left out (`BridgeSettings.cameraOrder`).
+    var cameraOrder: [UUID]
     /// The AI description settings, with whether a key is saved and its last four characters (never the key).
     var ai: AISettingsResource
 
-    init(settings: BridgeSettings, bridgeName: String, webhookProblem: String?, aiKey: (saved: Bool, hint: String?), aiStatus: AIStatus) {
+    init(settings: BridgeSettings, cameras: [CameraConfiguration] = [], bridgeName: String, webhookProblem: String?, aiKey: (saved: Bool, hint: String?), aiStatus: AIStatus) {
         self.bridgeName = bridgeName
         basePort = settings.basePort
         sensorsBridgePort = settings.sensorsBridgePort
@@ -584,6 +586,8 @@ struct SettingsResource: Encodable {
         logLevel = Self.levelName(settings.logLevel)
         motionShadowTest = settings.motionShadowTest
         timeZone = settings.timeZone
+        let known = Set(cameras.map(\.id))
+        cameraOrder = settings.cameraOrder.filter { known.contains($0) }
         ai = AISettingsResource(settings.ai, key: aiKey, status: aiStatus)
     }
 

@@ -1,18 +1,20 @@
 // What the page knows about the bridge, kept current by the server's event stream.
-import { get } from './api.js';
+import { get, patch } from './api.js';
+import { orderCameras } from './camera-order.js';
 
 export const store = {
   session: null,          // { authenticated, setupRequired, setupTokenRequired, bridgeName, csrfToken }
   bridge: { state: 'running', stateText: 'Running' },
   cameras: new Map(),     // id -> camera (configuration + status)
   notices: [],
+  cameraOrder: [],        // camera ids in the order the person chose (settings.cameraOrder); empty: by name
   connected: true,        // the event stream is open
   loaded: false,          // the first snapshot arrived
 };
 
 const subscribers = new Set();
 
-/** fn(kind, detail) runs on every change: 'camera', 'removed', 'bridge', 'notices', 'connection', 'motion', 'doorbell'. */
+/** fn(kind, detail) runs on every change: 'camera', 'removed', 'bridge', 'notices', 'connection', 'motion', 'doorbell', 'order'. */
 export function subscribe(fn) {
   subscribers.add(fn);
   return () => subscribers.delete(fn);
@@ -25,7 +27,31 @@ function emit(kind, detail) {
 }
 
 export function cameraList() {
-  return [...store.cameras.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  return orderCameras([...store.cameras.values()], store.cameraOrder);
+}
+
+/** The saved order, as the settings give it (GET /settings, `cameraOrder`). */
+export function setCameraOrder(order) {
+  store.cameraOrder = Array.isArray(order) ? order.filter((id) => typeof id === 'string') : [];
+  emit('order');
+}
+
+/**
+ * Takes a new order now and saves it with one PATCH; when the save fails the order before is back and `onError(error)` is told.
+ * (The bridge sends no event for settings, so other browsers see it the next time they load.) -> whether it was saved.
+ */
+export async function saveCameraOrder(ids, { save = (order) => patch('settings', { cameraOrder: order }), onError = () => {} } = {}) {
+  const before = store.cameraOrder;
+  store.cameraOrder = ids;
+  emit('order');
+  try {
+    await save(ids);
+    return true;
+  } catch (error) {
+    if (store.cameraOrder === ids) { store.cameraOrder = before; emit('order'); }   // a newer move since is not undone
+    onError(error);
+    return false;
+  }
 }
 
 let source = null;

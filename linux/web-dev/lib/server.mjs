@@ -182,7 +182,7 @@ export function createDevServer(options) {
     return empty(204);
   }
 
-  const settingsBody = { basePort: 21100, sensorsBridgePort: 21099, webhookEnabled: false, webhookPort: 21090, webhookToken: '00000000000000000000000000000000', webhookProblem: null, logLevel: 'info', motionShadowTest: false };
+  const settingsBody = { basePort: 21100, sensorsBridgePort: 21099, webhookEnabled: false, webhookPort: 21090, webhookToken: '00000000000000000000000000000000', webhookProblem: null, logLevel: 'info', motionShadowTest: false, cameraOrder: [] };
 
   const systemInfo = () => json({ product: 'Camera Bridge OS', version: '0.0-dev', build: 'development', mode: 'development', osName: 'Dev server', canUpdate: false, canReboot: false, canInstall: false, canManage: false });
 
@@ -242,7 +242,13 @@ export function createDevServer(options) {
     ['GET', 'settings', 'session', false, () => json({ bridgeName: config.bridgeName, ...settingsBody })],
     ['PATCH', 'settings', 'session', true, (ctx) => {
       if (typeof ctx.body.bridgeName === 'string') config.bridgeName = ctx.body.bridgeName.slice(0, 60);
-      for (const name of Object.keys(settingsBody)) if (name in ctx.body && name !== 'webhookToken' && name !== 'webhookProblem') settingsBody[name] = ctx.body[name];
+      for (const name of Object.keys(settingsBody)) if (name in ctx.body && name !== 'cameraOrder' && name !== 'webhookToken' && name !== 'webhookProblem') settingsBody[name] = ctx.body[name];
+      if ('cameraOrder' in ctx.body) {
+        // As the bridge does: only cameras that exist, each once (a stale id is dropped, not an error).
+        if (!Array.isArray(ctx.body.cameraOrder)) throw new ApiError(400, 'invalid', 'Send the cameras’ ids as a list.', { field: 'cameraOrder' });
+        const known = new Set(state.cameraList().map((camera) => camera.configuration.id));
+        settingsBody.cameraOrder = [...new Set(ctx.body.cameraOrder)].filter((id) => known.has(id));
+      }
       return json({ bridgeName: config.bridgeName, ...settingsBody });
     }],
     // Notifications (BridgeWeb/WebApp+Notifications.swift): the log of every notice, the once-only claim for a toast, the read marker.

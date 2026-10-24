@@ -4,7 +4,7 @@ import { h, replace, spinner, toast } from './dom.js';
 import { icon } from './icons.js';
 import { askToPowerOff, powerOff } from './power.js';
 import { THEME_EVENT, THEME_INFO, applyTheme, currentTheme, nextTheme, setTheme } from './theme.js';
-import { store, startEvents, stopEvents, subscribe, loadCameras } from './store.js';
+import { store, startEvents, stopEvents, subscribe, loadCameras, setCameraOrder } from './store.js';
 import { onUnread, startNotifications, unreadCount } from './notifications.js';
 import { renderSetup, renderLogin } from './screens/auth.js';
 import { renderCameras } from './screens/cameras.js';
@@ -206,11 +206,13 @@ async function showApp() {
   try { await loadCameras(); } catch (error) { toast(error.message, 'error'); }
   // A bridge without a time zone of its own (Camera Bridge OS runs in UTC) takes the zone of the browser that signs in: the timestamp it draws
   // and the clocks it sets on cameras are then local time.
-  get('settings').then((settings) => {
+  // The settings also give the cameras' order: read before the first screen so the wall does not reshuffle.
+  try {
+    const settings = await get('settings');
+    setCameraOrder(settings.cameraOrder);
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (!settings.timeZone && zone) return patch('settings', { timeZone: zone });
-    return null;
-  }).catch(() => {});
+    if (!settings.timeZone && zone) patch('settings', { timeZone: zone }).catch(() => {});
+  } catch { /* the cameras are by name until the next load */ }
   stopNotifications?.();
   stopNotifications = startNotifications();
   startEvents();
