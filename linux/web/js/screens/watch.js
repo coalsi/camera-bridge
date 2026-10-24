@@ -14,6 +14,7 @@ import { MseSurface } from '../nvr/surface.js';
 import { keyAction } from '../nvr/timeline/keys.js';
 import { createTimeline, ensureStylesheet } from '../nvr/timeline/view.js';
 import { createClip } from '../nvr/clip.js';
+import { footageOf } from '../nvr/clip-range.js';
 import { banners } from './banners.js';
 import { backLink, statePill } from './common.js';
 import { MANUAL_STEPS, optimizeDialog } from './optimize-dialog.js';
@@ -143,6 +144,8 @@ export function renderWatch({ params, navigate, setTitle, player = {} }) {
   const clip = createClip({
     cameras: () => [{ id, name: camera.name, pictureCorrection: camera.pictureCorrection }],
     endMs: () => (session.mode === 'live' ? catalog.serverNow() : session.position),
+    footage: () => footageOf([catalog.extent(id)]),
+    timeline: { setClipRange: (range, onEdge) => timeline?.setClipRange(range, onEdge) },
     onChange: () => update(),
   });
   const transport = h('div', { class: 'watch-transport' },

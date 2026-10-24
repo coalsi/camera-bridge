@@ -100,6 +100,7 @@ extension WebApp {
         try refuseHEAD(ctx)
         let request = try await clipRequest(ctx)
         let part = Int(try queryInteger("part", in: ctx.request, range: 1...64, fallback: 1, sentence: "Give “part” as the number of the part."))
+        let speed = try Self.timelapseSpeed(ctx.request.queryValue("speed"))
         let archive = try readyArchive()
         let address = ctx.request.remoteAddress
         guard takeArchiveSlot(address: address) else {
@@ -125,9 +126,9 @@ extension WebApp {
            let configured = await backend.overview().configurations.first(where: { $0.id == request.camera })?.pictureCorrection, !configured.isOff {
             correction = configured
         }
-        if labels || correction != nil {
+        if labels || correction != nil || speed != nil {
             return try await processedClip(plan: plan, part: part, exporter: exporter, cameraID: request.camera, name: request.cameraName, labels: labels,
-                                           correction: correction, release: { [self] in releaseArchiveSlot(address: address) })
+                                           correction: correction, speed: speed, release: { [self] in releaseArchiveSlot(address: address) })
         }
         let name = plan.parts[part - 1].fileName
         var headers = HTTPHeaders()
@@ -142,6 +143,25 @@ extension WebApp {
                 self.log.warning("sending a clip failed: \(String(describing: error))")
             }
         }
+    }
+
+    /// The speeds a time-lapse clip can be saved at (`speed` on the clip route): the Monitor's time-lapse speeds.
+    static let timelapseSpeeds = [30, 60, 120, 300]
+
+    /// The `speed` of a clip request: nil without one (the clip as recorded), else one of `timelapseSpeeds`.
+    static func timelapseSpeed(_ text: String?) throws -> Int? {
+        guard let text else { return nil }
+        guard let value = Int(text), timelapseSpeeds.contains(value) else {
+            throw APIError.badRequest("Give “speed” as 30, 60, 120 or 300.", field: "speed")
+        }
+        return value
+    }
+
+    /// A time-lapse clip's file name: the clip's own with " time-lapse 60x" before the extension.
+    static func timelapseFileName(_ name: String, speed: Int) -> String {
+        let suffix = " time-lapse \(speed)x"
+        guard let dot = name.lastIndex(of: "."), dot > name.startIndex else { return name + suffix }
+        return String(name[..<dot]) + suffix + String(name[dot...])
     }
 
     /// `attachment; filename="…"; filename*=UTF-8''…` with the name made safe for a header (no quotes, no control characters, no slashes).

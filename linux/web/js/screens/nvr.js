@@ -21,7 +21,7 @@ import { labelStyle, showLabel } from '../labels.js';
 import { createFetcher } from '../nvr/fetcher.js';
 import { createCatalog } from '../nvr/catalog.js';
 import { PlaybackClock } from '../nvr/clock.js';
-import { SPEEDS, speedLabel } from '../nvr/speed.js';
+import { SPEED_GROUPS, isTimelapse, speedDescription, speedLabel } from '../nvr/speed.js';
 import { createSession } from '../nvr/session.js';
 import { createCell } from '../nvr/cell.js';
 import { MseSurface } from '../nvr/surface.js';
@@ -29,7 +29,7 @@ import { createTimeline } from '../nvr/timeline/view.js';
 import { PRESETS } from '../nvr/timeline/viewport.js';
 import { banners } from './banners.js';
 import {
-  PAGE_SIZES, GRID_LEAD_LIMIT_BYTES, MEDIA_REQUESTS, MEDIA_REQUESTS_WHILE_LIVE, budgetedCell, createKeyDispatcher, createSnapshotScheduler, createTokenBucket, keyAction,
+  KEY_MAP, PAGE_SIZES, GRID_LEAD_LIMIT_BYTES, MEDIA_REQUESTS, MEDIA_REQUESTS_WHILE_LIVE, budgetedCell, createKeyDispatcher, createSnapshotScheduler, createTokenBucket, keyAction,
   loadPicture, parseEpochMs, sameLocalDay,
 } from './nvr-model.js';
 import {
@@ -37,6 +37,7 @@ import {
 } from './nvr-layout.js';
 import { createGridController } from './nvr-controller.js';
 import { createClip } from '../nvr/clip.js';
+import { footageOf } from '../nvr/clip-range.js';
 import { createRecordingSound, soundSupported } from '../nvr/sound.js';
 
 const PRESET_LABELS = { '10m': '10 min', '1h': '1 hour', '6h': '6 hours', '24h': '24 hours', all: 'All' };
@@ -49,6 +50,8 @@ const GRID_LABELS = { 4: 'Grid 2 × 2', 6: 'Grid 3 × 2', 9: 'Grid 3 × 3', 12: 
 const WALL_FIXED_QUERY = '(min-width: 900px)';
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+/** Paused, the readout gives tenths of a second, for a precise review picture by picture. */
+const tenthsFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 1 });
 /** The clock on a picture: day and time ("Tue 14 Oct · 6:27:14 PM"). */
 function clockText(ms) {
   return stampText(ms);
@@ -141,9 +144,12 @@ export function renderNVR({ params, navigate, setTitle }) {
 
   // Saving a clip: the playhead is the end (the newest recorded moment while live or on snapshots). On the wall the person ticks the cameras (any
   // of every page); with one camera filling the wall, the clip is that camera's.
+  const clipCameras = () => wallCameras().filter((camera) => soloId === null || camera.id === soloId);
   const clip = createClip({
-    cameras: () => wallCameras().filter((camera) => soloId === null || camera.id === soloId)
-      .map((camera) => ({ id: camera.id, name: camera.name, pictureCorrection: camera.pictureCorrection })),
+    cameras: () => clipCameras().map((camera) => ({ id: camera.id, name: camera.name, pictureCorrection: camera.pictureCorrection })),
+    // The range is drawn on the timeline as a red band, inside what the cameras on offer recorded.
+    footage: () => footageOf(clipCameras().map((camera) => catalog.extent(camera.id))),
+    timeline: { setClipRange: (range, onEdge) => timeline?.setClipRange(range, onEdge) },
     endMs: () => { const t = controller?.view().transport; return !t || t.mode === 'snapshots' || t.mode === 'live' ? catalog.serverNow() : t.positionMs; },
     onChange: () => { if (controller) render(); },
   });
@@ -471,18 +477,30 @@ export function renderNVR({ params, navigate, setTitle }) {
 
   // MARK: Transport, pager, notice
 
-  const playButton = h('button', { class: 'btn primary', type: 'button', onclick: () => controller.togglePlay() }, icon('play'), h('span', null, 'Play'));
+  const playButton = h('button', { class: 'btn primary', type: 'button', onclick: () => controller.togglePlay(), title: 'Play or pause (Space)' }, icon('play'), h('span', null, 'Play'));
   playButton.dataset.playing = 'false';
+  // One picture back or forward (← and → while paused): a step pauses first and never plays.
+  const frameBackButton = h('button', { class: 'btn small nvr-frame', type: 'button', 'aria-label': 'One picture back', title: 'One picture back (← while paused)',
+    dataset: { nvr: 'frame-back' }, onclick: () => controller.stepFrame(-1) }, icon('frameBack'));
+  const frameForwardButton = h('button', { class: 'btn small nvr-frame', type: 'button', 'aria-label': 'One picture forward', title: 'One picture forward (→ while paused)',
+    dataset: { nvr: 'frame-forward' }, onclick: () => controller.stepFrame(1) }, icon('frameForward'));
   // At the live edge there is nothing to play (the wall is live video): the row says Live. Looking back in the recordings, Play/Pause and
-  // Back to live appear.
-  const liveButton = h('button', { class: 'btn primary', type: 'button', onclick: () => controller.goLive() }, icon('back'), 'Back to live');
+  // Live appear; Live sits at the right end of the row, over the timeline's live edge, and points that way.
+  const liveButton = h('button', { class: 'btn primary nvr-golive', type: 'button', onclick: () => controller.goLive(), title: 'Back to live (L)',
+    'aria-label': 'Back to live', dataset: { nvr: 'go-live' } }, h('span', null, 'Live'), icon('toLive'));
   const readout = h('span', { class: 'nvr-readout', role: 'timer', 'aria-live': 'off' });
-  // Playback speed (1× to 10×) while a recording plays or stands; live is always 1×. The keys , and . step it.
-  const speedButtons = SPEEDS.map((rate) => h('button', {
-    class: 'btn small', type: 'button', 'aria-pressed': 'false', dataset: { rate: String(rate) },
-    'aria-label': `Play at ${speedLabel(rate)}`, onclick: () => controller.setSpeed(rate),
-  }, speedLabel(rate)));
-  const speedGroup = h('div', { class: 'nvr-speed', role: 'group', 'aria-label': 'Playback speed', title: 'Playback speed (, slower, . faster)', hidden: true }, speedButtons);
+  // Playback speed while a recording plays or stands; live is always 1×. One menu in four groups (nvr/speed.js); the keys , and . step it.
+  // A new speed while paused waits for Play.
+  const speedSelect = h('select', { class: 'nvr-speed', 'aria-label': 'Playback speed', title: 'Playback speed (, slower, . faster)', dataset: { nvr: 'speed' },
+    onchange: (event) => { controller.setSpeed(Number(event.target.value)); event.target.blur(); } },
+  SPEED_GROUPS.map((group) => h('optgroup', { label: group.label },
+    group.speeds.map((rate) => h('option', { value: String(rate), title: speedDescription(rate) },
+      group.id === 'lapse' ? `${speedLabel(rate)}  ·  ${speedDescription(rate).replace('Time-lapse: ', '').split(',')[0]}` : speedLabel(rate))))));
+  const speedGroup = h('label', { class: 'nvr-speed-group', hidden: true }, h('span', { class: 'sr-only' }, 'Speed'), speedSelect);
+  // The page's keys (KEY_MAP), one click away.
+  const keysHelp = h('details', { class: 'nvr-keys' },
+    h('summary', { class: 'btn small', title: 'Keyboard shortcuts', 'aria-label': 'Keyboard shortcuts' }, icon('keyboard')),
+    h('dl', { class: 'nvr-keys-list' }, KEY_MAP.map(([keys, words]) => [h('dt', null, h('kbd', null, keys)), h('dd', null, words)])));
   const presetButtons = PRESETS.map((preset) => h('button', {
     class: 'btn small', type: 'button', 'aria-pressed': 'false', dataset: { preset },
     onclick: () => { activePreset = preset; writeStored('cb.nvr.zoom', preset); timeline.setPreset(preset); render(); },
@@ -499,7 +517,8 @@ export function renderNVR({ params, navigate, setTitle }) {
   function readoutText(transport) {
     if (transport.mode === 'snapshots' || transport.mode === 'live') return live ? 'Live' : 'Live pictures';
     const day = sameLocalDay(transport.positionMs, catalog.serverNow()) ? '' : `${dayFormat.format(transport.positionMs)} `;
-    return `${day}${timeFormat.format(transport.positionMs)}`;
+    const time = (transport.mode === 'paused' ? tenthsFormat : timeFormat).format(transport.positionMs);
+    return `${day}${time}${transport.mode === 'playing' && transport.rate !== 1 ? `  ${speedLabel(transport.rate)}` : ''}`;
   }
 
   function renderTransport(view) {
@@ -516,7 +535,11 @@ export function renderNVR({ params, navigate, setTitle }) {
     setData(readout, 'live', String(atLive));
     setText(readout, readoutText(t));
     speedGroup.hidden = atLive || !t.canSpeed;
-    for (const button of speedButtons) button.setAttribute('aria-pressed', String(Number(button.dataset.rate) === t.rate));
+    if (speedSelect.value !== String(t.rate)) speedSelect.value = String(t.rate);
+    speedSelect.title = `${speedDescription(t.rate)} (, slower, . faster)${t.mode === 'paused' ? '. Paused: the speed applies on Play' : ''}`;
+    setData(speedSelect, 'lapse', String(isTimelapse(t.rate)));
+    for (const button of [frameBackButton, frameForwardButton]) { button.hidden = atLive; button.disabled = !t.canStep; }
+    setData(readout, 'held', String(t.mode === 'paused'));
     syncPresets();
   }
 
@@ -792,8 +815,9 @@ export function renderNVR({ params, navigate, setTitle }) {
     if (action.leaveSolo) setSolo(null);
     if (clip.choosing()) clip.cancel();
     controller.focus(event.cameraId);     // the event's camera leads: it has the recording, so its first frame starts the clock
+    const held = lastView?.transport.holding === true;
     if (controller.playAt(action.targetMs)) {
-      announcer.textContent = `Playing from ${timeFormat.format(action.targetMs)}, ${event.label} at ${event.cameraName}`;
+      announcer.textContent = `${held ? 'Paused at' : 'Playing from'} ${timeFormat.format(action.targetMs)}, ${event.label} at ${event.cameraName}`;
     } else {
       events.select(null);
       announcer.textContent = lastView?.playable === false ? 'This browser can’t play recordings.' : 'The recordings aren’t ready yet. Try again in a moment.';
@@ -854,9 +878,9 @@ export function renderNVR({ params, navigate, setTitle }) {
     events.banners, bannerHost, notice, grid, orderNote, emptyHost,
     replace(bottom,
       h('div', { class: 'mon-timeline nvr-controls' },
-        h('div', { class: 'nvr-transport' }, playButton, liveButton, readout, speedGroup, clip.button,
+        h('div', { class: 'nvr-transport' }, frameBackButton, playButton, frameForwardButton, readout, speedGroup, clip.button,
           h('div', { class: 'nvr-grid-presets', role: 'group', 'aria-label': 'Timeline range' }, presetButtons),
-          h('nav', { class: 'nvr-pager', 'aria-label': 'Camera pages' }, prevButton, pageLabel, nextButton)),
+          h('nav', { class: 'nvr-pager', 'aria-label': 'Camera pages' }, prevButton, pageLabel, nextButton), keysHelp, liveButton),
         clip.el,
         timelineHost),
       side.el,
@@ -909,6 +933,8 @@ export function renderNVR({ params, navigate, setTitle }) {
     const target = event.target instanceof Element ? event.target : null;
     const typing = Boolean(target?.closest('input, select, textarea, [contenteditable=""], [contenteditable="true"]')) || Boolean(document.querySelector('dialog[open]'));
     const activatable = Boolean(target?.closest('button, a[href], summary, [role="button"], [role="switch"], [role="tab"], [role="menuitem"]'));
+    // A handle of the clip's red band moves its end with the arrow keys (the timeline's own handler).
+    if (target?.closest('[data-clip-edge]') && event.key !== 'Escape' && event.key !== 'Enter') return;
     if (!typing && clip.key(event)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
     if (!typing && event.key === 'Escape' && zoom?.zoomed()) { event.preventDefault(); zoom.reset(); return; }
     if (!typing && event.key === 'Escape' && soloId !== null && !document.fullscreenElement) { event.preventDefault(); setSolo(null); return; }

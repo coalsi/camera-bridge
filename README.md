@@ -33,8 +33,10 @@ Website: <https://www.camera-bridge.app> · Documentation: <https://docs.camera-
 - **Records around the clock** to the box's SSD or a drive you attach. Each camera has a Record switch, with limits on how
   long and how much to keep. Recordings keep the camera's own video, not a re-encoded copy.
 - **Monitor:** every camera live on one wall, with sound and real live video over a single connection. Below it is one timeline
-  for all cameras: scrub back hours and play at 1×, 2×, 3×, 5× or 10×.
-- **Saved clips** as MP4 with sound, labelled with the camera's name and the time, from one camera or several at once.
+  for all cameras: scrub back hours, play in slow motion (¼×, ½×), at 1×, fast (2×, 4×, 8×) or as a time-lapse (30× to 300×), and
+  step picture by picture while paused.
+- **Saved clips** as MP4 with sound, labelled with the camera's name and the time, from one camera or several at once: drag the red
+  range on the timeline, or save it as a sped-up time-lapse.
 - **One label everywhere:** the camera's name and the date and time look the same on the Monitor, in Apple Home and in saved
   clips. The bridge keeps every camera's clock on its time zone.
 

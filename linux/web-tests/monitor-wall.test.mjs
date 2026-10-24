@@ -571,3 +571,34 @@ test('a camera that is turned off has no tile on the wall; one named in the addr
     opened.close();
   }
 });
+
+// MARK: The transport
+
+test('Live sits at the right end of the transport, pointing right like the timeline runs; the frame steps flank Play; one speed menu in four groups', async () => {
+  const monitor = await openMonitor([monitorCamera(GARAGE_ID, 'Garage', null)]);
+  try {
+    const transport = elementsUnder(monitor.page.el, (node) => node.classList?.contains('nvr-transport'))[0];
+    const shown = transport.childNodes.filter((node) => node.tagName);
+    const live = shown.at(-1);
+    assert.equal(live.dataset.nvr, 'go-live', 'the last control of the row, over the timeline’s live edge');
+    assert.equal(live.getAttribute('aria-label'), 'Back to live');
+    assert.equal(live.childNodes[0].textContent, 'Live', 'the word first, then the arrow');
+    const arrow = live.childNodes[1];
+    assert.equal(arrow.localName, 'svg');
+    const paths = elementsUnder(arrow, (node) => node.localName === 'path').map((node) => node.getAttribute('d'));
+    assert.ok(paths.includes('M4 6l7 6-7 6z') && paths.includes('M20.5 6v12'), 'it points right, to the bar at the end');
+    const names = shown.map((node) => node.dataset.nvr ?? node.className);
+    const play = shown.findIndex((node) => node.className === 'btn primary' && node.dataset.playing !== undefined);
+    assert.equal(names[play - 1], 'frame-back');
+    assert.equal(names[play + 1], 'frame-forward');
+    const select = elementsUnder(transport, (node) => node.dataset?.nvr === 'speed')[0];
+    const groups = select.childNodes.filter((node) => node.localName === 'optgroup');
+    assert.deepEqual(groups.map((group) => group.getAttribute('label')), ['Slow', 'Normal', 'Fast', 'Time-lapse']);
+    const lapse = groups[3].childNodes.map((option) => [String(option.value), option.getAttribute('title')]);
+    assert.deepEqual(lapse[0], ['30', 'Time-lapse: 1 min = 2 s, 1 hour = 2 min']);
+    const keys = elementsUnder(monitor.page.el, (node) => node.localName === 'kbd').map((node) => node.textContent);
+    assert.ok(keys.includes('← →') && keys.includes('Shift + ← →') && keys.includes('Alt + ← →'), 'the keyboard help lists the keys');
+  } finally {
+    monitor.close();
+  }
+});

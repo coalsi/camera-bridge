@@ -58,6 +58,27 @@
   font: 600 0.75rem/1.3 var(--mono); background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 6px;
 }
 .nvr-track.is-scrubbing { cursor: grabbing; }
+/* The clip being chosen: a transparent red band with a darker red border, standing taller than the track; a handle at each end, 28 px wide for
+   a finger, with a grip on the edge. The band itself lets clicks through to the track. */
+.nvr-track-wrap { position: relative; overflow-x: clip; overflow-y: visible; padding-block: 10px; margin-block: -10px; }
+.nvr-cliprange {
+  position: absolute; top: 0; bottom: 0; z-index: 3; pointer-events: none; box-sizing: border-box;
+  background: rgb(214 40 40 / 0.22); border: 2px solid #9e1b1b; border-radius: 6px;
+}
+.nvr-cliprange-fill { position: absolute; inset: 0; }
+.nvr-cliprange-handle {
+  position: absolute; top: -2px; bottom: -2px; width: 28px; margin-left: -14px; pointer-events: auto; cursor: ew-resize; touch-action: none;
+}
+.nvr-cliprange-handle::before {
+  content: ""; position: absolute; top: 50%; left: 50%; width: 8px; height: 34px; transform: translate(-50%, -50%); border-radius: 4px;
+  background: #c62828; border: 2px solid #6d1010; box-shadow: 0 1px 4px rgb(0 0 0 / 0.5);
+}
+.nvr-cliprange-handle:focus-visible { outline: none; }
+.nvr-cliprange-handle:focus-visible::before { outline: 3px solid var(--focus); outline-offset: 2px; }
+.nvr-cliprange-label {
+  position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); white-space: nowrap; padding: 2px 8px; border-radius: 6px;
+  font: 600 0.75rem/1.4 var(--mono); color: #fff; background: #9e1b1b; box-shadow: 0 2px 8px rgb(0 0 0 / 0.4); pointer-events: none;
+}
 .nvr-empty { margin: 8px 0 0; }
 .nvr-problem { margin: 8px 0 0; color: var(--warning); }
 

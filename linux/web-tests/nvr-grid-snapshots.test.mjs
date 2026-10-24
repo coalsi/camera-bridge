@@ -203,10 +203,11 @@ test('keyAction maps Space, the arrows and L, and stays out of the way in fields
   const key = (name, extra = {}) => ({ key: name, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, defaultPrevented: false, ...extra });
   assert.deepEqual(keyAction(key(' ')), { action: 'togglePlay' });
   assert.equal(keyAction(key(' '), { activatable: true }), null);
-  assert.deepEqual(keyAction(key('ArrowLeft')), { action: 'seek', deltaMs: -1000 });
-  assert.deepEqual(keyAction(key('ArrowRight', { shiftKey: true })), { action: 'seek', deltaMs: 10_000 });
-  assert.deepEqual(keyAction(key('ArrowLeft', { altKey: true })), { action: 'seek', deltaMs: -60_000 });
-  assert.deepEqual(keyAction(key('ArrowRight'), { activatable: true }), { action: 'seek', deltaMs: 1000 });
+  // A plain arrow is a picture while paused and a second while playing (the controller decides); Shift is a minute, Alt ten seconds.
+  assert.deepEqual(keyAction(key('ArrowLeft')), { action: 'nudge', direction: -1, deltaMs: -1000 });
+  assert.deepEqual(keyAction(key('ArrowRight', { shiftKey: true })), { action: 'seek', deltaMs: 60_000 });
+  assert.deepEqual(keyAction(key('ArrowLeft', { altKey: true })), { action: 'seek', deltaMs: -10_000 });
+  assert.deepEqual(keyAction(key('ArrowRight'), { activatable: true }), { action: 'nudge', direction: 1, deltaMs: 1000 });
   assert.deepEqual(keyAction(key('l')), { action: 'goLive' });
   assert.deepEqual(keyAction(key('L', { shiftKey: true })), { action: 'goLive' });
   assert.equal(keyAction(key('l'), { typing: true }), null);

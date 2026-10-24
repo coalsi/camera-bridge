@@ -6,6 +6,7 @@ import { makeTimeFormatter, valueText } from '../../screens/watch-state.js';
 import { paintTimeline } from './draw.js';
 import { createTimelineModel, release } from './model.js';
 import { createScrubController } from './scrub.js';
+import { edgeKeyDelta, lengthLabel } from '../clip-range.js';
 import { makeTicks } from './ticks.js';
 import { PRESETS, PRESET_LABELS, classifyWheel, timeForX, wheelPanMs, wheelZoomFactor, xForTime } from './viewport.js';
 
@@ -48,6 +49,11 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
   let scrubbing = false;
   let destroyed = false;
   let extentKey = '';
+  let clipRange = null;               // { fromMs, toMs } of the clip being chosen (clip.js), drawn as a red band over the track; null: none
+  let onClipEdge = null;              // (edge, ms) => the clip bar moves that end
+  let clipEdge = null;                // the handle being dragged ('from' | 'to'), or null
+  let clipFocus = null;               // the handle that has the keyboard focus
+  let clipKey = '';
 
   // MARK: Elements
 
@@ -57,6 +63,16 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
   const track = h('div', {
     class: 'nvr-track', role: 'slider', tabindex: 0, 'aria-label': 'Recording position', 'aria-orientation': 'horizontal', dataset: { nvr: 'track' },
   }, canvas, playhead, bubble);
+  // The clip being chosen: a transparent red band with a darker border, taller than the track, with a handle at each end (wide enough for a
+  // finger). Clicks inside the band reach the track (they move the playhead); only the handles are the band's.
+  const clipHandle = (edge, label) => h('div', {
+    class: 'nvr-cliprange-handle', role: 'slider', tabindex: 0, 'aria-label': label, 'aria-orientation': 'horizontal', dataset: { clipEdge: edge, nvr: `clip-${edge}` },
+  });
+  const clipFrom = clipHandle('from', 'Clip start');
+  const clipTo = clipHandle('to', 'Clip end');
+  const clipLabel = h('div', { class: 'nvr-cliprange-label', 'aria-hidden': 'true', hidden: true });
+  const clipBand = h('div', { class: 'nvr-cliprange', hidden: true, dataset: { nvr: 'clip-band' } }, h('div', { class: 'nvr-cliprange-fill' }), clipFrom, clipTo, clipLabel);
+  const trackWrap = h('div', { class: 'nvr-track-wrap' }, track, clipBand);
   const empty = h('p', { class: 'nvr-empty small muted', hidden: true }, EMPTY_TEXT);
   const problem = h('p', { class: 'nvr-problem small', role: 'status', hidden: true }, 'The activity graph can’t load right now. Trying again.');
   const announcer = h('div', { class: 'sr-only', role: 'status', 'aria-live': 'polite' });
@@ -68,7 +84,7 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
     h('div', { class: 'nvr-zoom' },
       h('button', { class: 'btn small', type: 'button', 'aria-label': 'Zoom out', onclick: () => zoomBy(2) }, '−'),
       h('button', { class: 'btn small', type: 'button', 'aria-label': 'Zoom in', onclick: () => zoomBy(0.5) }, '+')));
-  const el = h('div', { class: 'nvr-timeline', dataset: { nvr: 'timeline' } }, toolbar, track, empty, problem, announcer);
+  const el = h('div', { class: 'nvr-timeline', dataset: { nvr: 'timeline' } }, toolbar, trackWrap, empty, problem, announcer);
   if (host) host.append(el);
 
   // MARK: Actions
@@ -184,6 +200,8 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
       }
     }
 
+    drawClipRange();
+
     if (ariaDirty && timestamp - lastAriaAt >= 250 && !scrubbing) { ariaDirty = false; lastAriaAt = timestamp; updateAria(); }
     if (timestamp - lastSecondAt >= 1000) {
       lastSecondAt = timestamp;
@@ -192,6 +210,95 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
       const key = `${model.oldestMs}|${model.newestMs}|${model.empty}`;      // new footage lengthens the recorded span
       if (key !== extentKey) { extentKey = key; dirty = true; }
     }
+  }
+
+  // MARK: The clip's range
+
+  function clipText() {
+    return `${format(clipRange.fromMs)} – ${format(clipRange.toMs)} · ${lengthLabel(clipRange.toMs - clipRange.fromMs)}`;
+  }
+
+  /** Places the band and its handles where the range is in the window (the band runs off an edge the range goes past). */
+  function drawClipRange() {
+    if (!clipRange || model.empty || !width) {
+      if (!clipBand.hidden) clipBand.hidden = true;
+      clipKey = '';
+      return;
+    }
+    const v = model.viewport;
+    const x1 = xForTime(v, clipRange.fromMs, width);
+    const x2 = xForTime(v, clipRange.toMs, width);
+    const showLabel = clipEdge !== null || clipFocus !== null;
+    const key = `${x1.toFixed(1)}|${x2.toFixed(1)}|${showLabel}|${clipRange.fromMs}|${clipRange.toMs}`;
+    if (key === clipKey) return;
+    clipKey = key;
+    clipBand.hidden = false;
+    const offset = track.offsetLeft + (track.clientLeft || 0);
+    const left = Math.max(x1, -24);
+    const right = Math.min(x2, width + 24);
+    clipBand.style.left = `${(offset + left).toFixed(1)}px`;
+    clipBand.style.width = `${Math.max(0, right - left).toFixed(1)}px`;
+    clipFrom.hidden = x1 < -1 || x1 > width + 1;
+    clipTo.hidden = x2 < -1 || x2 > width + 1;
+    clipFrom.style.left = `${(x1 - left).toFixed(1)}px`;
+    clipTo.style.left = `${(x2 - left).toFixed(1)}px`;
+    for (const [handle, ms] of [[clipFrom, clipRange.fromMs], [clipTo, clipRange.toMs]]) {
+      handle.setAttribute('aria-valuenow', String(Math.round(ms)));
+      handle.setAttribute('aria-valuetext', `${format(ms)}, clip ${lengthLabel(clipRange.toMs - clipRange.fromMs)}`);
+    }
+    clipLabel.hidden = !showLabel;
+    if (showLabel) clipLabel.textContent = clipText();
+  }
+
+  /** A new range too narrow to grab, or out of the window: the timeline zooms so it is about a third of the window, in the middle. */
+  function revealClipRange(range) {
+    if (!width || model.empty) return;
+    const v = model.viewport;
+    const length = range.toMs - range.fromMs;
+    const inView = range.fromMs >= v.startMs && range.toMs <= v.startMs + v.durationMs;
+    if (inView && (length / v.durationMs) * width >= 60) return;
+    const wanted = Math.max(length * 3, 60_000);
+    const center = (range.fromMs + range.toMs) / 2;
+    model.zoom(wanted / v.durationMs, center);
+    const after = model.viewport;
+    model.pan(center - (after.startMs + after.durationMs / 2));
+  }
+
+  const clipX = (event) => event.clientX - track.getBoundingClientRect().left - (track.clientLeft || 0);
+
+  for (const handle of [clipFrom, clipTo]) {
+    const edge = handle.dataset.clipEdge;
+    handle.addEventListener('pointerdown', (event) => {
+      if (!clipRange || event.button > 0) return;
+      clipEdge = edge;
+      try { handle.setPointerCapture(event.pointerId); } catch { /* a synthetic pointer has nothing to capture */ }
+      handle.focus({ preventScroll: true });
+      event.preventDefault();
+      event.stopPropagation();
+      clipKey = '';
+    });
+    handle.addEventListener('pointermove', (event) => {
+      if (clipEdge !== edge || !onClipEdge) return;
+      onClipEdge(edge, timeForX(model.viewport, clipX(event), width));
+    });
+    const end = (event) => {
+      if (clipEdge !== edge) return;
+      clipEdge = null;
+      clipKey = '';
+      try { handle.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+    handle.addEventListener('lostpointercapture', end);
+    handle.addEventListener('keydown', (event) => {
+      const delta = edgeKeyDelta(event);
+      if (delta === null || !clipRange || !onClipEdge || event.ctrlKey || event.metaKey || event.altKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClipEdge(edge, (edge === 'from' ? clipRange.fromMs : clipRange.toMs) + delta);
+    });
+    handle.addEventListener('focus', () => { clipFocus = edge; clipKey = ''; });
+    handle.addEventListener('blur', () => { if (clipFocus === edge) clipFocus = null; clipKey = ''; });
   }
 
   // MARK: Events
@@ -245,6 +352,14 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
     setPreset(preset) { model.select(preset); },
     zoomBy,
     announce(text) { replace(announcer, text); },
+    /** Shows the clip being chosen as a red band (null: none); `onEdge(edge, ms)` hears a handle being moved ('from' or 'to'). */
+    setClipRange(range, onEdge) {
+      if (range && !clipRange) revealClipRange(range);
+      clipRange = range ? { fromMs: range.fromMs, toMs: range.toMs } : null;
+      onClipEdge = range ? onEdge : null;
+      if (!range) { clipEdge = null; clipFocus = null; }
+      clipKey = '';
+    },
     /** The sentence shown while nothing is recorded (the screen knows whether Record is on). */
     setEmptyText(text) { if (empty.textContent !== text) empty.textContent = text; },
     /** Runs one action of keys.js on the session and the timeline. */

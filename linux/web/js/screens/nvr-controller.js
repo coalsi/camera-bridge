@@ -1,6 +1,6 @@
 // The logic of the NVR grid page, without a DOM: which cameras are on the page, what each tile says, what the transport does, how a tile opens
 // the watch screen and how the page comes back. nvr.js builds the session, the cells and the DOM and hands them in; the tests hand in fakes.
-import { stepSpeed } from '../nvr/speed.js';
+import { isTimelapse, stepSpeed } from '../nvr/speed.js';
 import { EPOCH_MIN_MS, chooseWaveformCameras, gridPath, pageRanges, tileState, tileSummary, watchPath, whenKnown } from './nvr-model.js';
 
 const IDLE = Object.freeze({ kind: 'idle', next: null, message: null });
@@ -223,7 +223,11 @@ export function createGridController(deps) {
         canGoLive: canAct() && started && mode !== 'live',
         positionMs: position,
         rate: session.rate ?? 1,
+        lapse: isTimelapse(session.rate ?? 1),
         canSpeed: canAct() && started && mode !== 'live',
+        // Held: the person paused (or stepped a picture); nothing but Play, or going live, plays again.
+        holding: started && mode === 'paused' && session.holding === true,
+        canStep: canAct() && started && mode !== 'live',
       },
       waveform,
       noRecordings: phase === 'ready' && waveform.ids.length === 0 && !cameras.some((camera) => camera.nvrEnabled),
@@ -274,21 +278,34 @@ export function createGridController(deps) {
     },
     /**
      * Plays every tile of the page from `ms` (an event of the list): the shared playhead moves there and the cells play, the timeline follows
-     * the playhead, and the address follows as it does after a drag. Within five seconds of now it is live. False when it cannot act.
+     * the playhead, and the address follows as it does after a drag. Within five seconds of now it is live. While the person holds the page
+     * paused it stays paused and shows the pictures at `ms` (session.showAt). False when it cannot act.
      */
     playAt(ms) {
       if (!canAct() || !Number.isFinite(ms)) return false;
-      session.play(ms);
+      if (started && session.holding === true && typeof session.showAt === 'function') session.showAt(ms);
+      else session.play(ms);
       schedule();
       return true;
     },
     seek(deltaMs) { if (canAct()) { session.seek(deltaMs); schedule(); } },
+    /** One picture forward (+1) or back (-1): pauses first, never plays (session.stepFrame). */
+    stepFrame(direction) {
+      if (!canAct() || !started || session.mode === 'live') return;
+      session.stepFrame(direction);
+      schedule();
+    },
     retryTile() { if (canAct()) session.seek(0); },
     key(keyAction) {
       if (!keyAction) return;
       if (keyAction.action === 'togglePlay') api.togglePlay();
       else if (keyAction.action === 'goLive') api.goLive();
       else if (keyAction.action === 'seek') api.seek(keyAction.deltaMs);
+      else if (keyAction.action === 'nudge') {
+        // ← and →: a picture while paused (on a page that looks back), a second while playing or live.
+        if (started && session.mode === 'paused') api.stepFrame(keyAction.direction);
+        else api.seek(keyAction.deltaMs);
+      }
       else if (keyAction.action === 'speed') api.stepSpeed(keyAction.step);
     },
 

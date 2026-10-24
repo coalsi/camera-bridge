@@ -15,6 +15,19 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.120',
+    date: '2026-10-24',
+    title: 'Precise playback, time-lapse, and a clip range you can drag',
+    items: [
+      'Speeds in four groups: slow motion (¼×, ½×), normal, fast (2×, 4×, 8×) and time-lapse (30× to 300×, “1 minute in 2 seconds”), which skips through the key pictures so even a whole night goes by quickly.',
+      'Paused stays paused: dragging the timeline, clicking an event, changing speed or stepping never starts playback; only Play does. While paused, step one picture at a time with the buttons or ← and →, with the exact time shown.',
+      'Save clip shows the clip as a red band on the timeline, ending where you are. Drag either edge, or pick 10 s, 30 s, 1 min, 5 min or 15 min. A clip can also be saved as a time-lapse.',
+      'The Live button now points right, toward the end of the timeline where live is.',
+      'Keys: Space play or pause, ← → a picture (paused) or a second, Shift + ← → a minute, , and . slower and faster, L live, C save a clip.',
+      'The About page tells what Camera Bridge OS is now: a friendly local recorder for the cameras you already own, with Apple Home as an option.',
+    ],
+  },
+  {
     version: '0.1.119',
     date: '2026-10-24',
     title: 'Safer camera setup, cameras found on the wrong network, and removed cameras keep their Apple Home pairing',

@@ -4,7 +4,8 @@
 // runs on every pointer event. A cell works out the rest. Each dispatch to the cells has a new epoch, so a cell can tell the newest
 // desire from an old one, and so can this file when a cell reports back.
 import { realTimers } from './clock.js';
-import { nearestSpeed } from './speed.js';
+import { DEFAULT_FRAME_MS, frameStepTarget } from './frames.js';
+import { LAPSE_STEP_MS, isTimelapse, nearestSpeed } from './speed.js';
 import { choosePolicy, currentEnvironment } from './planner.js';
 
 const MAX_TILES = 16;
@@ -31,6 +32,10 @@ export function createSession({
   let waiting = null;                      // { epoch, targetMs }: the clock starts when the main tile shows its first playing frame
   let driveHold = null;                    // { position }: the clock stands still because a tile lost the recordings drive; it plays on when the drive is back
   let suspended = null;                    // { mode, position } while the page is hidden
+  let holding = false;                     // the person paused: nothing but Play (or going live) plays again
+  let scrubHolds = false;                  // the drag that is going on began while held: its release shows the picture there, paused
+  let lapseTimer = null;                   // a time-lapse plays: the timer of its next key picture
+  let lapseEpoch = 0;                      // the first epoch of the time-lapse playing now
   let destroyed = false;
 
   let reportedMode = clock.mode;
@@ -68,12 +73,12 @@ export function createSession({
   }
 
   /** One desire for every cell (or the ones in `only`), all with one new epoch. Returns the epoch. */
-  function dispatch(precision, playing, targetMs, only = null) {
+  function dispatch(precision, playing, targetMs, only = null, extra = null) {
     epoch += 1;
     if (!only) lastDispatch = epoch;
     for (const [id, entry] of cells) {
       if (only && !only.includes(id)) continue;
-      entry.cell.request({ targetMs, precision, playing, epoch, priority: id === primaryId() ? 1 : 0 });
+      entry.cell.request({ targetMs, precision, playing, epoch, priority: id === primaryId() ? 1 : 0, ...extra });
     }
     return epoch;
   }
@@ -89,14 +94,19 @@ export function createSession({
     timers.clearTimeout(startTimer);
     startTimer = null;
     waiting = null;
+    stopLapse();
     driveHold = null;                      // whatever a person (or the start of a play) does ends a drive hold
     if (announce) announceMode();
   }
 
   // MARK: Starting to play
 
-  /** Pause at `ms`, ask every cell for the exact frame and to play, and start the clock when the main tile shows its first playing frame. */
+  /**
+   * Pause at `ms`, ask every cell for the exact frame and to play, and start the clock when the main tile shows its first playing frame. At a
+   * time-lapse speed the clock runs at once and the cells show key pictures instead (startLapse).
+   */
   function startPlaying(ms) {
+    if (isTimelapse(clock.rate)) { startLapse(ms); return; }
     clearWait({ announce: false });
     target = ms;
     waiting = { epoch: -1, targetMs: ms };            // from here the page shows "playing", although the clock stands still for a moment
@@ -117,10 +127,66 @@ export function createSession({
     clock.play(from);                       // announces the mode if it changed
   }
 
+  /** Stands still at `ms` and shows the exact picture there in every tile: what a held (paused) page does instead of playing. */
+  function holdAt(ms) {
+    clearWait({ announce: false });
+    clock.scrub(clockTime(ms));
+    announceMode();
+    target = ms;
+    dispatch('exact', false, ms);
+    emit({ kind: 'position' });
+  }
+
+  // MARK: Time-lapse
+
+  /**
+   * A time-lapse (30× and faster, nvr/speed.js) is not played by the video elements: the clock runs at its speed from `ms`, and every
+   * LAPSE_STEP_MS every cell is asked for the key picture at the clock (one keyframe request, behind the page's key picture budget: a cell
+   * has one request in flight at most and the newest wish wins), so a fast speed never fetches every part. Gaps are jumped as when playing.
+   */
+  function startLapse(ms) {
+    clearWait({ announce: false });
+    target = ms;
+    clock.play(clockTime(ms));
+    announceMode();
+    lapseEpoch = epoch + 1;
+    lapseStep();
+    emit({ kind: 'position' });
+  }
+
+  function stopLapse() {
+    if (lapseTimer !== null) timers.clearTimeout(lapseTimer);
+    lapseTimer = null;
+  }
+
+  function lapseStep() {
+    lapseTimer = null;
+    if (destroyed || suspended || clock.mode !== 'playing' || !isTimelapse(clock.rate)) return;
+    const at = clock.position();
+    if (clock.shouldGoLive(at)) { goLiveNow(); return; }
+    if (lapseOverGap(at)) return;
+    target = at;
+    dispatch('key', false, at, null, { lapse: true });
+    lapseTimer = timers.setTimeout(lapseStep, LAPSE_STEP_MS);
+  }
+
+  /** Every tile answered this time-lapse and none has a picture at the clock: on to the next recording of any camera, or live. */
+  function lapseOverGap(at) {
+    const states = [...cells.values()].map((entry) => entry.cell.coverage);
+    if (!states.length || states.some((coverage) => coverage.epoch < lapseEpoch || !STOPPED.has(coverage.kind))) return false;
+    if (!states.some((coverage) => coverage.kind === 'gap')) return false;
+    const nexts = states.map((coverage) => coverage.next).filter((next) => Number.isFinite(next) && next > at);
+    if (states.some((coverage) => coverage.kind === 'gap' && Number.isFinite(coverage.next) && coverage.next <= at)) return false;
+    if (nexts.length) startLapse(Math.min(...nexts));
+    else goLiveNow();
+    return true;
+  }
+
   function goLiveNow() {
     clearWait({ announce: false });
     clearTimers();
     scrubbing = false;
+    holding = false;
     clock.goLive();                           // announces the mode if it changed
     announceMode();
     target = clock.position();
@@ -219,7 +285,9 @@ export function createSession({
         if (cells.has(id)) continue;
         const cell = createCell(id);
         cells.set(id, { cell, off: cell.onChange((coverage) => onCell(id, coverage)) });
-        if (activated && !suspended) {
+        if (activated && !suspended && lapseTimer !== null) {
+          cell.request({ targetMs: clock.position(), precision: 'key', playing: false, epoch: (epoch += 1), priority: 0, lapse: true });   // the next step asks again
+        } else if (activated && !suspended) {
           // Joins where the others are: at the playhead, or at the target they are all about to start playing from.
           const joining = waiting ?? { epoch: (epoch += 1), targetMs: clock.position() };
           cell.request({ targetMs: joining.targetMs, precision: 'exact', playing: waiting !== null || clock.mode !== 'paused', epoch: joining.epoch, priority: 0 });
@@ -233,6 +301,7 @@ export function createSession({
     beginScrub() {
       if (destroyed || suspended) return;
       activated = true;
+      scrubHolds = holding && effectiveMode() === 'paused';
       scrubbing = true;
       clearWait();
       clearTimers();
@@ -262,18 +331,23 @@ export function createSession({
       }, idleMs);
     },
 
-    /** Release: play from the target (live when it is within five seconds of now or later). */
+    /**
+     * Release: play from the target (live when it is within five seconds of now or later). While the person holds the page paused it stays
+     * paused there, showing the exact picture.
+     */
     endScrub() {
       if (destroyed || suspended || !scrubbing) return;
       scrubbing = false;
       clearTimers();
       if (clock.shouldGoLive(target)) goLiveNow();
+      else if (scrubHolds && holding) holdAt(target);
       else startPlaying(target);
     },
 
     play(fromMs) {
       if (destroyed || suspended) return;
       activated = true;
+      holding = false;
       if (Number.isFinite(fromMs)) {
         scrubbing = false;
         clearTimers();
@@ -288,6 +362,7 @@ export function createSession({
     pause() {
       if (destroyed || suspended) return;
       driveHold = null;                       // a person who pauses during a drive hold does not want it to play on
+      holding = true;
       if (effectiveMode() === 'paused') return;
       clearWait({ announce: false });
       clock.pause();                          // announces the mode if it changed
@@ -305,8 +380,41 @@ export function createSession({
     goLive() {
       if (destroyed || suspended) return;
       activated = true;
+      holding = false;
       goLiveNow();
     },
+
+    /**
+     * Goes to `ms` without changing whether it plays: playing (or live) it plays from there as play(ms) does; paused it stays paused and shows
+     * the exact picture there. What an event of the list, a jump or a step does.
+     */
+    showAt(ms) {
+      if (destroyed || suspended || !Number.isFinite(ms)) return;
+      activated = true;
+      if (effectiveMode() !== 'paused') { session.play(ms); return; }
+      scrubbing = false;
+      clearTimers();
+      holdAt(clampUpper(ms));
+    },
+
+    /**
+     * One picture forward (+1) or back (-1), paused: a step pauses first, and never plays. The picture's length is the recording's (the main
+     * tile's cell read it from the fragments), and the step starts from the picture on screen when the browser said exactly which it was.
+     */
+    stepFrame(direction) {
+      if (destroyed || suspended || clock.mode === 'live') return;
+      activated = true;
+      if (effectiveMode() !== 'paused') session.pause();
+      holding = true;
+      const cell = cells.get(primaryId())?.cell ?? null;
+      const ms = frameStepTarget({ positionMs: clock.position(), shownMs: cell?.shownMs ?? null, frameMs: cell?.frameMs ?? DEFAULT_FRAME_MS, direction });
+      scrubbing = false;
+      clearTimers();
+      holdAt(clampUpper(ms));
+    },
+
+    /** True while the person holds the page paused (Pause or a frame step): only Play, or going live, plays again. */
+    get holding() { return holding && effectiveMode() === 'paused'; },
 
     /** Jump by `deltaMs` and keep playing if it was playing. */
     seek(deltaMs) {
@@ -372,11 +480,20 @@ export function createSession({
 
     /** The playback speed (nvr/speed.js SPEEDS); live is always 1. */
     get rate() { return clock.rate ?? 1; },
-    /** Plays (or will play) at the step nearest to `rate`; every cell follows the clock's speed. */
+    /**
+     * Plays (or will play) at the step nearest to `rate`; every cell follows the clock's speed. Paused it stays paused (the speed applies on
+     * Play). Playing into or out of a time-lapse starts again from the playhead the other way (stepped key pictures or played video).
+     */
     setRate(rate) {
       if (destroyed) return;
-      clock.setRate?.(nearestSpeed(rate));
+      const next = nearestSpeed(rate);
+      const wasLapse = isTimelapse(clock.rate ?? 1);
+      clock.setRate?.(next);
+      if (wasLapse === isTimelapse(clock.rate ?? 1) || suspended || clock.mode === 'live' || effectiveMode() !== 'playing') return;
+      startPlaying(waiting ? waiting.targetMs : clock.position());
     },
+    /** True while a time-lapse steps its key pictures. */
+    get lapsing() { return lapseTimer !== null; },
     get position() { return clock.position(); },
     get mode() { return effectiveMode(); },
     /** fn({ kind: 'mode', mode } | { kind: 'position' } | { kind: 'cameras', ids } | { kind: 'coverage', id, coverage }); returns the unsubscribe function. */

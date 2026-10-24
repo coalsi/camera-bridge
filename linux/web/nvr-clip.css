@@ -17,3 +17,8 @@
 /* The cameras of a clip on the wall: one tick box each (js/nvr/clip.js). */
 .nvr-clip-cams { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 8px; }
 .nvr-clip-cam { display: inline-flex; align-items: center; gap: 6px; font-size: 0.88rem; white-space: nowrap; cursor: pointer; }
+/* The clip's length (it matches the red band on the timeline): the bar's lengths, or the band's own length after a drag; the time-lapse choice. */
+.nvr-clip-lengths { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.nvr-clip-lengths .btn[aria-pressed="true"] { background: #9e1b1b; border-color: #c62828; color: #fff; }
+.nvr-clip-custom { font-size: 0.85rem; font-weight: 600; color: #ff8a80; font-variant-numeric: tabular-nums; }
+.nvr-clip-speed { width: auto; }

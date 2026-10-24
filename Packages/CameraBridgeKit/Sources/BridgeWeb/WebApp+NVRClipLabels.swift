@@ -4,7 +4,8 @@ import Foundation
 import MediaCore
 import Synchronization
 
-// A saved clip that ffmpeg re-encodes (`GET /nvr/cameras/:id/clip?…&labels=1` and/or `&straighten=1`); without either it is copied as recorded
+// A saved clip that ffmpeg re-encodes (`GET /nvr/cameras/:id/clip?…&labels=1`, `&straighten=1` and/or `&speed=30|60|120|300`, a time-lapse);
+// without any of them it is copied as recorded
 // (`WebApp+NVRClip.swift`). The clip is written as usual (`ClipExporter`) to a temporary file, then ffmpeg re-encodes it and the result is streamed
 // as fragmented MP4 while it is made (the size is not known in advance). Encoding is on the GPU (VA-API) where there is one, else x264, at most
 // 3840 pixels wide (the H.264 encoder's limit is 4096).
@@ -69,32 +70,45 @@ extension WebApp {
         return (xMap: paths[0], yMap: paths[1], chromaXMap: paths[2], chromaYMap: paths[3], width: width, height: height)
     }
 
+    /// The frame rate a time-lapse clip is written at.
+    static let timelapseFrameRate = 30
+
+    /// A time-lapse's filters, after the label (which is drawn at the recording's own times): the pictures `speed` times as fast, at
+    /// `timelapseFrameRate`.
+    static func timelapseFilters(speed: Int) -> [String] {
+        ["setpts=(PTS-STARTPTS)/\(speed)", "fps=\(timelapseFrameRate)"]
+    }
+
     /// The ffmpeg arguments: read `input`, straighten it with `correction`'s maps (inputs 1 to 4, at the clip's size), draw one label per run
     /// in `style` (each only while its run is on screen; nil: no label), encode, fragmented MP4 to stdout. Without a correction the picture is
     /// scaled to at most 3840 wide in a plain `-vf` chain, as labelled clips always were.
+    /// With a time-lapse `speed`, only the key pictures are decoded (`-skip_frame nokey`, a small part of the work on the box), they are shown
+    /// `speed` times as fast at `timelapseFrameRate` (the label first, so it tells each picture's real time), and the sound is left out.
     static func clipArguments(input: String, textFiles: [(LabelRun, String)], style: TimestampOverlaySettings?, font: String?,
-                              correction: ClipCorrectionMaps?, vaapiDevice: String?) -> [String] {
-        let label = style.map { labelFilters(textFiles: textFiles, style: $0, font: font) } ?? []
+                              correction: ClipCorrectionMaps?, vaapiDevice: String?, speed: Int? = nil) -> [String] {
+        let label = (style.map { labelFilters(textFiles: textFiles, style: $0, font: font) } ?? []) + (speed.map { timelapseFilters(speed: $0) } ?? [])
         // The pixel format the encoder takes: uploaded to the GPU for VA-API (x264 is also told by -pix_fmt).
         let encoderFormat = vaapiDevice == nil ? ["format=yuv420p"] : ["format=nv12", "hwupload"]
-        var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin"] + (vaapiDevice.map { ["-vaapi_device", $0] } ?? []) + ["-i", input]
+        let sound = speed == nil ? ["-map", "0:a:0?"] : []
+        var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin"] + (vaapiDevice.map { ["-vaapi_device", $0] } ?? [])
+            + (speed == nil ? [] : ["-skip_frame", "nokey"]) + ["-i", input]
         if let correction {
             arguments += ["-i", correction.xMap, "-i", correction.yMap, "-i", correction.chromaXMap, "-i", correction.chromaYMap]
             let warp = PictureCorrection.ffmpegRemapChain(input: "0:v:0", width: correction.width, height: correction.height, xMap: "1:v", yMap: "2:v",
                                                           chromaXMap: "3:v", chromaYMap: "4:v", output: "cbw")
             arguments += ["-filter_complex", warp + ";[cbw]" + (label + encoderFormat).joined(separator: ",") + "[cbv]",
-                          "-map", "[cbv]", "-map", "0:a:0?", "-sn", "-dn"]
+                          "-map", "[cbv]"] + sound + ["-sn", "-dn"]
         } else {
             let filters = ["scale='min(iw\\,\(MediaFit.maximumOutputWidth))':-2"] + label + (vaapiDevice == nil ? [] : encoderFormat)
-            arguments += ["-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-vf", filters.joined(separator: ",")]
+            arguments += ["-map", "0:v:0"] + sound + ["-sn", "-dn", "-vf", filters.joined(separator: ",")]
         }
         if vaapiDevice != nil {
             arguments += ["-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", "23"]
         } else {
             arguments += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
         }
-        // The recording's sound (AAC, when Record sound is on) is kept as it is.
-        arguments += ["-c:a", "copy", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"]
+        // The recording's sound (AAC, when Record sound is on) is kept as it is; a time-lapse has none.
+        arguments += (speed == nil ? ["-c:a", "copy"] : ["-an"]) + ["-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"]
         return arguments
     }
 
@@ -157,10 +171,11 @@ extension WebApp {
     /// The clip of `part` of `plan` re-encoded and streamed: with the bridge's label burned in (`labels`), straightened by `correction` (the
     /// camera's, when it is on and the person asked for it), or both. The archive slot is the caller's: `release` runs once the answer ended.
     func processedClip(plan: ClipPlan, part: Int, exporter: ClipExporter, cameraID: UUID, name: String, labels: Bool, correction: PictureCorrection?,
-                       release: @escaping @Sendable () -> Void) async throws -> HTTPResponse {
+                       speed: Int? = nil, release: @escaping @Sendable () -> Void) async throws -> HTTPResponse {
         guard let ffmpeg = Self.ffmpegPath() else {
             release()
-            throw APIError(status: 501, code: "unsupported", message: "This bridge has no video converter for \(labels ? "labelled" : "straightened") clips.")
+            let kind = speed != nil ? "time-lapse" : labels ? "labelled" : "straightened"
+            throw APIError(status: 501, code: "unsupported", message: "This bridge has no video converter for \(kind) clips.")
         }
         let overview = await backend.overview()
         let configuration = overview.configurations.first { $0.id == cameraID }
@@ -171,9 +186,10 @@ extension WebApp {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("camera-bridge-clip-\(UUID().uuidString.prefix(8))", isDirectory: true)
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
-        headers["Content-Disposition"] = Self.attachment(clipPart.fileName)
+        headers["Content-Disposition"] = Self.attachment(speed.map { Self.timelapseFileName(clipPart.fileName, speed: $0) } ?? clipPart.fileName)
         let vaapi = FileManager.default.fileExists(atPath: "/dev/dri/renderD128") ? "/dev/dri/renderD128" : nil
-        let how = [correction == nil ? nil : "straightened", labels ? "with its label" : nil].compactMap { $0 }.joined(separator: ", ")
+        let how = [speed.map { "as a \($0)x time-lapse" }, correction == nil ? nil : "straightened", labels ? "with its label" : nil]
+            .compactMap { $0 }.joined(separator: ", ")
         log.notice("a clip of \(name) is being sent \(how)")
         return HTTPResponse.stream(contentType: "video/mp4", headers: headers) { stream in
             defer {
@@ -206,7 +222,7 @@ extension WebApp {
                         maps = try await Self.offThePool { try Self.writeCorrectionMaps(correction, width: size.width, height: size.height, in: folder) }
                     }
                     let arguments = Self.clipArguments(input: input.path, textFiles: files, style: style, font: style == nil ? nil : Self.labelFont(),
-                                                       correction: maps, vaapiDevice: vaapi)
+                                                       correction: maps, vaapiDevice: vaapi, speed: speed)
                     let command = Self.conversionCommand(ffmpeg: ffmpeg, arguments: arguments)
                     try await Self.runStreaming(executable: command.executable, arguments: command.arguments, timeZone: zone, into: stream)
                 }

@@ -219,7 +219,17 @@ Live needs Record. With Record off, or while recording is paused or waiting, the
 
 ### All cameras at once: the NVR page
 
-The **Monitor** (the first page) is a wall of your cameras (9 on a page by default, with arrows to move between pages) playing live, with **Live** shown under it. The recordings share one playhead and one timeline: drag or click the timeline and every camera shows that moment, **Play** and **Pause** play them together, and **Back to live** returns to the live picture. Click a camera to open its Watch screen at the same moment, and use your browser's Back button to return. The wave in the timeline combines the cameras: at each moment it shows whichever camera is busiest compared with its own normal.
+The **Monitor** (the first page) is a wall of your cameras (9 on a page by default, with arrows to move between pages) playing live, with **Live** shown under it. The recordings share one playhead and one timeline: drag or click the timeline and every camera shows that moment, **Play** and **Pause** play them together, and **Live** (at the right end of the row, where the timeline's live edge is) returns to the live picture. Click a camera to open its Watch screen at the same moment, and use your browser's Back button to return. The wave in the timeline combines the cameras: at each moment it shows whichever camera is busiest compared with its own normal.
+
+**Speed.** The speed menu beside Play has four groups: **Slow** (¼× and ½×, slow motion), **Normal** (1×, the only speed with sound), **Fast** (2×, 4× and 8×) and **Time-lapse** (30×, 60×, 120× and 300×: at 30× a minute passes in 2 seconds, at 300× five minutes pass in a second). A time-lapse shows one picture of each camera every half second, so it moves in steps; it skips the times nothing was recorded and goes live at the end.
+
+**Pause means paused.** After you press Pause, nothing plays until you press Play: dragging or clicking the timeline, choosing an event, jumping, stepping and changing the speed all leave the recordings paused and show the picture at the new time (a new speed applies when you press Play). Going live always plays live. While paused, the time shows tenths of a second.
+
+**Picture by picture.** While paused, the buttons on either side of Play (or ← and →) step one picture back or forward. A step never plays.
+
+**Keys** (the keyboard button beside Live lists them): Space play or pause; ← → one picture while paused, a second while playing; Shift + ← → a minute; Alt + ← → ten seconds (on a focused camera, Alt + arrow moves the camera instead); , and . slower and faster; L live; C save a clip.
+
+**Saving a clip.** **Save clip** shows a red band on the timeline: by default the 30 seconds before the playhead (or after it, when there is less recorded before). Drag either red edge to change it (or focus an edge and use the arrow keys), or choose 10 s, 30 s, 1 min, 5 min or 15 min in the clip bar. A clip can be up to 2 hours for each camera. **Time-lapse** in the clip bar saves the range sped up (30× to 300×; an hour at 60× is a minute of video), made on the box from the key pictures, without sound. **Export clip** saves it; Esc or **Cancel** removes the band.
 
 A browser can only decode so many pictures at once, so it may play fewer cameras than the page shows. A note then says, for example, "This browser plays recordings for one camera at a time on this page. The other cameras stay on snapshots; open one to watch it." At present Chrome on a Mac plays one camera at a time here.
 

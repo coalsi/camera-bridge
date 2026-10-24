@@ -1,6 +1,7 @@
 // The NVR routes R1 to R12 of T00 (Part C.5), answered from the virtual archive. Same paths, same order of checks, same error codes and sentences
 // as the daemon's WebApp+NVR.swift is specified to have; the scenario switches (state.mjs) make the failure answers reachable.
 
+import { spawn } from 'node:child_process';
 import { ApiError, bytes, json, sleep } from './http.mjs';
 import { parseFragmentId } from './identity.mjs';
 import { BUILTIN, KEEP_DAYS_RANGE, MAX_SIZE_RANGE, SENTENCES } from './state.mjs';
@@ -379,6 +380,93 @@ function undoOptimize(app, ctx) {
   return { status: 204, headers: {}, body: null };
 }
 
+// ---- saved clips: the plan and the download (WebApp+NVRClip.swift), enough for the clip bar -------------------------------------------
+// One part per recording file the range touches (the bridge splits a clip where the recording's format changes); the download is the file's
+// init and fragments as they are. `labels` and `straighten` are taken and ignored here; `speed` (a time-lapse) runs ffmpeg as the bridge does:
+// key pictures only, `speed` times as fast at 30 pictures a second, no sound.
+
+const MAX_CLIP_MS = 7_200_000;
+const TIMELAPSE_SPEEDS = [30, 60, 120, 300];
+
+/** The fragments of [from, to), from the key picture before `from`, grouped by file: [[fragment, …], …]. */
+function clipGroups(reader, id, from, to) {
+  if (to <= from) throw ApiError.invalid('The clip must end after it starts.', 'to');
+  if (to - from > MAX_CLIP_MS) throw new ApiError(422, 'too_long', 'A clip can be at most 2 hours for each camera. Choose a shorter time.');
+  const first = reader.containing(id, from);
+  let fragment = first ? keyFragmentOf(reader, id, first) : reader.startingAfter(id, from);
+  const groups = [];
+  while (fragment && fragment.start < to) {
+    if (!groups.length || groups.at(-1)[0].file !== fragment.file) {
+      if (!fragment.key) { fragment = reader.startingAfter(id, fragment.start); continue; }    // a new file starts at a key picture
+      groups.push([]);
+    }
+    groups.at(-1).push(fragment);
+    fragment = reader.startingAfter(id, fragment.start);
+  }
+  if (!groups.length) throw new ApiError(404, 'gap', 'Nothing was recorded in this time.');
+  return groups;
+}
+
+const clipName = (camera, group, speed) => {
+  const stamp = new Date(group[0].start).toISOString().slice(0, 19).replace('T', ' ').replaceAll(':', '.');
+  return `${camera} ${stamp}${speed ? ` time-lapse ${speed}x` : ''}.mp4`;
+};
+
+async function clipPlan(app, ctx) {
+  const id = cameraParam(ctx);
+  const from = timeParam(ctx.query, 'from');
+  const to = timeParam(ctx.query, 'to');
+  return withSlot(app, ctx, async () => {
+    const camera = app.state.cameras.get(id);
+    if (!camera) throw ApiError.notFound('There is no camera with this identifier.');
+    const groups = clipGroups(app.state.reader, id, from, to);
+    const parts = groups.map((group, index) => ({
+      index: index + 1, start: group[0].start, end: group.at(-1).end, leadInMs: Math.max(0, from - group[0].start),
+      bytes: group.reduce((sum, fragment) => sum + fragment.bytes, 0), samples: 0, fileName: clipName(camera.configuration.name, group, 0),
+    }));
+    return json({ camera: id, cameraName: camera.configuration.name, parts, gaps: [], soundOmitted: false,
+      bytes: parts.reduce((sum, part) => sum + part.bytes, 0), durationMs: to - from });
+  });
+}
+
+/** `data` through ffmpeg as a time-lapse at `speed`; resolves the MP4. */
+function timelapse(data, speed) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.env.CB_FFMPEG || 'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-skip_frame', 'nokey', '-i', 'pipe:0',
+      '-map', '0:v:0', '-vf', `setpts=(PTS-STARTPTS)/${speed},fps=30`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an',
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const out = [];
+    child.stdout.on('data', (chunk) => out.push(chunk));
+    child.on('error', () => reject(new ApiError(501, 'unsupported', 'This bridge has no video converter for time-lapse clips.')));
+    child.on('close', (code) => (code === 0 ? resolve(Buffer.concat(out)) : reject(new ApiError(502, 'unreadable', 'The clip couldn’t be converted.'))));
+    child.stdin.on('error', () => {});
+    child.stdin.end(data);
+  });
+}
+
+async function clip(app, ctx) {
+  const id = cameraParam(ctx);
+  notOnHead(ctx);
+  const from = timeParam(ctx.query, 'from');
+  const to = timeParam(ctx.query, 'to');
+  const part = integerParam(ctx.query, 'part', [1, 64], 1);
+  const speedText = ctx.query.get('speed');
+  if (speedText !== null && !TIMELAPSE_SPEEDS.includes(Number(speedText))) throw ApiError.invalid('Give “speed” as 30, 60, 120 or 300.', 'speed');
+  const speed = speedText === null ? 0 : Number(speedText);
+  return withSlot(app, ctx, async () => {
+    const camera = app.state.cameras.get(id);
+    if (!camera) throw ApiError.notFound('There is no camera with this identifier.');
+    const group = clipGroups(app.state.reader, id, from, to)[part - 1];
+    if (!group) throw ApiError.notFound(`The clip has no part ${part}.`);
+    await checkReads(app);
+    const reader = app.state.reader;
+    let data = Buffer.concat([Buffer.from(reader.readInit(group[0])), ...group.map((fragment) => Buffer.from(reader.readFragment(fragment)))]);
+    if (speed) data = await timelapse(data, speed);
+    const name = clipName(camera.configuration.name, group, speed).replace(/[^\x20-\x7e]|["\\/]/g, '_');
+    return bytes(data, 'video/mp4', { 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="${name}"` });
+  });
+}
+
 /** The route table entries (method, pattern under /api/v1, handler). All are session routes. */
 export const NVR_ROUTES = [
   ['GET', 'nvr/storage', storage, false],
@@ -392,6 +480,8 @@ export const NVR_ROUTES = [
   ['GET', 'nvr/cameras/:id/fragments/:fid', (app, ctx) => fragmentBytes(app, ctx, 'fragment'), false],
   ['GET', 'nvr/cameras/:id/fragments/:fid/init', (app, ctx) => fragmentBytes(app, ctx, 'init'), false],
   ['GET', 'nvr/cameras/:id/keyframe', keyframe, false],
+  ['GET', 'nvr/cameras/:id/clip-plan', clipPlan, false],
+  ['GET', 'nvr/cameras/:id/clip', clip, false],
   ['POST', 'cameras/:id/optimize', optimize, true],
   ['POST', 'cameras/:id/optimize/undo', undoOptimize, false],
 ];

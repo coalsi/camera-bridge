@@ -494,13 +494,21 @@ export function whenKnown(isKnown, { subscribe = () => () => {}, timeoutMs = 100
  * dialog is open. `activatable`: focus is on something Space already operates (a button, a link, a switch).
  * Returns { action: 'togglePlay' | 'goLive' } or { action: 'seek', deltaMs } or { action: 'speed', step: -1 | 1 } or null.
  */
+/**
+ * The Monitor's keys (the page's key map, KEY_MAP below): Space play or pause; ← and → one picture back or forward while paused, a second
+ * while playing; Shift + ← → a minute; Alt + ← → ten seconds (on a focused tile Alt + arrow moves the tile instead: nvr.js); , and . slower
+ * and faster; L live. Never while typing, never with ctrl or cmd.
+ */
 export function keyAction(event, { typing = false, activatable = false } = {}) {
   if (typing || event.defaultPrevented || event.ctrlKey || event.metaKey) return null;
-  const step = event.altKey ? 60000 : event.shiftKey ? 10000 : 1000;
+  const arrow = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0;
+  if (arrow !== 0) {
+    if (event.shiftKey) return { action: 'seek', deltaMs: arrow * 60000 };
+    if (event.altKey) return { action: 'seek', deltaMs: arrow * 10000 };
+    return { action: 'nudge', direction: arrow, deltaMs: arrow * 1000 };    // a picture while paused, a second while playing
+  }
   switch (event.key) {
     case ' ': return activatable ? null : { action: 'togglePlay' };
-    case 'ArrowLeft': return { action: 'seek', deltaMs: -step };
-    case 'ArrowRight': return { action: 'seek', deltaMs: step };
     case 'l':
     case 'L': return { action: 'goLive' };
     case ',': return { action: 'speed', step: -1 };
@@ -508,3 +516,14 @@ export function keyAction(event, { typing = false, activatable = false } = {}) {
     default: return null;
   }
 }
+
+/** The Monitor's key map as its keyboard help shows it: [keys, what they do]. */
+export const KEY_MAP = Object.freeze([
+  ['Space', 'Play or pause'],
+  ['← →', 'Paused: one picture back or forward. Playing: 1 second'],
+  ['Shift + ← →', '1 minute back or forward'],
+  ['Alt + ← →', '10 seconds back or forward (on a focused camera: move it)'],
+  [', .', 'Slower, faster'],
+  ['L', 'Live'],
+  ['C', 'Save a clip (Esc cancels, Return saves)'],
+]);

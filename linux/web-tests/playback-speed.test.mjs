@@ -1,7 +1,7 @@
-// Playback speeds on the Monitor: 1x, 2x, 3x, 5x, 10x (nvr/speed.js, the clock's rate, the session, the grid controller, the keys, the cells and the sound).
+// Playback speeds on the Monitor: ¼× to 8× played, 30× to 300× stepped (nvr/speed.js, the clock's rate, the session, the grid controller, the keys, the cells and the sound).
 import { describe, it, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MUTE_ABOVE, SPEEDS, aheadFactor, nearestSpeed, soundAllowed, speedLabel, stepSpeed } from '../web/js/nvr/speed.js';
+import { LAPSE_SPEEDS, SPEEDS, SPEED_GROUPS, aheadFactor, isTimelapse, nearestSpeed, soundAllowed, speedDescription, speedGroup, speedLabel, stepSpeed } from '../web/js/nvr/speed.js';
 import { PlaybackClock } from '../web/js/nvr/clock.js';
 import { keyAction } from '../web/js/screens/nvr-model.js';
 import { createSession } from '../web/js/nvr/session.js';
@@ -13,34 +13,53 @@ import { createRig } from './player-fakes/rig.mjs';
 import { fakeTime, settle } from './nvr-grid-helpers.mjs';
 
 describe('the steps', () => {
-  it('are 1, 2, 3, 5 and 10', () => {
-    assert.deepEqual(SPEEDS, [1, 2, 3, 5, 10]);
-    assert.equal(speedLabel(10), '10×');
-    assert.equal(speedLabel(1), '1×');
+  it('are slow motion, normal, fast and time-lapse, in that order', () => {
+    assert.deepEqual(SPEED_GROUPS.map((group) => [group.label, [...group.speeds]]), [
+      ['Slow', [0.25, 0.5]], ['Normal', [1]], ['Fast', [2, 4, 8]], ['Time-lapse', [30, 60, 120, 300]],
+    ]);
+    assert.deepEqual([...SPEEDS], [0.25, 0.5, 1, 2, 4, 8, 30, 60, 120, 300]);
+    assert.deepEqual([...LAPSE_SPEEDS], [30, 60, 120, 300]);
+    assert.deepEqual(SPEEDS.map(speedGroup), ['slow', 'slow', 'normal', 'fast', 'fast', 'fast', 'lapse', 'lapse', 'lapse', 'lapse']);
+    assert.equal(speedLabel(0.25), '¼×');
+    assert.equal(speedLabel(0.5), '½×');
+    assert.equal(speedLabel(300), '300×');
   });
-  it('step up and down and stop at the ends', () => {
+  it('are time-lapse from 30× on, and only those', () => {
+    assert.deepEqual(SPEEDS.filter(isTimelapse), [30, 60, 120, 300]);
+  });
+  it('say what a time-lapse does with a minute and an hour', () => {
+    assert.equal(speedDescription(30), 'Time-lapse: 1 min = 2 s, 1 hour = 2 min');
+    assert.equal(speedDescription(60), 'Time-lapse: 1 min = 1 s, 1 hour = 1 min');
+    assert.equal(speedDescription(120), 'Time-lapse: 2 min = 1 s, 1 hour = 30 s');
+    assert.equal(speedDescription(300), 'Time-lapse: 5 min = 1 s, 1 hour = 12 s');
+    assert.match(speedDescription(0.25), /Slow motion/);
+    assert.match(speedDescription(1), /sound/);
+  });
+  it('step up and down across the groups and stop at the ends', () => {
     assert.equal(stepSpeed(1, 1), 2);
-    assert.equal(stepSpeed(3, 1), 5);
-    assert.equal(stepSpeed(5, 1), 10);
-    assert.equal(stepSpeed(10, 1), 10);
-    assert.equal(stepSpeed(5, -1), 3);
-    assert.equal(stepSpeed(1, -1), 1);
+    assert.equal(stepSpeed(8, 1), 30);
+    assert.equal(stepSpeed(300, 1), 300);
+    assert.equal(stepSpeed(1, -1), 0.5);
+    assert.equal(stepSpeed(0.25, -1), 0.25);
+    assert.equal(stepSpeed(30, -1), 8);
   });
-  it('turn a stray number into the nearest step, and anything else into 1', () => {
-    assert.equal(nearestSpeed(4), 3);
-    assert.equal(nearestSpeed('5'), 5);
-    assert.equal(nearestSpeed(99), 10);
+  it('turn a stray number into the nearest step by ratio, and anything else into 1', () => {
+    assert.equal(nearestSpeed(5), 4);
+    assert.equal(nearestSpeed(10), 8);
+    assert.equal(nearestSpeed('60'), 60);
+    assert.equal(nearestSpeed(999), 300);
+    assert.equal(nearestSpeed(0.3), 0.25);
     assert.equal(nearestSpeed(0), 1);
     assert.equal(nearestSpeed(undefined), 1);
     assert.equal(nearestSpeed(Number.NaN), 1);
   });
-  it('allow sound up to 2×, not above', () => {
-    assert.equal(MUTE_ABOVE, 2);
-    assert.deepEqual(SPEEDS.map(soundAllowed), [true, true, false, false, false]);
+  it('allow sound at 1× only: slow motion and every faster speed are silent', () => {
+    assert.deepEqual(SPEEDS.map(soundAllowed), [false, false, true, false, false, false, false, false, false, false]);
   });
   it('fetch further ahead as the speed goes up, never less than at 1×', () => {
     assert.equal(aheadFactor(1), 1);
-    assert.ok(aheadFactor(10) > aheadFactor(5) && aheadFactor(5) > aheadFactor(2));
+    assert.equal(aheadFactor(0.25), 1);
+    assert.ok(aheadFactor(8) > aheadFactor(4) && aheadFactor(4) > aheadFactor(2));
     assert.equal(aheadFactor(undefined), 1);
   });
 });
@@ -144,15 +163,20 @@ describe('the grid controller', () => {
     await ready();
     assert.equal(controller.view().transport.rate, 1);
     session.mode = 'playing';
-    controller.setSpeed(5);
-    assert.deepEqual(session.calls.at(-1), ['setRate', 5]);
-    assert.equal(controller.view().transport.rate, 5);
+    controller.setSpeed(4);
+    assert.deepEqual(session.calls.at(-1), ['setRate', 4]);
+    assert.equal(controller.view().transport.rate, 4);
+    assert.equal(controller.view().transport.lapse, false);
     controller.key({ action: 'speed', step: 1 });
-    assert.equal(session.rate, 10);
+    assert.equal(session.rate, 8);
     controller.key({ action: 'speed', step: 1 });
-    assert.equal(session.rate, 10, 'the top step stays');
+    assert.equal(session.rate, 30, 'fast steps on into time-lapse');
+    assert.equal(controller.view().transport.lapse, true);
+    controller.setSpeed(300);
+    controller.key({ action: 'speed', step: 1 });
+    assert.equal(session.rate, 300, 'the top step stays');
     controller.key({ action: 'speed', step: -1 });
-    assert.equal(session.rate, 5);
+    assert.equal(session.rate, 120);
     controller.destroy();
   });
 
@@ -176,25 +200,25 @@ describe('the session', () => {
     const seen = [];
     session.onChange((event) => { if (event.kind === 'rate') seen.push(event.rate); });
     session.play(ORIGIN + 10_000);
-    session.setRate(4);
-    assert.equal(session.rate, 3, 'a stray number becomes the nearest step');
+    session.setRate(5);
+    assert.equal(session.rate, 4, 'a stray number becomes the nearest step');
     session.setRate(10);
-    assert.equal(rig.clock.rate, 10);
+    assert.equal(rig.clock.rate, 8);
     session.goLive();
     assert.equal(session.rate, 1);
-    assert.deepEqual(seen, [3, 10, 1]);
+    assert.deepEqual(seen, [4, 8, 1]);
     session.destroy();
   });
 
-  it('plays a tile at 10× in step with the clock, and keeps fetching ahead of it', async () => {
+  it('plays a tile at 8× in step with the clock, and keeps fetching ahead of it', async () => {
     const rig = createRig({ cameras: [{ id: 'A', files: [{ key: FILE_A, startMs: ORIGIN, parts: 90, gop: 1 }] }] });
     await rig.start();
     const session = createSession({ catalog: rig.catalog, fetcher: rig.fetcher, clock: rig.clock, timers: rig.timers, tileCap: 1, policy: DEFAULT_POLICY, createCell: (cid) => rig.makeCell(cid) });
     session.setCameras(['A']);
-    session.setRate(10);
+    session.setRate(8);
     session.play(ORIGIN + 1000);
     await rig.timers.advance(1500);
-    assert.equal(rig.surface('A').rate, 10, 'the video plays at the clock’s speed');
+    assert.equal(rig.surface('A').rate, 8, 'the video plays at the clock’s speed');
     for (let i = 0; i < 12; i += 1) {
       await rig.timers.advance(500);
       const lag = rig.clock.position() - (rig.base() + rig.surface('A').currentTime() * 1000);

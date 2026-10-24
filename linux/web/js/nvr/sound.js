@@ -120,7 +120,7 @@ export function createRecordingSound({ catalog, fetcher, clock, doc = document }
 
   async function tick() {
     if (destroyed || busy) return;
-    // Above 2× the sound is left out (nvr/speed.js): nothing is fetched or played, and it plays again when the speed comes down.
+    // At any speed but 1× the sound is left out (nvr/speed.js): nothing is fetched or played, and it plays again when the speed comes down.
     if (cameraId === null || clock.mode !== 'playing' || catalog.baseMs === undefined || !soundAllowed(clock.rate)) { if (!audio.paused) audio.pause(); return; }
     busy = true;
     try {

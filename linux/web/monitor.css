@@ -120,6 +120,23 @@
 .monitor .nvr-readout { font-variant-numeric: tabular-nums; font-weight: 650; }
 .monitor .nvr-grid-presets { display: flex; flex-wrap: wrap; gap: 6px; }
 .monitor .nvr-pager { margin-left: auto; }
+/* Frame by frame beside Play; the speed menu (a time-lapse speed in the brand's red); the keys; Live at the right end, over the timeline's live edge. */
+.monitor .nvr-frame { min-width: 36px; padding-inline: 8px; }
+.monitor .nvr-frame svg, .monitor .nvr-golive svg { width: 18px; height: 18px; }
+.monitor .nvr-speed[data-lapse="true"] { border-color: #ff6a61; color: #ffb3ad; }
+.monitor .nvr-readout[data-held="true"] { color: #ffd36b; }
+.monitor .nvr-golive { order: 99; margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.nvr-keys { position: relative; }
+.nvr-keys > summary { list-style: none; cursor: pointer; }
+.nvr-keys > summary::-webkit-details-marker { display: none; }
+.nvr-keys-list {
+  position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 20; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0;
+  width: max-content; max-width: min(420px, 86vw); padding: 10px 12px; background: #151517; border: 1px solid var(--mon-line); border-radius: 8px;
+  box-shadow: 0 6px 24px #000a; font-size: 0.85rem;
+}
+.nvr-keys-list dt { white-space: nowrap; }
+.nvr-keys-list dd { margin: 0; color: var(--mon-dim); }
+.nvr-keys-list kbd { font: inherit; font-variant-numeric: tabular-nums; padding: 1px 6px; border: 1px solid #3a3a44; border-radius: 4px; background: #1d1d23; }
 .mon-timeline-head { display: flex; align-items: center; gap: 10px; }
 .mon-timeline-head strong { font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mon-dim); }
 .mon-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; font-size: 0.88rem; overscroll-behavior: contain; }

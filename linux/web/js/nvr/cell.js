@@ -19,6 +19,7 @@
 // A request that was sent is never wasted: its bytes are appended and stay in the model whatever happened to the desire meanwhile.
 import { createStraightenedView, isOn } from '../live/straighten.js';
 import { realTimers } from './clock.js';
+import { frameDurationMs } from './frames.js';
 import { aheadFactor } from './speed.js';
 import {
   DEFAULT_POLICY, MESSAGES, bufferSeconds, canSeekInChain, dedupeChains, extendChain, findChainPart, follows, heldRangeAt, keyStepLookup, lastChain,
@@ -82,6 +83,8 @@ export function createCell({
   let lastEndProbe = -Infinity;
   let replannedFor = null;              // { epoch, id }: follow() planned again because no chain ended with this part, the one appended last
   let driveTimer = null;                // the next probe of a recordings drive that is gone
+  let frameTimes = new Map();           // fileKey -> one picture's length in ms (read from its fragments), or null when they do not say
+  let shown = null;                     // { ms, file }: the picture on screen, its start exact (requestVideoFrameCallback), after a paused present
 
   // MARK: Waking the worker
 
@@ -279,6 +282,7 @@ export function createCell({
       endSec: bufferSeconds(part.end, base()),
       key: part.key,
     });
+    if (!frameTimes.has(part.file) || frameTimes.get(part.file) === null) frameTimes.set(part.file, frameDurationMs(initCache.get(part.file), data));
     let result;
     if (continuing) result = extendChain(chain, part);
     else { result = makeChain(part); chains.push(result); }
@@ -311,6 +315,8 @@ export function createCell({
     const result = await surface.seek(seconds);
     if (destroyed) return false;
     if (!result.presented) return false;
+    // The picture's own start, for a frame step: only when the browser said which picture it showed (not a `seeked` that only says it is there).
+    shown = result.via === 'frame-callback' && Number.isFinite(result.mediaTime) ? { ms: base() + result.mediaTime * 1000, file: part.file } : { ms: null, file: part.file };
     if (!stale(d)) {
       await surface.evict(seconds);
       reconcile();
@@ -337,6 +343,7 @@ export function createCell({
   // MARK: Key step
 
   async function keyStep(d, target, oldest) {
+    if (!d.playing) surface?.pause();                 // a key picture stands still (a drag, a time-lapse), it does not play on from there
     const look = keyStepLookup(chains, hints, target, { marginMs: margin });
     if (look.kind === 'held') {
       if (!(await present(look.part, look.atMs, d, { oldest }))) await recover(d);
@@ -581,6 +588,7 @@ export function createCell({
     let current = chain;
     for (const part of list.parts) {
       if (stale(d)) return 'stale';
+      if (surface.rate !== (clock.rate ?? 1)) surface.setRate?.(clock.rate ?? 1);     // a new speed takes hold during a long fetch too
       if (!appendable(current, part) || !sameCodec(part)) break;                  // a delta part that does not follow, or another codec: the playhead will find it
       const data = await fetchPart(part);
       await prepareFile(part.file);
@@ -709,6 +717,9 @@ export function createCell({
       busyRetries = 0;
       clearDriveProbe();
       if (loadingTimer !== null) timers.clearTimeout(loadingTimer);
+      loadingTimer = null;
+      // A time-lapse asks for the next key picture twice a second: the one on screen stays while it comes, with no "Loading" in between.
+      if (next.lapse && (coverage.kind === 'recorded' || coverage.kind === 'coarse')) { wakeUp(); return; }
       loadingTimer = timers.setTimeout(() => {
         loadingTimer = null;
         if (!destroyed && desire && coverage.epoch < desire.epoch) setCoverage({ kind: 'loading', epoch: desire.epoch, playing: false });
@@ -716,6 +727,10 @@ export function createCell({
       wakeUp();
     },
     get coverage() { return coverage; },
+    /** One picture's length (ms) in the recording on screen, or null when its fragments do not say. */
+    get frameMs() { return shown ? frameTimes.get(shown.file) ?? null : null; },
+    /** The start (epoch ms) of the picture on screen when the browser said exactly which it showed, else null. */
+    get shownMs() { return shown?.ms ?? null; },
     /** The camera's picture correction changed (saved on its page): the video the cell made is drawn straightened by it from now on. */
     setCorrection(next) {
       if (destroyed) return;
