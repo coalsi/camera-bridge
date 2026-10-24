@@ -36,6 +36,8 @@ final class FakeBackend: BridgeBackend {
         var discovered: [DiscoveredCamera] = []
         var probe: Result<CameraProbeResult, any Error> = .success(FakeBackend.sampleProbe)
         var integrationProbe: Result<CameraProbeResult, any Error> = .success(FakeBackend.sampleProbe)
+        /// What the no-password check says for any address.
+        var notSetUp: NotSetUp?
         var protectCameras: [UnifiProtectCamera] = []
         var snapshot: Data? = Data([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0xFF, 0xD9])
         /// `original` of every `snapshotJPEG` call, in order.
@@ -104,6 +106,8 @@ final class FakeBackend: BridgeBackend {
         write { $0.probeCalls.append((vendor, endpoint.host, username, password)) }
         return try read { $0.probe }.get()
     }
+
+    func notSetUp(endpoint: CameraEndpoint) async -> NotSetUp? { read { $0.notSetUp } }
 
     func probeIntegration(vendor: CameraVendor, integration: IntegrationSettings, endpoint: CameraEndpoint, username: String,
                           secret: String) async throws -> CameraProbeResult {

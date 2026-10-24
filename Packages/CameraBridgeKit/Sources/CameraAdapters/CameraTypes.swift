@@ -90,6 +90,9 @@ public struct CameraProbeResult: Sendable, Codable, Equatable {
     /// The ONVIF device service's port when the probe found it somewhere other than the endpoint's HTTP port
     /// (`BridgeEngine.probeCamera`): save it as `CameraEndpoint.onvifPort`. nil otherwise.
     public var onvifPort: Int?
+    /// The camera was added as ONVIF (chosen by hand, or found by ONVIF) and answered its maker's own interface: `vendor` is that maker's
+    /// (`BridgeEngine.probeCamera`), `manufacturer` and `model` the interface's answer.
+    public var usedOwnInterface = false
 
     public init(vendor: CameraVendor, manufacturer: String, model: String, serialNumber: String, firmware: String,
                 mainStream: StreamInfo? = nil, subStream: StreamInfo? = nil, capabilities: CameraCapabilities = CameraCapabilities(),

@@ -40,6 +40,7 @@ extension EngineTuning {
         tuning.localNetworkRetryInterval = .milliseconds(20)
         tuning.securityChecks = false   // no camera requests a test did not ask for
         tuning.restoresWatchOnRemoval = false
+        tuning.findOwnInterface = { _, _ in .none }   // no request to an address a test did not script
         return tuning
     }
 }

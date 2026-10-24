@@ -340,6 +340,10 @@ struct DemoDiscoveryBackend: BridgeBackend {
         try await base.probeCamera(vendor: vendor, endpoint: endpoint, username: username, password: password, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL)
     }
 
+    func notSetUp(endpoint: CameraEndpoint) async -> NotSetUp? {
+        await base.notSetUp(endpoint: endpoint)
+    }
+
     func probeIntegration(vendor: CameraVendor, integration: IntegrationSettings, endpoint: CameraEndpoint, username: String,
                           secret: String) async throws -> CameraProbeResult {
         try await base.probeIntegration(vendor: vendor, integration: integration, endpoint: endpoint, username: username, secret: secret)

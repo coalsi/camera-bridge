@@ -1136,3 +1136,7 @@ so Home keeps the camera, its room, automations and pairing:
 - **HomeKit Secure Video** records nothing: the recording delegate refuses every stream.
 Started with the bridge, on add and on update (`startOffAccessories`); `stopRuntime` and `stopServices` stop it. Turning the camera on stops it
 and starts the runtime (same port, no bridge restart). Not done: no retry after a failed start, and no re-advertising after a wake.
+
+## Additions beyond the contract: a maker's own interface (2026-10-23, docs/CONTRACT_CHANGES.md)
+
+`probeCamera` for a camera added as ONVIF with credentials asks `CameraDrivers.ownInterface` (CameraAdapters README) once ONVIF accepted the credentials, or did not answer: a camera that answers Hikvision's ISAPI (also ANNKE and other OEMs), Reolink's or Dahua's API is probed as that vendor and returned with `CameraProbeResult.usedOwnInterface`, the manufacturer (ONVIF's name when the interface gives none) and the model. A wrong password stops at ONVIF (one failed login, the other interfaces are not asked); a refusal at the maker's interface leaves the ONVIF answer. `EngineTuning.findOwnInterface` replaces the check in tests (`EngineTuning.testing` answers none).

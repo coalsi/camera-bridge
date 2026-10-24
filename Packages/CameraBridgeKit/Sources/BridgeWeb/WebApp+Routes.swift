@@ -681,6 +681,8 @@ extension WebApp {
         var canUseTwoWayAudio: Bool
         var ringsThroughWebhook: Bool
         var alreadyAdded: AlreadyAdded?
+        /// Set when the camera was added as ONVIF and answered its maker's own interface: what the check says about it.
+        var ownInterfaceNote: String?
     }
 
     private struct AlreadyAdded: Encodable {
@@ -691,6 +693,17 @@ extension WebApp {
     private struct ProbeFailure: Encodable {
         var ok = false
         var error: String
+        var notSetUp: NotSetUpResource?
+    }
+
+    /// A camera with no admin password yet: the page says so, with the camera's own web page to open and a check again.
+    struct NotSetUpResource: Encodable, Equatable {
+        var maker: String
+        var title: String
+        var step: String
+        var webPage: String
+        var openLabel = NotSetUpText.openLabel
+        var checkAgainLabel = NotSetUpText.checkAgainLabel
     }
 
     func probe(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -707,7 +720,16 @@ extension WebApp {
             throw APIError(status: 499, code: "cancelled", message: "The check was cancelled.")
         } catch {
             log.notice("checking \(prepared.endpoint.host) failed: \(ErrorText.logDescription(error))")
-            return .json(ProbeFailure(error: ErrorText.describe(error)))
+            // A camera fresh from the box has no admin password and keeps its interfaces off until its web page sets one: say what to do
+            // (asked without a login).
+            let notSetUp = await backend.notSetUp(endpoint: prepared.endpoint)
+            return .json(ProbeFailure(error: notSetUp.map { NotSetUpText.title(maker: $0.maker) } ?? ErrorText.describe(error),
+                                      notSetUp: notSetUp.map { NotSetUpText.resource($0, endpoint: prepared.endpoint) }))
+        }
+        // A new Reolink camera accepts an empty password: never keep it that way.
+        if result.vendor == .reolink, prepared.password.isEmpty, prepared.spec.id != "demo" {
+            let reolink = NotSetUp(maker: "Reolink", vendor: .reolink)
+            return .json(ProbeFailure(error: NotSetUpText.title(maker: reolink.maker), notSetUp: NotSetUpText.resource(reolink, endpoint: prepared.endpoint)))
         }
         let defaults = CameraSetup.Defaults(result: result, discoveredName: nil)
         // A eufy camera sleeps between uses: built-in detection and a webhook would need its picture all the time, so only its own events.
@@ -728,7 +750,8 @@ extension WebApp {
             }),
             hasCameraAudio: result.mainStream.map { $0.audioCodec != nil } ?? true, canUseTwoWayAudio: result.capabilities.twoWayAudio,
             ringsThroughWebhook: defaults.kind == .doorbell && !result.capabilities.isDoorbell,
-            alreadyAdded: existing.map { AlreadyAdded(id: $0.id, name: $0.name) }))
+            alreadyAdded: existing.map { AlreadyAdded(id: $0.id, name: $0.name) },
+            ownInterfaceNote: result.usedOwnInterface ? NotSetUpText.ownInterface(vendor: result.vendor, manufacturer: result.manufacturer, model: result.model) : nil))
     }
 
     // MARK: Integrations

@@ -110,6 +110,8 @@ struct EngineTuning: Sendable {
     var detectVendor: (@Sendable (_ endpoint: CameraEndpoint, _ credentials: HTTPCredentials?) async -> VendorDetection?)?
     /// Replaces `CameraDrivers.onvifPort` in `probeCamera` (tests).
     var findONVIFPort: (@Sendable (_ endpoint: CameraEndpoint) async -> Int?)?
+    /// Replaces `CameraDrivers.ownInterface` in `probeCamera` (tests).
+    var findOwnInterface: (@Sendable (_ endpoint: CameraEndpoint, _ credentials: HTTPCredentials?) async -> OwnInterfaceCheck)?
     /// A Local Network check that is denied before any answer is known tries again this often (the system's alert may
     /// still be waiting for the person).
     var localNetworkRetryInterval: Duration = .milliseconds(500)

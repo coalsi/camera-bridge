@@ -1610,22 +1610,70 @@ public final class BridgeEngine {
         }
         if chosen == nil, mainStreamURL != nil { chosen = .rtsp }
         guard let chosen else { throw EngineError.noCameraAPI(host: endpoint.host) }
-        var camera = CameraConfiguration(name: endpoint.host, kind: .camera, vendor: chosen, endpoint: endpoint, username: username)
-        camera.mainStreamURL = mainStreamURL
-        camera.subStreamURL = subStreamURL
-        camera.integration = integration
-        let driver = tuning.driverFactory?(camera, credentials, environment.platform.transport)
-            ?? CameraDrivers.make(vendor: chosen, endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL,
-                                  transport: environment.platform.transport, cameraID: nil, integration: integration, go2rtc: go2rtc,
-                                  helpers: environment.platform.helpers, streamCredentials: streamCredentials)
         let onvifPort = chosen == .onvif ? endpoint.onvifPort.flatMap { $0 == endpoint.httpPort ? nil : $0 } : nil
+        func makeDriver(_ vendor: CameraVendor) -> any CameraDriver {
+            var camera = CameraConfiguration(name: endpoint.host, kind: .camera, vendor: vendor, endpoint: endpoint, username: username)
+            camera.mainStreamURL = mainStreamURL
+            camera.subStreamURL = subStreamURL
+            camera.integration = integration
+            return tuning.driverFactory?(camera, credentials, environment.platform.transport)
+                ?? CameraDrivers.make(vendor: vendor, endpoint: endpoint, credentials: credentials, mainStreamURL: mainStreamURL, subStreamURL: subStreamURL,
+                                      transport: environment.platform.transport, cameraID: nil, integration: integration, go2rtc: go2rtc,
+                                      helpers: environment.platform.helpers, streamCredentials: streamCredentials)
+        }
+        let driver = makeDriver(chosen)
         log.info("Probing \(endpoint.host) as \(chosen.rawValue)\(onvifPort.map { " (ONVIF port \($0))" } ?? "")")
         // The check's camera session ends with it (Reolink: a login holds one of the camera's few API sessions for an
         // hour otherwise); closed in the background, so the answer does not wait for the camera.
         defer { Task { await driver.close() } }
-        var result = try await driver.probe()
+        guard chosen == .onvif, credentials != nil else {
+            var result = try await driver.probe()
+            result.onvifPort = onvifPort
+            return result
+        }
+        // ONVIF can't read or change UPnP or the maker's cloud, so a camera that also answers its maker's own interface (Hikvision's ISAPI:
+        // also ANNKE, LTS and other OEMs; Reolink; Dahua and Amcrest) is added as that. ONVIF is asked first: a wrong password stops there
+        // as one failed login, and the maker's interface is asked only with credentials ONVIF accepted, or when ONVIF itself did not answer.
+        var onvif: CameraProbeResult?
+        var onvifFailure: (any Error)?
+        do {
+            onvif = try await driver.probe()
+        } catch {
+            if Task.isCancelled || Self.isLoginFailure(error) { throw error }
+            onvifFailure = error
+        }
+        let check: OwnInterfaceCheck
+        if let find = tuning.findOwnInterface {
+            check = await find(endpoint, credentials)
+        } else {
+            check = await CameraDrivers.ownInterface(endpoint: endpoint, credentials: credentials)
+        }
+        if case .found(let own) = check, own.vendor != .onvif {
+            let ownDriver = makeDriver(own.vendor)
+            defer { Task { await ownDriver.close() } }
+            if var result = try? await ownDriver.probe() {
+                if let maker = own.manufacturer ?? onvif?.manufacturer, !maker.isEmpty { result.manufacturer = maker }
+                if result.model.isEmpty, let model = own.model ?? onvif?.model { result.model = model }
+                if result.serialNumber.isEmpty, let serial = onvif?.serialNumber { result.serialNumber = serial }
+                if result.mainStream == nil { result.mainStream = onvif?.mainStream }
+                if result.subStream == nil { result.subStream = onvif?.subStream }
+                result.usedOwnInterface = true
+                log.info("\(endpoint.host): \(own.vendor.rawValue)'s own interface answered; using it instead of ONVIF")
+                return result
+            }
+        }
+        guard var result = onvif else { throw onvifFailure ?? EngineError.noCameraAPI(host: endpoint.host) }
         result.onvifPort = onvifPort
         return result
+    }
+
+    /// The camera refused the login, or logins to it are paused: asking anything else with the same credentials would be one more failure.
+    private static func isLoginFailure(_ error: any Error) -> Bool {
+        switch error {
+        case CameraAdapterError.unauthorized, CameraAdapterError.lockedOut, CameraAdapterError.loginsPaused: true
+        case let rtsp as RTSPError: rtsp == .unauthorized
+        default: false
+        }
     }
 
     /// Errors after which the camera may never have seen the request (no answer, connection failures), as opposed to a

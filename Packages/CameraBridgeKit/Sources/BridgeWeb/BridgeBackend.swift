@@ -92,6 +92,9 @@ public protocol BridgeBackend: Sendable {
     func localIPv4Addresses() async -> [String]
     /// `BridgeEngine.portAnswer(host:port:timeout:)`. The default never reaches anything (`.silent`).
     func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer
+    /// Whether the camera at `endpoint` answers that it has no admin password yet (`CameraDrivers.needsSetup`: no login is made). The
+    /// default says no.
+    func notSetUp(endpoint: CameraEndpoint) async -> NotSetUp?
     /// `BridgeEngine.pluginSecret(id:)`: a plugin's stored secret. The default has none.
     func pluginSecret(id: String) async throws -> Data?
     /// `BridgeEngine.setPluginSecret(id:_:)`. The default throws `EngineError.cameraNotRunning` (a backend that keeps no secrets).
@@ -150,6 +153,10 @@ public struct EngineBackend: BridgeBackend {
                             subStreamURL: URL?) async throws -> CameraProbeResult {
         try await engine.probeCamera(vendor: vendor, endpoint: endpoint, username: username, password: password, mainStreamURL: mainStreamURL,
                                      subStreamURL: subStreamURL)
+    }
+
+    public func notSetUp(endpoint: CameraEndpoint) async -> NotSetUp? {
+        await CameraDrivers.needsSetup(endpoint: endpoint)
     }
 
     public func probeIntegration(vendor: CameraVendor, integration: IntegrationSettings, endpoint: CameraEndpoint, username: String,
@@ -317,6 +324,8 @@ public struct EngineBackend: BridgeBackend {
 }
 
 extension BridgeBackend {
+    public func notSetUp(endpoint: CameraEndpoint) async -> NotSetUp? { nil }
+
     public func pluginSecret(id: String) async throws -> Data? { nil }
 
     public func portAnswer(host: String, port: UInt16, timeout: Duration) async -> PortAnswer { .silent }

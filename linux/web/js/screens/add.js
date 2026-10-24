@@ -5,6 +5,7 @@ import { h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { cameraSetupDialog, SETUP_TEXT, setupSupported } from './camera-setup.js';
 import { backLink, field, inlineError, switchRow } from './common.js';
+import { notSetUpCard, ownInterfaceBanner } from './not-set-up.js';
 import { pairingPanel } from './pairing.js';
 
 const SENSITIVITY_LABELS = ['Low', 'Medium', 'High'];
@@ -23,7 +24,7 @@ export function renderAdd({ navigate }) {
     // A camera from the eufy plugin: its serial number.
     eufy: { loaded: false, signedIn: false, cameras: [], serial: null, busy: false, error: null },
     discovered: null, discovering: false, discoverRun: 0,
-    probe: null, probeError: null, probeRun: 0,
+    probe: null, probeError: null, notSetUp: null, probeRun: 0,
     name: '', nameTouched: false, kind: 'camera', motionSource: 'softMotion', motionSensitivity: 0.5, motionHoldSeconds: 20,
     sensors: {}, audioEnabled: true, twoWayAudio: false,
     adding: false, addError: null, addedId: null, errors: {}, connectError: null,
@@ -422,7 +423,7 @@ export function renderAdd({ navigate }) {
 
   async function runProbe() {
     const run = ++w.probeRun;
-    w.probe = null; w.probeError = null; w.probing = true;
+    w.probe = null; w.probeError = null; w.notSetUp = null; w.probing = true;
     if (w.step === 'check') show('check');
     try {
       const result = await post('probe', request());
@@ -438,6 +439,7 @@ export function renderAdd({ navigate }) {
         w.sensors = {};
       } else {
         w.probeError = result.error;
+        w.notSetUp = result.notSetUp ?? null;
       }
     } catch (error) {
       if (run !== w.probeRun || gone) return;
@@ -463,6 +465,9 @@ export function renderAdd({ navigate }) {
       return h('div', null, h('h1', null, 'Checking the camera…'),
         h('div', { class: 'checking card' }, spinner(), h('div', null, t.id === 'demo' ? 'Starting the test pattern…' : 'Camera Bridge is signing in and reading the camera’s streams. This can take up to 20 seconds.')));
     }
+    if (w.probeError && w.notSetUp) {
+      return form([h('h1', null, 'Set this camera up first'), notSetUpCard(w.notSetUp, { onCheckAgain: runProbe }), nav({ next: 'Check again', onNext: runProbe })], runProbe);
+    }
     if (w.probeError) {
       return form([h('h1', null, 'Couldn’t check the camera'), inlineError(w.probeError),
         h('p', { class: 'muted' }, 'Check the address, the user name and the password, then try again.'),
@@ -480,6 +485,7 @@ export function renderAdd({ navigate }) {
           row('Main stream', p.mainStream?.summary),
           row('Sub stream', p.subStream?.summary),
           row('Events', p.capabilities.events.length ? p.capabilities.events.map((x) => x.replace(/([A-Z])/g, ' $1').toLowerCase()).join(', ') : 'None reported — built-in motion detection will be used'))),
+      ownInterfaceBanner(p.ownInterfaceNote),
       p.alreadyAdded ? h('div', { class: 'banner warning' }, icon('alert'), h('div', { class: 'text' }, h('span', { class: 'title' }, `Already added as “${p.alreadyAdded.name}”`),
         'Adding it again makes a second accessory in the Home app, with its own connections to the camera.')) : null,
       nav({}),

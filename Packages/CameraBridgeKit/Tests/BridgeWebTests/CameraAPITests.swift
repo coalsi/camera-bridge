@@ -52,6 +52,60 @@ import TestSupport
 }
 
 @Suite(.timeLimit(.minutes(1))) struct ProbeAPITests {
+    private func probeJSON(_ backend: FakeBackend, password: String = "pw", type: String = "automatic") async throws -> [String: Any] {
+        let session = try await Harness(backend: backend).signIn()
+        return await session.send("POST", "/api/v1/probe", json: ["type": type, "host": "192.168.77.30", "username": "admin", "password": password]).json
+    }
+
+    @Test func aCameraThatIsNotSetUpYetSaysWhatToDo() async throws {
+        let backend = FakeBackend()
+        backend.write { $0.probe = .failure(CameraAdapterError.unauthorized); $0.notSetUp = NotSetUp(maker: "Hikvision", vendor: .hikvision) }
+        let json = try await probeJSON(backend)
+        #expect(json["ok"] as? Bool == false)
+        let card = try #require(json["notSetUp"] as? [String: Any])
+        #expect(card["maker"] as? String == "Hikvision")
+        #expect(card["title"] as? String == "This Hikvision camera hasn’t been set up yet.")
+        #expect(card["step"] as? String == "This camera hasn’t been set up yet. Open its web page and choose an admin password (you type it twice), then come back and add it.")
+        #expect(card["webPage"] as? String == "http://192.168.77.30")
+        #expect(card["openLabel"] as? String == "Open the camera’s web page")
+        #expect(card["checkAgainLabel"] as? String == "Check again")
+    }
+
+    @Test func aFailureOfACameraThatIsSetUpHasNoSetupCard() async throws {
+        let backend = FakeBackend()
+        backend.write { $0.probe = .failure(CameraAdapterError.unauthorized) }
+        let json = try await probeJSON(backend)
+        #expect(json["ok"] as? Bool == false)
+        #expect(json["notSetUp"] == nil)
+    }
+
+    @Test func aNewReolinkWithAnEmptyPasswordIsNeverAddedWithIt() async throws {
+        let backend = FakeBackend()
+        var reolink = FakeBackend.sampleProbe
+        reolink.vendor = .reolink
+        backend.write { $0.probe = .success(reolink) }
+        let empty = try await probeJSON(backend, password: "", type: "reolink")
+        #expect(empty["ok"] as? Bool == false)
+        #expect((empty["notSetUp"] as? [String: Any])?["maker"] as? String == "Reolink")
+        let set = try await probeJSON(backend, password: "pw", type: "reolink")
+        #expect(set["ok"] as? Bool == true)
+    }
+
+    @Test func aCameraFoundThroughItsMakersOwnInterfaceSaysSo() async throws {
+        let backend = FakeBackend()
+        var annke = FakeBackend.sampleProbe
+        annke.vendor = .hikvision
+        annke.manufacturer = "ANNKE"
+        annke.model = "I91ET"
+        annke.usedOwnInterface = true
+        backend.write { $0.probe = .success(annke) }
+        let json = try await probeJSON(backend)
+        #expect(json["vendor"] as? String == "hikvision")
+        #expect(json["ownInterfaceNote"] as? String == "Found Hikvision’s own interface (ANNKE I91ET); using it for settings and security.")
+        let plain = try await probeJSON(FakeBackend())
+        #expect(plain["ownInterfaceNote"] == nil)
+    }
+
     @Test func aWorkingCameraIsDescribedForTheNextPages() async throws {
         let backend = FakeBackend()
         let harness = try Harness(backend: backend)

@@ -15,6 +15,15 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.118',
+    date: '2026-10-24',
+    title: 'Cameras are added through their maker’s own interface, and a new camera that isn’t set up yet says so',
+    items: [
+      'Adding a camera: before settling on ONVIF, Camera Bridge asks the camera for its maker’s own interface (Hikvision and the brands built on it such as ANNKE, then Reolink, Dahua and Amcrest) and uses it when it answers, so the Security card can check and turn off UPnP and the maker’s cloud. The page says which one it found.',
+      'A Hikvision or ANNKE camera that hasn’t been activated yet (no admin password) no longer shows “nothing found”: Camera Bridge says so, with a button to open the camera’s web page to choose a password and a Check again button. A Reolink still on an empty password is treated the same way and is never added with it.',
+    ],
+  },
+  {
     version: '0.1.117',
     date: '2026-10-23',
     title: 'Put your cameras in your own order, and choose the mosaic by columns',

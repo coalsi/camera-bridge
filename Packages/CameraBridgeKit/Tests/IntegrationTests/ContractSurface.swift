@@ -780,6 +780,8 @@ private struct SurfaceDriver: CameraDriver {
                                                     transport: SurfaceTransport())
     _ = made
     let _: CameraVendor? = await CameraDrivers.detectVendor(endpoint: endpoint, credentials: nil)
+    let _: OwnInterfaceCheck = await CameraDrivers.ownInterface(endpoint: endpoint, credentials: nil)
+    let _: NotSetUp? = await CameraDrivers.needsSetup(endpoint: endpoint)
     let discovered: [DiscoveredCamera] = await ONVIFDiscovery.discover(timeout: .seconds(3))
     if let camera = discovered.first { let _: (String, String?, String?, [URL]) = (camera.host, camera.name, camera.hardware, camera.xAddrs) }
     let detector = SoftMotionDetector(sensitivity: 0.5, analysisWidth: 320)
