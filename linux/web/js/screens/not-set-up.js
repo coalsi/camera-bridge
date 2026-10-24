@@ -1,5 +1,6 @@
-// The Add Camera check's answer for a camera that has no admin password yet (the server words it: `notSetUp` of the /probe answer), and the
-// note under a camera that was found through its maker's own interface.
+// The Add Camera check's answer for a camera that has no admin password yet (the server words it: `notSetUp` of the /probe answer, and of a
+// /discover camera that Hikvision's SADP says is not set up), a camera the search found on another network, and the note under a camera that
+// was found through its maker's own interface.
 import { h } from '../dom.js';
 import { icon } from '../icons.js';
 
@@ -10,6 +11,16 @@ export function notSetUpCard(info, { onCheckAgain }) {
     h('p', null, info.step),
     h('div', { class: 'row' },
       h('a', { class: 'btn primary', href: info.webPage, target: '_blank', rel: 'noopener' }, info.openLabel),
+      h('button', { class: 'btn', type: 'button', onclick: onCheckAgain }, info.checkAgainLabel)));
+}
+
+// A camera the search found on another network (Hikvision's SADP): `info` is { address, title, step, checkAgainLabel } (`otherNetwork` of
+// the /discover answer). Check again searches again.
+export function otherNetworkCard(info, { onCheckAgain }) {
+  return h('div', { class: 'card not-set-up other-network' },
+    h('h2', null, info.title),
+    h('p', null, info.step),
+    h('div', { class: 'row' },
       h('button', { class: 'btn', type: 'button', onclick: onCheckAgain }, info.checkAgainLabel)));
 }
 

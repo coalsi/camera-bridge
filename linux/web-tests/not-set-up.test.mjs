@@ -42,3 +42,28 @@ test('the Add Camera page shows the card when the check says the camera is not s
   assert.match(source, /notSetUpCard\(w\.notSetUp, \{ onCheckAgain: runProbe \}\)/);
   assert.match(source, /ownInterfaceBanner\(p\.ownInterfaceNote\)/);
 });
+
+test('a camera found on another network says to put it on the home network, and Check again searches again', async () => {
+  installFakeBrowser();
+  const { otherNetworkCard } = await import('../web/js/screens/not-set-up.js');
+  let asked = 0;
+  const card = otherNetworkCard({
+    address: '192.168.1.64', title: 'Found a camera on another network (192.168.1.64)',
+    step: 'It must be put on your home network before Camera Bridge can add it. Open its page with Hikvision’s SADP tool, or from a computer on that network (http://192.168.1.64), turn on DHCP, then Check again.',
+    checkAgainLabel: 'Check again',
+  }, { onCheckAgain: () => { asked += 1; } });
+  assert.match(text(card), /Found a camera on another network \(192\.168\.1\.64\)/);
+  assert.match(text(card), /SADP tool.*turn on DHCP, then Check again/);
+  assert.equal(all(card, (n) => n.localName === 'a').length, 0, 'its page is on another network: no link the browser could not open');
+  const again = all(card, (n) => n.localName === 'button')[0];
+  assert.match(text(again), /Check again/);
+  again.click();
+  assert.equal(asked, 1);
+});
+
+test('the camera search shows those cards instead of a choice', () => {
+  const source = readFileSync(new URL('../web/js/screens/add.js', import.meta.url), 'utf8');
+  assert.match(source, /otherNetworkCard\(camera\.otherNetwork, \{ onCheckAgain: runDiscovery \}\)/);
+  assert.match(source, /notSetUpCard\(camera\.notSetUp, \{ onCheckAgain: runDiscovery \}\)/);
+  assert.match(source, /filter\(\(camera\) => !camera\.otherNetwork && !camera\.notSetUp\)/);
+});

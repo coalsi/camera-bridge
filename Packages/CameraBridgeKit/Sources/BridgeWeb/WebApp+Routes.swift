@@ -631,6 +631,10 @@ extension WebApp {
             }
             if unique[index].name == nil { unique[index].name = camera.name }
             if unique[index].hardware == nil { unique[index].hardware = camera.hardware }
+            if unique[index].activated == nil { unique[index].activated = camera.activated }
+            if unique[index].httpPort == nil { unique[index].httpPort = camera.httpPort }
+            // On another network only when every answer at that address says so.
+            unique[index].onAnotherNetwork = unique[index].onAnotherNetwork == true && camera.onAnotherNetwork == true ? true : nil
             unique[index].xAddrs += camera.xAddrs.filter { !unique[index].xAddrs.contains($0) }
         }
         return .json(Found(cameras: unique.map { DiscoveredResource($0, configurations: configurations) }))
@@ -694,6 +698,14 @@ extension WebApp {
         var ok = false
         var error: String
         var notSetUp: NotSetUpResource?
+    }
+
+    /// A camera the search found on another network: the page says what to do, with a check again (a new search).
+    struct OtherNetworkResource: Encodable, Equatable {
+        var address: String
+        var title: String
+        var step: String
+        var checkAgainLabel = NotSetUpText.checkAgainLabel
     }
 
     /// A camera with no admin password yet: the page says so, with the camera's own web page to open and a check again.

@@ -141,6 +141,8 @@ struct EngineTuning: Sendable {
     /// A runtime that does not answer a heartbeat within `runtimeHeartbeatDeadline` three times in a row (checked every
     /// `runtimeHeartbeatInterval`) is restarted, that camera only.
     var runtimeHeartbeatInterval: Duration = .seconds(10)
+    /// How often removed cameras' Apple Home pairings kept 30 days or longer are deleted (`RemovedHAPIdentities.sweep`).
+    var removedPairingSweepInterval: Duration = .seconds(86_400)
     var runtimeHeartbeatDeadline: Duration = .seconds(3)
     var runtimeHeartbeatStrikes = 3
     /// Called (tests) at the start of a camera's reconnect after a network change or wake.

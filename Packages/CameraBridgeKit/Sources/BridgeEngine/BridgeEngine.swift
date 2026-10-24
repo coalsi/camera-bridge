@@ -114,6 +114,8 @@ public final class BridgeEngine {
     @ObservationIgnored private var sleepBegan: ContinuousClock.Instant?
     /// Answers a runtime's heartbeat every `runtimeHeartbeatInterval` (`startHeartbeat`).
     @ObservationIgnored private var heartbeatTask: Task<Void, Never>?
+    /// Deletes removed cameras' Apple Home pairings kept 30 days or longer: at the start, then every `removedPairingSweepInterval`.
+    @ObservationIgnored private var removedPairingSweepTask: Task<Void, Never>?
     /// Consecutive heartbeats a runtime did not answer in time.
     @ObservationIgnored private var heartbeatStrikes: [UUID: Int] = [:]
     @ObservationIgnored private var logToken: LogSinkToken?
@@ -529,8 +531,25 @@ public final class BridgeEngine {
             }
             configurations = updated
             statusInputsChanged()
-            // A camera added again after it was removed has an identity again (off the main actor: a read may hold the lock).
-            _ = try? await Self.offMain { [self] in identityAccess.withLock { _ = $0.remove(id) } }
+            // A camera added again after it was removed has an identity again (off the main actor: a read may hold the lock): the same
+            // camera removed less than 30 days ago gets its Apple Home identity and pairings back, so Home sees the old accessory.
+            let dataDirectory = environment.dataDirectory, serial = stored.serialNumber
+            let restored: RemovedHAPIdentity?
+            do {
+                restored = try await Self.offMain { [self] in
+                    try identityAccess.withLock { removed throws -> RemovedHAPIdentity? in
+                        removed.remove(id)
+                        return try credentials.restoreHomePairing(for: id, serialNumber: serial, dataDirectory: dataDirectory)
+                    }
+                }
+            } catch {
+                restored = nil
+                log.warning("Could not give \(stored.name) the Apple Home pairing it had when it was removed: \(error)")
+            }
+            if restored != nil {
+                invalidateStoredIdentity(id)
+                log.notice("\(stored.name) was removed less than 30 days ago: it keeps its Apple Home pairing")
+            }
             guard let camera = updated.first(where: { $0.id == configuration.id }) else { return }
             log.notice("Added camera \(camera.name) (\(camera.vendor.rawValue))")
             await router.register(camera)
@@ -624,15 +643,16 @@ public final class BridgeEngine {
             do {
                 // Under the identity lock: a status refresh already reading this camera's identity must not create it
                 // again once it is deleted.
-                let credentials = credentials, dataDirectory = environment.dataDirectory
+                // Its Apple Home identity and pairings are kept for 30 days: the same camera added again keeps its place in Home.
+                let credentials = credentials, dataDirectory = environment.dataDirectory, serial = camera.serialNumber
                 try await Self.offMain { [self] in
                     try identityAccess.withLock { removed throws in
                         removed.insert(id)
-                        try credentials.forgetCamera(id, dataDirectory: dataDirectory)
+                        try credentials.forgetCamera(id, dataDirectory: dataDirectory, keepingHomePairing: true, serialNumber: serial)
                     }
                 }
             } catch {
-                log.warning("Could not delete the stored secrets of \(camera.name): \(error)")
+                log.warning("Could not delete the stored secrets of \(camera.name), or keep its Apple Home pairing: \(error)")
             }
             invalidateStoredIdentity(id)
             await bridge?.update(cameras: bridgedConfigurations)
@@ -1690,10 +1710,36 @@ public final class BridgeEngine {
         }
     }
 
-    /// ONVIF WS-Discovery on the LAN (none in loopback-only environments: tests never multicast).
+    /// ONVIF WS-Discovery and Hikvision's SADP on the LAN, at once (none in loopback-only environments: tests never multicast), merged
+    /// (`mergedDiscovery`).
     public func discoverCameras() async -> [DiscoveredCamera] {
         guard !isPreview, !environment.loopbackOnly else { return [] }
-        return await ONVIFDiscovery.discover()
+        async let onvif = ONVIFDiscovery.discover()
+        async let sadp = SADPDiscovery.discover()
+        return Self.mergedDiscovery(onvif: await onvif, sadp: await sadp,
+                                    interfaces: tuning.interfaceAddresses?() ?? StreamAddress.interfaceAddresses())
+    }
+
+    /// WS-Discovery's cameras, then SADP's: one SADP found at the same address adds whether it is set up (`activated`) and its web page's
+    /// port to that entry; another is listed after them, marked `onAnotherNetwork` when its address is on none of the bridge's IPv4 networks
+    /// (`interfaces` without loopback or tunnels, `SADPDevice.isOnNetwork(of:)`). Its MAC and serial number go no further.
+    nonisolated static func mergedDiscovery(onvif: [DiscoveredCamera], sadp: [SADPDevice], interfaces: [InterfaceAddress]) -> [DiscoveredCamera] {
+        var cameras = onvif
+        // The bridge's own IPv4 networks: no loopback or tunnel (a VPN's network is not the home network).
+        let networks = interfaces.filter { !$0.isIPv6 && !StreamAddress.isLoopback($0.address) && !MacVPNDetector.isTunnelName($0.interface) }
+            .map { (address: $0.address, prefixLength: $0.prefixLength) }
+        for device in sadp {
+            if let index = cameras.firstIndex(where: { $0.host == device.ipv4Address }) {
+                cameras[index].activated = cameras[index].activated ?? device.activated
+                cameras[index].httpPort = cameras[index].httpPort ?? device.httpPort
+                if cameras[index].hardware == nil { cameras[index].hardware = device.model }
+                continue
+            }
+            let away = !device.isOnNetwork(of: networks)
+            cameras.append(DiscoveredCamera(host: device.ipv4Address, hardware: device.model, activated: device.activated,
+                                            onAnotherNetwork: away ? true : nil, httpPort: device.httpPort))
+        }
+        return cameras
     }
 
     /// The preview engine's sample status of the viewers in the app's own window (`liveVideo`); a real engine counts them in
@@ -1837,6 +1883,7 @@ public final class BridgeEngine {
         startNetworkMonitoring()
         startHeartbeat()
         startDailySecurityChecks()
+        startRemovedPairingSweep()
         startInternetGuard()
         state = .running
         statusInputsChanged()
@@ -1849,6 +1896,8 @@ public final class BridgeEngine {
         networkTask = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        removedPairingSweepTask?.cancel()
+        removedPairingSweepTask = nil
         heartbeatStrikes.removeAll()
         stopSecurityChecks()
         stopInternetGuardPoll()
@@ -2394,6 +2443,22 @@ public final class BridgeEngine {
         let laptop = environment.platform.power.hasBattery
         log.notice("Keep Mac Awake is off: while this Mac sleeps, Apple Home shows the cameras as not responding"
                    + (laptop ? " (a laptop also sleeps when its lid is closed, which only a display attached with power prevents)." : "."))
+    }
+
+    // MARK: - Removed cameras' Apple Home pairings
+
+    /// At the start and then daily (`EngineTuning.removedPairingSweepInterval`): removed cameras' Apple Home pairings kept 30 days or longer
+    /// are deleted (`RemovedHAPIdentities.sweep`).
+    private func startRemovedPairingSweep() {
+        guard removedPairingSweepTask == nil else { return }
+        let interval = tuning.removedPairingSweepInterval, credentials = credentials, dataDirectory = environment.dataDirectory, log = log
+        removedPairingSweepTask = Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                let deleted = credentials.sweepRemovedHomePairings(dataDirectory: dataDirectory)
+                if deleted > 0 { log.info("Deleted the Apple Home pairing\(deleted == 1 ? "" : "s") of \(deleted) camera\(deleted == 1 ? "" : "s") removed 30 days ago") }
+                try? await Task.sleep(for: interval)
+            }
+        }
     }
 
     // MARK: - Heartbeat

@@ -762,7 +762,7 @@ export function renderCamera({ params, navigate, setTitle }) {
   async function removeCamera() {
     const ok = await confirmDialog({
       title: `Remove “${camera.name}”?`,
-      body: ['Camera Bridge stops publishing this camera and deletes its saved password. Remove it from the Home app as well.', removalNote(camera)]
+      body: ['Camera Bridge stops publishing this camera and deletes its saved password. Its Apple Home pairing is kept for 30 days: add the same camera again within that time and Home keeps it. If you won’t add it again, remove it from the Home app as well.', removalNote(camera)]
         .filter(Boolean).join(' '),
       confirm: 'Remove camera', danger: true,
     });
@@ -836,7 +836,7 @@ export function renderCamera({ params, navigate, setTitle }) {
     straightenHandle?.destroy();
     straightenHandle = straightenCard();
     replace(right, recordHandle?.el, securityHandle.el, canSetUp ? cameraSetupCard(camera, { onDone: refreshCamera, localHelp: false }) : null, motionCard(), aiHandle.el, audioCard(), nightHandle.el, qualityCard(), overlayCard(), straightenHandle.el, hook, connectionCard(),
-      h('div', { class: 'card' }, h('h2', null, 'Remove'), h('p', { class: 'desc' }, 'Removes the camera from Camera Bridge. Remove it from the Home app as well.'),
+      h('div', { class: 'card' }, h('h2', null, 'Remove'), h('p', { class: 'desc' }, 'Removes the camera from Camera Bridge. Its Apple Home pairing is kept for 30 days, so the same camera added again keeps its place in Home.'),
         h('button', { class: 'btn danger', type: 'button', onclick: removeCamera }, icon('trash'), 'Remove camera…')));
     showSecurity();
   }

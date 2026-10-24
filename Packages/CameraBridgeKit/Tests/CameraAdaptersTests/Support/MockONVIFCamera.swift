@@ -121,6 +121,11 @@ final class MockONVIFCamera: Sendable {
     let refuseDNSChanges = Box(false)
     /// `SetDNS` answers success and changes nothing while set.
     let ignoreDNSChanges = Box(false)
+    /// An applied `SetDNS` also turns the interface's IPv4 DHCP off while set, keeping the address it had as the one set by hand (the ANNKE
+    /// I91ET of 2026-10-24, Hikvision OEM firmware V5.8.10, did so without saving an address).
+    let dnsTurnsDHCPOff = Box(false)
+    /// `GetDeviceInformation` names this manufacturer and model instead of the fixture's (Reolink) while set.
+    let deviceInformation = Box<[String]?>(nil)
     /// The subcodes of the faults successive `SetDNS` requests are answered with, in order ("InvalidArgVal"; "NotAuthorized" is the account
     /// that may not change the DNS once it signed in); once used up, `SetDNS` is answered as `refuseDNSChanges` and the slots say.
     let dnsFaults = Box<[String]>([])
@@ -345,7 +350,13 @@ final class MockONVIFCamera: Sendable {
         case nil: break
         }
         switch action {
-        case "GetDeviceInformation": return .soap(template("GetDeviceInformationResponse.xml"))
+        case "GetDeviceInformation":
+            var answer = template("GetDeviceInformationResponse.xml")
+            if let named = deviceInformation.value, named.count == 2 {
+                answer = answer.replacingOccurrences(of: "<tds:Manufacturer>Reolink</tds:Manufacturer>", with: "<tds:Manufacturer>\(named[0])</tds:Manufacturer>")
+                    .replacingOccurrences(of: "<tds:Model>Reolink Video Doorbell WiFi</tds:Model>", with: "<tds:Model>\(named[1])</tds:Model>")
+            }
+            return .soap(answer)
         case "GetCapabilities": return .soap(template("GetCapabilitiesResponse.xml"))
         case "GetServices": return .soap(template("GetServicesResponse.xml"))
         case "GetProfiles":
@@ -493,6 +504,7 @@ final class MockONVIFCamera: Sendable {
             } else {
                 dns.update(apply)
             }
+            if dnsTurnsDHCPOff.value { ipv4.update { $0.dhcp = false } }
             return self.envelope("<tds:SetDNSResponse/>")
         case "GetNetworkDefaultGateway": return self.envelope(Self.gatewayAnswer(gateways.value))
         case "GetNetworkInterfaces":

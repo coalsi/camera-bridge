@@ -273,16 +273,28 @@ extension CameraDriver {
     }
 }
 
+/// A camera the search found: by ONVIF's WS-Discovery (`xAddrs`), by Hikvision's SADP (`SADPDiscovery`), or both.
 public struct DiscoveredCamera: Sendable, Hashable, Codable {
     public var host: String
     public var name: String?
     public var hardware: String?
     public var xAddrs: [URL]
+    /// SADP: whether the camera has been set up (has an admin password); nil when no SADP answer said.
+    public var activated: Bool?
+    /// SADP: its address is on none of the bridge's networks (Hikvision's factory 192.168.1.64 after its DHCP went off), so it must be put
+    /// on the home network before it can be added; nil (false) otherwise.
+    public var onAnotherNetwork: Bool?
+    /// SADP: its web page's port; nil when it did not say.
+    public var httpPort: Int?
 
-    public init(host: String, name: String? = nil, hardware: String? = nil, xAddrs: [URL] = []) {
+    public init(host: String, name: String? = nil, hardware: String? = nil, xAddrs: [URL] = [], activated: Bool? = nil,
+                onAnotherNetwork: Bool? = nil, httpPort: Int? = nil) {
         self.host = host
         self.name = name
         self.hardware = hardware
         self.xAddrs = xAddrs
+        self.activated = activated
+        self.onAnotherNetwork = onAnotherNetwork
+        self.httpPort = httpPort
     }
 }

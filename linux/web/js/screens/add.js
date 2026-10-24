@@ -5,7 +5,7 @@ import { h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { cameraSetupDialog, SETUP_TEXT, setupSupported } from './camera-setup.js';
 import { backLink, field, inlineError, switchRow } from './common.js';
-import { notSetUpCard, ownInterfaceBanner } from './not-set-up.js';
+import { notSetUpCard, otherNetworkCard, ownInterfaceBanner } from './not-set-up.js';
 import { pairingPanel } from './pairing.js';
 
 const SENSITIVITY_LABELS = ['Low', 'Medium', 'High'];
@@ -175,17 +175,23 @@ export function renderAdd({ navigate }) {
 
   function discoverStep() {
     if (w.discovered === null && !w.discovering) queueMicrotask(runDiscovery);
-    const list = w.discovering || w.discovered === null
+    const searching = w.discovering || w.discovered === null;
+    // A camera on another network, or one not set up yet, can't be picked: its card says what to do first.
+    const cards = searching ? [] : w.discovered.filter((camera) => camera.otherNetwork || camera.notSetUp).map((camera) => camera.otherNetwork
+      ? otherNetworkCard(camera.otherNetwork, { onCheckAgain: runDiscovery })
+      : notSetUpCard(camera.notSetUp, { onCheckAgain: runDiscovery }));
+    const choices = searching ? [] : w.discovered.filter((camera) => !camera.otherNetwork && !camera.notSetUp);
+    const list = searching
       ? h('div', { class: 'checking' }, spinner(), h('div', null, h('strong', null, 'Looking for cameras on your network…'), h('div', { class: 'muted small' }, 'This takes a few seconds.')))
-      : w.discovered.length
-        ? h('div', { class: 'found', role: 'radiogroup', 'aria-label': 'Cameras found' }, w.discovered.map((camera) => {
+      : choices.length
+        ? h('div', { class: 'found', role: 'radiogroup', 'aria-label': 'Cameras found' }, choices.map((camera) => {
           const radio = h('input', { type: 'radio', name: 'found', checked: w.selectedHost === camera.host,
             disabled: camera.alreadyAdded, onchange: () => { w.selectedHost = camera.host; w.host = camera.host; w.onvifPort = camera.onvifPort && camera.onvifPort !== 80 ? camera.onvifPort : null; if (!w.nameTouched && camera.name) w.name = camera.name; w.discoveredName = camera.name; show('discover'); } });
           return h('label', { class: 'choice' }, radio, h('span', { class: 'text' },
             h('span', { class: 'title' }, camera.name || camera.hardware || camera.host, camera.alreadyAdded ? h('span', { class: 'pill plain' }, ' Already added') : null),
             h('span', { class: 'desc' }, [camera.host, camera.hardware && camera.name ? camera.hardware : null].filter(Boolean).join(' · '))));
         }))
-        : h('div', { class: 'banner info' }, icon('info'), h('div', { class: 'text' }, h('span', { class: 'title' }, 'No cameras answered'),
+        : cards.length ? null : h('div', { class: 'banner info' }, icon('info'), h('div', { class: 'text' }, h('span', { class: 'title' }, 'No cameras answered'),
           'Not every camera announces itself. You can type its address instead. Make sure the camera is on and on the same network as this bridge.'));
     const manual = field('Or type the camera’s address', h('input', { type: 'text', value: w.host, placeholder: '192.0.2.20 or camera.local', autocomplete: 'off', spellcheck: 'false',
       oninput: (e) => { w.host = e.target.value; if (w.selectedHost && w.selectedHost !== w.host.trim()) w.selectedHost = null; update(); } }),
@@ -195,7 +201,7 @@ export function renderAdd({ navigate }) {
     return form([
       h('h1', null, 'Find your camera'),
       h('p', { class: 'lede' }, 'Camera Bridge looks for ONVIF cameras on your network. Pick yours, or type its address.'),
-      list, h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', disabled: w.discovering, onclick: runDiscovery }, icon('refresh'), 'Search again')),
+      ...cards, list, h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', disabled: w.discovering, onclick: runDiscovery }, icon('refresh'), 'Search again')),
       h('hr'), manual, next,
     ], () => w.host.trim() && go(1));
   }

@@ -18,6 +18,14 @@ enum NotSetUpText {
         return WebApp.NotSetUpResource(maker: camera.maker, title: title(maker: camera.maker), step: step, webPage: "\(scheme)://\(host)\(port)")
     }
 
+    /// A camera Hikvision's SADP found at an address on none of the box's networks (such as the factory 192.168.1.64 after its DHCP
+    /// went off).
+    static func otherNetwork(address: String) -> WebApp.OtherNetworkResource {
+        WebApp.OtherNetworkResource(address: address, title: "Found a camera on another network (\(address))",
+                                    step: "It must be put on your home network before Camera Bridge can add it. Open its page with Hikvision’s "
+                                        + "SADP tool, or from a computer on that network (http://\(address)), turn on DHCP, then Check again.")
+    }
+
     /// "Found Hikvision's own interface (ANNKE I91ET); using it for settings and security."
     static func ownInterface(vendor: CameraVendor, manufacturer: String, model: String) -> String {
         let maker = StatusText.vendor(vendor)

@@ -15,6 +15,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.119',
+    date: '2026-10-24',
+    title: 'Safer camera setup, cameras found on the wrong network, and removed cameras keep their Apple Home pairing',
+    items: [
+      'Watch its internet no longer changes the DNS of a Hikvision-made camera (ANNKE and others) through ONVIF while it gets its address from your router. On some of these cameras that change turned the router address off, so they fell back to 192.168.1.64 after a restart. For other cameras, Camera Bridge checks the network settings after the change and puts the router address straight back if it was turned off.',
+      'The camera search also uses Hikvision’s own search, so a camera stuck on another network (such as 192.168.1.64 after a reset) shows up as “Found a camera on another network”, with the steps to bring it home.',
+      'A camera you remove keeps its Apple Home pairing for 30 days: add the same camera again within that time and Home keeps the accessory, its room and its automations.',
+    ],
+  },
+  {
     version: '0.1.118',
     date: '2026-10-24',
     title: 'Cameras are added through their maker’s own interface, and a new camera that isn’t set up yet says so',

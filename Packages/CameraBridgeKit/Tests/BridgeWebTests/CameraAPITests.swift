@@ -983,6 +983,32 @@ import TestSupport
         #expect(cameras[2]["alreadyAdded"] as? Bool == true)
     }
 
+    @Test func aCameraOnAnotherNetworkAndOneNotSetUpSayWhatToDo() async throws {
+        let backend = FakeBackend()
+        backend.write {
+            $0.discovered = [
+                DiscoveredCamera(host: "192.168.1.64", hardware: "I91ET", activated: true, onAnotherNetwork: true),
+                DiscoveredCamera(host: "192.0.2.40", hardware: "I91ET", activated: false, httpPort: 8080),
+                DiscoveredCamera(host: "192.0.2.41", name: "Porch", activated: true),
+            ]
+        }
+        let harness = try Harness(backend: backend)
+        let session = try await harness.signIn()
+        let cameras = try #require(await session.send("POST", "/api/v1/discover").json["cameras"] as? [[String: Any]])
+        #expect(cameras.count == 3)
+        let away = try #require(cameras[0]["otherNetwork"] as? [String: Any])
+        #expect(away["title"] as? String == "Found a camera on another network (192.168.1.64)")
+        let step = try #require(away["step"] as? String)
+        #expect(step.contains("home network") && step.contains("SADP tool") && step.contains("turn on DHCP") && step.contains("Check again"))
+        #expect(away["checkAgainLabel"] as? String == "Check again")
+        #expect(cameras[0]["notSetUp"] == nil)
+        let inactive = try #require(cameras[1]["notSetUp"] as? [String: Any])
+        #expect(inactive["webPage"] as? String == "http://192.0.2.40:8080")
+        #expect(inactive["title"] as? String == "This Hikvision camera hasn’t been set up yet.")
+        #expect(cameras[1]["otherNetwork"] == nil)
+        #expect(cameras[2]["otherNetwork"] == nil && cameras[2]["notSetUp"] == nil)
+    }
+
     @Test func nothingFoundIsAnEmptyList() async throws {
         let harness = try Harness()
         let session = try await harness.signIn()

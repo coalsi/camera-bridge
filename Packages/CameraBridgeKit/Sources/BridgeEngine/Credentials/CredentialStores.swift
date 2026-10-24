@@ -102,13 +102,37 @@ public struct CredentialStore: Sendable {
     /// Removes everything secret the engine keeps for a camera: its password, the credentials of its stream URLs, the cloud sign-in its
     /// setup kept, and its HAP identity and pairing state (`HAPStorage.removeAll`). Used when the camera is removed. Each is tried even
     /// when one before it failed, so only what could not be deleted stays; the first failure is thrown.
-    public func forgetCamera(_ cameraID: UUID, dataDirectory: URL) throws {
+    ///
+    /// `keepingHomePairing`: the camera's Apple Home identity and pairings are kept for 30 days instead (`RemovedHAPIdentities.keep`, with
+    /// the camera's serial number and MAC when known), so the same camera added again keeps its place in Home; nothing of them is deleted,
+    /// even when keeping them fails (they then stay where they were, and the failure is thrown).
+    public func forgetCamera(_ cameraID: UUID, dataDirectory: URL, keepingHomePairing: Bool = false, serialNumber: String? = nil,
+                             mac: String? = nil, now: Date = Date()) throws {
         var failure: (any Error)?
         do { try setPassword(nil, for: cameraID) } catch { failure = error }
         do { try forgetStreamCredentials(for: cameraID) } catch { failure = failure ?? error }
         do { try setSetupCloudAuthcode(nil, for: cameraID) } catch { failure = failure ?? error }
-        do { try HAPStorage.removeAll(for: cameraID, dataDirectory: dataDirectory, secrets: secrets) } catch { failure = failure ?? error }
+        do {
+            if keepingHomePairing {
+                try RemovedHAPIdentities.keep(cameraID: cameraID, serialNumber: serialNumber, mac: mac, dataDirectory: dataDirectory, secrets: secrets, now: now)
+            } else {
+                try HAPStorage.removeAll(for: cameraID, dataDirectory: dataDirectory, secrets: secrets)
+            }
+        } catch { failure = failure ?? error }
         if let failure { throw failure }
+    }
+
+    /// The Apple Home identity and pairings of the same camera removed less than 30 days ago, given to `cameraID` (being added) when it has
+    /// none yet (`RemovedHAPIdentities.restore`); nil when there is none.
+    public func restoreHomePairing(for cameraID: UUID, serialNumber: String?, mac: String? = nil, dataDirectory: URL,
+                                   now: Date = Date()) throws -> RemovedHAPIdentity? {
+        try RemovedHAPIdentities.restore(cameraID: cameraID, serialNumber: serialNumber, mac: mac, dataDirectory: dataDirectory, secrets: secrets, now: now)
+    }
+
+    /// Deletes the removed cameras' Apple Home pairings kept 30 days or longer (`RemovedHAPIdentities.sweep`); the number deleted.
+    @discardableResult
+    public func sweepRemovedHomePairings(dataDirectory: URL, now: Date = Date()) -> Int {
+        RemovedHAPIdentities.sweep(dataDirectory: dataDirectory, secrets: secrets, now: now)
     }
 
     /// `camera.<UUID>`.

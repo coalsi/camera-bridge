@@ -254,6 +254,8 @@ public actor CameraSettingsService {
     var dnsReadBack = DNSReadBackTiming()
 
     func useDNSReadBack(_ timing: DNSReadBackTiming) { dnsReadBack = timing }
+    /// Whether the camera is Hikvision's or an OEM's (`isHikvisionFamily`), once asked: its DNS is then never written through ONVIF on DHCP.
+    var hikvisionFamilyKnown: Bool?
 
     /// `vendor`, `mainStreamURL`, `preferredMethod` and `reolinkChannel` steer encoder changes (`applyEncoder`).
     public init(endpoint: CameraEndpoint, credentials: HTTPCredentials?, cameraID: UUID? = nil, vendor: CameraVendor? = nil,

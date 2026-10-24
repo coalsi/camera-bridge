@@ -273,7 +273,10 @@ WebhookServer (engine) ───────────────────
   until the person answers it (TN3179): a denial is retried every `EngineTuning.localNetworkRetryInterval` (500 ms) for
   up to `localNetworkAnswerWait` (20 s) before it counts, and `localNetworkAccess` does not change meanwhile; once an
   answer is known one attempt decides. Runtimes report denied connections, refused advertising and LAN connections.
-  `discoverCameras()` returns nothing in loopback-only environments (tests never multicast).
+  `discoverCameras()` returns nothing in loopback-only environments (tests never multicast). Since 2026-10-24 it runs ONVIF's
+  WS-Discovery and Hikvision's SADP at once (`SADPDiscovery`) and merges them (`mergedDiscovery`): a SADP device at an address WS-Discovery
+  listed adds `activated` and `httpPort` to that entry; another is listed after them, `onAnotherNetwork` when its address is on none of the
+  bridge's IPv4 networks (loopback and tunnels left out; `SADPDevice.isOnNetwork(of:)`). Tests: `CameraDiscoveryMergeTests`.
 - Probing (`probeCamera`, app review W4): `vendor` nil → `CameraDrivers.detect`; the ONVIF device service's port is
   kept when it isn't the HTTP port (detected, or searched with `CameraDrivers.onvifPort` for an `.onvif` camera without
   `onvifPort`), used for the driver and reported as `CameraProbeResult.onvifPort`. Nothing detected and no main stream
@@ -1140,3 +1143,20 @@ and starts the runtime (same port, no bridge restart). Not done: no retry after 
 ## Additions beyond the contract: a maker's own interface (2026-10-23, docs/CONTRACT_CHANGES.md)
 
 `probeCamera` for a camera added as ONVIF with credentials asks `CameraDrivers.ownInterface` (CameraAdapters README) once ONVIF accepted the credentials, or did not answer: a camera that answers Hikvision's ISAPI (also ANNKE and other OEMs), Reolink's or Dahua's API is probed as that vendor and returned with `CameraProbeResult.usedOwnInterface`, the manufacturer (ONVIF's name when the interface gives none) and the model. A wrong password stops at ONVIF (one failed login, the other interfaces are not asked); a refusal at the maker's interface leaves the ONVIF answer. `EngineTuning.findOwnInterface` replaces the check in tests (`EngineTuning.testing` answers none).
+
+## Additions beyond the contract: a removed camera's Apple Home pairing (2026-10-24, docs/CONTRACT_CHANGES.md)
+
+Removing a camera no longer deletes its Apple Home identity: `removeCamera(id:)` keeps it for 30 days (`RemovedHAPIdentities`,
+`Credentials/RemovedHAPIdentities.swift`). `CredentialStore.forgetCamera(_:dataDirectory:keepingHomePairing:serialNumber:mac:now:)` (the
+new parameters default to the old behaviour) still deletes the password, the stream URLs' credentials and the setup's cloud sign-in, and with
+`keepingHomePairing` moves `<data>/hap/<id>/` (its pairings, `state.json`) to `<data>/hap-removed/<id>/` with a note, `removed.json`
+(`RemovedHAPIdentity`: `cameraID`, `removedAt`, `serialNumber` and `mac` when known; the engine passes the configuration's serial number, and
+keeps no MAC), and the identity (device ID, setup code, long-term keys) from the secret store's `hap.<id>` to `hap-removed.<id>`. Nothing is
+deleted; a failure leaves the identity where it was (logged). `addCamera` asks `CredentialStore.restoreHomePairing(for:serialNumber:mac:dataDirectory:now:)`
+under the identity lock before the camera's accessory starts: the same camera (`RemovedHAPIdentity.isSameCamera(id:serialNumber:mac:)`:
+the same serial number, MAC or id, and no known serial number or MAC that differs) removed less than `RemovedHAPIdentities.keptFor` (30
+days) ago gets that identity and those pairings under its new id, so Home sees the old accessory again (the entry with the same id first,
+then the newest); a camera that already has an identity keeps its own. `CredentialStore.sweepRemovedHomePairings(dataDirectory:now:)`
+(`RemovedHAPIdentities.sweep`) deletes entries 30 days old or older, at the engine's start and then daily (`EngineTuning.removedPairingSweepInterval`).
+Public: `RemovedHAPIdentity`, `RemovedHAPIdentities.keep(cameraID:serialNumber:mac:dataDirectory:secrets:now:)`, `.restore(…)`, `.sweep(…)`,
+`.keptFor`. Tests: `RemovedHAPIdentitiesTests`, `RemovedCameraPairingEngineTests` (macOS).

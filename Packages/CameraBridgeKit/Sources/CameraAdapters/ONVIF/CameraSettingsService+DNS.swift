@@ -200,7 +200,10 @@ extension CameraSettingsService {
             }
             return Self.afterDahuaRefusal(.refused("the camera does not show its DNS servers"), dahuaWhy)
         }
-        let (onvif, keptDHCP) = try await onvifBridgeWrite(client, server: server, searchDomains: current.searchDomains, readBack: readBack)
+        let (onvif, keptDHCP, addressGuard) = try await onvifBridgeWrite(client, server: server, searchDomains: current.searchDomains, readBack: readBack)
+        // The camera's address settings stopped the write (a Hikvision-family camera on DHCP) or were undone by it (DHCP turned off, put back):
+        // nothing else is tried, through no other way.
+        if addressGuard { return onvif }
         // A camera on DHCP that keeps no DNS set by hand (it refused every form, or still takes DHCP's): the next preview offers to fix its
         // address (`needsFixedAddress`: its DNS is read through ONVIF, not a Dahua's CGI or a Reolink's API), and the words say so.
         let onDHCP = current.fromDHCP && vendor != .reolink && dahuaWhy == nil && keptDHCP != false
@@ -338,6 +341,10 @@ extension CameraSettingsService {
     /// once. The refusal says what the camera kept. A camera that refuses every form takes no DNS servers through ONVIF: its words for the
     /// last form are the refusal. A camera whose account may not change them (`.notPermitted`) is refused at the first such answer, in the
     /// administrator words and marked `notPermitted`, as no other form would be let through.
+    ///
+    /// The camera's address is guarded around the writes (`CameraSettingsService+AddressGuard.swift`): a Hikvision-family camera on DHCP is
+    /// sent no `SetDNS` (`hikvisionONVIFRefusal`), and after each form the camera accepted, an interface that had DHCP on and shows it off
+    /// gets DHCP back at once, the write refused (`dhcpTurnedOff`).
     func writeONVIFBridge(_ client: ONVIFClient, server: String, searchDomains: [String],
                           readBack: DNSReadBackTiming) async throws -> CameraSetupOutcome {
         try await onvifBridgeWrite(client, server: server, searchDomains: searchDomains, readBack: readBack).outcome
@@ -345,8 +352,14 @@ extension CameraSettingsService {
 
     /// `writeONVIFBridge`, and whether the camera still takes its DNS servers from DHCP after it: true or false as the last reading after a
     /// write the camera took showed it; nil when it took none (every form answered with a fault); false when it never showed them again.
+    /// `addressGuard`: the camera's address settings stopped the write or were put back after it (the outcome says which).
     private func onvifBridgeWrite(_ client: ONVIFClient, server: String, searchDomains: [String],
-                                  readBack: DNSReadBackTiming) async throws -> (outcome: CameraSetupOutcome, keptDHCP: Bool?) {
+                                  readBack: DNSReadBackTiming) async throws -> (outcome: CameraSetupOutcome, keptDHCP: Bool?, addressGuard: Bool) {
+        let (stop, dhcpBefore) = try await onvifDNSWriteCheck(client)
+        if let stop {
+            log.warning("Not changing a Hikvision-family camera's DNS through ONVIF: it takes its address from DHCP (or does not show it)")
+            return (.refused(stop), nil, true)
+        }
         var after: CameraDNSReading?
         var acceptedAForm = false
         var refusal: (any Error)?   // the last form's fault; a `.notPermitted` one ends the loop, so it is never replaced
@@ -361,20 +374,22 @@ extension CameraSettingsService {
             }
             let timing = acceptedAForm ? readBack.forLaterForms : readBack
             acceptedAForm = true
-            guard let reading = try await onvifReadBack(client, server: server, timing) else {
+            let read = try await onvifReadBack(client, server: server, timing)
+            if let undone = try await restoringDHCP(client, before: dhcpBefore, timing: readBack) { return (undone, nil, true) }
+            guard let reading = read else {
                 // A later form's short window can pass without one answer: say what the earlier form's reading showed.
-                if let after { return (.refused(Self.kept(after, server: server)), after.fromDHCP) }
-                return (.refused("the camera no longer shows its DNS servers"), false)
+                if let after { return (.refused(Self.kept(after, server: server)), after.fromDHCP, false) }
+                return (.refused("the camera no longer shows its DNS servers"), false, false)
             }
             if reading.pointsAt(server) {
                 log.info("Set the camera's DNS servers through ONVIF")
-                return (CameraSetupOutcome(succeeded: true, detail: "via ONVIF"), reading.fromDHCP)
+                return (CameraSetupOutcome(succeeded: true, detail: "via ONVIF"), reading.fromDHCP, false)
             }
             after = reading
         }
-        if let after { return (.refused(Self.kept(after, server: server)), after.fromDHCP) }
-        guard let refusal else { return (.refused("the camera kept its own DNS servers"), nil) }
-        return (.refused(refusal), nil)
+        if let after { return (.refused(Self.kept(after, server: server)), after.fromDHCP, false) }
+        guard let refusal else { return (.refused("the camera kept its own DNS servers"), nil, false) }
+        return (.refused(refusal), nil, false)
     }
 
     /// `GetDNS` after a `SetDNS`: at once, then every `timing.interval` until `timing.limit`, until the camera asks the bridge alone (a
@@ -394,15 +409,21 @@ extension CameraSettingsService {
     /// `SetDNS` with the backup's servers (or DHCP), read back. A camera with fixed slots that kept a server in a slot the write did not name
     /// (the bridge, after Watch put it in both) gets those slots emptied, so it asks exactly the servers it had. Empty slots (0.0.0.0, ::)
     /// are no servers on either side: a camera that shows an emptied slot as 0.0.0.0 has its old servers back all the same.
+    ///
+    /// An interface that had DHCP on before a write and shows it off after it gets DHCP back at once, and the restore is refused
+    /// (`restoringDHCP`). A Hikvision-family camera on DHCP is restored all the same: its backup is from a Watch that wrote its DNS (an
+    /// earlier build), and leaving the bridge's servers on it would be worse.
     func restoreONVIFDNS(_ client: ONVIFClient, _ backup: CameraDNSBackup, searchDomains: [String]) async throws -> CameraSetupOutcome {
         var servers = backup.servers
         let wanted = Self.usedSlots(backup.servers)
+        let dhcpBefore = try await onvifDHCPTokens(client)
         for attempt in 0..<2 {
             do {
                 try await client.setDNS(fromDHCP: backup.fromDHCP, servers: servers, searchDomains: searchDomains)
             } catch let error as CameraAdapterError where !error.isLoginRefusal {
                 return .refused(error)
             }
+            if let undone = try await restoringDHCP(client, before: dhcpBefore, timing: dnsReadBack) { return undone }
             guard let after = try await onvifDNS(client) else { return .refused(Self.notTakenBack) }
             let now = Self.onvifReading(after)
             let kept = Self.usedSlots(now.backup.servers)
@@ -706,6 +727,11 @@ extension CameraSettingsService {
         var backup = dns.backup
         if backup.ownAPI == nil, dns.method != .ipcWebAPI { backup.ownAPI = try await ownAPIDNS() }
         if dns.pointsAt(server) { return (CameraSetupReading(state: .alreadyRight, note: dns.fromDHCP ? Self.dnsFromRouterNote : nil), backup) }
+        // A Hikvision-family camera on DHCP read through ONVIF: its DNS is not written that way (`hikvisionONVIFRefusal`), and no fixed
+        // address is offered through ONVIF either.
+        if dns.method == .onvifMinimal, let client = await client(), let refusal = try await onvifDNSWriteCheck(client).refusal {
+            return (.notSupported(refusal), backup)
+        }
         if vendor == .reolink, dns.method == .reolinkAPI, try await reolinkMayNotChange("localLink") {
             return (.notSupported(CameraAdapterError.notPermittedReason), backup)
         }

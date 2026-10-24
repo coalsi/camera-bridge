@@ -88,25 +88,33 @@ public enum ONVIFDiscovery {
     }
 }
 
-/// Blocking BSD-socket multicast probe (run off the cooperative pool).
+/// Blocking BSD-socket multicast probe (run off the cooperative pool): WS-Discovery's and SADP's (`SADPDiscovery`).
 enum MulticastProbe {
     private static let log = Log(category: "discovery")
 
-    static func run(probe: Data, group: String, port: UInt16, timeout: Duration) -> [(data: Data, sender: String?)] {
+    /// `bindPort` 0 (WS-Discovery: replies come back to the sender's port); SADP binds the group's own port (37020, shared with
+    /// `SO_REUSEADDR` / `SO_REUSEPORT`), as its devices answer to the group, which reaches the bridge even from another subnet.
+    static func run(probe: Data, group: String, port: UInt16, timeout: Duration, bindPort: UInt16 = 0,
+                    label: String = "WS-Discovery") -> [(data: Data, sender: String?)] {
         #if canImport(Darwin)
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         #else
         let fd = socket(AF_INET, Int32(SOCK_DGRAM.rawValue), Int32(IPPROTO_UDP))
         #endif
         guard fd >= 0 else {
-            log.warning("WS-Discovery: socket() failed (errno \(errno))")
+            log.warning("\(label): socket() failed (errno \(errno))")
             return []
         }
         defer { close(fd) }
+        if bindPort != 0 {
+            var on: Int32 = 1
+            _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+            _ = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, socklen_t(MemoryLayout<Int32>.size))
+        }
 
         var local = sockaddr_in()
         local.sin_family = sa_family_t(AF_INET)
-        local.sin_port = 0
+        local.sin_port = bindPort.bigEndian
         local.sin_addr = in_addr(s_addr: 0)
         #if canImport(Darwin)
         local.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -115,7 +123,7 @@ enum MulticastProbe {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
         guard bound == 0 else {
-            log.warning("WS-Discovery: bind() failed (errno \(errno))")
+            log.warning("\(label): bind() failed (errno \(errno))")
             return []
         }
 
@@ -140,7 +148,7 @@ enum MulticastProbe {
                     }
                 }
             }
-            if sent < 0 { log.debug("WS-Discovery: sendto failed (errno \(errno))") }
+            if sent < 0 { log.debug("\(label): sendto failed (errno \(errno))") }
         }
 
         let interfaces = ipv4MulticastInterfaces()

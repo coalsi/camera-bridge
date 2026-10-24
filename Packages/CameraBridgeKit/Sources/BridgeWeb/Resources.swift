@@ -606,6 +606,10 @@ struct DiscoveredResource: Encodable {
     var hardware: String?
     var onvifPort: Int?
     var alreadyAdded: Bool
+    /// SADP found it on none of the box's networks: the page shows this card instead of a choice (`NotSetUpText.otherNetwork`).
+    var otherNetwork: WebApp.OtherNetworkResource?
+    /// SADP says it has no admin password yet (and it is on the home network): the page shows the not-set-up card.
+    var notSetUp: WebApp.NotSetUpResource?
 
     init(_ camera: DiscoveredCamera, configurations: [CameraConfiguration]) {
         host = camera.host
@@ -613,6 +617,12 @@ struct DiscoveredResource: Encodable {
         hardware = camera.hardware
         onvifPort = camera.xAddrs.first { $0.scheme?.lowercased() == "http" }?.port
         alreadyAdded = configurations.contains { $0.vendor != .demo && $0.endpoint.host.caseInsensitiveCompare(camera.host) == .orderedSame }
+        if camera.onAnotherNetwork == true {
+            otherNetwork = NotSetUpText.otherNetwork(address: camera.host)
+        } else if camera.activated == false, !alreadyAdded {
+            notSetUp = NotSetUpText.resource(NotSetUp(maker: "Hikvision", vendor: .hikvision),
+                                             endpoint: CameraEndpoint(host: camera.host, httpPort: camera.httpPort ?? 80))
+        }
     }
 }
 

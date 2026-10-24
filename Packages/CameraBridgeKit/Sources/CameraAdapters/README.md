@@ -460,6 +460,32 @@ DNS servers", when `readDNS()` is nil; not supported with why for a camera that 
 now, or when the camera is on DHCP there), and its value now is the backup (with the own API's DNS values), kept in
 `CameraSetupBackup.internetWatch`; the step applies with `applyDNS(server:)` and restores with `restoreDNS(_:)`.
 
+DNS safety (2026-10-24, docs/CONTRACT_CHANGES.md; `CameraSettingsService+AddressGuard.swift`): a DNS write never breaks a camera's address.
+Two ANNKE I91ET (Hikvision OEM firmware V5.8.10) added as plain ONVIF on DHCP came up static at Hikvision's factory 192.168.1.64 after an
+ONVIF `SetDNS` (that firmware turns the interface's DHCP off without saving an address). Before Watch's ONVIF `SetDNS`, `GetNetworkInterfaces`
+is read: a Hikvision-family camera (vendor `.hikvision`; an ONVIF manufacturer of Hikvision, HiWatch, ANNKE or EZVIZ, a `DS-` model; or an
+HTTP port that answers ISAPI's `deviceInfo` without a login with its document or a Hikvision Digest realm such as `IP Camera(…)`,
+`CameraDrivers.answersISAPI`, no credentials sent) with IPv4 DHCP on, or that shows no interfaces, is sent no `SetDNS`: the preview says not
+supported (`hikvisionONVIFRefusal`, no fixed address offered through ONVIF) and the engine's "Change it by hand" follows. After every ONVIF
+DNS write the camera accepted (Watch's forms and Restore's), the interfaces are read again (at once, then while it restarts its network
+service): one that had DHCP on and shows it off gets `SetNetworkInterfaces` with DHCP true at once, read back, and the step is refused in
+plain words (`dhcpTurnedOff(back:atRestart:)`), logged as a warning; no other form or way is tried after it. A camera that shows no interfaces
+again is refused (`dhcpUnconfirmed`). "Fix its address so the DNS stays" turns DHCP off on purpose with the address written: its interfaces
+show DHCP off before its `SetDNS`, so nothing undoes it. Tests: `CameraDNSAddressGuardTests` (the mock ONVIF camera's `dnsTurnsDHCPOff` and
+`deviceInformation`).
+
+## Additions beyond the contract: SADP discovery (2026-10-24, docs/CONTRACT_CHANGES.md)
+
+`SADPDiscovery.discover(timeout:)` (`Hikvision/SADPDiscovery.swift`, portable) sends Hikvision's SADP inquiry
+(`<Probe><Uuid>…</Uuid><Types>inquiry</Types></Probe>`) to 239.255.255.250:37020 through `MulticastProbe` (WS-Discovery's socket, now with
+`bindPort`: SADP binds the group's port, shared with `SO_REUSEADDR` / `SO_REUSEPORT`, as the devices answer to the group, which reaches the
+bridge even from another subnet) and returns each device's `ProbeMatch` once per MAC as a `SADPDevice` (`mac`, `ipv4Address`, `subnetMask`,
+`gateway`, `dhcp`, `activated`, `model` from `DeviceDescription`, `serialNumber` from `DeviceSN`, `httpPort`). `SADPDevice.isOnNetwork(of:)`
+is the subnet check (an IPv4 address against networks with prefix lengths). No login is sent and nothing is written; the MAC and serial
+number are never logged. `DiscoveredCamera` gains `activated`, `onAnotherNetwork` and `httpPort` (all optional; BridgeEngine's
+`discoverCameras()` fills them). Internal: `SADPDiscovery.probeMessage(uuid:)`, `parseReply(_:)`, `merge(_:)`. Tests: `SADPDiscoveryTests`
+(replies written from SADP's field list, made-up values).
+
 ## Additions beyond the contract: integrations beyond RTSP/ONVIF (2026-10-08, docs/CONTRACT_CHANGES.md; user docs: `docs/integrations/`)
 
 - **Native adapters** (`CameraVendor.amcrest`, `.doorbird`, `.unifi`): `AmcrestDriver` (Dahua/Amcrest CGI: `magicBox.cgi`, `snapshot.cgi`,
