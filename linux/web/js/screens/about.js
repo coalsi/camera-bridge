@@ -44,7 +44,9 @@ export function headCard(info, status) {
         row('System', info.osName), row('Machine', info.hardware),
         row('Running for', status ? duration(status.uptimeSeconds) : null))),
     h('p', { class: 'about-blurb muted' },
-      'Camera Bridge OS turns a small PC into a hub for your cameras: live video, recording and Apple Home, all on your own network. ',
+      'Camera Bridge OS is a local NVR for the cameras you already own. It records every camera around the clock, shows them all live, ',
+      'and keeps them on your own network: no cloud, no account, no subscription. ',
+      'Apple Home is optional, and Google Home is planned. ',
       'Free for personal use. ', h('a', { href: 'https://camera-bridge.app', target: '_blank', rel: 'noopener' }, 'camera-bridge.app')));
 }
 

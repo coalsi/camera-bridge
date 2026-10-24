@@ -2,18 +2,18 @@
 
 # Camera Bridge OS
 
-**A local NVR for the cameras you already own, with an AI assistant that tells you what happened, and every camera in Apple
-Home.**
+**The friendly NVR for the cameras you already own.**
 
-Camera Bridge OS turns a small Intel mini PC into a network video recorder:
+Camera Bridge OS turns a small Intel mini PC into a network video recorder that is easy to use and pleasant to look at:
 - It records your cameras around the clock.
-- It shows them all live on one page.
+- It shows them all live on one page, above one timeline.
 - It puts every event in one list, each with a picture and an optional one-line AI description such as "A delivery driver
   leaves a package at the front door".
 - It keeps your cameras off the internet.
-- It brings each camera into the Apple Home app with HomeKit Secure Video.
+- If you want, it also brings each camera into the Apple Home app with HomeKit Secure Video. You don't need Apple Home to use it.
 
-It runs at home, with no cloud account, no subscription and no hub to buy. You set it all up from a browser at
+It runs at home, with no cloud account, no subscription and no hub to buy. The name is the idea: it bridges your cameras to
+your screens and, if you like, to your smart home. You set it all up from a browser at
 `http://camera-bridge.local`, and it needs no keyboard or screen.
 
 <p align="center"><img src="docs/screenshots/os/monitor.jpg" width="900" alt="The Monitor: every camera live, the recordings timeline and the events list with AI descriptions"></p>
@@ -63,12 +63,14 @@ Website: <https://www.camera-bridge.app> · Documentation: <https://docs.camera-
 - No telemetry and no account. The only things that leave the box are update checks, the time server, and (only if you turn
   them on) AI descriptions.
 
-### Apple Home, built in
+### Apple Home, if you want it
+Camera Bridge OS is a complete NVR on its own. Apple Home is optional: pair a camera with the Home app only if you want it there.
 - Every camera becomes its own Home accessory with **HomeKit Secure Video**, live view, snapshots, two-way audio where the
   camera has it, and doorbells that ring like HomeKit doorbells.
 - Motion, person, vehicle, animal and package events become Home notifications and recording triggers. They come from the
   camera itself (ONVIF events and makers' own interfaces) or from the box's built-in motion detection.
 - A camera you turn off stays in Home, with a "Camera off" picture, so your rooms and automations keep working.
+- **Google Home:** planned, not available yet.
 
 ### Easy to live with
 - **Notifications** appear in the corner of the page and fade away, once per thing that happened, on every device. The
@@ -118,7 +120,8 @@ Details, storage advice and BIOS settings: [docs/linux/HARDWARE.md](docs/linux/H
    `CameraBridge-…` Wi-Fi with a phone and pick your network.
 3. Open `http://camera-bridge.local`, set a password, and install the system to the PC's internal disk from the System
    page. Remove the stick and restart.
-4. Add your cameras (the page finds ONVIF cameras on its own) and scan each one's code in the Home app.
+4. Add your cameras (the page finds ONVIF cameras on its own) and turn on Record for each one you want recorded. To put a
+   camera in Apple Home too, scan its code in the Home app.
 
 The full guide is [docs/linux/USER-GUIDE.md](docs/linux/USER-GUIDE.md); the design is
 [docs/linux/ARCHITECTURE.md](docs/linux/ARCHITECTURE.md).
