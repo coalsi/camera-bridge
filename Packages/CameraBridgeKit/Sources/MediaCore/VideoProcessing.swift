@@ -117,9 +117,21 @@ public struct TranscoderDiagnostics: Sendable {
     }
 }
 
+/// Where a decoder decodes: on the GPU (VA-API) or in software.
+public enum DecodingPlace: String, Sendable, Codable, Equatable {
+    case gpu, software
+}
+
 public protocol VideoDecoding: AnyObject, Sendable {
     func decode(_ frame: EncodedVideoFrame) async throws -> (any DecodedVideoFrame)?
     func invalidate()
+    /// Where this decoder decodes now, for a status line: nil while it cannot say (the default; before its first picture, or a decoder that
+    /// does not know). A decoder that falls back from the GPU to software says `.software` from then on.
+    var decodingPlace: DecodingPlace? { get }
+}
+
+public extension VideoDecoding {
+    var decodingPlace: DecodingPlace? { nil }
 }
 
 public protocol VideoEncoding: AnyObject, Sendable {

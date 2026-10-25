@@ -80,4 +80,14 @@ struct NoArchiveBackend: BridgeBackend {
 
     func optimizeForHomeKit(cameraID: UUID) async throws -> HomeKitOptimizationResult { try await base.optimizeForHomeKit(cameraID: cameraID) }
     func undoHomeKitOptimization(cameraID: UUID) async throws { try await base.undoHomeKitOptimization(cameraID: cameraID) }
+    func skyNightLog(cameraID: UUID, night: String?, view: SkyLogView) async throws -> SkyNightLog {
+        try await base.skyNightLog(cameraID: cameraID, night: night, view: view)
+    }
+    func correctSkyEntry(cameraID: UUID, entryID: String, night: String, label: SkyCorrection) async throws -> SkyEntry {
+        try await base.correctSkyEntry(cameraID: cameraID, entryID: entryID, night: night, label: label)
+    }
+    func skyStill(cameraID: UUID, night: String, entryID: String) async throws -> Data {
+        try await base.skyStill(cameraID: cameraID, night: night, entryID: entryID)
+    }
+    func findFlightFeeds() async -> [URL] { await base.findFlightFeeds() }
 }

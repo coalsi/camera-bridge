@@ -8,7 +8,7 @@ import { createLivePlayer, liveSupported, openLive } from '../live/mux.js';
 import { createStraightenedView, isOn, landing, largestStretch } from '../live/straighten.js';
 import { loadNVR, nvrSupported } from '../nvr/lite.js';
 import { stampText } from '../stamp.js';
-import { putCamera, store, subscribe } from '../store.js';
+import { pluginOn, putCamera, store, subscribe } from '../store.js';
 import { aiNotices, aiSettingsView } from './ai-settings.js';
 import { banners } from './banners.js';
 import { SHOW_SECURITY_EVENT } from '../notifications.js';
@@ -18,6 +18,7 @@ import { backLink, field, homeState, inlineError, selectField, statePill, switch
 import { createNightVisionCard } from './night-vision.js';
 import { pairingPanel } from './pairing.js';
 import { createSecurityCard, securityBadge, securityView } from './security.js';
+import { createSkyDetectorCard } from './sky-card.js';
 import { ARCHIVE_PAGE, concernWord, eventDescription, eventKind } from './wall-events-model.js';
 
 const SENSORS = [
@@ -258,6 +259,7 @@ export function renderCamera({ params, navigate, setTitle }) {
   let securityHandle = null; // the Security card: it follows status.security in place
   let wantsSecurity = params[1] === 'security';   // #/camera/<id>/security, or the banner's button on this page: bring the card into view once
   let aiHandle = null;       // the AI descriptions card: made once, it follows the camera's switch in place
+  let skyHandle = null;      // the Sky Watcher card: made once, and only while the Sky Watcher plugin is on; it follows the camera's sky settings and status in place
   let live = false;
   let pictureTimer = null;
   let previewStop = null;   // stops the clock of the preview on screen
@@ -294,6 +296,19 @@ export function renderCamera({ params, navigate, setTitle }) {
     }
   }
   const flush = debounce(send, 600);
+
+  /**
+   * The Sky Watcher card's save: its settings go at once, and the bridge's refusal ("Set where the box is first.") reaches the card, which says
+   * it in place; the camera it answers with goes to the store, so the card follows it like any other news of the camera.
+   */
+  async function saveSky(skyDetector) {
+    const updated = await patch(`cameras/${id}`, { skyDetector });
+    if (!destroyed) {
+      putCamera(updated);
+      camera = updated;
+    }
+    return updated;
+  }
 
   /** Saves `partial` a moment after the last change, or `now`: then it resolves once the bridge answered (or refused). */
   function save(partial, { now = false } = {}) {
@@ -820,6 +835,12 @@ export function renderCamera({ params, navigate, setTitle }) {
       settings: () => settingsAnswer,
     });
     aiHandle.update(camera);
+    // Sky Watcher is a plugin: every camera's page has its card while the plugin is on (Plugins), and none while it is off.
+    const skyOn = pluginOn('sky');
+    if (skyOn) {
+      skyHandle ??= createSkyDetectorCard(camera, { save: saveSky, settings: () => settingsAnswer });
+      skyHandle.update(camera);
+    }
     const [hook, nvr] = await Promise.all([webhookCard(settingsAnswer), nvrSupported(camera) ? loadNVR() : null]);
     if (destroyed) return;
     recordHandle?.destroy();
@@ -835,16 +856,16 @@ export function renderCamera({ params, navigate, setTitle }) {
     if (camera.status?.paired) { replace(homeHost); replace(homeBottomHost, home); } else { replace(homeBottomHost); replace(homeHost, home); }
     straightenHandle?.destroy();
     straightenHandle = straightenCard();
-    replace(right, recordHandle?.el, securityHandle.el, canSetUp ? cameraSetupCard(camera, { onDone: refreshCamera, localHelp: false }) : null, motionCard(), aiHandle.el, audioCard(), nightHandle.el, qualityCard(), overlayCard(), straightenHandle.el, hook, connectionCard(),
+    replace(right, recordHandle?.el, securityHandle.el, canSetUp ? cameraSetupCard(camera, { onDone: refreshCamera, localHelp: false }) : null, motionCard(), aiHandle.el, skyOn ? skyHandle.el : null, audioCard(), nightHandle.el, qualityCard(), overlayCard(), straightenHandle.el, hook, connectionCard(),
       h('div', { class: 'card' }, h('h2', null, 'Remove'), h('p', { class: 'desc' }, 'Removes the camera from Camera Bridge. Its Apple Home pairing is kept for 30 days, so the same camera added again keeps its place in Home.'),
         h('button', { class: 'btn danger', type: 'button', onclick: removeCamera }, icon('trash'), 'Remove camera…')));
     showSecurity();
   }
 
-  // What counts as the camera's structure: everything but its status, the two Record flags, its picture correction and the AI switch.
-  // The Record, Straighten and AI descriptions cards follow those in place, so pressing Record or the AI switch, or letting go of a
-  // slider, never rebuilds the page (the preview keeps running) or takes keyboard focus away from the control.
-  const structure = (c) => JSON.stringify({ ...c, status: null, nvrEnabled: null, nvrRecordSound: null, pictureCorrection: null, aiDescriptions: null });
+  // What counts as the camera's structure: everything but its status, the two Record flags, its picture correction, the AI switch and the sky
+  // settings. The Record, Straighten, AI descriptions and Sky Watcher cards follow those in place, so pressing Record or a switch, or letting go
+  // of a slider, never rebuilds the page (the preview keeps running) or takes keyboard focus away from the control.
+  const structure = (c) => JSON.stringify({ ...c, status: null, nvrEnabled: null, nvrRecordSound: null, pictureCorrection: null, aiDescriptions: null, skyDetector: null });
 
   const stop = subscribe((kind, detail) => {
     if (destroyed) return;
@@ -859,6 +880,7 @@ export function renderCamera({ params, navigate, setTitle }) {
       straightenHandle?.update(detail);
       if (encoderHost) replace(encoderHost, encoderNote(detail));
       aiHandle?.update(detail);
+      skyHandle?.update(detail);
       // The structure only changes when something other than a status moved (another browser edited it).
       if (before && structure(before) !== structure(detail) && !Object.keys(pending).length) renderAll();
     }
@@ -885,6 +907,7 @@ export function renderCamera({ params, navigate, setTitle }) {
       nightHandle?.destroy();
       securityHandle?.destroy();
       aiHandle?.destroy();
+      skyHandle?.destroy();
       bannerHost.destroy();
       window.removeEventListener(SHOW_SECURITY_EVENT, onShowSecurity);
       for (const img of root.querySelectorAll('img')) img.removeAttribute('src');   // closes a live preview

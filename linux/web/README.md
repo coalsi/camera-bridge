@@ -11,12 +11,13 @@ index.html            the shell; one module script
 style.css             tokens (colours, spacing), layout, components
 js/app.js             boot (first run, sign in, signed in), the hash router, the shell
 js/api.js             fetch with the session cookie and the anti-forgery token
-js/store.js           cameras and bridge state, kept current by /api/v1/events
+js/store.js           cameras and bridge state, kept current by /api/v1/events; which plugins are on (`pluginOn`, read from `GET plugins` at start-up and whenever the Plugins page loads)
 js/dom.js             h(), modal dialogs, toasts (everything is built with the DOM API, never innerHTML)
-js/screens/           auth, cameras (the Cameras list, #/cameras), nvr (the Monitor: the home page's wall with the recordings), wall-events (its notices), add (the wizard), camera, night-vision (Auto, Night, Day and the IR lights: a card on the camera page, buttons beside or under the Monitor's pan/tilt pad), ai-settings (Settings' AI descriptions card, the words and banners the camera page's AI descriptions card shares; `#/settings/ai`), pairing, settings, logs, system, banners
+js/screens/           auth, cameras (the Cameras list, #/cameras), nvr (the Monitor: the home page's wall with the recordings), wall-events (its notices), add (the wizard), camera, night-vision (Auto, Night, Day and the IR lights: a card on the camera page, buttons beside or under the Monitor's pan/tilt pad), ai-settings (Settings' AI descriptions card, the words and banners the camera page's AI descriptions card shares; `#/settings/ai`), sky-model, sky-card, sky-setup and sky-log (Sky Watcher, a plugin: its words, the camera page's card and the Setup panel, and the sky log at `#/sky`; see "Sky Watcher" below), plugins (Plugins: Wyze, eufy and Sky Watcher, each with a switch), pairing, settings, logs, system, banners
 js/nvr/               recording and playback (see "Recording and playback" below)
 js/live/              live video and the picture tools: mux.js, pan-tilt.js, zoom.js and straighten.js (Straighten the picture: the correction's formula, copied from MediaCore's `PictureCorrection`, and a `<video>` or `<img>` drawn straightened on a canvas over it, with WebGL or else in 2D; the camera page's card is in screens/camera.js)
 nvr-record.css, nvr-watch.css, nvr-grid.css    styles of the recording screens (style.css is not edited for them)
+sky.css               Sky Watcher's card and page (every class starts with sky-); linked from index.html after monitor.css
 mark.svg, mark-small.svg, site.webmanifest    the logo (mark-small.svg at 32 px and below: favicon, sidebar), the manifest
 ```
 
@@ -41,6 +42,35 @@ Recording, storage settings, banners and playback are plain ES modules under `js
 | `nvr-record.css`, `nvr-watch.css`, `nvr-grid.css` | Styles of the recording screens; `style.css` is not edited for them |
 
 Recorded video is fetched with `getBytes()` in `js/api.js` (the only place that calls `fetch`) and played through Media Source Extensions: a `blob:` media source is why the Content-Security-Policy has `media-src 'self' blob:`. Nothing in these modules uses WebCodecs, a worker or WebAssembly. `docs/linux/ARCHITECTURE.md` ("Recordings in the browser") explains the flow.
+
+
+## Sky Watcher
+
+A camera that looks at the sky can be watched for planes, satellites, meteors, bugs, birds and whatever is left over. The name in the page is **Sky Watcher** everywhere (the card, the menu item, the page's title); the settings and routes keep the code's name, `skyDetector`. All of it is vanilla JS in `js/screens/`, with `h()` and `replace()` from `dom.js`, the tokens of `style.css` in both themes and no inline styles.
+
+**Sky Watcher is a plugin**, the third on the Plugins page (`#/plugins`, after Wyze and eufy), with the same switch, **off by default**. Its entry has one sentence of what it does and an **Open** button to `#/sky`; it has no account, sign-in or sync, so no page of its own under `#/plugins/`. The page learns which plugins are on from `GET plugins` (`store.js`: `loadPlugins` at start-up, `setPlugins` whenever the Plugins page reads the list, `pluginOn('sky')`):
+
+| | Plugin off | Plugin on |
+|---|---|---|
+| Left menu and phone tab bar | no **Sky Watcher** item | the item, right after Notifications, all the time (not only once a camera has it on) |
+| A camera's page | no Sky Watcher card | the card, after the AI descriptions card, on every camera |
+| `#/sky` | "Sky Watcher is off", with a button to Plugins; nothing is asked of the bridge | the Setup panel at the top, then the log; with no camera on yet, "Turn on Sky Watcher in a camera's settings" with a link to each camera's page (or to add one) |
+| `PATCH cameras/:id {skyDetector: {enabled: true}}` | 400, field `plugins.sky`, "Turn on Sky Watcher in Plugins first." (the card shows it with a link to Plugins) | as before |
+
+Switching it off keeps every camera's saved settings, so switching it on again brings the same cameras back. A switch changed in another browser shows here the next time the page is loaded or the Plugins page is opened (the bridge sends no event for plugins).
+
+| File | What |
+|---|---|
+| `js/screens/sky-model.js` | Pure: no document, no requests. Every sentence (`SKY_TEXT`), direction ("low in the northwest, 8° up"), speed ("about 6× faster across the sky than planes at that height": never a real speed), blinking, shape, the summary, the conditions line ("☁︎ clear until 3 AM; sky not visible 3–5 AM"), the aim by lens, the strip's dots and hour marks, the groups of the explained, a path in picture coordinates, the Watch and clip addresses, and `SKY_ROUTE` |
+| `js/screens/sky-card.js` | The camera page's card (`createSkyDetectorCard`, after the AI descriptions card): the switch **Watch the sky**; the first time it is turned on it asks which way the camera faces, where the box is (typed, or from the browser: kept only on the box) and the lens layout (two lenses for a wide stitched picture), and says the bridge's refusals in place ("Set where the box is first.", "Choose a recordings folder first: …"); while it is on, the aim by lens, the stream, what it has learnt and the link to the log. `createSkySettingsCard` is the **Setup** panel (a `<details>`, open until the box has a place): where the box is, the flight feed with **Find a feed**, and the most questions a day the Sky Watcher may ask the AI (1 to 1,000). `createLocationFields` is the place's two fields and the browser's button, shared by both. The card says "Turn on Sky Watcher in Plugins first." with a link when the bridge refuses because the plugin is off |
+| `js/screens/sky-setup.js` | Loads the Setup panel for the Sky Watcher page: reads `GET settings` once and builds the card from it (`PATCH settings {sky}` saves); a bridge that does not answer gets a sentence and **Try again**. Settings no longer has a Sky Watcher section |
+| `js/screens/sky-log.js` | The page at `#/sky` and `#/sky/<camera>?night=yyyy-MM-dd&view=night\|day&entry=<id>` (the address is rewritten as you flip back; it keeps the page out of the history). Plugin off, it only says so. On, the Setup panel is at the top. Layout A: the summary and the counts by kind, the conditions, the night as a strip from sunset to sunrise (a dot for each light, the unexplained larger and glowing), the unexplained first (each with its still and the path drawn over it in the picture's own coordinates, the facts, Watch and Download clip), then the explained in collapsed groups built fifty at a time, a one-tap correction under every entry ("That was a…"), Night and Day, Earlier and Later, a camera picker when more than one camera watches the sky, and the status (the aim by lens, the stream) |
+| `js/app.js` | Reads the plugins at start-up; the menu's **Sky Watcher** item (moon), right after Notifications and shown only while the plugin is on; the route (loaded on demand). On a phone the tab bar scrolls sideways (`sky.css`), as it now has ten items |
+| `js/screens/plugins.js` | The Plugins page: a card for each plugin the bridge lists, with its switch (`PATCH plugins/<id>`) and an **Open** button (`#/plugins/<id>`, or `#/sky` for Sky Watcher) |
+
+What the page reads from the bridge (Task 5's API; `linux/web-dev/lib/sky.mjs` fakes it with a made-up night): `GET sky/cameras/:id/night?date=&view=` (`camera, night, view, from, to, serverTime, entries[], conditions[], counts, aim, learning`; an entry has `display` and `watch`), `GET sky/cameras/:id/entries/:eid/still?night=` (the original picture, used as an `<img>`), `POST sky/cameras/:id/entries/:eid/correction {night, label}`, `POST sky/feeds/find`, `GET`/`PATCH settings` (`sky.location`, `sky.flightFeedURL`, `sky.aiDailyLimit`), `GET plugins` and `PATCH plugins/sky {enabled}` (the plugin's switch), `PATCH cameras/:id {skyDetector}` and, on each camera, `skyDetector` and `status.sky` (`running, stream, analysisWidth, picturesPerSecond, aim, learning, problem`). Times are epoch milliseconds from the box's clock, said in the bridge's time zone. Past the brief: `skyDetector.lensLayout` (`single` or `dual`), which the card sends and reads back (a picture 2 to 1 or wider is two lenses until it says otherwise).
+
+Copy rules: no sentence says a real size, distance or speed of a light (nothing in km/h, mph, metres, feet or miles); a flight's own altitude is the feed's word and is shown as the bridge sends it ("TEST123 · 35,000 ft"). The explained entries are never built until their group is opened, so a night with hundreds of satellites stays quick. A correction changes the page in place (the entry stays where it is, and the counts and the strip follow it); nothing is loaded again.
 
 ## Run it on a Mac
 

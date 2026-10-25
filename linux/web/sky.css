@@ -1,0 +1,214 @@
+/* Sky Watcher (screens/sky-card.js, sky-model.js, sky-log.js and sky-setup.js): the camera page's card, the sky log, #/sky, and its Setup panel. Every class starts with sky-. The
+   colours are the page's tokens (style.css), in both themes; the strip of the night and the stills are pictures of the night, so they are dark in
+   both themes, as the camera's own pictures are. No inline styles: script sets el.style.left for a mark's place and nothing else. */
+
+/* The kinds of light. Never the colour alone: each is also said in words (the counts, the group titles, the rows). */
+.sky-page, .sky-card {
+  --sky-unexplained: var(--warning);
+  --sky-planes: var(--info);
+  --sky-satellites: var(--live);
+  --sky-meteors: var(--sec-yellow);
+  --sky-bugsAndBirds: color-mix(in srgb, var(--info) 55%, var(--recording));
+  --sky-notSure: var(--offline);
+}
+/* On a dark picture the same kinds are brighter than the tokens of a light page are. */
+.sky-strip, .sky-still {
+  --sky-unexplained: #ffb347;
+  --sky-planes: #7fb2ff;
+  --sky-satellites: #6fe0b0;
+  --sky-meteors: #f4e04d;
+  --sky-bugsAndBirds: #c79bff;
+  --sky-notSure: #b4b4bc;
+}
+
+/* A control of two to eight choices, one pressed: the compass, the lens layout, Night and Day. */
+.sky-segments { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-raised); max-width: 100%; }
+.sky-segment {
+  appearance: none; font: inherit; font-weight: 600; font-size: 0.92rem; line-height: 1.2; min-height: 40px; min-width: 0; padding: 6px 14px; border: 0; border-radius: 9px;
+  background: transparent; color: var(--text-2); cursor: pointer; touch-action: manipulation;
+}
+.sky-segment:hover { background: var(--surface-2); color: var(--text); }
+.sky-segment[aria-pressed="true"] { background: var(--brand); color: var(--on-brand); }
+.sky-segment[aria-disabled="true"] { opacity: 0.55; cursor: progress; }
+
+/* The camera page's card */
+.sky-card h2 { margin-bottom: 0; }
+.sky-card .sky-leaves { margin: 8px 0 0; }
+.sky-notes:not(:empty) { margin-top: 12px; }
+.sky-notes .banner { margin-bottom: 8px; }
+.sky-notes p { margin: 0 0 8px; }
+.sky-group { border: 0; padding: 0; margin: 18px 0 0; min-width: 0; }
+.sky-group legend { padding: 0; margin-bottom: 6px; font-weight: 600; font-size: 0.95rem; }
+.sky-group .hint { display: block; margin-top: 6px; font-size: 0.85rem; color: var(--text-2); }
+.sky-compass { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); width: 100%; gap: 2px; padding: 3px; }
+.sky-compass .sky-segment { padding-inline: 0; font-size: 0.85rem; text-align: center; }
+.sky-lenses { display: flex; width: 100%; }
+.sky-lenses .sky-segment { flex: 1 1 0; }
+.sky-setup .inline-fields { margin-top: 18px; }
+.sky-setup .field { margin-bottom: 8px; }
+.sky-place .row { margin: 4px 0 8px; }
+.sky-place .field .error { margin-top: 4px; }
+.sky-place-note { margin: 0 0 8px; }
+.sky-setup > .row { margin-top: 18px; }
+.sky-card .sky-status { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.sky-card .sky-status p { margin: 0 0 6px; }
+.sky-card .sky-status .banner { margin: 8px 0 0; }
+.sky-aim { font-weight: 600; font-variant-numeric: tabular-nums; }
+.sky-learning { color: var(--warning); }
+.sky-open-row { margin-top: 14px; }
+.sky-open-row:has(a[hidden]) { display: none; }
+
+/* The Setup panel at the top of the page: a card that folds. Its title is what is left when it is folded away; open until the box has a place. */
+.sky-setup-panel { margin-bottom: 20px; }
+.sky-setup-panel:empty { display: none; }
+.sky-setup-host > p { margin: 0; }
+.sky-settings-card > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 12px; list-style: none; cursor: pointer; }
+.sky-settings-card > summary::-webkit-details-marker { display: none; }
+.sky-settings-card > summary::before {
+  content: ""; flex: none; width: 7px; height: 7px; margin: 0 2px 0 4px; border-right: 2px solid var(--text-3); border-bottom: 2px solid var(--text-3); transform: rotate(-45deg); transition: transform 0.12s;
+}
+.sky-settings-card[open] > summary::before { transform: rotate(45deg); }
+.sky-settings-card > summary h2 { margin: 0; }
+.sky-settings-card > summary .sky-gist { min-width: 0; }
+.sky-settings-card[open] > summary { margin-bottom: 8px; }
+.sky-settings-card[open] > summary .sky-gist { display: none; }
+.sky-settings-card .row { margin: 8px 0; }
+.sky-settings-card .sky-group { margin-top: 18px; }
+.sky-problems:not(:empty) { margin-top: 10px; }
+.sky-problems .banner { margin-bottom: 0; }
+.sky-saved { margin: 8px 0 0; color: var(--live); }
+.sky-feeds { margin: 8px 0 0; padding: 0; list-style: none; }
+.sky-feed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 0; border-top: 1px solid var(--border); }
+.sky-feed code { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+
+/* The page */
+.sky-page { max-width: 980px; }
+.sky-picker select { width: auto; min-width: 190px; max-width: 100%; }
+.sky-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-bottom: 20px; }
+.sky-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sky-when { min-width: 11ch; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sky-body { transition: opacity 0.15s; }
+.sky-body.sky-stale { opacity: 0.55; }
+.sky-top h2 { font-size: 1.05rem; font-weight: 600; color: var(--text-2); }
+.sky-summary { margin: 4px 0 12px; font-size: 1.45rem; font-weight: 650; letter-spacing: -0.01em; line-height: 1.25; }
+.sky-counts { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0 0 12px; padding: 0; }
+.sky-count-item { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px 4px 10px; border: 1px solid var(--border); border-radius: 99px; background: var(--surface); font-size: 0.92rem; }
+.sky-count-item strong { font-variant-numeric: tabular-nums; }
+.sky-key { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--sky-planes); }
+.sky-key--unexplained { background: var(--sky-unexplained); box-shadow: 0 0 7px 1px var(--sky-unexplained); width: 12px; height: 12px; }
+.sky-key--planes { background: var(--sky-planes); }
+.sky-key--satellites { background: var(--sky-satellites); }
+.sky-key--meteors { background: var(--sky-meteors); }
+.sky-key--bugsAndBirds { background: var(--sky-bugsAndBirds); }
+.sky-key--notSure { background: var(--sky-notSure); }
+.sky-conditions { margin: 0 0 6px; color: var(--text-2); }
+.sky-top .sky-learning { margin: 0 0 6px; }
+.sky-note:not(:empty) { margin: 8px 0; }
+.sky-note .banner { margin-bottom: 0; }
+
+/* The night as a strip, sunset to sunrise: a dot for each light, higher for a higher light; the unexplained larger and glowing. */
+.sky-strip { margin: 18px 0 28px; }
+.sky-strip-svg { display: block; width: 100%; height: auto; border-radius: 10px; }
+.sky-sky { fill: #0d1226; }
+.sky-band--notVisible { fill: #8a8a93; opacity: 0.24; }
+.sky-band--cloudy { fill: #8a8a93; opacity: 0.12; }
+.sky-grid { stroke: #2a3350; stroke-width: 1; stroke-dasharray: 3 6; }
+.sky-horizon { stroke: #3d4875; stroke-width: 1.5; }
+.sky-dot { stroke: none; }
+.sky-dot--planes { fill: var(--sky-planes); opacity: 0.9; }
+.sky-dot--satellites { fill: var(--sky-satellites); opacity: 0.6; }
+.sky-dot--meteors { fill: var(--sky-meteors); }
+.sky-dot--bugsAndBirds { fill: var(--sky-bugsAndBirds); opacity: 0.9; }
+.sky-dot--notSure { fill: var(--sky-notSure); opacity: 0.9; }
+.sky-dot--unexplained { fill: var(--sky-unexplained); filter: drop-shadow(0 0 4px var(--sky-unexplained)); }
+.sky-halo { fill: var(--sky-unexplained); opacity: 0.28; }
+@media (prefers-reduced-motion: no-preference) { .sky-halo { animation: sky-glow 3.2s ease-in-out infinite; } }
+@keyframes sky-glow { 50% { opacity: 0.12; } }
+.sky-axis { position: relative; height: 1.3em; margin-top: 4px; font-size: 0.75rem; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.sky-tick { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.sky-ends { display: flex; justify-content: space-between; margin-top: 2px; font-size: 0.78rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+/* The unexplained: a card each, the still with its path on one side and the facts on the other. */
+.sky-unexplained h2, .sky-explained h2 { margin-bottom: 12px; }
+.sky-count { color: var(--text-3); font-weight: 500; font-variant-numeric: tabular-nums; }
+.sky-cards { display: grid; gap: 14px; }
+.sky-cards > .card { margin: 0; }
+.sky-entry { display: grid; grid-template-columns: minmax(200px, 42%) minmax(0, 1fr); gap: 8px 18px; padding: 14px; scroll-margin-top: 16px; }
+.sky-still { position: relative; margin: 0; align-self: start; overflow: hidden; border-radius: 10px; background: #0c0c0e; }
+.sky-still-img { display: block; width: 100%; height: auto; min-height: 60px; }
+.sky-path { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.sky-path-line { fill: none; stroke: var(--sky-unexplained); stroke-width: 2px; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 2px #000); }
+.sky-mark { fill: none; stroke: #fff; stroke-width: 2px; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 2px #000); }
+.sky-mark--end { fill: var(--sky-unexplained); }
+.sky-still--none { display: grid; place-items: center; min-height: 110px; border: 1px dashed var(--border-strong); background: var(--bg-raised); }
+.sky-entry-body { min-width: 0; }
+.sky-entry-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.sky-entry-head h3 { font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+.sky-kind { color: var(--text-2); font-size: 0.88rem; }
+.sky-tag { display: inline-block; padding: 1px 9px; border: 1px solid var(--border-strong); border-radius: 99px; background: var(--surface-2); font-size: 0.75rem; font-weight: 650; }
+.sky-facts { display: grid; gap: 2px; margin: 8px 0; padding: 0; list-style: none; }
+.sky-ai { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--brand-accent); border-radius: 8px; background: var(--surface-2); overflow-wrap: anywhere; unicode-bidi: isolate; }
+.sky-ai-label { margin-right: 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em; color: var(--text-3); }
+.sky-actions { margin: 10px 0; }
+
+/* One-tap corrections, under every entry. */
+.sky-correct { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.sky-correct-label { display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-2); }
+.sky-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.sky-chip {
+  appearance: none; font: inherit; font-size: 0.88rem; min-height: 38px; padding: 4px 13px; border: 1px solid var(--border-strong); border-radius: 99px;
+  background: var(--surface); color: var(--text-2); cursor: pointer; touch-action: manipulation;
+}
+.sky-chip:hover { background: var(--surface-2); color: var(--text); }
+.sky-chip[aria-pressed="true"] { border-color: var(--brand); background: var(--brand); color: var(--on-brand); font-weight: 650; }
+.sky-chip[aria-disabled="true"] { opacity: 0.55; cursor: progress; }
+.sky-said { margin: 6px 0 0; color: var(--live); }
+.sky-said.bad { color: var(--danger); }
+
+/* The explained, a group each, closed until opened. */
+.sky-explained { margin-top: 30px; }
+.sky-group-details { margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.sky-group-details > summary { display: flex; align-items: center; gap: 10px; padding: 12px 14px; list-style: none; font-weight: 650; cursor: pointer; }
+.sky-group-details > summary::-webkit-details-marker { display: none; }
+.sky-group-details > summary::before {
+  content: ""; flex: none; width: 7px; height: 7px; margin-right: 2px; border-right: 2px solid var(--text-3); border-bottom: 2px solid var(--text-3); transform: rotate(-45deg); transition: transform 0.12s;
+}
+.sky-group-details[open] > summary::before { transform: rotate(45deg); }
+.sky-rows { margin: 0; padding: 0 14px; list-style: none; }
+.sky-row { padding: 10px 0; border-top: 1px solid var(--border); scroll-margin-top: 16px; }
+.sky-row-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.sky-row-time { font-weight: 600; font-variant-numeric: tabular-nums; }
+.sky-row-what { overflow-wrap: anywhere; }
+.sky-row-where { font-size: 0.85rem; }
+.sky-row .sky-correct { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; padding-top: 0; border-top: 0; }
+.sky-row .sky-correct-label { margin: 0; }
+.sky-row .sky-chip { min-height: 30px; padding: 2px 10px; font-size: 0.8rem; }
+.sky-row .sky-said { flex-basis: 100%; margin: 2px 0 0; }
+.sky-group-details > .btn { margin: 6px 14px 14px; }
+.sky-target { outline: 2px solid var(--brand-accent); outline-offset: 3px; }
+
+/* Status: the aim by lens and the stream. */
+.sky-page .sky-status { margin-top: 30px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.sky-page .sky-status h2 { margin-bottom: 8px; font-size: 0.8rem; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-3); }
+.sky-page .sky-status p { margin: 0 0 4px; }
+.sky-failed .btn { margin-top: 4px; }
+/* The page when the plugin is off, and when no camera watches the sky yet: a short message, and the way on. */
+.sky-off, .sky-empty { padding-block: 36px; }
+.sky-camera-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 14px 0 0; padding: 0; list-style: none; }
+
+@media (max-width: 720px) {
+  .sky-entry { grid-template-columns: minmax(0, 1fr); }
+  .sky-summary { font-size: 1.2rem; }
+  .sky-toolbar { gap: 10px; }
+  /* The day on a line of its own, then Earlier on the left and Later on the right. */
+  .sky-nav { width: 100%; justify-content: space-between; }
+  .sky-when { order: -1; flex: 1 0 100%; text-align: left; }
+}
+
+/* With Sky Watcher in the menu the phone's tab bar has ten items, more than a phone is wide: it scrolls sideways (the page does not) and every
+   item keeps its own width, so none is cut off. */
+@media (max-width: 640px) {
+  .nav { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav a { flex: 1 0 auto; }
+}

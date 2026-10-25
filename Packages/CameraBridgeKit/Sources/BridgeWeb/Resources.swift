@@ -260,6 +260,8 @@ struct CameraStatusResource: Encodable {
     var battery: BatteryResource?
     /// The camera's security level (absent until its first check; `POST cameras/:id/security/check`).
     var security: CameraSecurityResource?
+    /// The camera's Sky Watcher (`SkyStatusResource`); absent while it is off for the camera.
+    var sky: SkyStatusResource?
 
     init(_ status: CameraStatus) {
         connection = StatusText.connectionName(status.connection)
@@ -293,6 +295,42 @@ struct CameraStatusResource: Encodable {
         nvr = NVRStatusResource(status.nvr)
         battery = status.battery.map(BatteryResource.init)
         security = status.security.map(CameraSecurityResource.init)
+        sky = status.sky.map(SkyStatusResource.init)
+    }
+}
+
+/// `CameraStatus.sky` as the camera's card reads it: `running` (a picture came in the last 10 s), `stream` (`main` or `sub`), `analysisWidth`,
+/// `picturesPerSecond`, `decoding` (`gpu` or `software`), `aim` and `learning` (as in a night's log), `problem` (a sentence: why it cannot watch,
+/// or the flight feed's trouble) and `profile` (the camera profile it is on). Every key is always there, an unknown value null.
+struct SkyStatusResource: Encodable {
+    var running: Bool
+    var stream: OrNull<String>
+    var analysisWidth: OrNull<Int>
+    var picturesPerSecond: OrNull<Double>
+    var decoding: OrNull<String>
+    var aim: SkyNightResource.Aim
+    var learning: SkyNightResource.Learning
+    var problem: OrNull<String>
+    var profile: OrNull<String>
+
+    init(_ status: SkyCameraStatus) {
+        running = status.running
+        stream = OrNull(status.stream)
+        analysisWidth = OrNull(status.analysisWidth)
+        picturesPerSecond = OrNull(status.picturesPerSecond.flatMap { $0.isFinite ? $0 : nil })
+        decoding = OrNull(status.decoding)
+        let aim = status.aim
+        self.aim = SkyNightResource.Aim(quality: aim.quality.rawValue, planes: aim.planes, stars: aim.stars,
+                                        residualPixels: OrNull(aim.residualPixels.flatMap { $0.isFinite ? $0 : nil }),
+                                        updated: OrNull(aim.updated.map(WebApp.milliseconds)),
+                                        lenses: aim.lenses.map {
+                                            SkyNightResource.Lens(quality: $0.quality.rawValue, planes: $0.planes, stars: $0.stars,
+                                                                  residualPixels: OrNull($0.residualPixels.flatMap { $0.isFinite ? $0 : nil }))
+                                        },
+                                        note: OrNull(aim.note))
+        learning = SkyNightResource.Learning(ready: status.learning.ready, planes: status.learning.planes, satellites: status.learning.satellites)
+        problem = OrNull(status.problem.map { Redact.string($0) })
+        profile = OrNull(status.profile)
     }
 }
 
@@ -401,7 +439,7 @@ struct CameraResource: Encodable {
     var status: CameraStatusResource?
 
     private enum ExtraKeys: String, CodingKey {
-        case status, vendorName, kindName, motionSourceName, address, typeID, internetWatched, restartOffered
+        case status, vendorName, kindName, motionSourceName, address, typeID, internetWatched, restartOffered, skyDetector
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -414,6 +452,8 @@ struct CameraResource: Encodable {
         try container.encode(Self.address(of: configuration), forKey: .address)
         try container.encode(BridgeEngine.internetWatchDone(configuration), forKey: .internetWatched)
         try container.encode(BridgeEngine.offersCameraRestart(configuration), forKey: .restartOffered)
+        // The Sky Watcher's settings are the configuration's own when they were ever saved; the key is there, null, when they were not.
+        if configuration.skyDetector == nil { try container.encodeNil(forKey: .skyDetector) }
     }
 
     /// Where the camera is: its host, or for a camera behind a service the service's name.
@@ -574,6 +614,8 @@ struct SettingsResource: Encodable {
     var cameraOrder: [UUID]
     /// The AI description settings, with whether a key is saved and its last four characters (never the key).
     var ai: AISettingsResource
+    /// The Sky Watcher's settings: where the box is (shown here, to the signed-in page, and nowhere else), the flight feed and the AI's daily limit.
+    var sky: SkySettingsResource
 
     init(settings: BridgeSettings, cameras: [CameraConfiguration] = [], bridgeName: String, webhookProblem: String?, aiKey: (saved: Bool, hint: String?), aiStatus: AIStatus) {
         self.bridgeName = bridgeName
@@ -589,6 +631,7 @@ struct SettingsResource: Encodable {
         let known = Set(cameras.map(\.id))
         cameraOrder = settings.cameraOrder.filter { known.contains($0) }
         ai = AISettingsResource(settings.ai, key: aiKey, status: aiStatus)
+        sky = SkySettingsResource(settings.sky)
     }
 
     static func levelName(_ level: LogLevel) -> String {

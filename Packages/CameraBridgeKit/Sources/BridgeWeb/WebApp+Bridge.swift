@@ -26,6 +26,7 @@ extension WebApp {
         var timeZone: String?
         var cameraOrder: [UUID]?
         var ai: AIPatch?
+        var sky: SkyPatch?
     }
 
     func patchSettings(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -44,6 +45,8 @@ extension WebApp {
         }
         var aiChange: AIChange?
         if let aiPatch = patch.ai { aiChange = try await self.aiChange(from: aiPatch) }   // checked before anything is changed
+        var skyChange: SkyChange?
+        if let skyPatch = patch.sky { skyChange = try await self.skyChange(from: skyPatch) }
         if let name = patch.bridgeName {
             guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError.badRequest("Give the bridge a name.", field: "bridgeName") }
             do {
@@ -67,7 +70,7 @@ extension WebApp {
         let token = patch.regenerateWebhookToken == true ? Secrets.hex(Secrets.randomBytes(16)) : nil
         let (basePort, sensorsPort, webhookEnabled, webhookPort, shadow) = (patch.basePort, patch.sensorsBridgePort, patch.webhookEnabled, patch.webhookPort, patch.motionShadowTest)
         let newLevel = level
-        let ai = aiChange
+        let ai = aiChange, sky = skyChange
         do {
             try await backend.updateSettings { settings in
                 if let basePort { settings.basePort = UInt16(basePort) }
@@ -80,6 +83,7 @@ extension WebApp {
                 if let zone { settings.timeZone = zone }
                 if let order { settings.cameraOrder = order }
                 ai?.apply(to: &settings.ai)
+                sky?.apply(to: &settings.sky)
             }
         } catch {
             throw APIError(status: 422, code: "settings_failed", message: ErrorText.describe(error))

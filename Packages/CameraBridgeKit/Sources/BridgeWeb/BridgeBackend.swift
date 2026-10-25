@@ -124,6 +124,16 @@ public protocol BridgeBackend: Sendable {
     func optimizeForHomeKit(cameraID: UUID) async throws -> HomeKitOptimizationResult
     /// `BridgeEngine.undoHomeKitOptimization(cameraID:)`.
     func undoHomeKitOptimization(cameraID: UUID) async throws
+    /// `BridgeEngine.skyNightLog(cameraID:night:view:)`: a night's or a day's sky log of one camera (nil `night`: the latest). The default throws
+    /// `SkyLogError.unavailable` (a backend without a sky log).
+    func skyNightLog(cameraID: UUID, night: String?, view: SkyLogView) async throws -> SkyNightLog
+    /// `BridgeEngine.correctSkyEntry(cameraID:entryID:night:label:)`: the person's word on an entry; answers the entry. The default throws
+    /// `SkyLogError.unavailable`.
+    func correctSkyEntry(cameraID: UUID, entryID: String, night: String, label: SkyCorrection) async throws -> SkyEntry
+    /// `BridgeEngine.skyStill(cameraID:night:entryID:)`: the JPEG of an entry. The default throws `SkyLogError.unavailable`.
+    func skyStill(cameraID: UUID, night: String, entryID: String) async throws -> Data
+    /// `BridgeEngine.findFlightFeeds()`: the flight feeds on the box's network, one per host. The default finds none.
+    func findFlightFeeds() async -> [URL]
 }
 
 /// The engine behind the web API.
@@ -291,6 +301,22 @@ public struct EngineBackend: BridgeBackend {
         try await engine.undoHomeKitOptimization(cameraID: cameraID)
     }
 
+    public func skyNightLog(cameraID: UUID, night: String?, view: SkyLogView) async throws -> SkyNightLog {
+        try await engine.skyNightLog(cameraID: cameraID, night: night, view: view)
+    }
+
+    public func correctSkyEntry(cameraID: UUID, entryID: String, night: String, label: SkyCorrection) async throws -> SkyEntry {
+        try await engine.correctSkyEntry(cameraID: cameraID, entryID: entryID, night: night, label: label)
+    }
+
+    public func skyStill(cameraID: UUID, night: String, entryID: String) async throws -> Data {
+        try await engine.skyStill(cameraID: cameraID, night: night, entryID: entryID)
+    }
+
+    public func findFlightFeeds() async -> [URL] {
+        await engine.findFlightFeeds()
+    }
+
     // The preview, the run and the check carry "Change it by hand" for the page (`BridgeEngine.withManualHelp`): the steps the camera refused
     // or does not support, the findings the setup can't change. A restore's report carries none: its help would say how to make the change
     // Restore is undoing.
@@ -403,4 +429,18 @@ extension BridgeBackend {
     public func checkCameraSecurity(cameraID: UUID) async throws -> CameraSecurity {
         throw EngineError.cameraNotRunning
     }
+
+    public func skyNightLog(cameraID: UUID, night: String?, view: SkyLogView) async throws -> SkyNightLog {
+        throw SkyLogError.unavailable
+    }
+
+    public func correctSkyEntry(cameraID: UUID, entryID: String, night: String, label: SkyCorrection) async throws -> SkyEntry {
+        throw SkyLogError.unavailable
+    }
+
+    public func skyStill(cameraID: UUID, night: String, entryID: String) async throws -> Data {
+        throw SkyLogError.unavailable
+    }
+
+    public func findFlightFeeds() async -> [URL] { [] }
 }

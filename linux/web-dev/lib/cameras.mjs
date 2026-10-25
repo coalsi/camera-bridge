@@ -11,6 +11,7 @@ export const DAY = 86_400_000;
  * nightVision: the modes it offers and whether it has an IR lamp; `refuses` makes every change fail (night-vision.mjs).
  * security: its status.security level (red, yellow, green, gold, or trying: gold, watched and its attempts to reach the internet blocked;
  * camera-security.mjs); the others have not been checked.
+ * sky: it watches the sky (skyDetector on; status.sky and the log's made-up night: sky.mjs). Back Yard does, as a dual-lens camera facing north.
  * panTilt, zoom: it turns and zooms (status.panTilt and status.zoom; POST cameras/:id/pan-tilt answers it and moves nothing). Driveway has
  * them with night vision and a lamp, as a camera whose lamp is on its PTZ node: the Monitor's column holds the pad and the night vision.
  */
@@ -18,7 +19,7 @@ const RAW_DEFINITIONS = [
   { index: 1, name: 'Front Door', kind: 'doorbell', fixture: 'gop2', boundary: 'abut', history: 'days3', gap: null, enabled: true, host: '192.0.2.11', model: 'Doorbell 5MP', security: 'red' },
   { index: 2, name: 'Driveway', kind: 'camera', fixture: 'hd', boundary: 'gap300', history: 'days3', gap: { hour: 3, minute: 40, minutes: 20 }, enabled: true, host: '192.0.2.12', model: 'Bullet 4MP', nightVision: { modes: ['auto', 'on', 'off'], light: true }, panTilt: true, zoom: true, security: 'yellow' },
   { index: 3, name: 'Garage', kind: 'camera', fixture: 'longgop', boundary: 'abut', history: 'days3', gap: null, enabled: true, host: '192.0.2.13', model: 'Turret 4MP (smart codec)', nightVision: { modes: ['auto', 'off'] }, security: 'green' },
-  { index: 4, name: 'Back Yard', kind: 'camera', fixture: 'ntsc', boundary: 'overlap', history: 'days3', gap: { hour: 4, minute: 5, minutes: 7 }, enabled: true, host: '192.0.2.14', model: 'Dome 4MP', security: 'gold' },
+  { index: 4, name: 'Back Yard', kind: 'camera', fixture: 'ntsc', boundary: 'overlap', history: 'days3', gap: { hour: 4, minute: 5, minutes: 7 }, enabled: true, host: '192.0.2.14', model: 'Dome 4MP', security: 'gold', sky: true },
   { index: 5, name: 'Side Gate', kind: 'camera', fixture: 'hevc', boundary: 'abut', history: 'days3', gap: null, enabled: true, host: '192.0.2.15', model: 'Bullet 4K (H.265)', nightVision: { modes: ['auto', 'on', 'off'], light: true, refuses: true } },
   { index: 6, name: 'Living Room', kind: 'camera', fixture: { by: (startMs) => (Math.floor(startMs / (2 * HOUR)) % 2 === 0 ? 'gop2' : 'res-b') }, boundary: 'abut', history: 'days3', gap: { hour: 2, minute: 15, minutes: 45 }, enabled: true, host: '192.0.2.16', model: 'Indoor 3MP', security: 'trying' },
   { index: 7, name: 'Porch', kind: 'camera', fixture: 'gop2', boundary: 'abut', history: 'days3', gap: null, enabled: true, recordSound: true, audioEnabled: true, host: '192.0.2.17', model: 'Bullet 4MP', battery: { level: 64, charging: false, source: 'battery' } },
@@ -72,5 +73,6 @@ export function cameraConfiguration(definition) {
     integration: null,
     nvrEnabled: definition.enabled,
     nvrRecordSound: definition.recordSound ?? false,
+    ...(definition.sky ? { skyDetector: { enabled: true, facing: 0, tilt: 20, groundPercent: 12, nightProfile: true, lensLayout: 'dual' } } : {}),
   };
 }

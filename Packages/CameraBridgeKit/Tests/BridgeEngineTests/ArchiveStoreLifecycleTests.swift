@@ -26,7 +26,7 @@ final class ArchiveStoreHarness: Sendable {
     /// unowned file (a test that needs a slow or failing one).
     init(total: UInt64 = 500 * ArchiveStoreHarness.gb, free: UInt64 = 400 * ArchiveStoreHarness.gb, now: Date = ArchiveStoreHarness.now, isSystemVolume: Bool = false,
          spaceGate: DispatchSemaphore? = nil, readDeadline: Duration = .seconds(5), probeInterval: Duration = .milliseconds(50), statusRefresh: Duration = .milliseconds(50), probeStallAfter: Duration = .seconds(5), retentionAtStart: Bool = false,
-         deletedHandleGrace: Duration = .zero, logs: Bool = false,
+         deletedHandleGrace: Duration = .zero, logs: Bool = false, skyStillBytes: UInt64? = nil,
          populate: (URL) throws -> Void = { _ in }, repair: (@Sendable (URL, URL, UUID) throws -> IndexScanOutcome)? = nil) throws {
         root = try TemporaryDirectory()
         dataDirectory = try TemporaryDirectory()
@@ -55,6 +55,7 @@ final class ArchiveStoreHarness: Sendable {
         tuning.retentionInterval = .seconds(3_600)
         tuning.readDeadline = readDeadline
         tuning.deletedHandleGrace = deletedHandleGrace
+        if let skyStillBytes { tuning.skyStillBytesPerCamera = skyStillBytes }
         if let repair { tuning.repair = repair }
         tuning.removeFile = { url in
             let path = url.path(percentEncoded: false)

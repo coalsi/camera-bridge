@@ -7,6 +7,7 @@ import { VirtualArchive } from './archive.mjs';
 import { nightVisionStatus } from './night-vision.mjs';
 import { securityStatus } from './camera-security.mjs';
 import { NotificationLog, categoryOf, keyOf } from './notifications.mjs';
+import { SkyDev } from './sky.mjs';
 
 export const BUILTIN = { id: 'builtin', label: 'This box’s storage', path: '/var/lib/camera-bridge/recordings' };
 export const GIB = 1_073_741_824;
@@ -89,6 +90,7 @@ export class DevState {
   reset(scenario = 'ok') {
     clearTimeout(this.loadingTimer);
     this.notifications = new NotificationLog();
+    this.sky = new SkyDev();
     this.archive = new VirtualArchive({ fixtures: this.fixtures, definitions: this.definitions, clock: () => this.serverNow() });
     this.archive.seed();
     this.settings = { nvrFolder: BUILTIN.path, nvrKeepDays: 7, nvrMaxSizeGB: 500 };
@@ -168,6 +170,7 @@ export class DevState {
     const recentEvents = this.recentEvents(camera);
     const nightVision = nightVisionStatus(camera);
     const security = securityStatus(camera, this.serverNow());
+    const sky = this.sky.statusFor(camera, this.serverNow());
     return {
       ...configuration,
       status: {
@@ -192,6 +195,7 @@ export class DevState {
         recentEvents,
         ...(definition.battery ? { battery: { ...definition.battery } } : {}),
         ...(security ? { security } : {}),
+        ...(sky ? { sky } : {}),
         subStreamProblem: null,
         liveSessions: [],
         recordingSession: null,

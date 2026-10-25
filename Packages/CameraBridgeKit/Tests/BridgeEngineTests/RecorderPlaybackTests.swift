@@ -65,6 +65,8 @@ import Testing
         #expect(try file.rescanned() == file.index)
         // The copy a crash leaves (no sidecar, cut inside a fragment) decodes up to its last whole fragment.
         let ends = file.index.fragments.map { Int($0.offset) + Int($0.length) }
+        // A feeder starved by a busy machine records fewer fragments: fail saying so, not with an index out of range that ends the whole run.
+        try #require(ends.count >= 3, "only \(ends.count) fragment(s) recorded in 14 s (the feeder fell behind?); the crash copy is cut after the third")
         let cut = ends[2] + 5_000
         let scanned = try RecordedFile.scan(file.mp4.prefix(cut))
         let repaired = rig.root.url.appending(path: "repaired.mp4")

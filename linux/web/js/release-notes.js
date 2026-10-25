@@ -15,6 +15,18 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.122',
+    date: '2026-10-25',
+    title: 'Sky Watcher: a log of what crosses your sky',
+    items: [
+      'A new plugin, Sky Watcher, for a camera pointed at the sky. It stays off until you switch it on in Plugins; then it gets its own page in the menu, and each camera’s settings get a Sky Watcher card.',
+      'Every night (and day) it keeps a log of the lights that cross the sky: the night as a strip from sunset to sunrise, the unexplained ones first, each with a picture of its path, the time, the direction and how fast it crossed. Tap an entry to say what it really was.',
+      'Planes are named from a flight receiver on your network (dump1090, readsb, tar1090 or PiAware): the Sky Watcher page can find it for you. It works without the internet; the box’s location stays on the box.',
+      'A camera with two lenses stitched into one wide picture is treated as two lenses, and the box learns exactly where each one points from the planes it matches, starting from the direction you give it.',
+      'Coming next: satellites, meteors and bugs, an alert for the truly strange, and the stars for a precise aim.',
+    ],
+  },
+  {
     version: '0.1.121',
     date: '2026-10-25',
     title: 'Recordings that ride out a shaky network, and Wi-Fi on 5 GHz',

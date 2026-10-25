@@ -61,6 +61,32 @@ tested with a fake process as well as with the real one.
 | Straighten the picture (`makeVideoTranscoder(output:overlay:correction:)`) | `remap` on each plane of the 4:2:0 picture as grey (`extractplanes`, three `remap`s, `mergeplanes`: `remap` takes no subsampled format, and on the box's N150 this costs about 18 ms per 1920×852 picture, half of a 4:4:4 warp, at the same quality), with four 16-bit PGM maps from `PictureCorrection.remapMaps` (`RemapScratch`: a private directory; each map replaced atomically; the x maps written when the size changes, the y maps when the correction or the size changes, and any map that has gone missing written again), given as four more `-i` inputs (luma x, luma y, chroma x, chroma y) that ffmpeg reads once and keeps for the whole stream. The filters become a graph (`-filter_complex`, output pad `cbv`): the frame-rate `select` first, then scale to the picture's fitted size at twice its height, the warp, `scale=…:flags=area` back down (remap only picks the nearest pixel), then the bars, the label and the encoder's pixel format. A letterboxed picture is straightened before its bars, and the label is drawn upright after the warp. A change of the correction restarts the child like a bit rate change; maps that cannot be written leave the picture uncorrected (one warning, no restarts). Without a correction the arguments are what they were. Snapshots (`correctJPEG`): one child per JPEG with the same warp at the picture's size (an odd width warped one pixel wider and scaled back), its four maps kept in a private temporary directory for each picture size and correction (`SnapshotMapCache`, six sets at most, the least recently used removed at once, all removed with the codecs; a `/live` preview asks for a picture every 700 ms, so they are made once, not for every snapshot), then full range again (`scale=out_range=pc,format=yuvj420p`) and `mjpeg` `-q:v 5`, as `resizeJPEG` writes; at most 6 s (`straightenTimeout` = `PictureCorrection.snapshotTimeout`; the engine runs the call on a thread of its own, `CorrectedSnapshots.offloaded`). |
 | level | The lowest level at or above the request that fits the picture and rate (`H264LevelLimits`), passed as `-level`. |
 
+## Decoding on the GPU, and the sky detector's decoder
+
+`FFmpegVideoDecoder` (snapshots, the live self-check, motion detection, the sky detector) decodes in software, except that the decoders for motion detection and
+the sky ask for the GPU (`hardwareWhenHeavy`) when the stream is heavy on the CPU (HEVC, or more than 1080p) **and the GPU's decoder takes its size**
+(`FFmpegVideoDecoder.fitsHardware`: H.264 up to 4096 wide and tall, HEVC up to 8192, Intel's limits), and VA-API is usable. A 4256×1888 H.264 camera is
+therefore decoded in software, and the same size in HEVC on the GPU. If a GPU session ends before its first picture (the driver refuses the stream, the
+device cannot be opened) that stream (codec, size, profile) is decoded in software for the next 10 minutes (`FFmpegRuntime.hardwareDecodeRetryAfter`), by every decoder,
+and the log says, as a warning, "the GPU could not decode H.264 3840×2160; decoding in software" with the last line ffmpeg said (once for the failure, not for each
+decoder it touches); the next keyframe starts the software child, and the first keyframe after the 10 minutes tries the GPU again (a passing hiccup of the GPU does not
+send a 4K or HEVC camera to the CPU for the rest of the run; a GPU that is still dead fails again, and is held and said again 10 minutes on).
+`VideoDecoding.decodingPlace` says `gpu` or `software`. **VA-API decoding was not exercised on real hardware** here: the arguments, the size limits and the
+fall back are unit-tested with a fake ffmpeg.
+
+`makeSkyDecoder(format:maxOutputWidth:keepEvery:)` (`FFmpegArguments.decoder(…, keepEvery:, highQualityScaling:)`):
+- **Pictures**: at most `maxOutputWidth` wide (the shape kept, even sizes), `yuv420p`, of frames 0, N, 2N, … only. On the GPU the chain is
+  `scale_vaapi=w=…:h=…:format=nv12:mode=hq,select='not(mod(n\,N))',hwdownload,format=nv12,format=yuv420p`: scaled by the GPU's high-quality scaler, dropped there,
+  and only the kept pictures (about five a second) copied back. On the CPU `select` comes before `scale=…:flags=area` (an area average), so a dropped picture is
+  never scaled either. The loop filter stays on (`-skip_loop_filter` would show block edges as faint false lights in a dark sky). How single-pixel sensor
+  speckle looks depends on the scaling, hence the filters.
+- **Times**: `decode` returns nil at once for a frame that is not kept (no 0.4 s wait for a picture that never comes), and a kept picture takes the time of its
+  own frame: the N − 1 times before it go with it (the pending times stay sorted). A stream with reordering (a frame with a decode time before its presentation
+  time) is not waited for at all: its pictures come out frames late, and the call that brings one hands it over.
+- **Priority**: the child runs under `nice -n 10` (`FFmpegProcessSpec.niceness`, `FFmpegVideoDecoder.skyNiceness`; the real launcher starts `/usr/bin/nice -n 10
+  ffmpeg …`, so every thread has it; no `nice` program: as it is), as the clip conversions do, so live video and recordings keep the box's cores.
+- `RawVideoFrame.grayThumbnail(maxWidth:)` at the picture's own size (what the sky decoder makes) copies the luma plane instead of averaging blocks of one pixel.
+
 ## Audio and HomeKit
 
 What ffmpeg can produce is read from `ffmpeg -encoders` (see `capabilitySummary()`):

@@ -209,6 +209,23 @@ actor CameraRuntime {
     private var softMotionOnSub = false
     /// Moves soft motion between the sub and the main stream (`chooseSoftMotionStream`).
     private var softMotionWatch: Task<Void, Never>?
+    /// The sky detector's pictures (`startSky`): where they go, the monitor decoding them and the stream it was chosen for.
+    private var skySink: (any SkyFrameSink)?
+    private var skyMonitor: SkyMonitor?
+    private var skyChoice: SkyStreamChoice?
+    /// Bumped by every `startSky` and `stopSky`: work begun for an earlier one does not go on.
+    private var skyGeneration = 0
+    /// Looks at the sky's choice of stream a few times a second (`advanceSky`).
+    private var skyWatch: Task<Void, Never>?
+    /// The sky holds one user of the sub stream: while it learns the sub stream's size, and while it watches it.
+    private var skyHoldsSub = false
+    /// Since when the sub stream is held to learn its size (nil: not doing that).
+    private var skyProbeSince: ContinuousClock.Instant?
+    /// The sub stream showed no picture in time when the sky tried it: the main stream is watched.
+    private var skySubProbeFailed = false
+    /// The decoder of the stills of the sky (`skyStill`): its own, apart from the snapshot provider's and the descriptions' pictures'.
+    private let skyDecoders: SnapshotDecoderPool
+    private let skyStills = AsyncSerialLock()
     /// The sub stream's state, as its supervisor reports it.
     private var subState: IngestSupervisor.State = .idle
     /// Since when the sub stream has had no picture while soft motion wants it (nil: it delivers).
@@ -252,6 +269,8 @@ actor CameraRuntime {
         let environment = dependencies.environment
         eventDecoders = SnapshotDecoderPool(codecs: environment.codecs, idleLifetime: EventPictures.decoderIdleLifetime,
                                             blockingWork: SnapshotDecoderPool.offCooperativePool)
+        skyDecoders = SnapshotDecoderPool(codecs: environment.codecs, idleLifetime: EventPictures.decoderIdleLifetime,
+                                          blockingWork: SnapshotDecoderPool.offCooperativePool)
         store = HAPStorage.store(for: configuration.id, dataDirectory: environment.dataDirectory, secrets: environment.platform.secrets)
         if configuration.vendor == .demo || configuration.vendor == .go2rtc {
             reachability = nil   // the demo camera has no network; a go2rtc camera is reached on this Mac, through the helper
@@ -300,6 +319,10 @@ actor CameraRuntime {
     var isSubStreamRunning: Bool {
         get async { await subIngest?.isRunning ?? false }
     }
+
+    /// Tests: the users of the sub stream (live views, soft motion's shadow test, the sky) and whether an idle stop is scheduled.
+    var subStreamUsers: Int { subUsers }
+    var isSubIdleStopScheduled: Bool { subIdleStop != nil }
 
     /// Tests: whether the main stream's supervisor runs (an on-demand camera's sleeps between uses).
     var isMainStreamRunning: Bool {
@@ -607,6 +630,7 @@ actor CameraRuntime {
             await softMotion.stop()
         }
         await stopMotionShadow()
+        await stopSky()   // its detector starts it again when the camera runs again
         await streaming?.stopAll()
         await recording?.stopAll()
         for cancel in appSubscriptions.values { cancel() }   // the app's viewers end with the camera
@@ -1677,6 +1701,156 @@ actor CameraRuntime {
         await monitor.stop()
         guard isCurrent(epoch), softMotion == nil else { return }   // stopped, or restarted meanwhile
         await runSoftMotion(onSub: onSub, epoch: epoch)
+    }
+
+    // MARK: - Sky detector
+
+    /// How often the sky looks at its choice of stream again: for the sub stream's first picture, the main stream's rate, a monitor that ended.
+    static let skyWatchInterval: Duration = .milliseconds(250)
+
+    /// The stream the sky detector watches now: the sub stream when it is at least 1280 wide, else the main stream; nil until there is a
+    /// picture to choose from (or while the sky is not started). It is the sub stream's size that is learned first, by connecting it.
+    var skyStream: SkyStreamChoice? { skyChoice }
+
+    /// Where the sky's pictures are decoded (`.gpu` or `.software`), once the decoder has made one; nil before that, or when the codecs cannot
+    /// say. A stream the GPU cannot take is decoded in software.
+    var skyDecoding: DecodingPlace? {
+        get async { await skyMonitor?.decoding }
+    }
+
+    /// Starts the sky detector's pictures: about five a second of luma, at most 1920 wide, of the stream `skyStream` says, to `sink`, with a
+    /// `gap` for every break. The camera's own picture, never straightened. The main stream always runs; the sub stream is held (one user,
+    /// `acquireSub`) while the sky learns its size and while it watches it. The stream is chosen again when its picture's format changes (one
+    /// gap, and the new decoder starts at the next keyframe). `false`: the camera streams on demand (watching it would keep it awake), or is not
+    /// running. A second start replaces the first; the camera's stop ends it.
+    func startSky(sink: any SkyFrameSink) async -> Bool {
+        guard running, !onDemand else { return false }
+        if skySink != nil { await stopSky() }
+        guard running else { return false }
+        skyGeneration &+= 1
+        let generation = skyGeneration
+        skySink = sink
+        skySubProbeFailed = false
+        skyWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.advanceSky(generation)
+                try? await Task.sleep(for: Self.skyWatchInterval)
+            }
+        }
+        return true
+    }
+
+    /// Ends the sky detector's pictures and gives the sub stream back (its idle stop is scheduled when nothing else uses it).
+    func stopSky() async {
+        skyGeneration &+= 1
+        skyWatch?.cancel()
+        skyWatch = nil
+        skySink = nil
+        let monitor = skyMonitor
+        skyMonitor = nil
+        skyChoice = nil
+        skyProbeSince = nil
+        if skyHoldsSub {
+            skyHoldsSub = false
+            releaseSub()
+        }
+        await monitor?.stop()
+    }
+
+    /// One look at the sky: a monitor that ended on its own (the picture's format changed, and it told the sink) is replaced, and when none
+    /// runs the stream is chosen and a monitor started once there is a picture to choose from. A running monitor is left alone.
+    private func advanceSky(_ generation: Int) async {
+        func current() -> Bool { running && generation == skyGeneration && skySink != nil }
+        guard current() else { return }
+        if let monitor = skyMonitor {
+            guard await monitor.isFinished, current(), skyMonitor === monitor else { return }
+            skyMonitor = nil
+            skyChoice = nil
+            await monitor.stop()
+            guard current() else { return }
+        }
+        let mainFormat = await mainHub.videoFormat
+        let mainRate = await mainHub.measuredFrameRate
+        guard current() else { return }
+        guard let sub = await skyLookAtSubStream() else { return }   // nil: its size is being learned
+        guard current(), let sink = skySink else { return }
+        let main = mainFormat.map { VideoResolution($0.width, $0.height, Int((mainRate ?? 0).rounded())) }
+        let subResolution = sub.format.map { VideoResolution($0.width, $0.height, Int((sub.rate ?? 0).rounded())) }
+        guard let choice = SkyStreamChoice.choose(sub: subResolution, subFrameRate: sub.rate, main: main, mainFrameRate: mainRate),
+              (choice.stream == .sub ? sub.rate : mainRate) != nil else { return }   // no picture yet, or no rate yet
+
+        // The sub stream is held while it is watched, and given back when it was only looked at.
+        if choice.stream == .sub {
+            if !skyHoldsSub {
+                skyHoldsSub = true
+                await acquireSub()
+            }
+        } else if skyHoldsSub {
+            skyHoldsSub = false
+            releaseSub()
+        }
+        guard current() else { return }
+        let hub = choice.stream == .sub ? subHub : mainHub
+        let source = (choice.stream == .sub ? sub.format : mainFormat).map { "\($0.width)×\($0.height)" } ?? "?"
+        log.info("\(configuration.name): the sky detector watches the \(choice.stream.rawValue) stream (\(source), analysed \(choice.analysisWidth) wide, "
+                 + "every \(choice.keepEvery == 1 ? "" : "\(choice.keepEvery)th ")picture)")
+        let monitor = SkyMonitor(hub: hub, codecs: dependencies.environment.codecs, choice: choice, sink: sink, log: log)
+        skyMonitor = monitor   // claimed before the first suspension: a stop in between finds it
+        skyChoice = choice
+        await monitor.start()
+        if !current() { await monitor.stop() }
+    }
+
+    /// The sub stream's picture format and rate: what it showed when it last ran, else learned by connecting it (held for at most
+    /// `subStreamStartWait`, or until it goes offline). nil while that goes on; `(nil, nil)` when the camera has no sub stream or it shows no
+    /// picture. A sub stream narrower than 1280 needs no rate, and is given back by the caller when the main stream is chosen.
+    private func skyLookAtSubStream() async -> (format: VideoFormat?, rate: Double?)? {
+        guard subIngest != nil else { return (nil, nil) }
+        let format = await subHub.videoFormat
+        let rate = await subHub.measuredFrameRate
+        if let format, format.width < SkyStreamChoice.minimumSubWidth || rate != nil {
+            skyProbeSince = nil
+            return (format, rate)
+        }
+        // Its size (or, when it is wide enough, its rate) is not known: connect it and see.
+        if let since = skyProbeSince {
+            var offline = false
+            if case .offline = subState { offline = true }
+            if !offline, ContinuousClock.now - since <= dependencies.tuning.subStreamStartWait { return nil }
+            skyProbeSince = nil
+            skySubProbeFailed = true
+            if skyHoldsSub {
+                skyHoldsSub = false
+                releaseSub()
+            }
+            log.info("\(configuration.name): the sub stream shows no picture; the sky detector watches the main stream")
+            return (nil, nil)
+        }
+        if skySubProbeFailed { return (nil, nil) }
+        skyProbeSince = .now
+        if !skyHoldsSub {
+            skyHoldsSub = true
+            await acquireSub()
+        }
+        return nil
+    }
+
+    /// The main stream's keyframe nearest `date` (the wall clock of its frames, as `SkyFrame.wallClock` is) that its ring holds (at least the
+    /// last 12 s), as a JPEG of the camera's own picture, never straightened, at full size and quality 0.8; `at` is that keyframe's wall clock.
+    /// The nearest the ring has, however far: `at` says which. nil without a keyframe, or when the camera is not running or the picture cannot
+    /// be made. One at a time, on a decoder of its own.
+    func skyStill(around date: Date) async -> (jpeg: Data, at: Date)? {
+        guard running else { return nil }
+        let keyframes = await mainHub.recentKeyframes()
+        guard let nearest = keyframes.min(by: { abs($0.wallClock.timeIntervalSince(date)) < abs($1.wallClock.timeIntervalSince(date)) }) else { return nil }
+        do {
+            let jpeg = try await skyStills.withLock { try await skyDecoders.jpeg(fromKeyframe: nearest, maxWidth: nil, maxHeight: nil, quality: 0.8) }
+            return (jpeg, nearest.wallClock)
+        } catch {
+            log.debug("The sky detector's still could not be made: \(URLFreeErrors.describe(error))")
+            return nil
+        }
     }
 
     // MARK: - Motion shadow test

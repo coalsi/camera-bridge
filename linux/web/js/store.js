@@ -8,13 +8,14 @@ export const store = {
   cameras: new Map(),     // id -> camera (configuration + status)
   notices: [],
   cameraOrder: [],        // camera ids in the order the person chose (settings.cameraOrder); empty: by name
+  plugins: new Map(),     // plugin id -> whether its switch is on (GET plugins); empty until the list was read
   connected: true,        // the event stream is open
   loaded: false,          // the first snapshot arrived
 };
 
 const subscribers = new Set();
 
-/** fn(kind, detail) runs on every change: 'camera', 'removed', 'bridge', 'notices', 'connection', 'motion', 'doorbell', 'order'. */
+/** fn(kind, detail) runs on every change: 'camera', 'removed', 'bridge', 'notices', 'connection', 'motion', 'doorbell', 'order', 'plugins'. */
 export function subscribe(fn) {
   subscribers.add(fn);
   return () => subscribers.delete(fn);
@@ -52,6 +53,28 @@ export async function saveCameraOrder(ids, { save = (order) => patch('settings',
     onError(error);
     return false;
   }
+}
+
+/** Whether the plugin with this id is switched on (false for one that is off, unknown, or not read yet). */
+export function pluginOn(id) {
+  return store.plugins.get(id) === true;
+}
+
+/**
+ * Takes the plugins' switches from `GET plugins` (`[{ id, enabled, … }]`) and tells whoever shows a plugin's things (the menu's Sky Watcher item,
+ * the camera page's Sky Watcher card). Anything that is not a list switches nothing on. (The bridge sends no event for plugins, so another browser
+ * sees a change the next time the page reads the list.)
+ */
+export function setPlugins(list) {
+  store.plugins = new Map((Array.isArray(list) ? list : []).filter((plugin) => typeof plugin?.id === 'string').map((plugin) => [plugin.id, plugin.enabled === true]));
+  emit('plugins');
+}
+
+/** Reads the plugins' switches (GET plugins) into the store; resolves the plugins' list. */
+export async function loadPlugins() {
+  const { plugins } = await get('plugins');
+  setPlugins(plugins);
+  return plugins;
 }
 
 let source = null;

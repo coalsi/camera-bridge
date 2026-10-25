@@ -45,7 +45,7 @@ The recorder and the store are in `BridgeEngine/NVR`; the daemon only says where
   that folder. The browser sends the id; the path is display only.
 - Starting never waits for the archive: `engine.start()` returns at once as far as the NVR is concerned (the store repairs and loads in the background), so the web
   interface and `READY=1` come up with a huge or damaged archive and with a drive that does not answer.
-- `NoArchiveBackend` wraps the backend of `--preview`: no archive, so the NVR routes answer `503 archive_unavailable` without `Retry-After`.
+- `NoArchiveBackend` wraps the backend of `--preview`: no archive, so the NVR routes answer `503 archive_unavailable` without `Retry-After`. Like `DemoDiscoveryBackend` it forwards every `BridgeBackend` requirement, the Sky Watcher's (`skyNightLog`, `correctSkyEntry`, `skyStill` and `findFlightFeeds`) included: a requirement with an extension default is added to both by hand, or they would answer with the default.
 
 ## The system
 

@@ -24,8 +24,10 @@ public final class FFmpegMediaCodecs: MediaCodecs {
     }
 
     init(configuration: FFmpegCodecsConfiguration, launcher: any FFmpegProcessLaunching, executable: URL? = nil,
-         deviceExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) {
-        runtime = FFmpegRuntime(launcher: launcher, configuration: configuration, executable: executable ?? configuration.resolveExecutable(), deviceExists: deviceExists)
+         deviceExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+         now: @escaping @Sendable () -> Date = { Date() }) {
+        runtime = FFmpegRuntime(launcher: launcher, configuration: configuration, executable: executable ?? configuration.resolveExecutable(), deviceExists: deviceExists,
+                                now: now)
         snapshotMaps = SnapshotMapCache(parent: configuration.scratchDirectory)
     }
 
@@ -71,6 +73,15 @@ public final class FFmpegMediaCodecs: MediaCodecs {
     public func makeMotionDecoder(format: VideoFormat) throws -> any VideoDecoding {
         try FFmpegVideoDecoder(runtime: runtime, format: format, sessionLogLevel: .debug, maxOutputWidth: FFmpegVideoDecoder.motionPictureWidth,
                                hardwareWhenHeavy: true)
+    }
+
+    /// The sky detector's decoder: pictures at most `maxOutputWidth` wide, a picture of every `keepEvery`th frame only (on the GPU, where the
+    /// GPU takes the stream, the others are dropped before they are copied back), scaled with a good filter, under `nice -n 10`. A stream
+    /// the GPU's decoder cannot take (H.264 over 4096 wide or tall) is decoded in software, and so is one the GPU fails on; the decoder
+    /// says which (`VideoDecoding.decodingPlace`). The loop filter stays on: block edges would show as faint false lights in a dark sky.
+    public func makeSkyDecoder(format: VideoFormat, maxOutputWidth: Int, keepEvery: Int) throws -> any VideoDecoding {
+        try FFmpegVideoDecoder(runtime: runtime, format: format, sessionLogLevel: .info, maxOutputWidth: maxOutputWidth > 0 ? maxOutputWidth : nil,
+                               hardwareWhenHeavy: true, keepEvery: keepEvery, niceness: FFmpegVideoDecoder.skyNiceness, highQualityScaling: true)
     }
 
     public func makeVideoEncoder(settings: VideoEncoderSettings) throws -> any VideoEncoding {

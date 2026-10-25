@@ -413,10 +413,11 @@ actor WyzePlugin {
                 continue
             }
             // `config` was read before the writes of the cameras ahead of this one (each can restart a camera), and the owner may have turned
-            // the camera's AI descriptions off meanwhile: the write keeps the switch the configuration has now. (Only this one field is taken
-            // from the fresh copy; a camera removed meanwhile is left alone.)
+            // the camera's AI descriptions off meanwhile, or its Sky Watcher: the write keeps the switches the configuration has now. (Only
+            // these fields are taken from the fresh copy; a camera removed meanwhile is left alone.)
             guard let current = await backend.overview().configurations.first(where: { $0.id == config.id }) else { continue }
             next.aiDescriptions = current.aiDescriptions
+            next.skyDetector = current.skyDetector
             do {
                 try await backend.updateCamera(next, password: password)
                 log.notice("a Wyze camera moved to a new address; updated")

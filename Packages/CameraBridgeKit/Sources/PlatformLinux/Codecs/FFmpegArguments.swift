@@ -101,13 +101,26 @@ enum FFmpegArguments {
 
     /// compressed video in (FLV on stdin) → raw yuv420p pictures at `width × height` out (Y4M: `rawvideo` holds a picture back).
     /// With `hardwareDevice` (a VA-API render node) the GPU decodes and scales and ffmpeg copies the scaled pictures back. Only for
-    /// streams the GPU takes (HEVC, H.264): the pictures must stay on the GPU for `scale_vaapi`, so there is no CPU fallback.
-    static func decoder(width: Int, height: Int, hardwareDevice: String? = nil) -> [String] {
+    /// streams the GPU's decoder takes (`FFmpegVideoDecoder.fitsHardware`): the pictures must stay on the GPU for `scale_vaapi`, so there is
+    /// no CPU fallback inside the command (a session that fails is replaced by a software one, without a device, by `FFmpegVideoDecoder`).
+    ///
+    /// With `keepEvery` N above 1 only every Nth picture comes out (`select='not(mod(n\,N))'`: pictures 0, N, 2N, … from the first the
+    /// child is given): on the GPU after the scaling and before `hwdownload`, so a dropped picture is never copied back; on the CPU before the
+    /// scaling, so it is never scaled either. `highQualityScaling` asks for a good downscale filter (the GPU's `mode=hq` scaler, `flags=area`
+    /// on the CPU): the sky detector looks at single-pixel speckle, which looks different under every filter.
+    static func decoder(width: Int, height: Int, hardwareDevice: String? = nil, keepEvery: Int = 1, highQualityScaling: Bool = false) -> [String] {
         // On the GPU the pictures stay there for the scaling (`scale_vaapi`), and only the scaled picture is copied back: copying a 4K
         // picture back and scaling it on the CPU cost as much as the decoding saved (2026-10-16).
         let hardware = hardwareDevice.map { ["-hwaccel", "vaapi", "-hwaccel_device", $0, "-hwaccel_output_format", "vaapi"] } ?? []
-        let filters = hardwareDevice == nil ? "scale=\(width):\(height),format=yuv420p"
-            : "scale_vaapi=w=\(width):h=\(height):format=nv12,hwdownload,format=nv12,format=yuv420p"
+        let select = keepEvery > 1 ? "select='not(mod(n\\,\(keepEvery)))'" : nil
+        let filters: String
+        if hardwareDevice == nil {
+            let scale = "scale=\(width):\(height)" + (highQualityScaling ? ":flags=area" : "")
+            filters = [select, scale, "format=yuv420p"].compactMap { $0 }.joined(separator: ",")
+        } else {
+            let scale = "scale_vaapi=w=\(width):h=\(height):format=nv12" + (highQualityScaling ? ":mode=hq" : "")
+            filters = [scale, select, "hwdownload", "format=nv12", "format=yuv420p"].compactMap { $0 }.joined(separator: ",")
+        }
         return common + hardware + lowLatencyInput + ["-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn",
                                     "-vf", filters, "-fps_mode", "passthrough",
                                     "-f", "yuv4mpegpipe", "-pix_fmt", "yuv420p", "pipe:1"]

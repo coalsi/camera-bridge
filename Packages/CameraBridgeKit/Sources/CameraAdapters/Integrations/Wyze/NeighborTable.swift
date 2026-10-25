@@ -10,16 +10,18 @@ public enum NeighborTable {
     ///     192.168.1.20     0x1         0x2         d0:3f:27:a1:b2:c3     *        eth0
     public static func ipv4(forMAC mac: String, in table: String) -> String? {
         guard let wanted = normalized(mac) else { return nil }
-        var found: String?
-        for line in table.split(whereSeparator: \.isNewline) {
-            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
-            guard fields.count >= 4, isIPv4(fields[0]) else { continue }   // also skips the header
-            let flags = fields[2].lowercased()
-            guard flags.hasPrefix("0x"), let value = Int(flags.dropFirst(2), radix: 16), value & 0x2 != 0 else { continue }
-            guard let entry = normalized(String(fields[3])), entry != "000000000000", entry == wanted else { continue }
-            found = String(fields[0])
+        return completeEntries(in: table).last { $0.mac == wanted }?.address
+    }
+
+    /// The IPv4 address of every complete entry of `table` (Linux `/proc/net/arp`): the hosts that answered the box on its own networks,
+    /// in the table's order, each once. An entry is complete when its flags say so (`0x2`) and its MAC is neither all zeros nor the
+    /// broadcast address; entries of any address range are listed, and what to do with them is the caller's (the sky detector's feed
+    /// finder keeps the private ones). An IPv6 entry is not an IPv4 address and is left out.
+    public static func ipv4s(in table: String) -> [String] {
+        var seen = Set<String>()
+        return completeEntries(in: table).compactMap { entry in
+            entry.mac != "ffffffffffff" && seen.insert(entry.address).inserted ? entry.address : nil
         }
-        return found
     }
 
     /// The contents of `/proc/net/arp` on Linux; nil elsewhere (or when it cannot be read).
@@ -29,6 +31,20 @@ public enum NeighborTable {
         #else
         return nil
         #endif
+    }
+
+    /// The table's complete IPv4 entries, in order: the address as written and the MAC as twelve lowercase hex digits (never all zeros).
+    private static func completeEntries(in table: String) -> [(address: String, mac: String)] {
+        var entries: [(address: String, mac: String)] = []
+        for line in table.split(whereSeparator: \.isNewline) {
+            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard fields.count >= 4, isIPv4(fields[0]) else { continue }   // also skips the header
+            let flags = fields[2].lowercased()
+            guard flags.hasPrefix("0x"), let value = Int(flags.dropFirst(2), radix: 16), value & 0x2 != 0 else { continue }
+            guard let mac = normalized(String(fields[3])), mac != "000000000000" else { continue }
+            entries.append((String(fields[0]), mac))
+        }
+        return entries
     }
 
     /// Twelve lowercase hex digits, or nil.

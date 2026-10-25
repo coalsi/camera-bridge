@@ -6,6 +6,8 @@ import Foundation
 // The Wyze plugin's: `GET plugins/wyze` (state and cameras, `?refresh=1` asks Wyze again), `POST plugins/wyze/sign-in`
 // {email, password, keyID, apiKey} → {signedIn: true} or {verification, kinds}, `POST plugins/wyze/send-code` {verification, kind},
 // `POST plugins/wyze/verify` {verification, kind, code}, `POST plugins/wyze/sign-out`. The password is used for the sign-in only.
+// The Sky Watcher (`Plugins/SkyWatcherPlugin.swift`) is the third plugin and has no routes of its own: its entry in `GET plugins` and `PATCH plugins/sky`
+// are all there is (it has no account, sign-in or sync); its switch is `BridgeSettings.skyPluginOn`.
 extension WebApp {
     private struct PluginItem: Encodable {
         var id: String

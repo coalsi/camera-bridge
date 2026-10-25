@@ -123,7 +123,8 @@ extension FFmpegMediaCodecs {
     /// Codecs over a fake launcher that pretends ffmpeg is installed with libx264, drawtext, the warp's filters (remap, extractplanes,
     /// mergeplanes), Opus and AAC; `filters` is the `-filters` listing it answers.
     static func fake(_ launcher: FakeFFmpegLauncher, configuration: FFmpegCodecsConfiguration = FFmpegCodecsConfiguration(fontFile: TestFonts.path),
-                     deviceExists: @escaping @Sendable (String) -> Bool = { _ in false }, filters: String = FakeListings.filters) -> FFmpegMediaCodecs {
+                     deviceExists: @escaping @Sendable (String) -> Bool = { _ in false }, filters: String = FakeListings.filters,
+                     now: @escaping @Sendable () -> Date = { Date() }) -> FFmpegMediaCodecs {
         launcher.onLaunch = { child in
             // The capability probe: answer `-encoders` and `-filters`.
             if child.arguments.contains("-encoders") {
@@ -140,7 +141,7 @@ extension FFmpegMediaCodecs {
                 child.exit(status: 0)
             }
         }
-        return FFmpegMediaCodecs(configuration: configuration, launcher: launcher, executable: URL(fileURLWithPath: "/usr/bin/ffmpeg"), deviceExists: deviceExists)
+        return FFmpegMediaCodecs(configuration: configuration, launcher: launcher, executable: URL(fileURLWithPath: "/usr/bin/ffmpeg"), deviceExists: deviceExists, now: now)
     }
 }
 

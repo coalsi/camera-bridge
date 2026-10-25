@@ -11,6 +11,18 @@ struct FFmpegProcessSpec: Sendable, Equatable {
     var arguments: [String]
     /// Names the process in logs and errors ("video transcoder", "snapshot").
     var label: String
+    /// Run at this niceness (1…19, higher is lower priority): the real launcher starts the program under `nice -n <niceness>`, so every
+    /// thread it makes has it. nil or 0: as the parent is. Without a `nice` program the child runs as it is, rather than not at all.
+    var niceness: Int? = nil
+
+    /// Where `nice` is, nil when this system has none.
+    static let nicePath: String? = ["/usr/bin/nice", "/bin/nice"].first { FileManager.default.isExecutableFile(atPath: $0) }
+
+    /// The program and arguments the real launcher starts: the program itself, or `nice -n <niceness> <program> <arguments>`.
+    func launchCommand(nice: String? = FFmpegProcessSpec.nicePath) -> (executable: URL, arguments: [String]) {
+        guard let niceness, niceness > 0, let nice else { return (executable, arguments) }
+        return (URL(fileURLWithPath: nice), ["-n", String(min(niceness, 19)), executable.path] + arguments)
+    }
 }
 
 /// How a child ended, with the last lines it wrote to stderr.
@@ -102,8 +114,9 @@ private final class SystemChild: FFmpegProcess, @unchecked Sendable {
         self.maxPendingInput = maxPendingInput
         self.onOutput = onOutput
         self.onExit = onExit
-        process.executableURL = spec.executable
-        process.arguments = spec.arguments
+        let command = spec.launchCommand()
+        process.executableURL = command.executable
+        process.arguments = command.arguments
         var environment = ProcessInfo.processInfo.environment
         environment["AV_LOG_FORCE_NOCOLOR"] = "1"
         process.environment = environment

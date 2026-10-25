@@ -1,6 +1,6 @@
 // Bridge-wide settings, in sections: General (name, time zone, password, sign out), Video and recording (one label on every camera,
 // recording), Apple Home and other systems (ports, webhook), AI (descriptions of events), Troubleshooting (the log). The appearance is the
-// menu's button.
+// menu's button. (Sky Watcher's own setup, where the box is and the flight feed, is on its page, #/sky.)
 import { get, patch, post } from '../api.js';
 import { confirmDialog, h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';

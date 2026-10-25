@@ -25,7 +25,7 @@ function dateText(value) {
  */
 export function secureAddressCard(report, { busy = '', retry, check, setRedirect, rebind = report?.rebind } = {}) {
   if (!report?.available) return null;
-  const parts = [h('h2', null, icon('lock'), ' Secure address')];
+  const parts = [h('h2', null, icon('lock', { size: 18 }), ' Secure address')];
   if (report.state === 'ready') {
     parts.push(
       h('p', { class: 'desc' }, 'Your bridge’s secure address is ', h('a', { href: report.url, class: 'secure-url' }, report.url),

@@ -122,6 +122,9 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     /// The camera's security level and what it rests on, from the last security check (`BridgeEngine.checkCameraSecurity`; at start, daily,
     /// after "Set up for Camera Bridge"); nil before the first check, for the demo camera, and after a restart until it is checked again.
     public var security: CameraSecurity?
+    /// The Sky Watcher of this camera (`SkyCameraStatus`): nil while it is off for the camera (the plugin off, or the camera's switch off); while
+    /// it is on, whether it watches, the stream, the aim and the learning, or why it cannot run.
+    public var sky: SkyCameraStatus?
 
     public init(id: UUID, name: String, kind: CameraKind, vendor: CameraVendor, connection: ConnectionState = .idle,
                 eventChannelConnected: Bool = false, videoSummary: String? = nil, isPaired: Bool = false, setupCode: String = "",

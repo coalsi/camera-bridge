@@ -41,6 +41,9 @@ struct ArchiveStoreTuning: Sendable {
     /// How long a read handle on a deleted file stays open (a reader in the middle of it finishes).
     var deletedHandleGrace: Duration = .seconds(10)
     var removeFile: @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    /// A camera's pictures of the sky stay under this many bytes, and its folders are measured at most this often (Ruling S27).
+    var skyStillBytesPerCamera: UInt64 = SkyLightFilter.stillBytesPerCamera
+    var skyStillPruneInterval: TimeInterval = SkyLightFilter.stillPruneInterval
     /// Rebuilds the index of an unowned mp4 and writes it.
     var repair: @Sendable (_ mp4: URL, _ sidecar: URL, _ camera: UUID) throws -> IndexScanOutcome = { mp4, sidecar, camera in
         try IndexScanner.repair(mp4: mp4, sidecar: sidecar, camera: camera)
@@ -85,6 +88,8 @@ struct ArchiveStoreState: Sendable {
     var retentionPasses = 0
     /// The newest start of a file the size rule deleted in this folder: the camera events of the days before it go too (`pruneEvents`).
     var eventSizeCutoffMs: Int64?
+    /// When the cameras' pictures of the sky were last measured (`pruneEvents`).
+    var skyStillsPrunedAt: Date?
 
     var pause: ArchivePause?
     var space: VolumeMonitor.Space?
@@ -121,6 +126,7 @@ struct ArchiveStoreState: Sendable {
         lastKeyTicks = [:]
         keyIntervals = [:]
         eventSizeCutoffMs = nil
+        skyStillsPrunedAt = nil
         isReady = folder == nil
         isSettled = false
         reloadWhenFolderReturns = false
@@ -158,6 +164,8 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
     let probeWake = ChangeSignal()
     /// The cameras' events beside the recordings (`ArchiveEventLog.swift`).
     let eventLog: ArchiveEventLog
+    /// The Sky Watcher's log beside the recordings (`Sky/SkyLogStore.swift`): kept with the events and deleted by the same rules.
+    let skyLog: SkyLogStore
 
     init(environment: BridgeEnvironment, signal: ChangeSignal, tuning: ArchiveStoreTuning = ArchiveStoreTuning(),
          probes: ArchiveProbeQueue = ArchiveProbeQueue()) {
@@ -168,6 +176,7 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
         log = tuning.log
         reads = ArchiveReadQueue(deadline: tuning.readDeadline)
         eventLog = ArchiveEventLog(log: tuning.log)
+        skyLog = SkyLogStore(log: tuning.log)
     }
 
     // MARK: Lifecycle (called by NVRCoordinator)

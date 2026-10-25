@@ -74,21 +74,40 @@ struct Y4MPictureReader {
 /// that went in (exact unless ffmpeg drops a frame it could not decode, then the times of that stretch are off by one frame).
 /// Start-up (process, probe, first picture) may take a second; after the first picture a frame that yields none costs 0.4 s.
 /// Calls are taken one at a time, in order. A parameter-set change starts a new child; a child that dies throws and is replaced by the next keyframe.
+///
+/// With `keepEvery` N above 1 (the sky detector's decoder) the child makes a picture of frames 0, N, 2N, … only, counted from the first
+/// frame it is given (a keyframe): `decode` returns nil at once for any other frame, without waiting, and a kept picture takes the time of
+/// its own frame (the N − 1 times before it go with it). A stream with reordering (a frame with a decode time before its presentation time)
+/// is not waited for at all: its pictures come out frames late, and the call that brings one hands it over.
+///
+/// On the GPU (`hardwareWhenHeavy`): only a stream that is heavy on the CPU (HEVC, or larger than 1080p) and that the GPU's decoder takes
+/// (`fitsHardware`). If the GPU's session ends before its first picture, streams like that one are decoded in software for 10 minutes, and the GPU
+/// is tried again after that (`FFmpegRuntime.noteHardwareDecodeFailure`); `decodingPlace` says which.
 final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
     private final class Pipeline: @unchecked Sendable {
         let session: FFmpegSession
         var stream: VideoFLVStream
         var reader: Y4MPictureReader
         let format: VideoFormat
+        /// The child decodes on the GPU.
+        let hardware: Bool
+        /// The child makes a picture of every Nth frame it is given (1: of every one).
+        let keepEvery: Int
         /// Presentation times of the frames written and not yet matched to a picture, ascending.
         var pending: [MediaTime] = []
         var pictures = 0
+        /// Frames written to the child.
+        var written = 0
+        /// A frame had a decode time before its presentation time.
+        var reordered = false
 
-        init(session: FFmpegSession, stream: VideoFLVStream, reader: Y4MPictureReader, format: VideoFormat) {
+        init(session: FFmpegSession, stream: VideoFLVStream, reader: Y4MPictureReader, format: VideoFormat, hardware: Bool, keepEvery: Int) {
             self.session = session
             self.stream = stream
             self.reader = reader
             self.format = format
+            self.hardware = hardware
+            self.keepEvery = keepEvery
         }
 
         deinit { session.terminate() }
@@ -97,6 +116,8 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
         func collect() -> RawVideoFrame? {
             var newest: RawVideoFrame?
             for data in reader.push(session.drain()) {
+                // A kept picture stands for N frames: the N − 1 before it (their pictures were dropped) are owed their times first.
+                if pictures > 0, keepEvery > 1 { pending.removeFirst(min(keepEvery - 1, max(0, pending.count - 1))) }
                 let pts: MediaTime
                 if pending.isEmpty { pts = MediaTime(value: 0, timescale: 90_000) } else { pts = pending.removeFirst() }
                 newest = RawVideoFrame(width: reader.width, height: reader.height, pts: pts, pixels: data)
@@ -127,12 +148,23 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
     private let maxOutputWidth: Int?
     /// Decode on the GPU (VA-API, when usable) for a stream that is heavy on the CPU: HEVC, or larger than 1080p.
     private let hardwareWhenHeavy: Bool
+    /// Only every Nth picture is made (at least 1).
+    private let keepEvery: Int
+    /// The child runs under `nice -n <niceness>` (nil: as the engine does).
+    private let niceness: Int?
+    /// Scale with a good downscale filter (`FFmpegArguments.decoder`).
+    private let highQualityScaling: Bool
+    /// Where the current (or last) pipeline decodes; apart from `state` so that a status line never waits for a decode.
+    private let place = Mutex<DecodingPlace?>(nil)
 
     /// Motion detection's picture width (it analyses a 320-pixel thumbnail of it).
     static let motionPictureWidth = 640
 
+    /// The sky detector's decoders run at this niceness (`nice -n 10`, as the clip conversions do): live video and recordings keep the box's cores.
+    static let skyNiceness = 10
+
     init(runtime: FFmpegRuntime, format: VideoFormat, sessionLogLevel: LogLevel = .info, lowPriority: Bool = false, maxOutputWidth: Int? = nil,
-         hardwareWhenHeavy: Bool = false) throws {
+         hardwareWhenHeavy: Bool = false, keepEvery: Int = 1, niceness: Int? = nil, highQualityScaling: Bool = false) throws {
         _ = try runtime.requireExecutable()
         guard format.width > 0, format.height > 0, FLVWriter.videoSequenceHeader(format) != nil else {
             throw MediaCodecError.unsupported("video format \(format.codec.rawValue) \(format.width)×\(format.height) with \(format.parameterSets.count) parameter sets")
@@ -142,22 +174,30 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
         self.lowPriority = lowPriority
         self.maxOutputWidth = maxOutputWidth
         self.hardwareWhenHeavy = hardwareWhenHeavy
+        self.keepEvery = max(1, keepEvery)
+        self.niceness = niceness
+        self.highQualityScaling = highQualityScaling
         initialFormat = format
         state = Mutex(State())
     }
 
     deinit { invalidate() }
 
+    var decodingPlace: DecodingPlace? { place.withLock { $0 } }
+
     func decode(_ frame: EncodedVideoFrame) async throws -> (any DecodedVideoFrame)? {
         try await gate.run { try await self.decodeNow(frame) }
     }
 
     private func decodeNow(_ frame: EncodedVideoFrame) async throws -> (any DecodedVideoFrame)? {
-        let (pipeline, already) = try state.withLock { state -> (Pipeline?, Int) in
-            guard !invalidatedFlag.load(ordering: .relaxed) else { return (nil, 0) }
+        let (pipeline, already, waits) = try state.withLock { state -> (Pipeline?, Int, Bool) in
+            guard !invalidatedFlag.load(ordering: .relaxed) else { return (nil, 0, false) }
             let pipeline = try prepare(for: frame, state: &state)
-            guard let pipeline else { return (nil, 0) }
+            guard let pipeline else { return (nil, 0, false) }
             let request = pipeline.pictures
+            let index = pipeline.written
+            pipeline.written += 1
+            if let decodeTime = frame.dts, decodeTime != frame.pts { pipeline.reordered = true }
             do {
                 let (data, _) = pipeline.stream.tag(for: frame, requestKeyframe: false)
                 pipeline.pending.append(frame.pts)
@@ -165,28 +205,38 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
                 try pipeline.session.send(data)
             } catch {
                 let failure = pipeline.session.exit != nil ? pipeline.session.failure : (error as? MediaCodecError) ?? .unsupported("\(error)")
+                noteHardwareFailure(of: pipeline)
                 drop(pipeline, state: &state)
                 throw failure
             }
-            return (pipeline, request)
+            // The picture of a frame that is not kept never comes: nothing to wait for. (A picture of one that is may come frames late
+            // when the stream has reordering; then no call waits, and the call that brings it hands it over.)
+            let waits = pipeline.keepEvery <= 1 || (index % pipeline.keepEvery == 0 && !pipeline.reordered)
+            return (pipeline, request, waits)
         }
         guard let pipeline else { return nil }
+        guard waits else { return try poll(pipeline) }
         let timeout = already == 0 ? Self.firstPictureTimeout : Self.pictureTimeout
         let deadline = ContinuousClock.now + timeout
         while true {
-            let picture = try state.withLock { state -> RawVideoFrame? in
-                let picture = pipeline.collect()
-                if picture == nil, pipeline.session.exit != nil, pipeline.session.bufferedOutputBytes == 0 {
-                    let failure = pipeline.session.failure
-                    drop(pipeline, state: &state)
-                    throw failure
-                }
-                return picture
-            }
-            if let picture { return picture }
+            if let picture = try poll(pipeline) { return picture }
             guard ContinuousClock.now < deadline, !invalidatedFlag.load(ordering: .relaxed) else { return nil }
             await pipeline.session.waitForOutputAsync(timeout: .milliseconds(20))
             try Task.checkCancellation()
+        }
+    }
+
+    /// The picture that is ready now, if any; a child that ended with nothing left to read throws its failure and is dropped.
+    private func poll(_ pipeline: Pipeline) throws -> RawVideoFrame? {
+        try state.withLock { state -> RawVideoFrame? in
+            let picture = pipeline.collect()
+            if picture == nil, pipeline.session.exit != nil, pipeline.session.bufferedOutputBytes == 0 {
+                let failure = pipeline.session.failure
+                noteHardwareFailure(of: pipeline)
+                drop(pipeline, state: &state)
+                throw failure
+            }
+            return picture
         }
     }
 
@@ -216,27 +266,38 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
             throw MediaCodecError.unsupported("the stream's parameter sets cannot be described to ffmpeg")
         }
         // CPU decoding by default: on the reference box (N150, five H.264 cameras) decoding on the GPU saved nothing measurable and copying
-        // the pictures back cost a little (2026-10-14). A heavy stream (HEVC, above 1080p) decoded all the time is where it pays.
-        let hardware = hardwareWhenHeavy && Self.isHeavy(format) ? runtime.hardwareDecodeDevice() : nil
+        // the pictures back cost a little (2026-10-14). A heavy stream (HEVC, above 1080p) decoded all the time is where it pays, if the GPU's
+        // decoder takes it (Intel's H.264 one stops at 4096 wide or tall) and has not already failed on a stream like it.
+        let hardware = hardwareWhenHeavy && Self.isHeavy(format) && Self.fitsHardware(format) ? runtime.hardwareDecodeDevice(for: format) : nil
         let output = Self.outputSize(width: format.width, height: format.height, maxWidth: maxOutputWidth)
         let spec = FFmpegProcessSpec(executable: executable,
-                                     arguments: FFmpegArguments.decoder(width: output.width, height: output.height, hardwareDevice: hardware),
-                                     label: "video decoder")
+                                     arguments: FFmpegArguments.decoder(width: output.width, height: output.height, hardwareDevice: hardware,
+                                                                        keepEvery: keepEvery, highQualityScaling: highQualityScaling),
+                                     label: "video decoder", niceness: niceness)
         let session = try FFmpegSession(launcher: runtime.launcher, spec: spec)
         do {
             try session.send(header)
         } catch {
+            if hardware != nil, let exit = session.exit { runtime.noteHardwareDecodeFailure(format, reason: exit.stderrTail.last) }
             session.terminate()
             throw error
         }
         let pipeline = Pipeline(session: session, stream: stream, reader: Y4MPictureReader(width: output.width, height: output.height),
-                                format: format)
+                                format: format, hardware: hardware != nil, keepEvery: keepEvery)
         state.pipeline = pipeline
         live.withLock { $0 = session }
+        place.withLock { $0 = hardware != nil ? .gpu : .software }
         let message = "ffmpeg video decoder started: \(format.codec.rawValue) \(format.width)×\(format.height)"
             + (output.width != format.width ? " → \(output.width)×\(output.height)" : "") + (hardware != nil ? " on the GPU" : "")
+            + (keepEvery > 1 ? ", every \(keepEvery)th picture" : "")
         if sessionLogLevel <= .debug { log.debug(message) } else { log.info(message) }
         return pipeline
+    }
+
+    /// A GPU session that ended before its first picture: streams like this one are decoded in software for a while.
+    private func noteHardwareFailure(of pipeline: Pipeline) {
+        guard pipeline.hardware, pipeline.pictures == 0, let exit = pipeline.session.exit else { return }
+        runtime.noteHardwareDecodeFailure(pipeline.format, reason: exit.stderrTail.last)
     }
 
     private func drop(_ pipeline: Pipeline, state: inout State) {
@@ -248,6 +309,13 @@ final class FFmpegVideoDecoder: VideoDecoding, @unchecked Sendable {
     /// HEVC, or more pixels than 1080p.
     static func isHeavy(_ format: VideoFormat) -> Bool {
         format.codec == .hevc || format.width * format.height > 1920 * 1088
+    }
+
+    /// Whether the GPU's decoder takes a stream of this size at all: Intel's H.264 decoder stops at 4096 pixels wide or tall (a camera's
+    /// 4256×1888 H.264 cannot go to the GPU), its HEVC decoder at 8192.
+    static func fitsHardware(_ format: VideoFormat) -> Bool {
+        let limit = format.codec == .hevc ? 8192 : 4096
+        return format.width <= limit && format.height <= limit
     }
 
     /// The picture size for `maxWidth` (even numbers, the aspect kept); the stream's own size when it is not wider.

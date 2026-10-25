@@ -1,11 +1,15 @@
 // Plugins (#/plugins): the vendor integrations this bridge has (compiled into the system, updated with it), each switched on or off, with its
 // own page. The Wyze plugin (#/plugins/wyze): sign in to the Wyze account (two-step verification included), the account's cameras with how
-// each one can connect, and Add for the ones that can.
+// each one can connect, and Add for the ones that can. Sky Watcher is the third plugin: no account, so only its switch, and its page is #/sky.
 import { get, patch, post } from '../api.js';
 import { confirmDialog, h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
+import { setPlugins } from '../store.js';
 import { field, inlineError, switchRow } from './common.js';
 import { timeAgo } from '../format.js';
+
+/** Where a plugin's own page is, when it is not #/plugins/<id>. */
+const PLUGIN_PAGES = { sky: '#/sky' };
 
 export function renderPlugins({ navigate }) {
   const root = h('div', { class: 'card-columns' }, h('div', { class: 'checking' }, spinner()));
@@ -14,6 +18,7 @@ export function renderPlugins({ navigate }) {
   async function load() {
     try {
       const { plugins } = await get('plugins');
+      setPlugins(plugins);   // the menu and the camera page follow the switches
       if (destroyed) return;
       replace(root, plugins.map((plugin) => h('div', { class: 'card plugin-card' },
         h('div', { class: 'plugin-head' }, h('h2', null, plugin.name),
@@ -24,9 +29,9 @@ export function renderPlugins({ navigate }) {
         h('p', { class: 'small muted' }, plugin.needs),
         plugin.lastError ? h('p', { class: 'problems' }, plugin.lastError) : null,
         switchRow({ title: 'Use this plugin', checked: plugin.enabled, onchange: async (on) => {
-          try { await patch(`plugins/${plugin.id}`, { enabled: on }); toast(on ? `${plugin.name} is on.` : `${plugin.name} is off.`, 'ok'); load(); } catch (error) { toast(error.message, 'error'); }
+          try { await patch(`plugins/${plugin.id}`, { enabled: on }); toast(on ? `${plugin.name} is on.` : `${plugin.name} is off.`, 'ok'); load(); } catch (error) { toast(error.message, 'error'); load(); }
         } }),
-        h('div', { class: 'row' }, h('a', { class: 'btn', href: `#/plugins/${plugin.id}` }, 'Open', icon('chevron'))))));
+        h('div', { class: 'row' }, h('a', { class: 'btn', href: Object.hasOwn(PLUGIN_PAGES, plugin.id) ? PLUGIN_PAGES[plugin.id] : `#/plugins/${plugin.id}` }, 'Open', icon('chevron'))))));
     } catch (error) {
       if (!destroyed) replace(root, inlineError(error.message));
     }
@@ -35,7 +40,7 @@ export function renderPlugins({ navigate }) {
   load();
   return {
     el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Plugins')),
-      h('p', { class: 'lede' }, 'Plugins connect cameras that don’t speak ONVIF or RTSP on their own. They come with Camera Bridge OS and update with it.'),
+      h('p', { class: 'lede' }, 'Plugins add what Camera Bridge doesn’t do on its own: connecting cameras that don’t speak ONVIF or RTSP, and watching the sky. They come with Camera Bridge OS and update with it.'),
       root),
     destroy() { destroyed = true; },
   };

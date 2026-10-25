@@ -140,11 +140,15 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
     /// Describe this camera's events with the AI service the person chose (`BridgeSettings.ai`): a few still pictures from around each event go
     /// to that service. Off by default. Applied in place, so changing it never restarts the camera (`BridgeEngine.needsRestart`).
     public var aiDescriptions: Bool
+    /// The Sky Watcher on this camera: whether it watches the sky, which way and how high it looks, and the lenses (docs/superpowers/plans/2026-10-25-sky-detector.md).
+    /// nil until the person first saves them. Applied in place, so changing them never restarts the camera (`BridgeEngine.needsRestart`).
+    public var skyDetector: SkyDetectorSettings?
 
     /// Defaults: no stream URLs, camera events for motion (sensitivity 0.5, 20 s hold), no sensors, audio on,
     /// two-way audio off, port 0 (allocated by the engine), enabled, empty device info, capabilities unknown,
     /// automatic live/recording stream selection, quality matched to what HomeKit/the hub asked for, no bit rate override,
-    /// timestamp overlay off, picture correction off, the camera's own clock untouched, NVR recording off (sound off), AI descriptions off.
+    /// timestamp overlay off, picture correction off, the camera's own clock untouched, NVR recording off (sound off), AI descriptions off,
+    /// the Sky Watcher never set.
     public init(id: UUID = UUID(), name: String, kind: CameraKind, vendor: CameraVendor, endpoint: CameraEndpoint, username: String) {
         self.id = id
         self.name = name
@@ -184,6 +188,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         self.nvrEnabled = false
         self.nvrRecordSound = false
         self.aiDescriptions = false
+        self.skyDetector = nil
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -191,7 +196,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         case sensors, audioEnabled, twoWayAudio, hapPort, isEnabled, manufacturer, model, serialNumber, firmware, capabilities
         case liveStreamMode, liveQualityMode, liveMaxBitrateOverride, recordingStreamMode, recordingQualityMode
         case preferredConfigMethod, timestampOverlay, hiddenCameraClock, cleanPictureBackup, integration, nvrEnabled, nvrRecordSound
-        case setupBackup, setupState, dnsWatch, pictureCorrection, aiDescriptions
+        case setupBackup, setupState, dnsWatch, pictureCorrection, aiDescriptions, skyDetector
     }
 
     public init(from decoder: any Decoder) throws {
@@ -241,6 +246,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         nvrEnabled = value(.nvrEnabled, default: nvrEnabled)
         nvrRecordSound = value(.nvrRecordSound, default: nvrRecordSound)
         aiDescriptions = value(.aiDescriptions, default: aiDescriptions)
+        skyDetector = value(.skyDetector, default: nil)
         if !unreadable.isEmpty {
             Log(category: "Engine", cameraID: id).warning("\(name): unreadable \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }
@@ -291,6 +297,9 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
     /// The order the person put the cameras in (dragging on the Monitor): camera ids, first to last. Empty until they do. Cameras not listed come
     /// after the listed ones, by name; ids of cameras that no longer exist are ignored (`orderedIDs(of:)`).
     public var cameraOrder: [UUID]
+    /// The Sky Watcher's bridge-wide settings: where the box is (kept only on this box: never logged, in the diagnostics or exported), the flight
+    /// feed on the network, and the AI's daily limit for what the box cannot explain.
+    public var sky: SkySettings
 
     public static let nvrKeepDaysRange = 1...365
     public static let nvrMaxSizeGBRange = 10...100_000
@@ -321,6 +330,7 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         plugins = [:]
         ai = AIDescriptionSettings()
         cameraOrder = []
+        sky = SkySettings()
     }
 
     /// The ids of `cameras` in the saved order: the listed ones first, then the others by name (numbers in names by value, the same sort the page
@@ -336,7 +346,7 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case webhookEnabled, webhookPort, webhookToken, keepMacAwake, sensorsBridgePort, logLevel, basePort, motionShadowTest
-        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone, plugins, ai, cameraOrder
+        case nvrFolder, nvrKeepDays, nvrMaxSizeGB, timeZone, plugins, ai, cameraOrder, sky
     }
 
     public init(from decoder: any Decoder) throws {
@@ -373,6 +383,7 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
         plugins = value(.plugins, default: plugins)
         ai = value(.ai, default: ai)
         cameraOrder = value(.cameraOrder, default: cameraOrder)
+        sky = value(.sky, default: sky)
         if !unreadable.isEmpty {
             Log(category: "Engine").warning("Unreadable settings \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }

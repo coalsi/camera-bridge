@@ -20,6 +20,14 @@ the per-camera `MediaHub`. Depends on BridgeSupport only (Foundation, Synchroniz
 Camera off still (2026-10-22, docs/CONTRACT_CHANGES.md): `MediaCodecs.cameraOffJPEG(cameraName:width:height:)` (a requirement with a default that throws
 `MediaCodecError.unsupported`): the dark "Camera off" picture Apple Home gets for a camera that is turned off, exactly `width` × `height`, as JPEG.
 
+The sky detector's decoder (2026-10-25, docs/CONTRACT_CHANGES.md): `MediaCodecs.makeSkyDecoder(format:maxOutputWidth:keepEvery:)` (a requirement with a
+default, `makeMotionDecoder`): a decoder for the sky detector, which looks at a luma picture at most `maxOutputWidth` wide a few times a second. It makes a
+picture of every `keepEvery`th frame it is given (frames 0, N, 2N, … from the first, a keyframe) and answers nil at once for the others; a codec service that can
+drops the others before they are copied back (the ffmpeg one does, on the GPU where the GPU takes the stream), scales with a good filter, never straightens the
+picture and runs at low priority. The default makes a picture of every frame, so a caller keeps the rate itself. `VideoDecoding.decodingPlace` (a requirement
+with a default, nil) and `DecodingPlace` (`gpu`, `software`) say where a decoder decodes, for a status line: the ffmpeg decoders say it, and say `software` after
+the GPU failed on a stream.
+
 Snapshot decoders (2026-10-02, docs/CONTRACT_CHANGES.md): `MediaCodecs.makeSnapshotDecoder(format:)` (a protocol requirement with
 a default that returns `makeVideoDecoder(format:)`; the Apple implementation logs its routine session creation at debug level, not info).
 

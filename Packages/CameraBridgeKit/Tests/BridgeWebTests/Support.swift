@@ -70,7 +70,24 @@ final class FakeBackend: BridgeBackend {
         var security: Result<CameraSecurity, any Error> = .failure(EngineError.cameraNotRunning)
         /// What "Restart the camera now" throws (nil: the camera took it).
         var restartError: (any Error)?
+        /// The sky log the Sky Watcher's routes read: every camera's entries (the fake serves them for whatever night it is asked), the log's
+        /// conditions, the aim and the learning it reports, and the stills by entry id.
+        var skyEntries: [SkyEntry] = []
+        var skyConditions: [SkyConditions] = []
+        var skyAim = SkyAimStatus(quality: .rough, planes: 0, stars: 0, residualPixels: nil, updated: nil)
+        var skyLearning = SkyLearning(ready: false, planes: 0, satellites: 0)
+        var skyStills: [String: Data] = [:]
+        /// What the sky calls throw instead of answering, when set (a place not set, a folder not chosen, a drive that is away).
+        var skyError: (any Error)?
+        /// Every sky call in order: "night:<camera>:<night or latest>:<view>", "correct:<entry>:<night>:<label>", "still:<entry>:<night>", "feeds".
+        var skyCalls: [String] = []
+        /// The flight feeds "Find a feed" finds.
+        var feeds: [URL] = []
     }
+
+    /// The hours the fake's log covers (a night from sunset to sunrise).
+    static let skyFrom = Date(timeIntervalSince1970: 1_792_890_000)
+    static let skyTo = Date(timeIntervalSince1970: 1_792_925_000)
 
     let box = Mutex(State())
 
@@ -245,6 +262,45 @@ final class FakeBackend: BridgeBackend {
     func restartCamera(cameraID: UUID) async throws {
         write { $0.calls.append("restartCamera") }
         if let error = read({ $0.restartError }) { throw error }
+    }
+
+    func skyNightLog(cameraID: UUID, night: String?, view: SkyLogView) async throws -> SkyNightLog {
+        try box.withLock { state in
+            state.skyCalls.append("night:\(cameraID.uuidString):\(night ?? "latest"):\(view.rawValue)")
+            if let error = state.skyError { throw error }
+            guard state.configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+            let entries = state.skyEntries.filter { $0.camera == cameraID }.sorted { ($0.start, $0.id) < ($1.start, $1.id) }
+            return SkyNightLog(camera: cameraID, night: night ?? "2026-10-24", view: view, from: Self.skyFrom, to: Self.skyTo, entries: entries,
+                               conditions: state.skyConditions, counts: SkyCounts(counting: entries), aim: state.skyAim, learning: state.skyLearning)
+        }
+    }
+
+    func correctSkyEntry(cameraID: UUID, entryID: String, night: String, label: SkyCorrection) async throws -> SkyEntry {
+        try box.withLock { state in
+            state.skyCalls.append("correct:\(entryID):\(night):\(label.rawValue)")
+            if let error = state.skyError { throw error }
+            guard state.configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+            guard let index = state.skyEntries.firstIndex(where: { $0.id == entryID && $0.camera == cameraID }) else { throw SkyLogError.unknownEntry }
+            state.skyEntries[index].correction = label
+            return state.skyEntries[index]
+        }
+    }
+
+    func skyStill(cameraID: UUID, night: String, entryID: String) async throws -> Data {
+        try box.withLock { state in
+            state.skyCalls.append("still:\(entryID):\(night)")
+            if let error = state.skyError { throw error }
+            guard state.configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+            guard let jpeg = state.skyStills[entryID] else { throw SkyLogError.noStill }
+            return jpeg
+        }
+    }
+
+    func findFlightFeeds() async -> [URL] {
+        box.withLock { state in
+            state.skyCalls.append("feeds")
+            return state.feeds
+        }
     }
 }
 

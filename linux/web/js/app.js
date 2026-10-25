@@ -4,7 +4,7 @@ import { h, replace, spinner, toast } from './dom.js';
 import { icon } from './icons.js';
 import { askToPowerOff, powerOff } from './power.js';
 import { THEME_EVENT, THEME_INFO, applyTheme, currentTheme, nextTheme, setTheme } from './theme.js';
-import { store, startEvents, stopEvents, subscribe, loadCameras, setCameraOrder } from './store.js';
+import { store, startEvents, stopEvents, subscribe, loadCameras, loadPlugins, pluginOn, setCameraOrder } from './store.js';
 import { onUnread, startNotifications, unreadCount } from './notifications.js';
 import { renderSetup, renderLogin } from './screens/auth.js';
 import { renderCameras } from './screens/cameras.js';
@@ -15,6 +15,7 @@ import { renderLogs } from './screens/logs.js';
 import { renderSystem } from './screens/system.js';
 import { renderAbout } from './screens/about.js';
 import { renderEufyPlugin, renderPlugins, renderWyzePlugin } from './screens/plugins.js';
+import { SKY_ROUTE, SKY_TEXT } from './screens/sky-model.js';
 import { versionLabel, whatsNewNotice } from './whats-new.js';
 
 const root = document.getElementById('app');
@@ -24,10 +25,15 @@ let unsubscribe = null;
 let stopNotifications = null;
 let stopUnread = null;
 
+/** Whether the Sky Watcher plugin is on (Plugins): the menu shows its item only then, whatever the cameras are set to. */
+const skyIsOn = () => pluginOn('sky');
+
 const NAV = [
   { href: '#/', label: 'Monitor', icon: 'monitor', match: (p) => p === '' || p === 'monitor' || p === 'nvr' || p.startsWith('nvr/') },
   { href: '#/events', label: 'Events', icon: 'clock', match: (p) => p === 'events' || p.startsWith('events?') },
   { href: '#/notifications', label: 'Notifications', icon: 'bell', match: (p) => p === 'notifications' },
+  // Sky Watcher's morning log (#/sky, #/sky/<camera>): in the menu, and so in a phone's tab bar, only while the Sky Watcher plugin is on (showSkyMenu).
+  { href: '#/sky', label: SKY_TEXT.menu, icon: 'moon', match: (p) => p === 'sky' || p.startsWith('sky/') || p.startsWith('sky?'), when: skyIsOn },
   { href: '#/cameras', label: 'Cameras', icon: 'camera', match: (p) => p === 'cameras' || p.startsWith('camera/') || p === 'add' || p.startsWith('pair') },
   { href: '#/plugins', label: 'Plugins', icon: 'plugin', match: (p) => p === 'plugins' || p.startsWith('plugins/') },
   { href: '#/logs', label: 'Log', icon: 'list', match: (p) => p === 'logs' },
@@ -66,6 +72,8 @@ const ROUTES = [
   // The Events page keeps its filters in the address: #/events?cameras=<ids>&type=Person&saw=person&concern=notable&range=7d
   { pattern: /^events(?:\?(.*))?$/, title: 'Events', render: lazy(() => import('./screens/events.js'), 'renderEvents') },
   { pattern: /^notifications$/, title: 'Notifications', render: lazy(() => import('./screens/notifications.js'), 'renderNotifications') },
+  // #/sky and #/sky/<camera>?night=yyyy-MM-dd&view=night|day&entry=<id>: the sky log (the Sky Watcher notification opens an entry).
+  { pattern: SKY_ROUTE, title: SKY_TEXT.page, render: lazy(() => import('./screens/sky-log.js'), 'renderSkyLog') },
   { pattern: /^cameras$/, title: 'Cameras', render: renderCameras },
   { pattern: /^add$/, title: 'Add a camera', render: renderAdd },
   // #/camera/<id>, and #/camera/<id>/security at its Security card (the Internet guard's notice opens that).
@@ -139,9 +147,9 @@ function markNav(path) {
 
 function buildShell() {
   const name = h('span', null, store.session.bridgeName);
-  const nav = h('nav', { class: 'nav', 'aria-label': 'Main' },
-    NAV.map((item) => h('a', { href: item.href, title: item.label }, icon(item.icon), h('span', null, item.label),
-      item.href === '#/notifications' ? h('span', { class: 'nav-badge', id: 'nav-unread', hidden: true }) : null)));
+  const links = NAV.map((item) => h('a', { href: item.href, title: item.label, hidden: item.when ? !item.when() : false }, icon(item.icon), h('span', null, item.label),
+    item.href === '#/notifications' ? h('span', { class: 'nav-badge', id: 'nav-unread', hidden: true }) : null));
+  const nav = h('nav', { class: 'nav', 'aria-label': 'Main' }, links);
   const content = h('div');
   const main = h('main', { id: 'main', class: 'main', tabindex: '-1' }, content);
   const reconnect = h('div', { class: 'reconnect', role: 'status', hidden: true }, 'Lost contact with the bridge. Trying again…');
@@ -163,7 +171,7 @@ function buildShell() {
       nav,
       h('div', { class: 'sidebar-foot' }, theme, power, version)),
     h('div', { class: 'app-main' }, reconnect, notice, main));
-  shell = { nav, content, main, name, reconnect, version, theme };
+  shell = { nav, content, main, name, reconnect, version, theme, sky: links[NAV.findIndex((item) => item.href === '#/sky')] };
   showTheme();
   stopUnread?.();
   stopUnread = onUnread(showUnread);
@@ -174,6 +182,11 @@ function buildShell() {
     const news = whatsNewNotice(s.version);
     if (news) notice.append(news);
   }).catch(() => {});
+}
+
+/** Sky Watcher's item in the menu: there while its plugin is on, gone while it is off. */
+function showSkyMenu() {
+  if (shell?.sky) shell.sky.hidden = !skyIsOn();
 }
 
 /** The count of notifications not read, in the menu: a number beside the bell, and said in the link's name. */
@@ -202,8 +215,12 @@ async function showApp() {
   unsubscribe?.();
   unsubscribe = subscribe((kind) => {
     if (kind === 'connection' && shell) shell.reconnect.hidden = store.connected;
+    if (kind === 'plugins' && shell) showSkyMenu();
   });
+  // Which plugins are on is asked at the same time as the cameras; the Sky Watcher's menu item and card wait for it (without it they stay out).
+  const plugins = loadPlugins().catch(() => {});
   try { await loadCameras(); } catch (error) { toast(error.message, 'error'); }
+  await plugins;
   // A bridge without a time zone of its own (Camera Bridge OS runs in UTC) takes the zone of the browser that signs in: the timestamp it draws
   // and the clocks it sets on cameras are then local time.
   // The settings also give the cameras' order: read before the first screen so the wall does not reshuffle.

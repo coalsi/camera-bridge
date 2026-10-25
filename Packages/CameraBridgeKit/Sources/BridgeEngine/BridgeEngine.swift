@@ -139,6 +139,11 @@ public final class BridgeEngine {
     public nonisolated let archive: any ArchiveReading
     /// The recordings folder as numbers, nil before the first measurement (refreshed with the cameras' status, at most every 5 s).
     public private(set) var nvrStorage: ArchiveStorageStatus?
+    /// The Sky Watcher's detectors and its flight feed (`BridgeEngine+Sky.swift`); nil for a preview engine.
+    @ObservationIgnored let skyService: SkyService?
+    /// The detectors running, by camera, as the service last said; and the runtime whose pictures each one is given (`startSkyIfWanted`).
+    @ObservationIgnored var skyDetectors: [UUID: SkyCameraDetector] = [:]
+    @ObservationIgnored var skyLinks: [UUID: SkyLink] = [:]
     /// Bumped by every operation that changes what `refreshStatus` reads (cameras, runtimes, the sensors bridge, the
     /// state): a refresh that read before it publishes nothing (the operation refreshes again).
     @ObservationIgnored private var statusGeneration = 0
@@ -172,6 +177,8 @@ public final class BridgeEngine {
         let coordinator = NVRCoordinator(environment: environment, signal: changes)
         nvr = coordinator
         archive = coordinator.reader
+        skyService = SkyService(dataDirectory: environment.dataDirectory, http: tuning.skyHTTP ?? URLSessionSkyHTTP(), logStore: coordinator.store.skyLog,
+                                pollInterval: tuning.skyPollInterval)
         // Settings and cameras are shown before the first start (a missing or unreadable file is handled by `start`).
         if let configuration = try? store.load() {
             storedSettings = configuration.settings
@@ -215,6 +222,7 @@ public final class BridgeEngine {
         let coordinator = NVRCoordinator(environment: environment, signal: changes, previewArchive: snapshot.archive)
         nvr = coordinator
         archive = coordinator.reader
+        skyService = nil
         nvrStorage = snapshot.nvrStorage
         state = snapshot.state
         cameras = snapshot.cameras
@@ -498,6 +506,7 @@ public final class BridgeEngine {
             await stopSensorsBridge()
             await startSensorsBridge()
         }
+        if Self.skyChanged(old, settings) { await applySky() }   // the plugin, the place, the feed, the folder or the zone
         changes.notify()
     }
 
@@ -556,6 +565,7 @@ public final class BridgeEngine {
             await bridge?.update(cameras: bridgedConfigurations)
             if isActive { await startSensorsBridge() }   // the first camera starts it
             if isActive { if camera.isEnabled { await startRuntimes([camera]) } else { await startOffAccessories([camera]) } }
+            if isActive { await applySky() }
             await refreshStatus()
         }
     }
@@ -592,6 +602,9 @@ public final class BridgeEngine {
             configurations = updated
             statusInputsChanged()
             camera = updated[index]
+            if (old.skyDetector?.enabled ?? false) != (camera.skyDetector?.enabled ?? false) {
+                log.notice("Sky Watcher turned \(camera.skyDetector?.enabled == true ? "on" : "off") for \(camera.name)")
+            }
             await router.register(camera)
             await bridge?.update(cameras: bridgedConfigurations)
             if isActive {
@@ -612,6 +625,7 @@ public final class BridgeEngine {
                         await runtime.updatePictureCorrection(camera.pictureCorrection)
                     }
                 }
+                await applySky()   // its switch, its card, its name; a restarted runtime was given to its detector already
             }
             invalidateStoredIdentity(camera.id)
             await refreshStatus()
@@ -634,6 +648,7 @@ public final class BridgeEngine {
             }
             await giveDNSBackOnRemoval(camera)
             await stopRuntime(id)
+            await removeSky(id)   // its aim goes with it
             onvifRefusals[id] = nil
             clockUnsupported[id] = nil
             forgetSecurity(id)
@@ -1880,6 +1895,7 @@ public final class BridgeEngine {
         nvr.start(settings: storedSettings)   // returns at once: repair and catalog load run in the background (the daemon waits for this function)
         await startRuntimes(configurations.filter(\.isEnabled))
         await startOffAccessories(configurations.filter { !$0.isEnabled })
+        await applySky()
         startNetworkMonitoring()
         startHeartbeat()
         startDailySecurityChecks()
@@ -1908,6 +1924,7 @@ public final class BridgeEngine {
         await stopWebhook()
         webhookProblem = nil
         await nvr.detachAll()   // recorders flush and close while the hubs still deliver (`stopServices` clears `runtimes` without `stopRuntime`)
+        await stopAllSky()   // the detectors write what they keep; nothing more is fetched for them. After the recordings, which come first (Ruling S27)
         let running = Array(runtimes.values)
         runtimes.removeAll()
         let off = Array(offAccessories.values)
@@ -2035,6 +2052,7 @@ public final class BridgeEngine {
             }
         }
         if moved { await persist() }
+        for (camera, runtime, _) in started where runtimes[camera.id] === runtime { await startSkyIfWanted(camera.id) }
     }
 
     /// Tries the camera's accessory again after its backoff; returns the delay.
@@ -2576,6 +2594,7 @@ public final class BridgeEngine {
             var status = CameraStatus(id: camera.id, name: camera.name, kind: camera.kind, vendor: camera.vendor)
             status.nvr = nvr.status(for: camera, folderChosen: storedSettings.nvrFolder != nil)
             status.security = securityChecks.records[camera.id]?.security
+            status.sky = await skyCameraStatus(camera)
             if let sensor = await router.state(for: camera.id) { sensor.apply(to: &status) }
             if let runtime = runtimes[camera.id] {
                 let runtimeStatus = await runtime.status()
@@ -2915,6 +2934,9 @@ public final class BridgeEngine {
         if let problem = settings.ai.validationProblem {
             throw EngineError.invalidSettings(problem.message)
         }
+        if let problem = settings.sky.validationProblem {
+            throw EngineError.invalidSettings(problem.message)
+        }
     }
 
     /// A delayed piece of work that either begins or is cancelled, never both (`begin()` / `cancel()` race safely).
@@ -2963,6 +2985,7 @@ public final class BridgeEngine {
         comparable.nvrEnabled = old.nvrEnabled               // Record and Record sound are applied in place (`setNVR`): never a restart
         comparable.nvrRecordSound = old.nvrRecordSound
         comparable.aiDescriptions = old.aiDescriptions       // the describer reads the switch when an event starts: never a restart
+        comparable.skyDetector = old.skyDetector             // the Sky Watcher takes its settings in place: never a restart
         if paired { comparable.name = old.name }
         return comparable != old
     }

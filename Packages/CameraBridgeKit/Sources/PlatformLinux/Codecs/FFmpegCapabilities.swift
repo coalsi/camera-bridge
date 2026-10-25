@@ -154,9 +154,17 @@ final class FFmpegRuntime: Sendable {
     let configuration: FFmpegCodecsConfiguration
     let log = Log(category: "FFmpegCodecs")
 
+    /// How long a stream the GPU's decoder session ended on before showing a picture is decoded in software, by every decoder, before the GPU is
+    /// tried on a stream like it again. (A latch that never let go sent a 4K or HEVC camera's motion detection to the CPU for the rest of the
+    /// run after one passing hiccup of the GPU.)
+    static let hardwareDecodeRetryAfter: TimeInterval = 600
+
     private struct State {
         var capabilities: FFmpegCapabilities?
         var vaapiDisabled = false
+        /// Streams (`hardwareDecodeKey`) the GPU's decoder session ended on before showing a picture, and when: decoded in software for
+        /// `hardwareDecodeRetryAfter` after that.
+        var hardwareDecodeFailures: [String: Date] = [:]
         var loggedBackend: String?
         var loggedFontProblem = false
         var loggedCorrectionProblem = false
@@ -168,10 +176,14 @@ final class FFmpegRuntime: Sendable {
 
     /// Whether a device node exists (replaced in tests).
     let deviceExists: @Sendable (String) -> Bool
+    /// The clock the failures of the GPU are dated with (replaced in tests).
+    let now: @Sendable () -> Date
 
     init(launcher: any FFmpegProcessLaunching, configuration: FFmpegCodecsConfiguration, executable: URL?,
-         deviceExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) {
+         deviceExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+         now: @escaping @Sendable () -> Date = { Date() }) {
         self.deviceExists = deviceExists
+        self.now = now
         self.launcher = launcher
         self.configuration = configuration
         self.executable = executable
@@ -202,11 +214,54 @@ final class FFmpegRuntime: Sendable {
     }
 
     /// The VA-API render node decoders use, or nil to decode on the CPU: the GPU decodes wherever it encodes (VA-API usable, not
-    /// turned off by configuration or after a failure). A camera stream the GPU cannot decode falls back to the CPU inside ffmpeg.
+    /// turned off by configuration or after a failure).
     func hardwareDecodeDevice() -> String? {
         guard configuration.videoEncoder != .software, let capabilities = try? capabilities(), capabilities.vaapiUsable,
               !state.withLock({ $0.vaapiDisabled }) else { return nil }
         return configuration.vaapiDevice
+    }
+
+    /// The render node to decode `format` on, nil to decode it in software: no usable VA-API (`hardwareDecodeDevice()`), or the GPU's
+    /// decoder session for a stream like this ended before it showed a picture less than `hardwareDecodeRetryAfter` ago
+    /// (`noteHardwareDecodeFailure`). Whether the GPU's decoder takes the size at all is the caller's to ask first
+    /// (`FFmpegVideoDecoder.fitsHardware`).
+    func hardwareDecodeDevice(for format: VideoFormat) -> String? {
+        let current = now()
+        let held = state.withLock { state -> Bool in
+            let key = Self.hardwareDecodeKey(format)
+            guard let failed = state.hardwareDecodeFailures[key] else { return false }
+            if Self.holds(failedAt: failed, now: current) { return true }
+            state.hardwareDecodeFailures[key] = nil   // the time is up: the GPU is tried again
+            return false
+        }
+        return held ? nil : hardwareDecodeDevice()
+    }
+
+    /// A GPU decoder session for `format` ended before its first picture: streams like it (the same codec, size and profile) are decoded in
+    /// software for `hardwareDecodeRetryAfter`, by every decoder, and the GPU is tried again after that. Logged as a warning, with the last
+    /// line ffmpeg said, when the failure is new (not when another session of the same stream ends so within the time).
+    func noteHardwareDecodeFailure(_ format: VideoFormat, reason: String?) {
+        let current = now()
+        let fresh = state.withLock { state -> Bool in
+            let key = Self.hardwareDecodeKey(format)
+            if let failed = state.hardwareDecodeFailures[key], Self.holds(failedAt: failed, now: current) { return false }
+            state.hardwareDecodeFailures[key] = current
+            return true
+        }
+        guard fresh else { return }
+        log.warning("the GPU could not decode \(format.codec == .h264 ? "H.264" : "H.265") \(format.width)×\(format.height); decoding in software"
+                    + (reason.map { " (\($0))" } ?? ""))
+    }
+
+    /// Whether a failure at `failedAt` still keeps its stream in software at `now`: for `hardwareDecodeRetryAfter` after it. A clock that
+    /// stepped back lets go of it (it would otherwise hold until the clock caught up).
+    private static func holds(failedAt: Date, now: Date) -> Bool {
+        let age = now.timeIntervalSince(failedAt)
+        return age >= 0 && age < hardwareDecodeRetryAfter
+    }
+
+    private static func hardwareDecodeKey(_ format: VideoFormat) -> String {
+        "\(format.codec.rawValue) \(format.width)x\(format.height) \(format.profile)"
     }
 
     /// The H.264 encoder for a new pipeline (logged when it changes).

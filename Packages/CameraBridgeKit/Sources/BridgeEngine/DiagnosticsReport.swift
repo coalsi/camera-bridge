@@ -88,6 +88,16 @@ public enum DiagnosticsReport {
                    + "log level \(DiagnosticsLog.levelName(settings.logLevel).lowercased()), base port \(settings.basePort), "
                    + "motion shadow test \(settings.motionShadowTest ? "on" : "off")")
         out.append("Cameras: \(configurations.count)")
+        // How many cameras watch the sky, and nothing else about it: where the box is stays on the box. While the plugin is off nothing watches, so
+        // the cameras that are set to are said to be only set (they keep their settings for when it is switched on).
+        let watching = configurations.filter { $0.skyDetector?.enabled == true }.count
+        if watching > 0 {
+            if settings.skyPluginOn {
+                out.append("Sky Watcher on for \(watching) camera\(watching == 1 ? "" : "s")")
+            } else {
+                out.append("Sky Watcher is off in Plugins (\(watching) camera\(watching == 1 ? " is" : "s are") set to watch the sky)")
+            }
+        }
         out.append("")
         out.append(contentsOf: networkSection(notices: networkNotices, macVPN: macVPN, generated: context.generated))
 

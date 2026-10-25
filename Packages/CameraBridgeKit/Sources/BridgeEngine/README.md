@@ -1160,3 +1160,296 @@ then the newest); a camera that already has an identity keeps its own. `Credenti
 (`RemovedHAPIdentities.sweep`) deletes entries 30 days old or older, at the engine's start and then daily (`EngineTuning.removedPairingSweepInterval`).
 Public: `RemovedHAPIdentity`, `RemovedHAPIdentities.keep(cameraID:serialNumber:mac:dataDirectory:secrets:now:)`, `.restore(…)`, `.sweep(…)`,
 `.keptFor`. Tests: `RemovedHAPIdentitiesTests`, `RemovedCameraPairingEngineTests` (macOS).
+
+## Additions beyond the contract: the sky detector's geometry (2026-10-25, docs/CONTRACT_CHANGES.md)
+
+The sky detector's maths is portable Swift in `Sky/` (Foundation's math and `SIMD3` only). Public: `SkyDirection` (azimuth from true north,
+clockwise, and elevation, in degrees) and `SkyLogView` (`night`, `day`), for the web interface later. Internal:
+- `SkyGeometry.swift`: `SkyObserver` (the box's location, kept on the box; it prints, dumps and debug-prints as "location hidden") and `SkyMath`: separations, the Julian date, Greenwich mean
+  sidereal time, right ascension and declination to a direction, and a WGS84 position to a direction and range (Earth-centred, then
+  east-north-up, so the Earth's curve counts).
+- `SunEphemeris.swift`: the Sun within 0.01° (Meeus, chapter 25), sunset and sunrise at an elevation of −0.833° and darkness below −6°;
+  `SkyNight` names each night after the local date of its sunset and finds its window to the next sunrise (one window across midnight and
+  a daylight saving change; none on a day the Sun does not set). A moment belongs to the night that contains it or, in the day, to the
+  one that ended that morning. A log's night view runs from sunset to sunrise, and its day view is the local day it is named after.
+- `SkyCameraModel.swift`: how the camera's original picture (never the straightened one) maps to the sky. A single lens, or a dual camera
+  (two lenses side by side, stitched on the camera; the default for pictures 2:1 and wider) split at a seam (x = 0.5 to start), each half
+  a camera of its own: its own projection (rectilinear, equidistant, cylindrical or equirectangular, chosen by the fit), pose, fields of
+  view, principal point and Brown radial distortion (k1, k2, k3), with nothing shared between the halves; a single lens has the same
+  choice. What projecting needs is worked out once per lens, not per projection. Large radial terms bow the halves' seam columns in
+  opposite directions, so a track crossing the seam is matched across it by direction, with an angular tolerance (about 3°). A direction projects through every lens that sees it (both near the seam, where the halves
+  overlap); a pixel maps back through the lens of its half; a band of 1 % of the width around the seam is low trust, kept but not used
+  for fitting. Tests: `SkyGeometryTests`, `SkyCameraModelTests`.
+
+## Additions beyond the contract: the sky detector's aim (2026-10-25, docs/CONTRACT_CHANGES.md)
+
+How a sky camera's aim is fitted to what it sees, in `Sky/` (Foundation's math and `SIMD3` only). Public: `SkyAimQuality` (`rough`, `good`,
+`precise`) and `SkyAimStatus`, the card's aim line: the quality, the planes and stars matched, the residual (the inliers' RMS in pixels of
+the original picture), when, each lens's own (`SkyLensAimStatus`), and a note such as "The camera seems to have moved; aiming again." (a
+status without `lenses` or `note` decodes with none). Internal:
+- `SkyAim.swift`: `AimCorrespondence`, a pixel of the original picture and the sky direction really there (a plane's from the feed, a star's
+  from the catalogue), and `AimFit`, the fitted model with the stage, quality and residuals of the camera and of each lens.
+- `AimFitter.swift`: each lens is fitted on its own, to the matches it owns outside the seam band. RANSAC (200 samples of 3, the rotation
+  alone, by Horn's method), then Levenberg–Marquardt (at most 50 iterations) on the pixel errors, with Huber weights (δ 3 px), a ridge prior
+  on the correction terms and small rotations of the lens's own axes, so a lens looking straight up fits like any other. A pixel error past
+  a quarter of the width, or a direction with no point, is an outlier with no weight, never a huge squared error. The inliers are judged
+  again at the tolerance the residual earns (0.75°, 1.5° or 15°); one that would cost the lens its stage tries 1.5°, then takes the lower
+  stage, 1.5° before 15°, and never down to stage 0; a lens whose matches mostly disagree at its previous tolerance tries the next looser one.
+  Stages free the pose and the field (1: 8 matches of 5 objects), the principal point and k1 (2: 40 of at least 8 objects, aircraft and
+  stars, with 10 in each quadrant of the lens's frame, or in 3 of them for a dual camera's lens, whose outer bottom corner is usually
+  ground), k2 and the vertical field (3: 150 over 6 of the 9 cells of a 3×3 grid) and, for a single lens only, k3 (4: 300). From stage 2
+  each lens's projection is chosen by the lowest robust residual, the one it has kept unless another is more than 10 % better. A lens's fit
+  is accepted when 60 % of what it saw agrees (each star match once, each aircraft once by at least half of its samples), its RMS is at most
+  1.1 × the previous aim's on them, and its frame is sane (no fold; for a dual camera's lens, no correction moving the picture by more than
+  3 % of its width); otherwise, and while it has too few matches, it keeps its earlier aim. Good is within 0.8°, precise 25 star matches
+  whose own RMS is within 0.15°; the camera's quality and stage are its least aimed lens's. `matchTolerance` (rough 15°, good 1.5°,
+  precise 0.75°) is for the matchers.
+- `SkyAimStore.swift`: `<data>/sky/<camera-uuid>/aim.json` and `matches.jsonl` (0600 in 0700; a line that does not parse is skipped). They
+  stay on the box: the matched directions with their times tell where the box is, so they are never logged, sent or exported. One pass of
+  an aircraft (its samples in one `add`) keeps at most 12 samples, each 1° from the others; the latest 2,000 matches of each source are
+  kept, planes for 30 days; a refit happens at most once per 10 new matches or per hour. 10 plane matches in a row each more than 3 × the
+  fit's plane RMS and half their lens's match tolerance off (one aircraft's samples counting once) start the aim again; a fit with no plane
+  matches judges none.
+- `SkyCameraModel.Lens.undistortedRadius` falls back to a bracketed search where Newton's ten steps do not settle (steep or wavy terms far
+  out, or next to the fold), and `localPoint(ofUnit:)` projects a direction given as its unit vector. Tests: `SkyAimFitterTests`.
+
+## Additions beyond the contract: the sky detector's lights (2026-10-25, docs/CONTRACT_CHANGES.md)
+
+Finding and following the lights that cross a sky camera's view, in `Sky/` (Foundation's math and `SIMD3`, and MediaCore's `GrayImage`).
+Public: `SkyPathShape` (`straight`, `curved`, `suddenStop`, `sharpTurn`) and `SkyMeasures`, a track's measures on the sky (where it was
+first and last seen, duration, speed in °/s and its acceleration, turn rate and largest turn within a second, straightness, shape,
+size in degrees, brightness, blinking and its rate, focus): never a real size, distance or speed. Internal:
+- `SkyFrameAnalyzer.swift`: `SkyFrameAnalyzer` (owned by one detector actor, its buffers allocated once per picture size) compares each
+  analysed picture with a running mean of the sky (5 % a picture), smooths the difference by a 3×3 kernel (a matched filter for a small dot,
+  which cuts a camera's single-pixel speckle many times over) and thresholds it per 64×64 tile at max(8, 4σ) about the tile's own level
+  (where its smoothed difference sat in the last picture: a sky that brightens slowly passes nothing), σ the robust noise of the last 25
+  pictures; at night only brighter pixels count, by day darker ones too. More than 20 % of the picture over the threshold at once (an IR-cut
+  switch, an exposure step) starts the background again, and nothing is found for 10 pictures (2 s). Blobs are 8-connected, 1…5000 px, found
+  per lens of a dual camera (never across its seam; those in the seam band are flagged, never used for aiming; the pieces of a blob the seam
+  cuts are linked, each with its own centre and the whole blob's measures); more than 200 make the picture noisy, with none. `SkyDetection`
+  is a blob's centre, area, flux, peak, elongation and orientation, sharpness, lens, significance and seam group. `SkyMask`: the ground's
+  rows, the horizon below 1° once the aim is good, and circles: the Sun within 15° while it is above −6° (`SkyMask.sunCircles`);
+  `SkyMaskRaster` lays it on the pixels, also masking the picture's outermost pixels, which the smoothing cannot see past. A second, slow
+  background (a running mean over about 3 minutes) holds what stands still in the sky, a star, a wire, a lamp; each detection carries how
+  far it stands under and around it (`fixedRise`, `fixedRiseUnder`).
+- `SkyTracker.swift`: `SkyTracker` follows the detections: alpha-beta prediction (α 0.85, β 0.005) and a gate of max(6 px, 0.6 × the step);
+  born after 3 detections in consecutive pictures, or 2 elongated ones along their path (a meteor, `streakBorn`); coasting 1.5 s; split at
+  10 minutes; under 0.6 s dropped unless streak-born; at most 50 open. Each track keeps to its lens; across a dual camera's seam it is
+  joined through the two lenses' sky directions within 3° once the aim is good, and by the picture with a wider gate before (the join marked
+  uncertain), and so are a track's first two detections; a light on the seam is one track (a track takes its own lens's piece of a cut blob,
+  and the other pieces go with it). A track seen in the last picture that misses its gate continues with a strong detection (significant,
+  and not a lone sharp pixel: the sensor's speckle) about as bright as it, within one step of where it was (a sharp turn, a sudden stop); a
+  second detection that is faint or a lone sharp pixel is looked for only where a chance one is unlikely, and a third is about as bright as
+  the first two, so noise rarely starts a track. A picture with the same time as the last is ignored. No track is kept that barely moved
+  (none of its samples 4 px from its first, or 0.05° on the sky once the aim is good: a loop or a path out and back that went far is kept)
+  or whose samples are all faint (significance under 1.5), whatever it lasted: a twinkling star, a flickering spot; nor one that sat on
+  something fixed all along (every detection within 10 px of a spot of the slow background standing 5σ; right on it half the time, if it
+  travelled 10 px or more): a star whose track wanders onto the noise beside it, flicker along a wire. A light passing a star, or flying
+  along a wire, is kept. The tracks dropped for barely moving or for sitting on something fixed are not lost:
+  `update(_:at:wallClock:dropped:)` and `endAll(dropped:)` hand them over apart from the kept ones, each a `SkyDroppedTrack` with its reason
+  (`barelyMoved`, `fixed`; noise and tracks under 0.6 s are not handed over), for the flashes and stationary points the later parts read,
+  and nothing logs one as a light. `SkyTrack` keeps its samples (`SkyTrackSample`: time, wall clock, point, area, flux, sharpness,
+  elongation, lens, seam band, significance, fixedRise, fixedRiseUnder), the pictures it was missing from, and its seam joins; `filters`
+  shows the open tracks' predictions.
+- `TrackMeasurer.swift`: `TrackMeasurer.measure` turns a track into `SkyMeasures` through the camera model, each sample by its own lens (by
+  the model's split when the samples' lenses disagree with it outside the seam band: a picture analysed without the model knows one lens):
+  the path between points at least 4 analysed pixels apart, headings along great circles (a straight path across the sky never turns), the
+  shape (a sharp turn of 60° within a second at 0.2°/s or more; a sudden stop from 0.5°/s or more to 10 % within 0.6 s, then staying a
+  second, by the least-squares speed over it; straight under 15° of turning and 0.97 straightness; else curved), the size from the area and
+  the local degrees per pixel, the brightness in the original picture's pixels, and blinking from dips below 30 % of the median flux
+  (missing pictures count as dips). `isStationary`: under 0.05°/s over 2 s or more.
+- `SkyVisibility.swift`: `SkyVisibility` counts the stars (local maxima 5σ above the sky around them) in an 8×4 grid of the background once
+  a minute at night; a cell is visible at 30 % of the 90th percentile of its counts on past nights; unknown until 3 nights, and by day. A
+  night's counts are a small histogram per cell, and a night closes after 24 hours (a polar night).
+  Tests: `SkyDetectionTests`, `SkyTrackMathTests`.
+
+## Additions beyond the contract: the sky detector's flights (2026-10-25, docs/CONTRACT_CHANGES.md)
+
+Where the aircraft are, and which one a track is, in `Sky/` (Foundation, and `CameraAdapters.NeighborTable` for the feed finder; the
+live transport is the existing `AuthenticatingHTTPClient`). Public: `SkyLabel` (`unexplained`, `plane`, `probablePlane`, `satellite`,
+`satelliteFlare`, `meteor`, `bug`, `bird`), what the sky log calls a light. Internal:
+- `SkyHTTP.swift`: `SkyHTTP`, one bounded GET (a status is an answer, whatever it is; a wait that ran out or an answer that is too long is an
+  error that names no address), and `URLSessionSkyHTTP`, its live form: one `AuthenticatingHTTPClient` for the bridge's life, shared by every
+  instance, with no credentials, the certificate checks on and redirects never followed. Each call has its own timeout and byte limit: the
+  answer is read as it arrives and cut off when it passes the limit, and the whole call at the timeout.
+- `AircraftFeed.swift`: `AircraftFeedParser` reads a dump1090, readsb, tar1090 or PiAware `aircraft.json` (`aircraft`) or an adsb.fi answer
+  (`ac`) into `AircraftReport`s (hex, call sign, place, height in metres and feet, the position's time, ground speed and track). It uses
+  `JSONSerialization` and reads each field on its own (a number, or a plain decimal in a string; never a boolean, `nan` or a hex float), so
+  one odd field costs only its aircraft; a feed that writes `nan` or `inf` bare is read with those made `null`. The height is the geometric
+  altitude, else the barometric one; an aircraft on the ground, with a position older than 30 s (`seen_pos`), with a place or height that is
+  not one, or with no `seen_pos` is left out. **The position's time is the box's receive time less `seen_pos`; the feed's own `now` is never
+  read**, since a feed host's clock can be minutes out. A body over 4 MiB is not read, at most 5,000 aircraft come out, and a document nested
+  more than 16 levels deep is not read (on macOS, Apple's reader overflows a 512 KB thread stack at about 480 levels of objects, which is a crash).
+  `FlightFeedPoller` polls a feed once a second (each request bounded to 5 s and 4 MiB) into a `FlightHistory`; `problem` says in plain
+  words what is wrong ("The flight feed answered 404.") and `lastAnswer` when the last good answer came; `stop()` returns when polling has
+  stopped, and a poller nobody holds stops by itself.
+- `FlightHistory.swift`: the last 15 minutes of reports of each aircraft, in time order (bounded: 10,000 aircraft, 1,200 reports each, and
+  one report for a time); `tracks(overlapping:)` gives, for a time range, the reports in it and the nearest on each side.
+- `FlightFeedFinder.swift`: the "Find a feed" of Settings. It asks only the hosts in the box's own neighbour table (`NeighborTable`), private
+  addresses only (10/8, 172.16/12, 192.168/16, written plainly), at most 64 hosts, for the four places a feed usually is (tar1090,
+  dump1090-fa and SkyAware on port 80, dump1090 on port 8080), 8 requests at a time, 1.5 s each; an answer counts when it reads as a feed
+  (an empty sky does). It builds no address of its own and logs nothing.
+- `FlightMatcher.swift`: `FlightMatcher.match` says which aircraft a track is, if any: each aircraft's place at each picture's time is
+  interpolated in its history (up to 5 s beyond it, extrapolated from its speed and track; not across a gap of over 20 s); its score is the
+  median angular distance to the track's directions through the camera model (a picture it cannot be placed at is infinitely far); it matches
+  within the aim's tolerance (`AimFitter.matchTolerance`), with its heading within 30° of the track's for a track of a second or more. While
+  the aim is rough it must also be the only aircraft within 15° and within 50 % of the track's speed. A match is a `FlightMatch`: the hex, a
+  detail like "TEST123 · 35,000 ft", the score, `.probablePlane` (rough) or `.plane`, and one `AimCorrespondence` per matched picture outside
+  the seam band, which go to `SkyAimStore.add` in one call.
+  Tests: `SkyFlightTests`.
+
+## Additions beyond the contract: the sky detector's settings and log (2026-10-25, docs/CONTRACT_CHANGES.md)
+
+The Sky Watcher (the name a person reads; the code and the JSON keep `sky` and `skyDetector`): its settings, the log it keeps beside the
+recordings and the engine's face on it, in `Sky/SkySettings.swift`, `Sky/SkyEntry.swift`, `Sky/SkyLogStore.swift` and `BridgeEngine+Sky.swift`.
+Public:
+- **Settings.** `BridgeSettings.sky` (`SkySettings`): `location` (a `SkyLocation`: `latitude`, `longitude`, `heightMeters`; −90 to 90, −180 to 180,
+  not 0 and 0, −500 to 9,000 m, all numbers), `flightFeedURL` (http or https with a host; no user name or password, no `#`, one line of at most 500
+  characters) and `aiDailyLimit` (`SkySettings.aiDailyLimitRange`, 1 to 1,000; `SkySettings.defaultAIDailyLimit`, 50). `SkySettings.validationProblem`
+  is the first thing wrong (a `SkySettings.Problem`: the `field`, `sky.location`, `sky.flightFeedURL` or `sky.aiDailyLimit`, and the words, which never
+  repeat what was typed); `updateSettings` refuses such settings with `EngineError.invalidSettings`. Decoding is lenient like the AI settings: a missing
+  or unreadable value takes its default and what this build would refuse to save is dropped, logged by the name of its key.
+  **Where the box is stays on the box.** It is in `config.json` and in the signed-in page's `GET settings`, and nowhere else: `SkyLocation` prints,
+  interpolates and dumps as "location hidden", and it is in no log line, no diagnostics report, no notification, no AI request and no export.
+- **A camera's switch.** `CameraConfiguration.skyDetector` (a `SkyDetectorSettings`; nil: never saved): `enabled` (off), `facing` (0 up to 360°
+  clockwise from true north, 0 is north), `tilt` (20°, 0 to 90), `groundPercent` (12, 0 to 60), `nightProfile` (on) and `lensLayout` (a `SkyLensLayout`,
+  `single` or `dual`; nil: automatic, two lenses for a picture of 2:1 or wider). Decoding is lenient (an unknown layout is automatic) and
+  `SkyDetectorSettings.validationProblem` names the field (`skyDetector.facing`, `skyDetector.tilt`, `skyDetector.groundPercent`). `needsRestart` ignores it:
+  the Sky Watcher takes its settings in place. `CameraConfiguration.streamsOnDemand` says a camera cannot watch the sky (a battery camera: it would be
+  kept awake all night); it is decided from the configuration and a test keeps it equal to what every driver says. Turning a camera's switch on or off
+  is logged ("Sky Watcher turned on for North Sky"), and the diagnostics say "Sky Watcher on for 2 cameras" and nothing more about it (while the plugin is off, "Sky Watcher is off in Plugins (2 cameras are set to watch the sky)").
+- **The plugin's switch.** The Sky Watcher is a plugin that a person switches on first (2026-10-25): `BridgeSettings.skyPluginOn` is
+  `plugins["sky"]?.enabled == true`, the switch on the Plugins page (a `PluginState`; off on a new box and in every configuration from before it, and a
+  value that cannot be read is off). The engine's Sky Watcher runs only while it is true: no detector, no flight feed polling and no downloads while it
+  is off. Switching it off or on touches neither `BridgeSettings.sky` nor any camera's `skyDetector`, so switching it on again brings the same cameras back.
+- **The log's types.** A `SkyEntry` is one light: `id` (1 to 64 letters, digits, `-` and `_`: `SkyEntry.isValidID`, since it names the entry's picture),
+  `camera`, `kind` (`SkyEntryKind`: `track`, `newLight`, `flash`), `start`, `end`, `path` (`SkyPathPoint`: seconds from the start and `x`, `y` in the camera's
+  original picture, 0 to 1; at most 64), `measures` (`SkyMeasures`), `label` (`SkyLabel`) with `by` (`SkyLabelSource`) and `detail`, `unusual`
+  (`SkyUnusualReason`), `speedVsPlanes`, `candidate`, `alerted`, `hasStill`, `ai` (a `SkyAIAnswer`) and the person's `correction` (`SkyCorrection`: plane,
+  bird, bug, satellite, meteor, notSure). `SkyDisplay.label` is what the log shows: a correction wins, and "not sure" shows the entry's own label.
+  `SkyConditions` (`SkyConditionState`: clear, cloudy, notVisible, unknown) say how the sky was for a stretch of time; `SkyCounts` count a night's
+  entries by what the log shows (`SkyCounts(counting:)`: planes include probable ones, satellites their flares; an entry the box explained and the
+  person was not sure of is `notSure`, one it did not explain stays `unexplained` whatever the person said; `explained` is the sum of all but the
+  unexplained); `SkyLearning` is how many planes and satellites the box has matched against what it needs (30 and 10); `SkyNightLog` is one night's or
+  day's log with its counts and the camera's aim; `SkyLogError` says in the person's words why the log cannot answer (no place, no folder, a night that
+  is not a date, no such entry, no picture).
+- **The engine.** `BridgeEngine.skyNightLog(cameraID:night:view:)` reads a log (`night` is the log's name, nil for the latest; `view` is `SkyLogView`,
+  the night from sunset to sunrise or the day from sunrise to sunset), `BridgeEngine.correctSkyEntry(cameraID:entryID:night:label:)` records a
+  person's word and answers the entry, `BridgeEngine.skyStill(cameraID:night:entryID:)` reads an entry's picture, and `BridgeEngine.findFlightFeeds()`
+  finds the flight feeds on the box's network, one address per host (the first that answers, in the finder's own order), looking for at most 20 s.
+  Until the detector runs (the tasks that follow) a log reports the aim as not fitted and nothing matched.
+
+Internal:
+- `SkyLogStore` (`Sky/SkyLogStore.swift`; the Sky Watcher's log beside the recordings, owned by `ArchiveStore.skyLog` next to the events). Layout:
+  `<recordings>/.sky/<CAMERA-UUID>/<yyyy-MM-dd>.jsonl`, one file per camera per night, mode 0600 in folders of 0700, append-only, one JSON object per line
+  with sorted keys and times in milliseconds: `{"entry": {…}, "v": 1}`, `{"correction": {"at", "label"}, "id", "v": 1}`, `{"ai": {…}, "id", "v": 1}`,
+  `{"alerted": true, "id", "v": 1}` and `{"conditions": {…}, "v": 1}`; an entry's picture is `<yyyy-MM-dd>/<id>.jpg` in the camera's folder (at most 2 MiB).
+  The first entry line of an id wins and the lines after it apply to it in order (the last correction and the last answer win; a line for an id the file
+  does not hold is ignored); a line that does not parse (a torn last line, a later version's, one over 64 KiB) is skipped, and the next append starts on
+  a line of its own. An entry is kept within bounds (its path thinned to 64 points, text cut to length, an end never before the start, a number that is
+  not one written as a word that reads back). Writes run on one serial queue and never wait for a drive: what cannot be written waits (at most 1,000
+  lines, and 16 MiB of pictures; the oldest go first, never the one being written; `retry()` tries again, and the janitor calls it every pass). A write that
+  finds a link where a folder or a file belongs is given up, not waited on; `.sky`, a camera's folder, a night's file and its folder of pictures are never
+  written, read or pruned through a link. A read sees what waits for the drive as well as the file. Nothing is kept while no place for recordings is chosen,
+  and the recordings folder itself is never made. Retention: `ArchiveStore.pruneEvents` also prunes `.sky` by the events' cutoff, deleting a night with its
+  pictures once its date and the day after it are over (the night named D lasts to the morning of D+1), so nothing newer than the cutoff goes.
+- Filing by time (Ruling S4; `SkyNight.logName(for:observer:zone:)`, `SkyNight.logSpan(named:view:observer:zone:)`, `SkyNight.latestLogName(view:now:observer:zone:)`):
+  a night (sunset to sunrise) is named by the local date of its sunset, a day (sunrise to sunset) by its own local date, and the day after night N is day
+  N+1. An entry is filed by its time, so a night is one file across midnight, and one file holds a day and the night that follows it: the log named D reaches
+  from the sunrise of D to the sunrise of D+1. The detector files with `logName(for:)`, not with `SkyNight.name(containing:)` (which names, in the day, the night
+  that ended that morning). Where the Sun does not set or rise there is no night, and a day is the local day.
+- `ArchiveStore.skyRead(_:)` runs a read of the log on the store's read queue with its deadline (a drive that is away is `ArchiveUnavailable.folderMissing`, one that
+  does not answer `ArchiveError.timedOut`); `BridgeEngine.skyLog`, `BridgeEngine.skyFolder` and `BridgeEngine.skyStatus(of:)` (the camera's aim and learning for a
+  log, which the detector's task fills in) are the engine's hooks.
+- Tests: `SkySettingsTests`, `SkyLogStoreTests`, `SkyFilingTests` and `SkyNightLogEngineTests`.
+
+
+## Additions beyond the contract: the sky detector's picture stream (2026-10-25, docs/CONTRACT_CHANGES.md)
+
+The pictures the sky detector looks at, in `Runtime/` (`SkyStream.swift`, `SkyMonitor.swift`, `CameraRuntime`'s "Sky detector" section). Public, in MediaCore:
+`MediaCodecs.makeSkyDecoder(format:maxOutputWidth:keepEvery:)`, `VideoDecoding.decodingPlace` and `DecodingPlace` (`gpu`, `software`). Internal:
+- `SkyStreamChoice` (`stream` sub or main, `analysisWidth`, `keepEvery`; `choose(sub:subFrameRate:main:mainFrameRate:)`): the sub stream when it is at least 1280
+  pixels wide, else the main stream, analysed at its own width but at most 1920, `keepEvery = max(1, round(frames per second / 5))`; nil while there is no picture
+  to choose from (a sub stream under 1280 is no help while the main stream has shown none). A rate that is not known is the one the resolution carries, else 1.
+- `SkyFrame` (`image` luma at the analysis width, `time` the stream's own presentation time in seconds, `wallClock` the encoded frame's, `clockOffset` to add to
+  it for the bridge's clock, `MediaHub.wallClockOffset`, and `pictureWidth` × `pictureHeight`, the size of the stream's own picture before it was scaled down: what the
+  camera model is about) and `SkyFrameSink` (`frame(_:)`, `gap(at:reason:)`), where the pictures go.
+- `SkyMonitor` (an actor; `start()`, `stop()`, `analysed`, `decoding`, `isFinished`): reads the hub from the newest keyframe on (`.prebuffer(.zero)`), makes a decoder with
+  `makeSkyDecoder` at a keyframe, keeps to five pictures a second from the pictures' times (a decoder that makes every picture, as the default does, is kept to the rate
+  here: pictures closer than 0.16 s are not both analysed, before the thumbnail is made), maps each picture's time back to the wall clock of its own encoded frame
+  (a picture may come out frames after the one it shows), and asks the picture for `grayThumbnail(maxWidth: analysisWidth)`. Nothing applies `PictureCorrection`:
+  the detector works on the camera's own picture. A **gap** is told once for a break: the hub's source was reconnected (`discontinuityCount`), the stream's time went back
+  or forward by more than 5 s, no picture for 5 s (once for a silence, however long), or the picture's codec or size changed; several together are one gap with all the
+  reasons. After a gap, and after a decoder that failed, the decoder starts again at the next keyframe. On a format change the monitor tells the sink and **ends**
+  (`isFinished`): its choice is for the old format, and the runtime chooses again. Stopping returns once nothing more can reach the sink.
+- `CameraRuntime.startSky(sink:)` (false: an on-demand camera, which sleeps, or a camera that is not running), `stopSky()`, `skyStream` (the choice in use, nil before a
+  picture to choose from), `skyDecoding` (`gpu`, `software`, or nil), `skyStill(around:)`. The main stream always runs. The sub stream's size is learned first: if the
+  hub does not remember it (or its rate, when it is wide enough) the runtime holds the sub stream (`acquireSub`) until it shows a picture, `subStreamStartWait` at most
+  (it goes offline: the main stream); a sub stream under 1280 is given back at once (`releaseSub`, the idle stop), and one that is watched is held for as long as the sky
+  runs (one user, shown by `subStreamUsers`). A look every 250 ms starts the monitor when there is a picture and a rate, replaces one that ended, and otherwise leaves
+  a running monitor alone; the sub stream is looked at again only then (when the sky starts and after a format change). The camera's `stop()` ends the sky; its detector
+  starts it again when the camera runs again. `skyStill(around:)` is the JPEG (full size, quality 0.8, the camera's own picture, no correction) of the main ring's keyframe
+  nearest a time, with that keyframe's wall clock (the same clock as `SkyFrame.wallClock`), on a decoder of its own, one at a time; the ring holds at least the last 12 s.
+- The decoder: `Codecs/README.md` of PlatformLinux. A stream the GPU's decoder cannot take (H.264 over 4096 wide or tall) or fails on is decoded in software, and
+  `skyDecoding` says so. Tests: `RuntimeSkyTests` (the choice, the monitor with fake codecs, the runtime on the demo camera) and PlatformLinux's `SkyDecoderTests`.
+
+## Additions beyond the contract: the sky detector at work (2026-10-25, docs/CONTRACT_CHANGES.md)
+
+The Sky Watcher running on a camera: `Sky/SkyCameraDetector.swift` (one camera's pipeline), `Sky/SkyService.swift` (the detectors, the flight history and the
+feed's poller), `Sky/SkyAimSearch.swift` (the wide search of a card), and the engine's side in `BridgeEngine+Sky.swift`. Public: `SkyCameraStatus` (`running`,
+`stream` `main` or `sub`, `analysisWidth`, `picturesPerSecond`, `decoding` `gpu` or `software`, `aim`, `learning`, `problem`, `profile`), `CameraStatus.sky` (nil while
+the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky Watcher is a plugin, id `sky`, off by default: `plugins["sky"]?.enabled`). Internal:
+- **When it runs** (`BridgeEngine.applySky`, Ruling S21): a detector runs for a camera only while the plugin is on, the camera's switch is on, the camera is turned on and
+  the bridge runs, and only with a valid place and a recordings folder; a battery camera never (it would be kept awake). Otherwise the camera's `status.sky` is nil (the
+  plugin or its switch off) or not running with a sentence in `problem` ("Set where the box is first.", "Choose a recordings folder first: the sky log is kept with the
+  recordings.", "Battery cameras can’t watch the sky: it would keep them awake."). It is applied at the start, after a change of the settings it needs
+  (`skyChanged`: the plugin, `sky`, the recordings folder, the zone: `PATCH plugins/sky` goes through `updateSettings`), of a camera (`addCamera`, `updateCamera`) and
+  when a runtime starts (`startRuntimes` gives it to the camera's detector, `startSkyIfWanted`, through `CameraRuntime.startSky(sink:)`); a pause stops every detector
+  (`stopAllSky`) and `removeCamera` deletes the camera's aim (`removeSky`). **Nothing is fetched while no detector runs**: `SkyService` polls the feed
+  (`FlightFeedPoller`, once a second) only while at least one runs, and stops it with the last.
+- **Each picture** (`SkyCameraDetector.frame`, on its actor): the mask (the ground, the horizon below 1° once the aim is good, the Sun within 15°; the Sun and the night
+  are worked out once a minute), the analyzer, the tracker on the box's clock (`SkyFrame.wallClock + clockOffset`). A whole-picture change ends every open track unlogged
+  (`endAll(dropped:)`, its drops thrown away too) and starts none for `quietAfterChange` (3 s on the stream's clock): one such jump made 49 lights on the owner's camera.
+  The drops of the tracker go to `droppedTrack(_:)`, a hook Tasks 9 and 10 fill. A gap (`gap(at:reason:)`) or a new runtime (`restarted()`) cuts what was open: a track
+  a gap cut is not logged, and a gap is never a track. The aim is read from a copy kept on the detector: a picture never waits for the store's fit.
+- **Each ended track** (a queue of its own, in order, off the picture path): measured with the current aim; a stationary one is left (Task 10's); `classify` (Phase 1:
+  `FlightMatcher` on the shared `FlightHistory`, off the actor; a match is `.plane`, or `.probablePlane` while the aim is rough, by `.flight`, with its call sign and
+  height, and its correspondences go to `SkyAimStore.add` in one call); nothing explains it: `.unexplained`, a candidate while learning, with a still of its middle
+  (`CameraRuntime.skyStill`, at most 1920 wide, `BridgeEngine.skyStillPicture`). Entries are filed with `SkyNight.logName` (Ruling S4), their path at most 64 points
+  evenly picked, their id the start's milliseconds and a random part in hex. The learning counts the planes matched with a good aim (ready at 30; satellites are not asked
+  for while no orbits are loaded). **Fewer junk entries** (Ruling S24, `SkyLightFilter`): a light that nothing explains and that crawls (a mean speed along its path under
+  0.05°/s while the lens's aim is good or precise, under 0.5 analysed pixels a second while it is rough: a star), or that never gets 12 analysed pixels from where it was
+  first seen (Ruling S28, `SkyLightFilter.reach`: a faint star or a wire whose centroid wanders; a light that turns back counts by its farthest point), is no entry and
+  has no picture, only a count that the
+  journal gets once a clock hour ("Sky Watcher, North Sky: 41 slow lights skipped this hour (likely stars)"; a plane is a plane whatever its speed), and a camera keeps at
+  most 30 pictures of unexplained lights in a clock hour of the box's zone: the later ones are logged without. **The pictures stay off a full drive** (Ruling S27):
+  one is taken only while the recordings drive has at least twice its floor free (`SkyLightFilter.stillsHaveRoom`, from `nvr.storageStatus()`; below the floor every
+  camera's recording pauses, and the size rule never counts what the sky log keeps), a picture that cannot be made 1920 wide is not kept at full size
+  (`BridgeEngine.skyStillJPEG`), and each camera's pictures stay under 2 GiB, the oldest nights' folders going first (`SkyLogStore.pruneStills`, from the retention
+  janitor every 10 minutes; never the logs or the recordings, never the newest night, no link followed; an entry whose picture went answers "There is no picture of it").
+- **The conditions** (`SkyConditionsRecorder`): the visible share once a minute (`SkyVisibility`): clear at 0.6 or more, not visible below 0.3, cloudy between, unknown when
+  not known; a span is written when the state changes or once it has lasted an hour, and a silence of more than 5 minutes ends it at its last look.
+- **The status** (`SkyCameraDetector.status`; `skyCameraStatus` adds the flight feed's trouble as `problem` when the detector has none): `running` while a picture came in
+  the last 10 s, the stream and where it is decoded from the pictures (`SkyFrame.stream`, `SkyFrame.decoding`, set by `SkyMonitor`), `picturesPerSecond` over the last 25
+  pictures' stream times since the last break, to a tenth, the aim and the learning. The log's `aim` and `learning` are the detector's (`skyStatus(of:)`).
+- **An aim far off** (Ruling S18; `SkyMatchWatch`, `SkyAimSearch`): once a minute the feed's aircraft that the aim puts in the view (within 60 km, 2° up, above the
+  ground; not while the sky is known not visible) are noted. When planes have been in view for 2 hours (5 aircraft at least), 5 lights or more were followed and none
+  matched, `aim.note` says "Planes are flying through the view but none match: check which way the camera faces" (also the sign of a camera that moved), until a match.
+  While the aim is still rough then, once an hour, the unexplained tracks of the last 2 hours (at most 40, 16 pictures each, with up to 40 aircraft within 100 km
+  placed at their times; kept in memory only) are matched again through the cards of facing ±45° in 15° steps and tilt ±30° in 10° steps (within 0…90°), off the
+  actor. A card that explains at least 5 aircraft and twice as many as the best card not next to it on the grid becomes the aim's start (`SkyAimStore.reset` with the
+  note "The planes fit the camera facing about 30° further right and tilted 10° higher than set: it aims from there now.", then `setStart`); it is kept until the person
+  changes the card. **A camera that moved** (Ruling S25): the aim starts again from the card, rough as a new camera's is (so that the wide search can run), when the
+  card's facing, tilt or lenses change through the settings update (the ground and the night profile change nothing of where it looks), or when the aim is good or precise
+  and the stretch above has held its 2 hours; the journal says so ("Sky Watcher, North Sky: no planes matched for 2 hours with the aim good; starting the aim again") and
+  so does `aim.note`.
+- **Stopping** (Ruling S27; `SkyCameraDetector.stop`, `SkyService`, `BridgeEngine.stopAllSky`): the engine stops the detectors with its locks held, and the daemon gives the
+  whole engine ten seconds, so a stop is quick. The lights that wait in the queue are dropped, none takes a picture once the detector is told to stop, and the light the
+  queue is at work on gets one second (a keyframe's decode can stall for ten) and no longer; what it leaves unfinished can write nothing of the aim (`SkyAimStore.close`).
+  `SkyService` stops its detectors together, `stopAllSky` is bounded to 2 s, and `stopServices` closes the recordings (`nvr.detachAll`) before it stops the sky.
+- **Kept per camera** in `<data>/sky/<camera-uuid>/` (`SkyService.directory(of:in:)`, beside the aim's `aim.json` and `matches.jsonl`): `detector.json` (0600) with the
+  visibility's memory, the open conditions span, the planes learned and the card the search found with the card it was found for. No place is in it; nothing logged names
+  the place. Kept when the detector is turned off; deleted with the camera.
+- Tests: `SkyDetectorTests` (synthetic pictures through the whole pipeline: a matched plane, an unexplained light with its still, a gap, a brightness jump, the status, the
+  conditions; the aim improved by twelve planes and kept over a restart; the note and the wide search; in `SkyDetectorPolicyTests.swift` and `SkyStillsAndStopTests.swift`, Rulings S24, S25 and S27) and `SkyServiceTests` (the feed asked only while a detector runs,
+  the aim kept and removed; on macOS `SkyEngineTests`: the switch, the plugin both ways and across a pause, a cleared place or folder, a removed camera).

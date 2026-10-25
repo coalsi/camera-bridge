@@ -57,7 +57,7 @@ final class FakeWyzeServer: WyzeTransport, Sendable {
         let list = await session.get("/api/v1/plugins")
         #expect(list.status == 200)
         let plugins = try #require(list.json["plugins"] as? [[String: Any]])
-        #expect(plugins.compactMap { $0["id"] as? String } == ["wyze", "eufy"])
+        #expect(plugins.compactMap { $0["id"] as? String } == ["wyze", "eufy", "sky"])
         #expect(plugins.first?["enabled"] as? Bool == false)
         let on = await session.send("PATCH", "/api/v1/plugins/wyze", json: ["enabled": true])
         #expect(on.status == 200)

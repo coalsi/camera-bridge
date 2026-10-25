@@ -1,7 +1,8 @@
 // The dev archive server: linux/web served as camerabridged serves it, the session, CSRF and header rules of BridgeWeb/WebApp.swift,
 // enough of the existing API for the page to run, and the NVR routes (nvr-routes.mjs) over the virtual archive. Dependency free.
 //
-// Not the daemon: one process, one fake bridge with nine cameras, a fixed development password, everything in memory.
+// Not the daemon: one process, one fake bridge with nine cameras, a fixed development password, everything in memory. Sky Watcher's routes and
+// its made-up night are in sky.mjs.
 
 import { randomBytes } from 'node:crypto';
 import http from 'node:http';
@@ -100,6 +101,8 @@ export function createDevServer(options) {
 
   function patchCameraSettings(ctx) {
     const camera = findCamera(ctx);
+    // Sky Watcher (sky.mjs): checked first, so that a refusal changes nothing.
+    if (ctx.body.skyDetector !== undefined) state.sky.patchCamera(camera, ctx.body.skyDetector, { hasFolder: state.settings.nvrFolder !== null });
     for (const name of EDITABLE) if (ctx.body[name] !== undefined) camera.configuration[name] = ctx.body[name];
     for (const name of ['sensors', 'timestampOverlay']) if (ctx.body[name] && typeof ctx.body[name] === 'object') Object.assign(camera.configuration[name], ctx.body[name]);
     return json(state.cameraResource(camera));
@@ -239,8 +242,9 @@ export function createDevServer(options) {
     ['POST', 'cameras/:id/night-vision', 'session', true, nightVision],
     ['POST', 'cameras/:id/security/check', 'session', false, (ctx) => json(checkSecurity(findCamera(ctx), state.serverNow()))],
     ['POST', 'cameras/:id/pan-tilt', 'session', true, panTilt],
-    ['GET', 'settings', 'session', false, () => json({ bridgeName: config.bridgeName, ...settingsBody })],
+    ['GET', 'settings', 'session', false, () => json({ bridgeName: config.bridgeName, ...settingsBody, sky: state.sky.settingsView() })],
     ['PATCH', 'settings', 'session', true, (ctx) => {
+      if (ctx.body.sky !== undefined) state.sky.patchSettings(ctx.body.sky);
       if (typeof ctx.body.bridgeName === 'string') config.bridgeName = ctx.body.bridgeName.slice(0, 60);
       for (const name of Object.keys(settingsBody)) if (name in ctx.body && name !== 'cameraOrder' && name !== 'webhookToken' && name !== 'webhookProblem') settingsBody[name] = ctx.body[name];
       if ('cameraOrder' in ctx.body) {
@@ -249,8 +253,16 @@ export function createDevServer(options) {
         const known = new Set(state.cameraList().map((camera) => camera.configuration.id));
         settingsBody.cameraOrder = [...new Set(ctx.body.cameraOrder)].filter((id) => known.has(id));
       }
-      return json({ bridgeName: config.bridgeName, ...settingsBody });
+      return json({ bridgeName: config.bridgeName, ...settingsBody, sky: state.sky.settingsView() });
     }],
+    // Plugins (BridgeWeb/WebApp+Plugins.swift): this server has one, Sky Watcher, with its switch (sky.mjs); Wyze and eufy need their clouds.
+    ['GET', 'plugins', 'session', false, () => json({ plugins: state.sky.pluginList() })],
+    ['PATCH', 'plugins/:id', 'session', true, (ctx) => json({ plugins: state.sky.patchPlugin(ctx.params.id, ctx.body) })],
+    // Sky Watcher (BridgeWeb/WebApp+Sky.swift; sky.mjs has the made-up night): the log, a still, a correction, the flight feeds on the network.
+    ['GET', 'sky/cameras/:id/night', 'session', false, (ctx) => json(state.sky.night(findCamera(ctx), ctx.query, state.serverNow()))],
+    ['GET', 'sky/cameras/:id/entries/:eid/still', 'session', false, (ctx) => state.sky.still(findCamera(ctx), ctx.params.eid, ctx.query, state.serverNow())],
+    ['POST', 'sky/cameras/:id/entries/:eid/correction', 'session', true, (ctx) => json(state.sky.correct(findCamera(ctx), ctx.params.eid, ctx.body, state.serverNow()))],
+    ['POST', 'sky/feeds/find', 'session', false, () => json({ feeds: [...state.sky.feeds] })],
     // Notifications (BridgeWeb/WebApp+Notifications.swift): the log of every notice, the once-only claim for a toast, the read marker.
     ['GET', 'notifications', 'session', false, () => { state.notifications.record(state.notices(), state.serverNow()); return json({ unread: state.notifications.unread, notifications: state.notifications.list }); }],
     ['POST', 'notifications/shown', 'session', false, () => {
@@ -354,6 +366,9 @@ export function createDevServer(options) {
       const camera = state.cameraList().find((c) => c.definition.id === input.id);
       if (!camera) throw ApiError.invalid('No camera has that id.', 'id');
       setNightVisionFailure(camera, input.fail);
+    } else if (url.pathname === '/__dev/sky') {
+      // What the box reports about Sky Watcher: {plugin: on | off, aim: rough | good | mixed | precise, learning: learning | ready, problem, stream: main | sub, location, feeds}.
+      state.sky.control(input);
     } else if (url.pathname === '/__dev/secure') {
       if (['ready', 'waiting', 'error', 'off'].includes(input.state)) secure.state = input.state;
       if (['open', 'blocked'].includes(input.router)) { secure.router = input.router; secure.rebind = null; }

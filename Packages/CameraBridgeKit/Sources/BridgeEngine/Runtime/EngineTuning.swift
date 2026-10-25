@@ -49,6 +49,10 @@ struct EngineTuning: Sendable {
     var driverFactory: DriverFactory?
     /// Replaces the engine's go2rtc helper manager (tests: a fake that serves a local RTSP source).
     var go2rtc: (any Go2RTCStreamProviding)?
+    /// Replaces the Sky Watcher's downloads (`URLSessionSkyHTTP`: the flight feed) (tests: a fake feed, so nothing leaves the machine).
+    var skyHTTP: (any SkyHTTP)?
+    /// How often the Sky Watcher asks the flight feed (`SkyService.pollInterval`; tests shorten it).
+    var skyPollInterval: Duration = SkyService.pollInterval
     /// Replaces this machine's interface addresses where "Set up for Camera Bridge" looks for the bridge's own (tests: documentation
     /// addresses, never the machine's real LAN address).
     var interfaceAddresses: (@Sendable () -> [InterfaceAddress])?

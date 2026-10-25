@@ -34,6 +34,13 @@ enum PluginCatalog {
             caution: "eufy has no official way in for other apps: this uses the same connection as the eufy app, through the open-source eufy SDK, and can stop working when eufy changes it.",
             needsInternet: true,
             internetNote: "Signing in, the camera’s connection keys and motion alerts go through eufy’s cloud. Video goes over your network when it can, but without the internet the camera stops connecting after a while."),
+        // No account, no sign-in and no sync: the switch, and the page at #/sky.
+        Descriptor(
+            id: SkyWatcherPlugin.id, name: "Sky Watcher",
+            summary: "Watches the sky with a camera pointed up and keeps a log of planes, satellites, meteors and anything it can’t explain.",
+            needs: "A camera that looks at the sky, and a recordings folder for the sky log.",
+            needsInternet: false,
+            internetNote: "Works without the internet: planes come from a flight receiver on your network. When the internet is there, Camera Bridge can also download satellite orbits once a day and ask free online services for flights and weather in a wide area around you, never your exact spot. Nothing leaves the box while Sky Watcher is off."),
     ]
 
     static func descriptor(id: String) -> Descriptor? { all.first { $0.id == id } }

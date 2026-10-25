@@ -553,23 +553,38 @@ extension ArchiveStore {
     }
 
     /// Deletes the event days the recordings' rules let go: days that ended before the keep time (not while the clock looks wrong, like the age
-    /// rule), and days before the newest file the size rule deleted. Then writes what waited for the drive.
+    /// rule), and days before the newest file the size rule deleted; the Sky Watcher's nights go by the same cutoff (`SkyLogStore.prune`). Each
+    /// camera's pictures of the sky are kept under their limit, the oldest nights' going first (`SkyLogStore.pruneStills`, Ruling S27: it reads
+    /// the size of every picture, so it is done every ten minutes, not at every pass). Then writes what waited for the drive.
     func pruneEvents(_ run: ArchiveRun) async {
-        let plan = state.withLock { state -> (folder: URL, cutoffMs: Int64)? in
+        let plan = state.withLock { state -> (folder: URL, cutoffMs: Int64?, stillsDue: Bool)? in
             guard state.isCurrent(run), state.isReady, let folder = state.folder, state.pause != .folderMissing, !state.stalled else { return nil }
-            let nowMs = ArchiveTime.ms(tuning.now())
+            let date = tuning.now()
+            let nowMs = ArchiveTime.ms(date)
             var cutoff: Int64?
             if !(state.catalog.newestStartMs.map { $0 > nowMs + Int64(ArchiveConstants.futureFileGuard * 1_000) } ?? false) {
                 cutoff = nowMs - Int64(state.keepDays) * ArchiveEventLog.dayMs
             }
             if let size = state.eventSizeCutoffMs { cutoff = max(cutoff ?? size, size) }
-            return cutoff.map { (folder, $0) }
+            let due = state.skyStillsPrunedAt.map { date < $0 || date.timeIntervalSince($0) >= tuning.skyStillPruneInterval } ?? true
+            if due { state.skyStillsPrunedAt = date }
+            return (folder, cutoff, due)
         }
         eventLog.retry()
+        skyLog.retry()
         guard let plan else { return }
         let remove = tuning.removeFile
-        let removed = await onControl { ArchiveEventLog.prune(folder: plan.folder, cutoffMs: plan.cutoffMs, remove: remove) }
-        if removed > 0 { log.info("Deleted \(removed) days of old camera events") }
+        if let cutoffMs = plan.cutoffMs {
+            let removed = await onControl { ArchiveEventLog.prune(folder: plan.folder, cutoffMs: cutoffMs, remove: remove) }
+            if removed > 0 { log.info("Deleted \(removed) days of old camera events") }
+            let nights = await onControl { SkyLogStore.prune(folder: plan.folder, cutoffMs: cutoffMs, remove: remove) }
+            if nights > 0 { log.info("Deleted \(nights) nights of old Sky Watcher logs") }
+        }
+        if plan.stillsDue {
+            let limit = tuning.skyStillBytesPerCamera
+            let trimmed = await onControl { SkyLogStore.pruneStills(folder: plan.folder, maximumBytes: limit, remove: remove) }
+            if trimmed.nights > 0 { log.info("Deleted the pictures of \(trimmed.nights) old Sky Watcher nights to keep each camera's under \(limit / 1_073_741_824) GiB") }
+        }
     }
 }
 

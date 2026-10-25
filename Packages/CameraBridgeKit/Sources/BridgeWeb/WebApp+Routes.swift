@@ -90,7 +90,7 @@ extension WebApp {
         Route("POST", "system/ssh", takesBody: true) { app, ctx in try await app.systemSSH(ctx) },
         Route("POST", "system/auto-update", takesBody: true) { app, ctx in try await app.systemAutomaticUpdates(ctx) },
         Route("POST", "system/factory-reset", takesBody: true) { app, ctx in try await app.systemFactoryReset(ctx) },
-    ] + archiveRoutes + cameraSetupRoutes + aiRoutes + notificationRoutes
+    ] + archiveRoutes + cameraSetupRoutes + aiRoutes + notificationRoutes + skyRoutes
 
     // MARK: Status and session
 
@@ -404,12 +404,15 @@ extension WebApp {
         /// The whole value (both sliders); numbers past the limits are clamped by `PictureCorrection`, not refused.
         var pictureCorrection: PictureCorrection?
         var aiDescriptions: Bool?
+        /// The Sky Watcher's switch and aim (`WebApp+Sky.swift`); a field left out stays.
+        var skyDetector: SkyDetectorPatch?
     }
 
     func patchCamera(_ ctx: RequestContext) async throws -> HTTPResponse {
         let id = try ctx.uuid("id")
         let patch = try decode(CameraPatch.self, from: ctx)
-        guard var camera = await backend.overview().configurations.first(where: { $0.id == id }) else {
+        let overview = await backend.overview()
+        guard var camera = overview.configurations.first(where: { $0.id == id }) else {
             throw APIError.notFound("There is no camera with this identifier.")
         }
         if let name = patch.name {
@@ -485,6 +488,7 @@ extension WebApp {
         if let value = patch.recordingStreamMode { camera.recordingStreamMode = value }
         if let value = patch.recordingQualityMode { camera.recordingQualityMode = value }
         if let value = patch.aiDescriptions { camera.aiDescriptions = value }
+        if let sky = patch.skyDetector { camera.skyDetector = try skyDetectorSettings(applying: sky, to: camera, bridge: overview.settings) }
         if let overlay = patch.timestampOverlay {
             if let value = overlay.enabled { camera.timestampOverlay.enabled = value }
             if let value = overlay.position { camera.timestampOverlay.position = value }

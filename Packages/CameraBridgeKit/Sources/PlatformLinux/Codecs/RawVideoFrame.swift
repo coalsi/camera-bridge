@@ -32,6 +32,14 @@ public struct RawVideoFrame: DecodedVideoFrame, Sendable {
         guard maxWidth > 0, isComplete else { return nil }
         let outWidth = min(maxWidth, width)
         let outHeight = max(1, Int((Double(height) * Double(outWidth) / Double(width)).rounded()))
+        if outWidth == width, outHeight == height {
+            // The picture's own size (the sky detector's, already scaled by the decoder): its luma plane, copied whole.
+            let count = width * height
+            let luma = [UInt8](unsafeUninitializedCapacity: count) { buffer, initialized in
+                initialized = pixels.copyBytes(to: buffer, count: count)
+            }
+            return GrayImage(width: width, height: height, pixels: luma)
+        }
         let columns = Self.blockBounds(count: outWidth, source: width)
         let rows = Self.blockBounds(count: outHeight, source: height)
         var out = [UInt8](repeating: 0, count: outWidth * outHeight)
