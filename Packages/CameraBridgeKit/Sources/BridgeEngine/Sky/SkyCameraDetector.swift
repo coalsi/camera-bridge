@@ -575,7 +575,7 @@ actor SkyCameraDetector: SkyFrameSink {
             }
         } else if SkyLightFilter.isSlow(measures, pixelsPerSecond: SkyLightFilter.pixelSpeed(of: track, analysisWidth: analysisWidth, analysisHeight: analysisHeight),
                                         aimIsGood: aimIsGood(for: track))
-                    || SkyLightFilter.reach(of: track, analysisWidth: analysisWidth, analysisHeight: analysisHeight) < SkyLightFilter.minimumReachPixels {
+                    || SkyLightFilter.wandersInPlace(track, analysisWidth: analysisWidth, analysisHeight: analysisHeight) {
             return Classified(entry: entry, skipped: true)   // nothing explains it, and it crawls or only wanders in place: not a light worth an entry
         } else {
             entry.candidate = !learning.ready

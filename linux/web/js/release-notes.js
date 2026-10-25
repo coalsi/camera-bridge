@@ -15,6 +15,14 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.123',
+    date: '2026-10-25',
+    title: 'Sky Watcher keeps the lights that hold still',
+    items: [
+      'A bright light that rises, holds for a few seconds and fades on one spot is now kept in the sky log, however little it moves. Faint stars that only wobble in place are still left out.',
+    ],
+  },
+  {
     version: '0.1.122',
     date: '2026-10-25',
     title: 'Sky Watcher: a log of what crosses your sky',

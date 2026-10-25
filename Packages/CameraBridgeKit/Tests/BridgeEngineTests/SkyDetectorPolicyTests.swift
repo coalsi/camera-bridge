@@ -114,6 +114,16 @@ extension SkyDetectorTests {
         }, streakBorn: false)
         #expect(abs(SkyLightFilter.reach(of: back, analysisWidth: 640, analysisHeight: 284) - 30) < 0.001)
         #expect(SkyLightFilter.reach(of: SkyTrack(id: UUID(), samples: [], streakBorn: false), analysisWidth: 640, analysisHeight: 284) == 0)
+        // Wandering in place is a faint light that never got 12 px away; a bright one (6σ or more at its strongest) is kept however little it moved,
+        // like the overnight test's lights that rose, held and faded on one spot (Ruling S29).
+        #expect(SkyLightFilter.brightSignificance == 6)
+        #expect(SkyLightFilter.wandersInPlace(wander, analysisWidth: 640, analysisHeight: 284))
+        var flare = wander
+        flare.samples[50].significance = 6
+        #expect(!SkyLightFilter.wandersInPlace(flare, analysisWidth: 640, analysisHeight: 284))
+        flare.samples[50].significance = 5.9
+        #expect(SkyLightFilter.wandersInPlace(flare, analysisWidth: 640, analysisHeight: 284))
+        #expect(!SkyLightFilter.wandersInPlace(back, analysisWidth: 640, analysisHeight: 284), "a light that got 30 px away moved")
     }
 
     @Test func aLightsSpeedInAnalysedPixelsIsItsPathOverItsTime() {

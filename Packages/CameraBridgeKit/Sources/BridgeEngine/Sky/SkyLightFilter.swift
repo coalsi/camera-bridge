@@ -25,6 +25,10 @@ enum SkyLightFilter {
     /// speed (Ruling S28): a faint star or a wire whose centroid wanders a few pixels reads 0.2 to 0.3°/s along its path. Three times the
     /// measurer's noise floor. A light that turns back on itself counts by the farthest point it reached.
     static let minimumReachPixels = 3 * TrackMeasurer.noisePixels
+    /// …unless it is bright (Ruling S29): a light whose strongest detection stands at least this many times the noise above the sky is kept
+    /// however little it moved. The overnight test's strangest lights rose, held for seconds and faded on one spot; faint stars and wires never
+    /// stand this far above the noise (and a bright star is on the slow background, which the tracker already drops).
+    static let brightSignificance = 6.0
     /// A camera keeps at most this many pictures of unexplained lights in a clock hour.
     static let stillsPerHour = 30
     /// A camera's pictures stay under this many bytes on the recordings drive.
@@ -73,6 +77,14 @@ enum SkyLightFilter {
         guard let first = samples.first else { return 0 }
         let across = Double(max(1, analysisWidth)), down = Double(max(1, analysisHeight))
         return samples.reduce(0) { max($0, hypot(($1.point.x - first.point.x) * across, ($1.point.y - first.point.y) * down)) }
+    }
+
+    /// Whether `track` only wandered in place: it never got `minimumReachPixels` from its first point, and it was never bright
+    /// (`brightSignificance`).
+    static func wandersInPlace(_ track: SkyTrack, analysisWidth: Int, analysisHeight: Int) -> Bool {
+        guard reach(of: track, analysisWidth: analysisWidth, analysisHeight: analysisHeight) < minimumReachPixels else { return false }
+        let peak = track.samples.map(\.significance).filter(\.isFinite).max() ?? 0
+        return peak < brightSignificance
     }
 
     /// When the clock hour that holds `date` began, in `zone` (a person's hour: it begins at :30 in a zone that is half an hour off).

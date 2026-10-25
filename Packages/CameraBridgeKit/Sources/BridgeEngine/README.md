@@ -1419,7 +1419,8 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   evenly picked, their id the start's milliseconds and a random part in hex. The learning counts the planes matched with a good aim (ready at 30; satellites are not asked
   for while no orbits are loaded). **Fewer junk entries** (Ruling S24, `SkyLightFilter`): a light that nothing explains and that crawls (a mean speed along its path under
   0.05°/s while the lens's aim is good or precise, under 0.5 analysed pixels a second while it is rough: a star), or that never gets 12 analysed pixels from where it was
-  first seen (Ruling S28, `SkyLightFilter.reach`: a faint star or a wire whose centroid wanders; a light that turns back counts by its farthest point), is no entry and
+  first seen while it is never bright (Rulings S28 and S29, `SkyLightFilter.wandersInPlace`: a faint star or a wire whose centroid wanders; a light that turns back
+  counts by its farthest point, and one that stands 6σ or more above the sky at its strongest is kept however little it moved), is no entry and
   has no picture, only a count that the
   journal gets once a clock hour ("Sky Watcher, North Sky: 41 slow lights skipped this hour (likely stars)"; a plane is a plane whatever its speed), and a camera keeps at
   most 30 pictures of unexplained lights in a clock hour of the box's zone: the later ones are logged without. **The pictures stay off a full drive** (Ruling S27):
