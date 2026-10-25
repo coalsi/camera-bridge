@@ -29,7 +29,7 @@ body:
     attributes:
       label: Camera Bridge OS version
       description: "The build number on the About page of the web interface (Camera Bridge OS is a beta, so the build matters)."
-      placeholder: "0.1.120"
+      placeholder: "0.1.121"
     validations:
       required: true
   - type: textarea

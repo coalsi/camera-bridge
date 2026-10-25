@@ -1,3 +1,4 @@
+import BridgeSupport
 import FMP4
 import Foundation
 import MediaCore
@@ -43,6 +44,99 @@ import Testing
         await rig.feed(RecorderFixtures.videoFrames(401..<450, gop: 60), to: recorder)
         await recorder.stop()
         #expect(rig.target.openedSegments.count == 3 && rig.target.closedSegments.count == 3)
+    }
+
+    private static func decodeTimes(_ file: RecordedFile) throws -> [Int64] {
+        try file.videoFrames().map { ($0.dts ?? $0.pts).converted(to: 90_000).value }
+    }
+
+    @Test func aFrameAFewTicksBehindTheLastIsKeptWithATimeThatKeepsIncreasing() async throws {
+        // Jitter: a frame that arrives late with the decode time of an earlier moment (0.13 s behind) does not end the file.
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, gop: 60), to: recorder)
+        await rig.feed([RecorderFixtures.video(95, gop: 60), RecorderFixtures.video(95, gop: 60)], to: recorder)      // twice: the second is a repeat of the first
+        await rig.feed(RecorderFixtures.videoFrames(101..<200, gop: 60), to: recorder)
+        await recorder.stop()
+        let segments = rig.target.openedSegments
+        #expect(segments.count == 1 && rig.target.closedSegments.count == 1, "\(segments)")
+        guard segments.count == 1 else { return }
+        let file = try RecordedFile(rig, segment: item(segments, 0))
+        #expect(file.frameCount == 100 + 2 + 99, "no frame is lost")
+        let times = try Self.decodeTimes(file)
+        #expect(zip(times, times.dropFirst()).allSatisfy { $0 < $1 }, "decode times strictly increase")
+        #expect(await recorder.nudges == 2)
+        #expect(try file.rescanned() == file.index)
+    }
+
+    private final class Collected: LogSink {
+        let entries = Box<[LogEntry]>([])
+        func record(_ entry: LogEntry) { entries.update { $0.append(entry) } }
+    }
+
+    @Test func jitterIsWarnedAboutOnceNamingTheCamera() async throws {
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let sink = Collected()
+        let token = LogHub.addSink(sink)
+        defer { LogHub.removeSink(token) }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, gop: 60), to: recorder)
+        await rig.feed([RecorderFixtures.video(95, gop: 60), RecorderFixtures.video(96, gop: 60)], to: recorder)         // two nudges
+        await rig.feed(RecorderFixtures.videoFrames(190..<200, gop: 60), to: recorder)                                    // and a gap
+        await recorder.stop()
+        let warnings = sink.entries.value.filter { $0.cameraID == rig.camera.id && $0.level == .warning && $0.message.contains("arrives unevenly") }
+        #expect(warnings.count == 1 && warnings.first?.message == "Driveway: its video arrives unevenly (network?)")
+    }
+
+    @Test func aBackwardStepOverHalfASecondStillEndsTheFile() async throws {
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, gop: 60), to: recorder)
+        await rig.feed([RecorderFixtures.video(60, gop: 60)], to: recorder)                         // 1.3 s behind
+        await rig.feed(RecorderFixtures.videoFrames(61..<90, gop: 60), to: recorder)
+        await recorder.stop()
+        #expect(rig.target.openedSegments.count == 2)
+        #expect(await recorder.nudges == 0)
+    }
+
+    @Test func aGapOfAFewSecondsKeepsTheFileAndTheTimeline() async throws {
+        // Lost packets: 3 s without a frame, then the stream goes on. One file; the picture before the gap lasts through it.
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, gop: 60), to: recorder)
+        await rig.feed(RecorderFixtures.videoFrames(190..<300, gop: 60), to: recorder)             // frame 100 is at 3.3 s, 190 at 6.3 s
+        await recorder.stop()
+        let segments = rig.target.openedSegments
+        #expect(segments.count == 1, "\(segments)")
+        guard segments.count == 1 else { return }
+        let file = try RecordedFile(rig, segment: item(segments, 0))
+        #expect(file.frameCount == 100 + 110)
+        let times = try Self.decodeTimes(file)
+        #expect(zip(times, times.dropFirst()).allSatisfy { $0 < $1 })
+        #expect((times.last ?? 0) - (times.first ?? 0) == 299 * 3_000, "the media time follows the camera's, the gap is in it")
+        #expect(await recorder.gaps == 1)
+        #expect(try file.rescanned() == file.index)
+    }
+
+    @Test func aGapOfSixSecondsIsAClockJump() async throws {
+        let rig = try RecorderRig()
+        defer { rig.root.remove() }
+        let recorder = rig.recorder()
+        await recorder.start()
+        await rig.feed(RecorderFixtures.videoFrames(0..<100, gop: 60), to: recorder)
+        await rig.feed([RecorderFixtures.video(300, gop: 60)], to: recorder)                         // 6.7 s later
+        await rig.feed(RecorderFixtures.videoFrames(301..<360, gop: 60), to: recorder)
+        await recorder.stop()
+        #expect(rig.target.openedSegments.count == 2)
+        #expect(await recorder.gaps == 0)
     }
 
     /// Frames `range` of a camera whose decode times started again at 0 and whose wall clock says the first of them came at `base + wallStart`.

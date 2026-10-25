@@ -588,9 +588,13 @@ struct Rig {
         #expect(rig.system.setupHotspot() == SetupHotspot(ssid: "CameraBridge-1A2B", address: "10.42.0.1"))
         let report = await rig.system.wifi()
         #expect(report.state == "hotspot" && report.saved == ["Home"] && report.lastError == "Couldn’t join “Home”." && report.ssid == nil && report.hasWifi)
-        rig.helper?.writeStatus("wifi", "online", "On the network.", extra: ["ssid": "Home", "hotspot": NSNull(), "saved": ["Home"], "hasWifi": true, "wired": false])
+        rig.helper?.writeStatus("wifi", "online", "On the network.", extra: ["ssid": "Home", "hotspot": NSNull(), "saved": ["Home"], "hasWifi": true, "wired": false,
+                                                                      "band": "2.4 GHz", "frequency": 2437])
         #expect(rig.system.setupHotspot() == nil)
         #expect(await rig.system.wifi().ssid == "Home")
+        #expect(await rig.system.wifi().band == "2.4 GHz", "the radio the box is on comes through")
+        rig.helper?.writeStatus("wifi", "online", "On the network.", extra: ["ssid": "Home", "hotspot": NSNull(), "saved": ["Home"], "hasWifi": true, "wired": false, "band": NSNull()])
+        #expect(await rig.system.wifi().band == nil, "an unknown radio is nil")
     }
 
     @Test func joiningAWifiNetworkChecksTheNameAndThePasswordAndRestarts() async throws {

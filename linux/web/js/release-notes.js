@@ -15,6 +15,15 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.121',
+    date: '2026-10-25',
+    title: 'Recordings that ride out a shaky network, and Wi-Fi on 5 GHz',
+    items: [
+      'A camera whose video arrives unevenly (a busy Wi-Fi, a few lost packets) no longer has its recording cut into many short files, and its sound converter keeps running. Only a real jump of the camera’s clock starts a new file. The log says when a camera’s video arrives unevenly.',
+      'When your Wi-Fi offers 5 GHz with a good signal, the bridge moves to it (and back to it after a restart), so many cameras fit. The System page shows the band and warns on 2.4 GHz. An Ethernet cable is still best.',
+    ],
+  },
+  {
     version: '0.1.120',
     date: '2026-10-24',
     title: 'Precise playback, time-lapse, and a clip range you can drag',

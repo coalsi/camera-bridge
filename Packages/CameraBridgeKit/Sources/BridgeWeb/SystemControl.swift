@@ -166,9 +166,11 @@ public struct WifiReport: Codable, Sendable, Equatable {
     public var wired: Bool
     /// The networks seen at the last look, strongest first.
     public var networks: [WifiNetwork]
+    /// The radio the box is joined on: "2.4 GHz", "5 GHz" or "6 GHz"; nil when it is not joined or the system does not say.
+    public var band: String?
 
     public init(state: String, message: String, ssid: String? = nil, hotspot: SetupHotspot? = nil, saved: [String] = [], lastError: String? = nil,
-                hasWifi: Bool = false, wired: Bool = false, networks: [WifiNetwork] = []) {
+                hasWifi: Bool = false, wired: Bool = false, networks: [WifiNetwork] = [], band: String? = nil) {
         self.state = state
         self.message = message
         self.ssid = ssid
@@ -178,6 +180,7 @@ public struct WifiReport: Codable, Sendable, Equatable {
         self.hasWifi = hasWifi
         self.wired = wired
         self.networks = networks
+        self.band = band
     }
 }
 

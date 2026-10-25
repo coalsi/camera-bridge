@@ -1,0 +1,41 @@
+#!/bin/bash
+# The Wi-Fi band logic of cb-wifi, as filters with no side effects (no root, no radio), so it can be tested on its own.
+#
+#   cb-wifi-pick --band MHZ                 "2.4 GHz", "5 GHz" or "6 GHz" for a frequency in MHz; nothing for anything else
+#   cb-wifi-pick --parse                    `iw dev IFACE scan dump` on stdin -> one line per access point: BSSID, MHz, dBm, name (tab-separated)
+#   cb-wifi-pick --pick SSID BSSID MHZ      that list on stdin, the network the box is on (name, access point, frequency) -> the BSSID of the
+#                                           access point of the same network on 5 or 6 GHz to move to, or nothing. Only a box on 2.4 GHz moves;
+#                                           the access point must be strong enough (CB_WIFI_MIN_DBM, default -70) and the strongest of them.
+#
+# The box is never locked to a band: this only names a better access point of the network it is already on; cb-wifi asks NetworkManager
+# to join it once, and the saved network stays free to join any of its access points (2.4 GHz again, when 5 GHz is not usable).
+set -euo pipefail
+
+min_dbm=${CB_WIFI_MIN_DBM:--70}
+
+case ${1:-} in
+    --band)
+        awk -v mhz="${2:-0}" 'BEGIN {
+            if (mhz >= 2400 && mhz <= 2500) print "2.4 GHz"
+            else if (mhz >= 4900 && mhz <= 5895) print "5 GHz"
+            else if (mhz >= 5925 && mhz <= 7125) print "6 GHz"
+        }'
+        ;;
+    --parse)
+        awk '
+            function flush() { if (bssid != "" && freq != "" && signal != "") printf "%s\t%d\t%d\t%s\n", bssid, freq, signal, ssid }
+            /^BSS / { flush(); bssid = $2; sub(/\(.*/, "", bssid); freq = ""; signal = ""; ssid = ""; next }
+            /^[ \t]+freq:/ { freq = $2; next }
+            /^[ \t]+signal:/ { signal = $2; next }
+            /^[ \t]+SSID:/ { ssid = $0; sub(/^[ \t]+SSID: ?/, "", ssid); next }
+            END { flush() }'
+        ;;
+    --pick)
+        awk -F'\t' -v ssid="${2:-}" -v current="${3:-}" -v mhz="${4:-0}" -v min="$min_dbm" '
+            BEGIN { if (ssid == "" || mhz >= 3000 || mhz <= 0) skip = 1 }
+            skip { next }
+            $4 == ssid && $1 != current && $2 >= 4900 && $3 >= min && (best == "" || $3 > strongest) { best = $1; strongest = $3 }
+            END { if (best != "") print best }'
+        ;;
+    *) echo "usage: cb-wifi-pick --band MHZ | --parse | --pick SSID BSSID MHZ" >&2; exit 2 ;;
+esac

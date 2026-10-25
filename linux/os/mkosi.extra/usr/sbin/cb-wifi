@@ -12,8 +12,15 @@
 #                                join), it opens the setup hotspot "CameraBridge-XXXX" (open, 10.42.0.1); every name a phone asks for points
 #                                at the box, so the setup page opens by itself. As soon as the box has a network again the hotspot goes.
 #   cb-wifi --hotspot-now        open the setup hotspot at once (tests)
+#   cb-wifi --prefer-5ghz        look for a 5 GHz access point of the network the box is on now, and move to it (tests, and by hand)
+#
+# 5 GHz: a box that joined its network on 2.4 GHz (the first access point NetworkManager found after a boot) looks for an access point of the
+# same network on 5 or 6 GHz with a signal of at least -70 dBm and moves to it once ("nmcli connection up ... ap BSSID", for this
+# connection only: no band is saved, so after a reboot, or when 5 GHz goes away, the box can be on either). The choice is cb-wifi-pick.
 #
 # Status for the web page: /run/camera-bridge/status/wifi.json and wifi-networks.json.
+# A && B || C is a guard on purpose, and the curly quotes are text for the web page:
+# shellcheck disable=SC2015,SC1111
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export CB_TAG=cb-wifi
@@ -25,6 +32,10 @@ RETRY=${CB_WIFI_RETRY:-300}
 HOTSPOT=cb-setup-hotspot
 HOTSPOT_ADDRESS=10.42.0.1
 PENDING=$CB_SYSTEM/wifi-pending
+PICK=/usr/lib/camera-bridge/cb-wifi-pick
+BAND_EVERY=${CB_WIFI_BAND_EVERY:-600}          # seconds between looks for a 5 GHz access point while the box is on 2.4 GHz
+BAND_AFTER_FAILURE=${CB_WIFI_BAND_AFTER_FAILURE:-3600}
+band_next=0
 FILE_NAME=camera-bridge-wifi.txt
 last_error=""
 
@@ -65,16 +76,26 @@ write_networks() {
     cb_status wifi-networks ok "networks in range" "$(jq -n --argjson n "$list" '{networks: $n}')"
 }
 
+# link_frequency DEVICE: the frequency (MHz) of the access point the device is joined to; nothing when it is not joined.
+link_frequency() { iw dev "$1" link 2>/dev/null | awk '/^[ \t]+freq:/ {print int($2); exit}' || true; }
+
+link_bssid() { iw dev "$1" link 2>/dev/null | awk '/^Connected to / {print $3; exit}' || true; }
+
 write_state() {
     # write_state STATE MESSAGE [DEVICE]
-    local state=$1 message=$2 dev=${3:-} ssid="" hotspot="" saved
+    local state=$1 message=$2 dev=${3:-} ssid="" hotspot="" saved freq="" band=""
     [ -z "$dev" ] || ssid=$(connected_ssid "$dev")
+    if [ -n "$ssid" ]; then
+        freq=$(link_frequency "$dev")
+        [ -z "$freq" ] || band=$("$PICK" --band "$freq")
+    fi
     if [ "$state" = hotspot ] && [ -n "$dev" ]; then hotspot=$(hotspot_name "$dev"); fi
     saved=$(saved_networks | jq -R -s 'split("\n") | map(select(length > 0))')
     cb_status wifi "$state" "$message" "$(jq -n --arg ssid "$ssid" --arg hotspot "$hotspot" --arg address "$HOTSPOT_ADDRESS" --arg error "$last_error" \
-        --argjson saved "$saved" --arg device "$dev" --argjson wired "$(wired && echo true || echo false)" \
+        --argjson saved "$saved" --arg device "$dev" --argjson wired "$(wired && echo true || echo false)" --arg freq "$freq" --arg band "$band" \
         '{ssid: $ssid, hotspot: (if $hotspot == "" then null else {ssid: $hotspot, address: $address} end), lastError: $error, saved: $saved,
-          hasWifi: ($device != ""), wired: $wired}')"
+          hasWifi: ($device != ""), wired: $wired, frequency: (if $freq == "" then null else ($freq | tonumber) end),
+          band: (if $band == "" then null else $band end)}')"
 }
 
 wired() { ip -4 route show default 2>/dev/null | grep -qv ' dev wl'; }
@@ -167,6 +188,38 @@ do_join() {
     save_network "$name" "$password"
 }
 
+# --- 5 GHz -----------------------------------------------------------------------------------------------------------
+
+# prefer_5ghz DEVICE: on 2.4 GHz, with an access point of the same network on 5 or 6 GHz that is strong enough, move to it once. Looks at most
+# every BAND_EVERY seconds (a scan costs the connected radio a moment), and after a move that did not work not for BAND_AFTER_FAILURE.
+# Not while a cable carries the box's traffic: the radio does not matter then.
+prefer_5ghz() {
+    local dev=$1 now ssid con bssid freq target
+    [ -n "$dev" ] || return 0
+    now=$(date +%s)
+    [ "$now" -ge "$band_next" ] || return 0
+    wired && return 0
+    freq=$(link_frequency "$dev")
+    [ -n "$freq" ] && [ "$freq" -lt 3000 ] || return 0
+    band_next=$((now + BAND_EVERY))
+    con=$(connected_ssid "$dev")
+    [ -n "$con" ] || return 0
+    ssid=$(iw dev "$dev" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p' | head -1 || true)
+    bssid=$(link_bssid "$dev")
+    nmcli device wifi rescan ifname "$dev" >/dev/null 2>&1 || true
+    sleep 5
+    target=$(iw dev "$dev" scan dump 2>/dev/null | "$PICK" --parse | "$PICK" --pick "$ssid" "$bssid" "$freq" || true)
+    [ -n "$target" ] || return 0
+    cb_log "on 2.4 GHz; moving '$con' to its 5 GHz access point $target"
+    if nmcli connection up id "$con" ifname "$dev" ap "$target" >/dev/null 2>&1; then
+        cb_log "'$con' is on $(link_frequency "$dev") MHz now"
+    else
+        cb_log "the 5 GHz access point $target did not take the box; back on '$con' as it was"
+        nmcli connection up id "$con" ifname "$dev" >/dev/null 2>&1 || true
+        band_next=$((now + BAND_AFTER_FAILURE))
+    fi
+}
+
 # --- the watcher ------------------------------------------------------------------------------------------------------
 
 do_watch() {
@@ -179,6 +232,7 @@ do_watch() {
             guard_resume
             rm -f "$PENDING"
             last_error=""
+            prefer_5ghz "$dev"
             write_state online "On the network." "$dev"
             sleep 10
             continue
@@ -241,6 +295,7 @@ case ${1:-} in
     --forget) nmcli connection delete id "${2:?--forget needs a network name}" >/dev/null 2>&1 || true ;;
     --watch) do_watch ;;
     --hotspot-now) do_hotspot_now ;;
-    -h|--help|'') sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+    --prefer-5ghz) prefer_5ghz "$(wifi_device)" ;;
+    -h|--help|'') sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) cb_die "unknown option: $1" ;;
 esac

@@ -49,7 +49,8 @@ enum AudioPlan {
     }
 
     /// `firstAudio`: the format of the first audio frame seen since the file's keyframe, nil when none arrived.
-    static func choose(video: VideoFormat, firstAudio: AudioFormat?, wantsSound: Bool, audioEnabled: Bool, codecs: any MediaCodecs) -> AudioPlan {
+    static func choose(video: VideoFormat, firstAudio: AudioFormat?, wantsSound: Bool, audioEnabled: Bool, codecs: any MediaCodecs,
+                       reusing kept: (source: AudioFormat, converter: any AudioTranscoding)? = nil) -> AudioPlan {
         guard wantsSound else { return .none(.notWanted) }
         guard audioEnabled else { return .none(.cameraAudioOff) }
         guard let source = firstAudio else { return .none(.noSound) }
@@ -57,6 +58,9 @@ enum AudioPlan {
             (try? FMP4Muxer(configuration: FMP4Configuration(video: video, audio: format))) != nil
         }
         if fits(source) { return .passthrough(source) }
+        if let kept, kept.source == source, fits(kept.converter.outputFormat) {
+            return .transcode(source: source, converter: kept.converter, output: kept.converter.outputFormat)
+        }
         guard let converter = try? codecs.makeAudioTranscoder(input: source, output: AudioEncoderSettings(codec: .aac, sampleRate: source.sampleRate,
                                                                                                             channels: max(1, source.channels))),
               fits(converter.outputFormat) else {

@@ -598,6 +598,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
 .kv + .row, .kv + .stack { margin-top: 16px; }
 .phrase { display: block; font-family: var(--mono); font-size: 0.95rem; padding: 10px 12px; margin: 6px 0 14px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border-strong); overflow-wrap: anywhere; user-select: all; }
 .disk .problems { margin: 4px 0 0; }
+.wifi-slow { color: var(--warning); margin: 0 0 10px; }
 .install-progress { margin: 12px 0; }
 
 /* The setup hotspot's page (setup.html) */

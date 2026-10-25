@@ -28,9 +28,19 @@ public enum ArchiveConstants {
     public static let idleCloseAfter: TimeInterval = 15
     /// The recorder asks the file to reach the disk this often.
     public static let syncInterval: TimeInterval = 30
-    /// A forward step of the decode time above max(this, `forwardStepFrameIntervals` frame intervals) ends the file.
+    /// A forward step of the decode time above max(this, `forwardStepFrameIntervals` frame intervals) is a gap (late or lost packets); up to
+    /// `forwardGapLimit` the file goes on and the picture before the gap lasts through it.
     public static let forwardStepFloor: TimeInterval = 1.5
     public static let forwardStepFrameIntervals = 4
+    /// A forward step above max(this, `forwardStepFrameIntervals` frame intervals) is a clock jump and ends the file. Five seconds: a congested
+    /// Wi-Fi link stalls a stream for a few seconds (TCP retransmits, a channel scan), the player holds a picture that long without looking broken
+    /// (an export holds gaps up to 10 s), and a camera that really jumped (a clock set, a reboot) does so by far more, usually by minutes.
+    public static let forwardGapLimit: TimeInterval = 5
+    /// A decode time at or behind the last, by up to this much, is reordering or jitter, not a clock going back: the frame is kept and its time moved
+    /// to just after the last. Half a second is about fifteen frames at 30 fps; a camera whose clock went back does so by more.
+    public static let backwardNudgeLimit: TimeInterval = 0.5
+    /// The warning that a camera's video arrives unevenly is written at most this often (seconds).
+    public static let jitterWarningInterval: TimeInterval = 300
     /// A write that has been pending this long, or this many bytes, is a stall: the recorder drops its subscription and pauses.
     public static let stallPendingAge: TimeInterval = 15
     public static let stallPendingBytes = 256 * 1_048_576

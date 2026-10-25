@@ -21,6 +21,8 @@ extension RecorderFixtures {
 /// Codecs that can do exactly one thing: turn G.711 into AAC-LC (a fake: one AAC frame for every six G.711 frames), or refuse.
 final class FakeAudioCodecs: MediaCodecs, Sendable {
     private let converts: Bool
+    /// How many audio converters were made (each is a process or an encoder session on the box).
+    let convertersMade = Box(0)
 
     init(converts: Bool) {
         self.converts = converts
@@ -40,6 +42,7 @@ final class FakeAudioCodecs: MediaCodecs, Sendable {
 
     func makeAudioTranscoder(input: AudioFormat, output: AudioEncoderSettings) throws -> any AudioTranscoding {
         guard converts, input.codec == .pcmu, output.codec == .aac else { throw Unsupported() }
+        convertersMade.update { $0 += 1 }
         return FakeG711ToAAC(sampleRate: input.sampleRate, channels: output.channels)
     }
 }
@@ -203,5 +206,45 @@ final class FakeG711ToAAC: AudioTranscoding {
         #expect(a.info.audio == nil && b.info.audio == RecorderFixtures.aac32k)
         let framesInA = try a.videoFrames().count, framesInB = try b.videoFrames().count
         #expect(framesInA + framesInB == 300)
+    }
+
+    @Test func aNudgeOrAClockJumpDoesNotRestartTheAudioConverter() async throws {
+        let rig = try RecorderRig(camera: RecorderFixtures.camera(recordSound: true))
+        defer { rig.root.remove() }
+        let codecs = FakeAudioCodecs(converts: true)
+        let recorder = rig.recorder(codecs: codecs)
+        await recorder.start()
+        // 0 to 3.3 s; a frame 0.13 s late (a nudge); a jump of 10 s (a cut) and another 3.3 s.
+        let video = RecorderFixtures.videoFrames(0..<100, gop: 60) + [RecorderFixtures.video(95, gop: 60)]
+            + RecorderFixtures.videoFrames(400..<500, gop: 60)
+        await rig.feed(RecorderFixtures.interleaved(video, RecorderFixtures.g711Frames(seconds: 17)), to: recorder)
+        await recorder.stop()
+        #expect(await recorder.nudges == 1)
+        let segments = rig.target.openedSegments
+        #expect(segments.count == 2, "\(segments)")
+        #expect(codecs.convertersMade.value == 1, "one converter served both files")
+        guard segments.count == 2 else { return }
+        for segment in segments {
+            let file = try RecordedFile(rig, segment: segment)
+            let audioFrames = try file.audioFrames()
+            #expect(file.info.audio == AudioFormat.aacLC(sampleRate: 8_000, channels: 1) && !audioFrames.isEmpty)
+        }
+    }
+
+    @Test func aChangeOfTheCamerasAudioFormatStartsANewConverter() async throws {
+        let rig = try RecorderRig(camera: RecorderFixtures.camera(recordSound: true))
+        defer { rig.root.remove() }
+        let codecs = FakeAudioCodecs(converts: true)
+        let recorder = rig.recorder(codecs: codecs)
+        await recorder.start()
+        let a = RecorderFixtures.g711Frames(seconds: 3)
+        let b = RecorderFixtures.g711Frames(seconds: 6).dropFirst(150).map { frame -> EncodedAudioFrame in
+            var copy = frame
+            copy.format = AudioFormat(codec: .pcmu, sampleRate: 8_000, channels: 2)
+            return copy
+        }
+        await rig.feed(RecorderFixtures.interleaved(RecorderFixtures.videoFrames(0..<300, gop: 60), a + b), to: recorder)
+        await recorder.stop()
+        #expect(codecs.convertersMade.value == 2)
     }
 }

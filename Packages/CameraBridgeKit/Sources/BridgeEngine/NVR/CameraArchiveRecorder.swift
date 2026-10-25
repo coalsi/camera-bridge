@@ -16,8 +16,10 @@ import Synchronization
 /// is what `prft` and the index carry. If a fragment's measured wall time differs from the derived one by more than 1 s twice in a row, the file ends.
 ///
 /// One continuity rule: any break writes out the open group (without `nextDecodeTime`, so its last frame is not stretched), writes the sidecar,
-/// closes the file, and the next keyframe opens a new one. Breaks: `hub.discontinuityCount` changed; a decode time at or before the last, or a
-/// forward step above max(1.5 s, 4 frame intervals); a parameter-set change or a muxer error; a change of the camera's audio format; a frame over
+/// closes the file, and the next keyframe opens a new one. Breaks: `hub.discontinuityCount` changed; a decode time more than 0.5 s before the last,
+/// or a forward step above max(5 s, 4 frame intervals) (a smaller backward step is jitter: the frame stays and its time moves to just after the
+/// last; a forward step above max(1.5 s, 4 frame intervals) is a gap: the file goes on and the picture before it lasts through it; both are
+/// logged as a warning, at most every 5 minutes, that the video arrives unevenly); a parameter-set change or a muxer error; a change of the camera's audio format; a frame over
 /// 16 MiB; 15 s without video (found by the tick); the wall divergence. A planned roll at a keyframe (900 s or 2 GiB) is not a break: the open group
 /// ends exactly at that keyframe.
 actor CameraArchiveRecorder {
@@ -104,6 +106,7 @@ actor CameraArchiveRecorder {
     private let tuning: RecorderTuning
     private let writeQueue: DispatchQueue
     private let log: Log
+    private let cameraName: String
 
     private let published = Mutex(CameraArchiveStatus(state: .waiting("waiting for the camera")))
 
@@ -130,6 +133,13 @@ actor CameraArchiveRecorder {
     private var unrecordableUntil: TimeInterval?
     private var keyframeNote = KeyframeIntervalNote()
     private var soundNote: ArchiveNote?
+    /// The camera's audio converter of the last file, kept for the next one while the camera's audio is the same: a converter is a process or an
+    /// encoder session, and a cut for a video reason must not start it again (a camera that cuts every few seconds would keep a core busy).
+    private var keptAudio: (source: AudioFormat, converter: any AudioTranscoding)?
+    private var jitterWarnedAt: TimeInterval?
+    /// Frames whose time was moved after the last, and gaps kept inside a file (for tests).
+    private(set) var nudges = 0
+    private(set) var gaps = 0
     /// Samples taken in so far (a counter, for tests to wait on).
     private(set) var samplesHandled = 0
 
@@ -148,6 +158,7 @@ actor CameraArchiveRecorder {
         self.writeQueue = writeQueue
         directory = ArchiveCameraDirectory(naming: naming, cameraID: camera.id, cameraName: camera.name, fileSystem: tuning.fileSystem)
         log = Log(category: "NVR", cameraID: camera.id)
+        cameraName = camera.name
         soundNote = camera.nvrRecordSound && !camera.audioEnabled ? RecorderNotes.soundCameraAudioOff : nil
     }
 
@@ -297,8 +308,28 @@ actor CameraArchiveRecorder {
         let now = tuning.uptime()
         checkDiscontinuity()
         lastVideoAt = now
-        let decode = Self.decode(frame)
+        var frame = frame
+        var decode = Self.decode(frame)
+        var measures = true
         let size = Self.payloadBytes(frame)
+        if let run {
+            switch step(run, decode) {
+            case .normal, .jump: break
+            case .reordered(let moved):
+                let scale = ArchiveConstants.videoTimescale
+                let shift = moved - decode
+                frame.dts = MediaTime(value: moved, timescale: scale)
+                frame.pts = MediaTime(value: frame.pts.converted(to: scale).value + shift, timescale: scale)
+                decode = moved
+                measures = false
+                nudges += 1
+                noteJitter(now, "its video steps back by \(shift) ticks")
+            case .gap:
+                measures = false
+                gaps += 1
+                noteJitter(now, "its video stopped for a moment")
+            }
+        }
         if frame.isKeyframe, keyframeNote.observe(keyframeAt: decode) { publishStatus(target.writeState) }
 
         if let run {
@@ -313,7 +344,7 @@ actor CameraArchiveRecorder {
             }
         }
         if let run {
-            add(frame, decode, size, to: run)
+            add(frame, decode, size, to: run, measures: measures)
             return
         }
         // No open file: a keyframe starts one (anything else is dropped).
@@ -323,7 +354,7 @@ actor CameraArchiveRecorder {
         let fromCamera = abs(measured.timeIntervalSince(host)) <= ArchiveConstants.anchorSkewLimit
         let new = FileRun(anchor: anchor(fromCamera ? measured : host), fromCamera: fromCamera, format: frame.format, firstDecode: decode, uptime: now)
         run = new
-        add(frame, decode, size, to: new)
+        add(frame, decode, size, to: new, measures: true)
     }
 
     /// The anchor of a new file whose first frame was captured at `measured`. A break whose camera time went back (a clock jump, a stretch the
@@ -343,11 +374,12 @@ actor CameraArchiveRecorder {
     /// 16 MiB less room for the box headers and the sample table of up to 900 samples.
     private static let maximumGroupBytes = ArchiveConstants.fragmentMaximumBytes - 64 * 1_024
 
-    private func add(_ frame: EncodedVideoFrame, _ decode: Int64, _ size: Int, to run: FileRun) {
+    /// `measures`: false for a frame whose step is a nudge or a gap, which is not a frame interval.
+    private func add(_ frame: EncodedVideoFrame, _ decode: Int64, _ size: Int, to run: FileRun, measures: Bool) {
         if run.group.video.isEmpty { run.group.firstDecode = decode }
         run.group.video.append(frame)
         run.group.bytes += size
-        if decode > run.lastDecode { run.lastInterval = max(1, decode - run.lastDecode) }
+        if measures, decode > run.lastDecode { run.lastInterval = max(1, decode - run.lastDecode) }
         run.lastDecode = decode
     }
 
@@ -359,14 +391,42 @@ actor CameraArchiveRecorder {
             || run.group.bytes + size > Self.maximumGroupBytes
     }
 
+    /// What a frame's decode time says about the camera's stream so far.
+    private enum Step {
+        case normal
+        /// At or just behind the last (jitter, reordering): kept, with this decode time (the last plus one tick).
+        case reordered(Int64)
+        /// A short stop of the stream (late or lost packets): kept, the picture before it lasts through the gap.
+        case gap
+        /// A clock going back by more than the nudge limit, or forward by more than the gap limit.
+        case jump
+    }
+
+    private func step(_ run: FileRun, _ decode: Int64) -> Step {
+        let scale = Double(ArchiveConstants.videoTimescale)
+        if decode <= run.lastDecode {
+            return run.lastDecode - decode <= Int64(ArchiveConstants.backwardNudgeLimit * scale) ? .reordered(run.lastDecode + 1) : .jump
+        }
+        let forward = decode - run.lastDecode
+        let intervals = Int64(ArchiveConstants.forwardStepFrameIntervals) * run.lastInterval
+        if forward > max(Int64(ArchiveConstants.forwardGapLimit * scale), intervals) { return .jump }
+        if forward > max(Int64(ArchiveConstants.forwardStepFloor * scale), intervals) { return .gap }
+        return .normal
+    }
+
     private func breakReason(_ run: FileRun, _ frame: EncodedVideoFrame, _ decode: Int64, _ size: Int) -> CloseReason? {
         if frame.format != run.format, !run.formatKey.matches(FormatKey(frame.format)) { return .formatChanged }
         if size > Self.maximumGroupBytes { return .tooLarge }
-        if decode <= run.lastDecode { return .clockJump }
-        let step = decode - run.lastDecode
-        let limit = max(Int64(ArchiveConstants.forwardStepFloor * 90_000), Int64(ArchiveConstants.forwardStepFrameIntervals) * run.lastInterval)
-        if step > limit { return .clockJump }
+        if case .jump = step(run, decode) { return .clockJump }
         return nil
+    }
+
+    /// A camera whose video arrives unevenly: a warning (at most every `jitterWarningInterval`), so the cause shows next to the symptom.
+    private func noteJitter(_ now: TimeInterval, _ detail: String) {
+        log.debug("\(cameraName): \(detail)")
+        if let last = jitterWarnedAt, now - last < ArchiveConstants.jitterWarningInterval { return }
+        jitterWarnedAt = now
+        log.warning("\(cameraName): its video arrives unevenly (network?)")
     }
 
     private func mayStartFile(_ now: TimeInterval) -> Bool {
@@ -427,7 +487,9 @@ actor CameraArchiveRecorder {
         }
 
         if run.plan == nil {
-            let plan = AudioPlan.choose(video: run.format, firstAudio: run.rawAudio.first?.format, wantsSound: wantsSound, audioEnabled: audioEnabled, codecs: codecs)
+            let plan = AudioPlan.choose(video: run.format, firstAudio: run.rawAudio.first?.format, wantsSound: wantsSound, audioEnabled: audioEnabled, codecs: codecs,
+                                        reusing: keptAudio)
+            keptAudio = nil
             run.plan = plan
             soundNote = plan.note
             if plan.trackFormat != nil {
@@ -553,12 +615,22 @@ actor CameraArchiveRecorder {
         if flush { _ = flushGroup(nextDecode: nil) }
         self.run = nil
         guard let writer = run.writer else { return }
+        // The audio converter goes on into the next file when the cut was about the video (or a roll), not about the camera's stream or audio.
+        if case .transcode(let source, let converter, _)? = run.plan, Self.keepsAudioConverter(reason) { keptAudio = (source, converter) } else { keptAudio = nil }
         // After a planned roll the next file takes the camera's time again: a move, or the media clock's drift, ends with the file.
         previousFileEndMs = reason == .roll ? nil : run.endWallMs
         closing.append(writer)
         writer.close()
         if reason != .roll { keyframeNote.restart() }
         log.info("Closed a recording file (\(reason.rawValue)); \(run.fragments) fragments")
+    }
+
+    /// Whether a converter that was running when a file closed for this reason may serve the next file (which still checks the audio format).
+    private static func keepsAudioConverter(_ reason: CloseReason) -> Bool {
+        switch reason {
+        case .roll, .clockJump, .divergence, .formatChanged, .tooLarge: true
+        case .idle, .discontinuity, .audioChanged, .muxFailure, .sessionEnded, .stopped: false
+        }
     }
 
     /// The writer created its file and wrote the initialization segment: the drive works.

@@ -501,6 +501,7 @@ public struct RequestFileSystemControl: SystemControlling {
         var saved: [String]?
         var hasWifi: Bool?
         var wired: Bool?
+        var band: String?
     }
 
     private struct NetworksFile: Decodable {
@@ -513,7 +514,8 @@ public struct RequestFileSystemControl: SystemControlling {
         let networks: NetworksFile? = read(.wifiNetworks)
         return WifiReport(state: file?.state ?? "searching", message: file?.message ?? "Looking for a network.", ssid: file?.ssid.flatMap { $0.isEmpty ? nil : $0 },
                           hotspot: file?.state == "hotspot" ? file?.hotspot : nil, saved: file?.saved ?? [], lastError: file?.lastError.flatMap { $0.isEmpty ? nil : $0 },
-                          hasWifi: file?.hasWifi ?? false, wired: file?.wired ?? false, networks: networks?.networks ?? [])
+                          hasWifi: file?.hasWifi ?? false, wired: file?.wired ?? false, networks: networks?.networks ?? [],
+                          band: file?.band.flatMap { $0.isEmpty ? nil : $0 })
     }
 
     public func scanWifi() async throws -> [WifiNetwork] {

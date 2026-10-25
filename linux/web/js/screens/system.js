@@ -11,6 +11,7 @@ import { inlineError, switchRow } from './common.js';
 import { askToPowerOff, powerOff as sendPowerOff } from '../power.js';
 import { isBeta } from '../release-notes.js';
 import { secureAddressSection } from './secure-address.js';
+import { wifiCardFor } from './wifi-card.js';
 
 /** An update in words: "beta build 0.1.109" while the system is in beta, "version 1.0.0" from 1.0 (`capital`: at the start of a sentence). */
 export function updateLabel(version, capital = false) {
@@ -212,14 +213,6 @@ export function renderSystem() {
 
   // Wi-Fi ---------------------------------------------------------------------------------------------------------------------
 
-  const WIFI_STATES = {
-    online: 'On the network.',
-    hotspot: 'No network: the setup hotspot is open.',
-    searching: 'Looking for a network…',
-    'no-wifi': 'This computer has no Wi-Fi the bridge can use. It works with a network cable.',
-    'no-hotspot': 'No network, and this Wi-Fi chip cannot open the setup hotspot. Use a network cable.',
-  };
-
   async function scanWifi() {
     await run('wifi-scan', async () => { wifiNetworks = (await post('system/wifi/scan', {})).networks; });
   }
@@ -245,20 +238,8 @@ export function renderSystem() {
   }
 
   function wifiCard() {
-    if (!info.canInstall || !wifi || wifi.state === 'unavailable') return null;
-    const where = wifi.wired ? 'Connected with a network cable.' : wifi.ssid ? `On the Wi-Fi network “${wifi.ssid}”.` : (WIFI_STATES[wifi.state] || wifi.message);
-    return h('div', { class: 'card' }, h('h2', null, 'Wi-Fi'),
-      h('p', { class: 'desc' }, 'The bridge joins a saved Wi-Fi network by itself. With no network cable and no network it can join, it opens its own setup network, “CameraBridge-…”: join it with a phone and a page asks which Wi-Fi to use.'),
-      h('p', { class: 'muted' }, where),
-      wifi.lastError ? h('p', { class: 'problems' }, wifi.lastError) : null,
-      wifi.saved.length ? h('div', { class: 'found' }, wifi.saved.map((ssid) => h('div', { class: 'row' },
-        h('span', null, ssid, ssid === wifi.ssid ? h('span', { class: 'small muted' }, ' · in use') : null),
-        h('button', { class: 'btn small', type: 'button', disabled: !!busy, onclick: () => forgetWifi(ssid) }, 'Forget')))) : null,
-      !wifi.hasWifi ? null : h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: scanWifi }, busy === 'wifi-scan' ? spinner() : icon('search'), 'Find Wi-Fi networks'),
-      wifiNetworks === null ? null : wifiNetworks.length === 0 ? h('p', { class: 'muted' }, 'No network was found.')
-        : h('div', { class: 'found' }, wifiNetworks.map((network) => h('div', { class: 'card disk' },
-          h('div', null, h('strong', null, network.ssid), h('div', { class: 'small muted' }, `${network.signal}%${network.security ? ` · ${network.security}` : ' · open'}`)),
-          h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: () => joinWifi(network.ssid, !network.security) }, 'Join…')))));
+    if (!info.canInstall) return null;
+    return wifiCardFor(wifi, { networks: wifiNetworks, busy, scan: scanWifi, join: joinWifi, forget: forgetWifi });
   }
 
   // Recording drive -------------------------------------------------------------------------------------------------------
