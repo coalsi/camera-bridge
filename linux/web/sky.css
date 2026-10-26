@@ -1,6 +1,8 @@
-/* Sky Watcher (screens/sky-card.js, sky-model.js, sky-log.js and sky-setup.js): the camera page's card, the sky log, #/sky, and its Setup panel. Every class starts with sky-. The
-   colours are the page's tokens (style.css), in both themes; the strip of the night and the stills are pictures of the night, so they are dark in
-   both themes, as the camera's own pictures are. No inline styles: script sets el.style.left for a mark's place and nothing else. */
+/* Sky Watcher (screens/sky-card.js, sky-model.js, sky-log.js, sky-setup.js and sky-player.js): the camera page's card, the sky log, #/sky, its
+   Setup panel and its clip player. Every class starts with sky-. The colours are the page's tokens (style.css), in both themes; the strip of the
+   night, the stills and the player are pictures of the night, so they are dark in both themes, as the camera's own pictures are (the player has
+   the Monitor's colours and transport: monitor.css). No inline styles: script sets a mark's place (left, width) and custom properties (a
+   close-up's crop, the player's picture shape and zoom) through the CSSOM, nothing else. */
 
 /* The kinds of light. Never the colour alone: each is also said in words (the counts, the group titles, the rows). */
 .sky-page, .sky-card {
@@ -12,7 +14,7 @@
   --sky-notSure: var(--offline);
 }
 /* On a dark picture the same kinds are brighter than the tokens of a light page are. */
-.sky-strip, .sky-still {
+.sky-strip, .sky-still, .sky-player {
   --sky-unexplained: #ffb347;
   --sky-planes: #7fb2ff;
   --sky-satellites: #6fe0b0;
@@ -49,6 +51,8 @@
 .sky-place .row { margin: 4px 0 8px; }
 .sky-place .field .error { margin-top: 4px; }
 .sky-place-note { margin: 0 0 8px; }
+/* The browser did not share where it is: said plainly beside the fields, where the person types it in instead. */
+.sky-place-note[data-tone="refused"] { padding: 8px 12px; border-left: 3px solid var(--warning); border-radius: 8px; background: var(--surface-2); color: var(--text); }
 .sky-setup > .row { margin-top: 18px; }
 .sky-card .sky-status { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
 .sky-card .sky-status p { margin: 0 0 6px; }
@@ -134,8 +138,30 @@
 .sky-cards { display: grid; gap: 14px; }
 .sky-cards > .card { margin: 0; }
 .sky-entry { display: grid; grid-template-columns: minmax(200px, 42%) minmax(0, 1fr); gap: 8px 18px; padding: 14px; scroll-margin-top: 16px; }
-.sky-still { position: relative; margin: 0; align-self: start; overflow: hidden; border-radius: 10px; background: #0c0c0e; }
+/* A still is a close-up of the light (16:9; sky-log.js places the picture with --sky-crop-w, -x and -y, in per cent of the frame), or the whole
+   picture; a tap switches between them. Before the picture has arrived it is an empty 16:9 frame. */
+.sky-still {
+  position: relative; display: block; width: 100%; margin: 0; padding: 0; border: 0; overflow: hidden; border-radius: 10px; background: #0c0c0e;
+  align-self: start; appearance: none; font: inherit; color: inherit; text-align: left; cursor: zoom-in; touch-action: manipulation;
+}
+.sky-still[data-view="loading"], .sky-still[data-view="closeup"] { aspect-ratio: 16 / 9; }
+.sky-still[data-view="whole"] { cursor: zoom-out; }
+.sky-still[aria-disabled="true"] { cursor: default; }
+.sky-still:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .sky-still-img { display: block; width: 100%; height: auto; min-height: 60px; }
+.sky-still[data-view="loading"] .sky-still-img { opacity: 0; }
+.sky-still[data-view="closeup"] .sky-still-img {
+  position: absolute; max-width: none; min-height: 0; width: calc(var(--sky-crop-w, 100) * 1%); left: calc(var(--sky-crop-x, 0) * -1%); top: calc(var(--sky-crop-y, 0) * -1%);
+}
+/* What the still shows, in its top right corner (the light is in the middle of a close-up, and often low in the whole picture). */
+.sky-still-badge {
+  position: absolute; right: 8px; top: 8px; padding: 1px 8px; border-radius: 99px; font-size: 0.72rem; font-weight: 650; color: #e8e8ea;
+  background: rgb(12 12 14 / 0.72); border: 1px solid rgb(255 255 255 / 0.16); pointer-events: none;
+}
+.sky-still--small { flex: none; width: 112px; border-radius: 7px; }
+.sky-still--small .sky-still-badge { display: none; }
+/* A row's still shown whole takes the row's width, on a line of its own under the row's words. */
+.sky-still--small[data-view="whole"] { order: 5; flex: 1 1 100%; width: 100%; }
 .sky-path { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .sky-path-line { fill: none; stroke: var(--sky-unexplained); stroke-width: 2px; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 2px #000); }
 .sky-mark { fill: none; stroke: #fff; stroke-width: 2px; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 2px #000); }
@@ -145,11 +171,13 @@
 .sky-entry-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .sky-entry-head h3 { font-size: 1.2rem; font-variant-numeric: tabular-nums; }
 .sky-kind { color: var(--text-2); font-size: 0.88rem; }
+.sky-detail { margin: 4px 0 0; color: var(--text-2); overflow-wrap: anywhere; unicode-bidi: isolate; }
 .sky-tag { display: inline-block; padding: 1px 9px; border: 1px solid var(--border-strong); border-radius: 99px; background: var(--surface-2); font-size: 0.75rem; font-weight: 650; }
 .sky-facts { display: grid; gap: 2px; margin: 8px 0; padding: 0; list-style: none; }
 .sky-ai { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--brand-accent); border-radius: 8px; background: var(--surface-2); overflow-wrap: anywhere; unicode-bidi: isolate; }
 .sky-ai-label { margin-right: 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em; color: var(--text-3); }
 .sky-actions { margin: 10px 0; }
+.sky-play-problem { margin: 4px 0 0; }
 
 /* One-tap corrections, under every entry. */
 .sky-correct { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
@@ -176,7 +204,9 @@
 .sky-group-details[open] > summary::before { transform: rotate(45deg); }
 .sky-rows { margin: 0; padding: 0 14px; list-style: none; }
 .sky-row { padding: 10px 0; border-top: 1px solid var(--border); scroll-margin-top: 16px; }
-.sky-row-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.sky-row-main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.sky-row-text { flex: 1 1 220px; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.sky-row .sky-play { flex: none; margin-left: auto; }
 .sky-row-time { font-weight: 600; font-variant-numeric: tabular-nums; }
 .sky-row-what { overflow-wrap: anywhere; }
 .sky-row-where { font-size: 0.85rem; }
@@ -196,8 +226,103 @@
 .sky-off, .sky-empty { padding-block: 36px; }
 .sky-camera-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 14px 0 0; padding: 0; list-style: none; }
 
+/* The clip player (screens/sky-player.js): a dialog over the log, as wide as the window allows, the picture on top and the Monitor's transport
+   under it. The dialog fills the window (a tap on the dimmed page around the panel closes it); the panel is centred in it. */
+dialog.sky-player {
+  inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; padding: 24px; border: 0; border-radius: 0;
+  background: transparent; box-shadow: none; color: var(--mon-text); overflow: hidden; overscroll-behavior: contain;
+}
+dialog.sky-player[open] { display: grid; place-items: center; }
+dialog.sky-player::backdrop { background: rgb(0 0 0 / 0.78); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+.sky-player-panel {
+  display: flex; flex-direction: column; gap: 10px; width: min(1100px, 100%); max-height: 100%; min-width: 0; overflow: auto; overscroll-behavior: contain;
+  padding: 14px; border: 1px solid var(--mon-line); border-radius: 14px; background: var(--mon-bg); color: var(--mon-text); box-shadow: 0 16px 56px rgb(0 0 0 / 0.6);
+}
+/* The panel takes the focus when it opens (the keys work at once); its controls show their own rings. */
+.sky-player-panel:focus-visible { outline: none; }
+.sky-player-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.sky-player-title { min-width: 0; }
+.sky-player-title h2 { margin: 0; font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+.sky-player-what { margin: 2px 0 0; color: var(--mon-dim); font-size: 0.9rem; overflow-wrap: anywhere; }
+.sky-player .btn.ghost { background: transparent; border-color: transparent; }
+.sky-player .btn.ghost:hover { background: #1d1d24; }
+.sky-player-x { flex: none; min-width: 40px; }
+
+/* The picture: the frame keeps the picture's shape (--sky-ratio, from the recording, else the still, else the camera's stream) inside the
+   stage, and holds the still, the video and the path. The Zoom scales the picture about the light (--sky-zoom, --sky-zoom-x, --sky-zoom-y). */
+.sky-player-stage {
+  position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: var(--sky-ratio, 16 / 9); max-height: min(62vh, 640px);
+  container-type: size; overflow: hidden; border-radius: 10px; background: #000;
+}
+.sky-player-frame { position: relative; width: min(100cqw, calc(100cqh * var(--sky-ratio, 1.78))); aspect-ratio: var(--sky-ratio, 16 / 9); overflow: hidden; }
+.sky-player-picture { position: absolute; inset: 0; }
+.sky-player-stage[data-zoom="true"] .sky-player-picture { transform: scale(var(--sky-zoom, 2)); transform-origin: var(--sky-zoom-x, 50%) var(--sky-zoom-y, 50%); }
+.sky-player-still, .sky-player-video, .sky-player-hold { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: transparent; pointer-events: none; }
+.sky-player-video { opacity: 0; }
+.sky-player-stage[data-layer="video"] .sky-player-video { opacity: 1; }
+.sky-player-stage[data-layer="video"] .sky-player-still { opacity: 0; }
+.sky-player-path .sky-path-line { opacity: 0.6; }
+.sky-player-now { fill: none; stroke: #fff; stroke-width: 2px; vector-effect: non-scaling-stroke; opacity: 0.55; filter: drop-shadow(0 0 2px #000); }
+.sky-player-now[data-at="during"] { stroke: var(--sky-unexplained); stroke-width: 2.5px; opacity: 1; }
+.sky-player-now[data-at="none"] { display: none; }
+.sky-player-busy { position: absolute; top: 12px; left: 12px; z-index: 3; }
+.sky-player-note {
+  position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 4; display: grid; gap: 2px; padding: 12px 14px; border-radius: 12px;
+  color: #f3f3f4; background: rgb(12 12 14 / 0.92); border: 1px solid rgb(255 255 255 / 0.14);
+}
+.sky-player-note p { margin: 0; color: #c9c9d0; }
+.sky-player-note .actions, .sky-player-notice .actions { display: flex; gap: 8px; margin-top: 8px; }
+/* Instead of the recording (none of this moment, the drive away, …): a line above the picture, which then shows the still, whole. */
+.sky-player-notice {
+  display: grid; gap: 2px; padding: 10px 14px; border-radius: 10px; color: #f3f3f4; background: #121216; border: 1px solid var(--mon-line);
+  border-left: 3px solid var(--warning);
+}
+.sky-player-notice p { margin: 0; color: #c9c9d0; }
+
+/* Under the picture, as under the Monitor's wall: the transport, the scrubber over the window (the light's own time marked) and its width. */
+.sky-player-controls { display: grid; gap: 10px; padding: 10px 12px; background: var(--mon-panel); border: 1px solid var(--mon-line); border-radius: 10px; min-width: 0; }
+.sky-player-zoom { margin-left: auto; }
+.sky-scrub { display: grid; gap: 4px; min-width: 0; }
+.sky-scrub-track.nvr-track { height: 48px; border-radius: 10px; }
+.sky-scrub-track[aria-disabled="true"] { cursor: default; opacity: 0.6; }
+.sky-scrub-span {
+  position: absolute; top: 0; bottom: 0; min-width: 3px; pointer-events: none;
+  background: color-mix(in srgb, var(--sky-unexplained) 26%, transparent); border-inline: 2px solid var(--sky-unexplained);
+}
+.sky-scrub-ends { display: flex; justify-content: space-between; gap: 8px; font-size: 0.78rem; color: var(--mon-dim); font-variant-numeric: tabular-nums; }
+.sky-scrub-light { color: var(--sky-unexplained); text-align: center; }
+.sky-player-widen { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sky-player-margin { margin-right: 4px; color: var(--mon-dim); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.sky-player-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sky-player-done { margin-left: auto; }
+
+/* A phone: the player fills the screen, the picture in the middle and every control at the bottom, where the thumb is; the buttons a finger's size. */
+@media (max-width: 640px) {
+  dialog.sky-player { padding: 0; }
+  .sky-player-panel {
+    width: 100%; height: 100%; max-height: none; gap: 8px; border: 0; border-radius: 0; box-shadow: none;
+    padding: calc(8px + env(safe-area-inset-top)) var(--gutter) calc(10px + env(safe-area-inset-bottom));
+  }
+  .sky-player-stage { flex: 1 1 auto; min-height: 120px; aspect-ratio: auto; max-height: none; width: calc(100% + 2 * var(--gutter)); margin-inline: calc(-1 * var(--gutter)); border-radius: 0; }
+  .sky-player-controls { padding: 10px; }
+  .sky-player .nvr-transport .btn, .sky-player-widen .btn, .sky-player-foot .btn { min-height: 44px; }
+  .sky-player .nvr-transport .nvr-frame { min-width: 52px; }
+  .sky-player .nvr-transport .btn.primary { flex: 1 1 auto; }
+  /* Play, the two steps and Zoom (its magnifier alone: the word is still read out) on the first line; the time and the speed on the second. */
+  .sky-player .nvr-readout { order: 10; }
+  .sky-player .nvr-speed-group { order: 11; margin-left: auto; }
+  .sky-player .nvr-speed-group select { min-height: 44px; }
+  .sky-player-zoom { margin-left: 0; min-width: 52px; }
+  .sky-player-zoom-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .sky-player .nvr-keys { display: none; }
+  .sky-scrub-track.nvr-track { height: 56px; }
+  .sky-player-widen .btn { flex: 1 1 0; }
+  .sky-player-margin { flex: 1 1 100%; }
+}
+
 @media (max-width: 720px) {
   .sky-entry { grid-template-columns: minmax(0, 1fr); }
+  .sky-still--small { width: 96px; }
   .sky-summary { font-size: 1.2rem; }
   .sky-toolbar { gap: 10px; }
   /* The day on a line of its own, then Earlier on the left and Later on the right. */

@@ -14,11 +14,15 @@ import Synchronization
 ///     {"correction":{"at":<ms>,"label":"bird"},"id":"<id>","v":1}       a person's word on it
 ///     {"ai":{"at","kind","model","sentence"},"id":"<id>","v":1}         the AI's answer
 ///     {"alerted":true,"id":"<id>","v":1}                                it raised an alert
+///     {"id":"<id>","still":true,"v":1}                                  its picture was made later, from the recording (Ruling S31)
 ///     {"conditions":{"cloudCover","from","state","to"},"v":1}           how the sky was for a stretch of time
+///     {"capped":{"at","count","hour"},"v":1}                            `count` more lights in the clock hour `hour` were not logged
 ///
 /// The first entry line of an id wins; the lines after it (in the order written) apply to it, the last correction and the last answer winning,
 /// and one for an id the file does not hold is ignored. A line that does not parse (a torn last line after a crash, a line of a later version, an
-/// oversized one) is skipped, and the next append starts on a new line. The picture of an entry is `<night>/<id>.jpg` in the camera's folder.
+/// oversized one) is skipped, and the next append starts on a new line; so is a line of a kind the reader does not know (a later build's), since
+/// every key it knows is absent from it, or names an entry it applies nothing to. The picture of an entry is `<night>/<id>.jpg` in the camera's
+/// folder. The capped lines of an hour add up (a detector that restarted in the hour writes one for each part; `at` is when each was written).
 ///
 /// Writes run on one serial queue and never wait for a drive: lines (and pictures) that cannot be written wait, at most `maximumPending`
 /// (the oldest dropped first, never the one being written) and `maximumPendingStillBytes` of pictures; `retry()` tries again. A read sees what
@@ -48,23 +52,34 @@ final class SkyLogStore: Sendable {
             var at: Date
         }
 
+        /// An hour's lights that were not logged: the hour, how many, and when the line was written.
+        struct Capped: Codable, Equatable, Sendable {
+            var hour: Date
+            var count: Int
+            var at: Date
+        }
+
         var v: Int
         var entry: SkyEntry?
         var id: String?
         var correction: Correction?
         var ai: SkyAIAnswer?
         var alerted: Bool?
+        var still: Bool?
         var conditions: SkyConditions?
+        var capped: Capped?
 
         init(v: Int, entry: SkyEntry? = nil, id: String? = nil, correction: Correction? = nil, ai: SkyAIAnswer? = nil, alerted: Bool? = nil,
-             conditions: SkyConditions? = nil) {
+             still: Bool? = nil, conditions: SkyConditions? = nil, capped: Capped? = nil) {
             self.v = v
             self.entry = entry
             self.id = id
             self.correction = correction
             self.ai = ai
             self.alerted = alerted
+            self.still = still
             self.conditions = conditions
+            self.capped = capped
         }
     }
 
@@ -147,6 +162,23 @@ final class SkyLogStore: Sendable {
     func recordAlert(entryID: String, camera: UUID, night: String, folder: URL?) {
         guard let folder, Self.isValidNight(night), SkyEntry.isValidID(entryID) else { return }
         if let data = line(Line(v: Self.version, id: entryID, alerted: true), what: "an alert") { enqueue(.line(data), folder: folder, camera: camera, night: night) }
+    }
+
+    /// The entry's picture was made later, from the camera's recording (Ruling S31: it is written with `writeStill` first, on the same queue). The
+    /// entry then reads as having one, as a correction applies to it.
+    func recordStill(entryID: String, camera: UUID, night: String, folder: URL?) {
+        guard let folder, Self.isValidNight(night), SkyEntry.isValidID(entryID) else { return }
+        if let data = line(Line(v: Self.version, id: entryID, still: true), what: "a picture's line") {
+            enqueue(.line(data), folder: folder, camera: camera, night: night)
+        }
+    }
+
+    /// `hour.count` more lights that nothing explains were followed in the clock hour that began at `hour.hour` than the camera logs
+    /// (`SkyLightFilter.unexplainedPerHour`); `at` is now, so that two lines of one hour (a detector that restarted in it) are two.
+    func recordCapped(_ hour: SkyCappedHour, camera: UUID, night: String, folder: URL?, at: Date) {
+        guard let folder, Self.isValidNight(night), hour.count > 0, hour.hour.timeIntervalSince1970.isFinite, at.timeIntervalSince1970.isFinite else { return }
+        let capped = Line.Capped(hour: Self.millisecond(hour.hour), count: hour.count, at: Self.millisecond(at))
+        if let data = line(Line(v: Self.version, capped: capped), what: "an hour's count") { enqueue(.line(data), folder: folder, camera: camera, night: night) }
     }
 
     /// How the sky was for a stretch of time.
@@ -452,12 +484,19 @@ final class SkyLogStore: Sendable {
 
     // MARK: Reading
 
-    /// The entries and the conditions of one camera's night, in the order of their time: the lines of the file in the order written, and then the
-    /// ones still waiting for the drive, each applied to its entry (the first entry line of an id wins; the last correction and the last
-    /// answer win; a line for an id the file does not hold is ignored). Blocking disk work (the engine runs it on the store's read queue). A
-    /// missing file, or one reached through a link, is no entries.
+    /// The entries and the conditions of one camera's night, in the order of their time (`contents`).
     func read(camera: UUID, night: String, folder: URL) -> (entries: [SkyEntry], conditions: [SkyConditions]) {
-        guard Self.isValidNight(night) else { return ([], []) }
+        let read = contents(camera: camera, night: night, folder: folder)
+        return (read.entries, read.conditions)
+    }
+
+    /// Everything one camera's night holds, in the order of its time: the lines of the file in the order written, and then the ones still waiting
+    /// for the drive, each applied to its entry (the first entry line of an id wins; the last correction and the last answer win; a picture made
+    /// later sets `hasStill`; a line for an id the file does not hold is ignored), the conditions and the capped hours. Blocking disk work (the
+    /// engine runs it on the store's read queue). A missing file, or one reached through a link, is nothing. A file larger than
+    /// `maximumReadBytes` is read from its end: a night is filed after the day before it, so a day that flooded the file does not hide its night.
+    func contents(camera: UUID, night: String, folder: URL) -> SkyLogContents {
+        guard Self.isValidNight(night) else { return SkyLogContents() }
         // What waits is looked at before the file, so a line that is written meanwhile is read twice (harmless) and never not at all.
         let path = ArchiveVolume.path(of: folder)
         let waiting = state.withLock { state in
@@ -474,12 +513,14 @@ final class SkyLogStore: Sendable {
         return Self.parse(lines, camera: camera)
     }
 
-    /// The lines read, applied: see `read`.
-    static func parse(_ lines: [Data], camera: UUID) -> (entries: [SkyEntry], conditions: [SkyConditions]) {
+    /// The lines read, applied: see `contents`. A capped line read twice (it waited, and then it was in the file) counts once; the distinct
+    /// lines of an hour add up.
+    static func parse(_ lines: [Data], camera: UUID) -> SkyLogContents {
         let decoder = makeDecoder()
         var entries: [SkyEntry] = []
         var position: [String: Int] = [:]
         var conditions: [SkyConditions] = []
+        var capped: [Line.Capped] = []
         for raw in lines {
             guard raw.count <= maximumLineBytes, let line = try? decoder.decode(Line.self, from: raw), line.v == version else { continue }
             if let entry = line.entry {
@@ -490,13 +531,17 @@ final class SkyLogStore: Sendable {
                 if let correction = line.correction { entries[index].correction = correction.label }
                 if let answer = line.ai { entries[index].ai = answer }
                 if line.alerted == true { entries[index].alerted = true }
+                if line.still == true { entries[index].hasStill = true }
             } else if let span = line.conditions, !conditions.contains(span) {
                 conditions.append(span)
+            } else if let hour = line.capped, hour.count > 0, !capped.contains(hour) {
+                capped.append(hour)
             }
         }
         entries.sort { ($0.start, $0.id) < ($1.start, $1.id) }
         conditions.sort { ($0.from, $0.to) < ($1.from, $1.to) }
-        return (entries, conditions)
+        let hours = Dictionary(grouping: capped, by: \.hour).map { SkyCappedHour(hour: $0.key, count: $0.value.reduce(0) { $0 + $1.count }) }
+        return SkyLogContents(entries: entries, conditions: conditions, capped: hours.sorted { $0.hour < $1.hour })
     }
 
     /// The JPEG of an entry, or nil when there is none (or the name is not a night's or an id, or a link is in the way, or the file is larger
@@ -569,6 +614,14 @@ final class SkyLogStore: Sendable {
     }
 }
 
+/// What a camera's night file holds, read (`SkyLogStore.contents`): its entries with the lines after them applied, the conditions, and the hours
+/// in which more lights were followed than logged, oldest first, each hour's lines added up.
+struct SkyLogContents: Sendable, Equatable {
+    var entries: [SkyEntry] = []
+    var conditions: [SkyConditions] = []
+    var capped: [SkyCappedHour] = []
+}
+
 // MARK: - A camera's pictures on the drive (Ruling S27)
 
 extension SkyLogStore {
@@ -635,6 +688,12 @@ extension SkyNight {
         let before = self.window(named: dayName(day.start.addingTimeInterval(-1), zone: zone), observer: observer, zone: zone)
         guard let sunrise = before.sunrise, sunrise < sunset else { return whole }
         return sunrise...sunset
+    }
+
+    /// The log before the one named `name`: the one named by the local date a day earlier; nil for a name that is not a date.
+    static func logName(before name: String, zone: TimeZone) -> String? {
+        guard let day = localDay(named: name, zone: zone) else { return nil }
+        return dayName(day.start.addingTimeInterval(-1), zone: zone)
     }
 
     /// The log to show when none is asked for: the night in progress or the one that ended this morning; or, for the day view, the log `now` is

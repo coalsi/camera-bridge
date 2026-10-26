@@ -1,8 +1,11 @@
 // The Sky Watcher page (#/sky): the morning sky log, in layout A. At the top the summary ("Last night: 1 unexplained, 214 explained"), the counts
-// by kind and the sky's conditions; the night as a strip from sunset to sunrise with a dot for each light (the unexplained larger and glowing);
-// the unexplained ones first, each with its still, the path drawn over it, its facts and its moment in the recordings; the explained ones
-// below, collapsed by kind (a night has dozens of planes and hundreds of satellites: they are built when a group is opened, fifty at a time);
-// a one-tap correction on every entry; past nights and days; a camera picker; and the aim and stream as status.
+// by kind and the sky's conditions; the night as a strip from sunset to sunrise with a dot for each light (the unexplained larger and glowing),
+// and under it a note for each hour in which the box followed more lights than it logs ("4 PM: 212 more lights weren’t logged (busy hour)");
+// the unexplained ones first, each with a close-up of the light in its still (the path drawn over it; a tap shows the whole picture), its
+// facts and a Play button; the explained ones below, collapsed by kind (a night has dozens of planes and hundreds of satellites: they are built
+// when a group is opened, fifty at a time), each with its still small and a Play button; a one-tap correction on every entry; past nights and
+// days; a camera picker; and the aim and stream as status. Play opens the clip player on this page (sky-player.js, loaded on demand): the
+// recording around the light, with the Monitor's own playback.
 // Sky Watcher is a plugin: while it is off the page says so, with the way to Plugins; while it is on, a Setup panel (where the box is, the flight
 // feed, the AI's limit: sky-setup.js) sits at the top, and with no camera watching the sky yet the page says where to turn it on.
 // Nothing here claims a real size, distance or speed: a light's speed is only ever "faster across the sky than planes at that height".
@@ -14,8 +17,8 @@ import { cameraList, pluginOn, subscribe } from '../store.js';
 import { inlineError } from './common.js';
 import { createSkySetupPanel } from './sky-setup.js';
 import {
-  BUCKETS, CORRECTIONS, SKY_ROUTE, SKY_TEXT, aimLines, blinkText, clipAddress, conditionsText, correctionText, countEntries, countLabel, countsAfter, dayLabel,
-  defaultLensLayout, directionText, durationText, entryBucket, groupExplained, learningText, normalizeEntry, pathPoints, shapeText, shiftDate, skyWatching, speedText,
+  BUCKETS, CORRECTIONS, SKY_ROUTE, SKY_TEXT, aimLines, blinkText, cappedText, clipAddress, closeUpRect, conditionsText, correctionText, countEntries, countLabel, countsAfter,
+  dayLabel, defaultLensLayout, directionText, durationText, entryBucket, groupExplained, learningText, normalizeEntry, pathPoints, shapeText, shiftDate, skyWatching, speedText,
   streamText, stripDots, stripTicks, summaryText, timeText, toMs, watchAddress,
 } from './sky-model.js';
 
@@ -43,6 +46,11 @@ function loadNight({ cameraID, night, view }) {
 /** POST sky/cameras/:id/entries/:eid/correction { night, label }: the entry as the bridge has it afterwards. */
 function sendCorrection({ cameraID, entryID, night, label }) {
   return post(`sky/cameras/${encodeURIComponent(cameraID)}/entries/${encodeURIComponent(entryID)}/correction`, { night, label });
+}
+
+/** The clip player (sky-player.js), loaded the first time a Play is pressed: the log itself does not need its code. -> { close() } */
+function openSkyPlayer(options) {
+  return import('./sky-player.js').then((module) => module.openSkyPlayer(options));
 }
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -81,6 +89,7 @@ function readNight(answer, asked) {
     counts,
     aim: answer.aim && typeof answer.aim === 'object' ? answer.aim : null,
     learning: answer.learning && typeof answer.learning === 'object' ? answer.learning : null,
+    capped: Array.isArray(answer.capped) ? answer.capped : [],   // the hours with more lights than were logged (a bridge from before sends none)
   };
 }
 
@@ -104,10 +113,12 @@ function readQuery(query) {
  *   zone()        the bridge's time zone (or a promise of it): the page says the box's hours
  *   plugin()      whether the Sky Watcher plugin is on (store.js pluginOn): off, the page only says so; it is read once, when the page is made
  *   setup()       the Setup panel, { el, destroy() } (sky-setup.js), or null for none
+ *   openPlayer(o) the clip player over the page (sky-player.js openSkyPlayer): { camera, entry, zone, heading, what, still, watchHref, onClose }
+ *                 -> a promise of { close() }
  */
 export function createSkyLogPage({ cameraID = null, query = '', load = loadNight, correct = sendCorrection, now = () => Date.now(), writeAddress = () => {},
   cameras = cameraList, onCameras = (fn) => subscribe((kind) => { if (kind === 'camera' || kind === 'removed') fn(); }), zone = loadZone,
-  plugin = () => pluginOn('sky'), setup = () => createSkySetupPanel() } = {}) {
+  plugin = () => pluginOn('sky'), setup = () => createSkySetupPanel(), openPlayer = openSkyPlayer } = {}) {
   const wanted = readQuery(query);
   const pluginIsOn = plugin() === true;
   let current = cameraID;        // the camera shown (null: not chosen yet)
@@ -131,6 +142,9 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
   const latest = { night: null, day: null };   // the name of the latest night (and day) the bridge answered with
   const opened = new Set();                    // the groups the person opened
   const refreshers = new Map();                // entry id -> [functions that draw its words again after a correction]
+  const expanded = new Set();                  // the stills shown whole, each as the function that shows its close-up again
+  let player = null;                           // the clip player that is open ({ close() }), or null
+  let opening = false;                         // and one is on its way
   const clock = () => now() + skew;
 
   // MARK: Pieces that stay
@@ -350,31 +364,120 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
       h('div', { class: 'sky-ends', 'aria-hidden': 'true' }, h('span', null, timeText(log.from, zoneName)), h('span', null, timeText(log.to, zoneName))));
   }
 
-  // MARK: The still and the path
+  /** Under the strip, a note for each hour in which the box followed more lights than it logs: "4 PM: 212 more lights weren’t logged (busy hour)". */
+  function cappedNotes() {
+    const lines = cappedText(log?.capped, zoneName);
+    return lines.length ? h('div', { class: 'sky-capped' }, lines.map((line) => h('p', { class: 'small muted sky-capped-hour' }, line))) : null;
+  }
+
+  // MARK: The still: a close-up of the light, the whole picture a tap away
 
   const stillAddress = (entry) => `/api/v1/sky/cameras/${encodeURIComponent(current)}/entries/${encodeURIComponent(entry.id)}/still?night=${encodeURIComponent(log.night)}`;
 
-  /** The still with the path over it. The overlay's coordinates are the picture's own, known once it has arrived: the still is the camera's original picture. */
-  function stillBlock(entry) {
-    if (!entry.hasStill) return h('div', { class: 'sky-still sky-still--none' }, h('span', { class: 'small muted' }, TEXT.noPicture));
+  /**
+   * The still as a close-up of the light (sky-model.js closeUpRect: the path's box, padded, at least 160 × 90 of the picture's pixels, 16:9 and
+   * inside the picture), with the path drawn over it in the picture's own coordinates (known once it has arrived: the still is the camera's
+   * original picture). A tap shows the whole picture with the path; another tap, or Escape, the close-up again. A light that crossed more of the
+   * sky than a close-up holds is shown whole, with nothing to tap. `small`: the thumbnail of an explained row (none without a still).
+   */
+  function stillBlock(entry, { small = false } = {}) {
+    if (!entry.hasStill) return small ? null : h('div', { class: 'sky-still sky-still--none' }, h('span', { class: 'small muted' }, TEXT.noPicture));
     const img = h('img', { class: 'sky-still-img', src: stillAddress(entry), alt: `Still picture from ${timeText(entry.start, zoneName)}`, loading: 'lazy', decoding: 'async' });
     const overlay = svg('svg', { class: 'sky-path', 'aria-hidden': 'true', focusable: 'false', preserveAspectRatio: 'none' });
-    const draw = () => {
+    const badge = h('span', { class: 'sky-still-badge', 'aria-hidden': 'true' });
+    const el = h('button', {
+      class: `sky-still${small ? ' sky-still--small' : ''}`, type: 'button', dataset: { view: 'loading' }, 'aria-pressed': 'false',
+      'aria-label': `${TEXT.wholePicture}, ${timeText(entry.start, zoneName, { seconds: true })}`, onclick: () => toggle(),
+    }, img, overlay, badge);
+    let crop = null;
+    let whole = false;
+    const collapse = () => toggle(false);
+
+    function draw() {
       const width = img.naturalWidth;
       const height = img.naturalHeight;
       if (!(width > 0 && height > 0)) return;
-      overlay.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      crop = closeUpRect(entry.path, width, height);
+      const showsWhole = whole || !crop;
+      const box = showsWhole ? { x: 0, y: 0, width, height } : crop;
+      el.dataset.view = showsWhole ? 'whole' : 'closeup';
+      if (crop) {
+        // The picture placed so that the crop fills the close-up's 16:9 frame (sky.css): its width and its corner, in per cent of the frame.
+        el.style.setProperty('--sky-crop-w', String(round((width / crop.width) * 100)));
+        el.style.setProperty('--sky-crop-x', String(round((crop.x / crop.width) * 100)));
+        el.style.setProperty('--sky-crop-y', String(round((crop.y / crop.height) * 100)));
+      }
+      el.setAttribute('aria-pressed', String(showsWhole && Boolean(crop)));
+      if (crop) { el.removeAttribute('aria-disabled'); el.removeAttribute('tabindex'); } else { el.setAttribute('aria-disabled', 'true'); el.setAttribute('tabindex', '-1'); }
+      badge.textContent = crop ? (showsWhole ? TEXT.wholePicture : TEXT.closeUp) : '';
+      badge.hidden = !crop;
+      overlay.setAttribute('viewBox', `${box.x} ${box.y} ${box.width} ${box.height}`);
       while (overlay.firstChild) overlay.removeChild(overlay.firstChild);
       const points = pathPoints(entry.path, width, height);
       const list = points ? points.split(' ').map((pair) => pair.split(',')) : [];
-      const radius = round(Math.max(width, height) * 0.012);
+      const radius = round(Math.max(box.width, box.height) * (showsWhole ? 0.012 : 0.03));
       if (list.length >= 2) overlay.append(svg('polyline', { class: 'sky-path-line', points, fill: 'none' }));
       if (list.length >= 1) overlay.append(svg('circle', { class: list.length >= 2 ? 'sky-mark sky-mark--start' : 'sky-mark sky-mark--point', cx: list[0][0], cy: list[0][1], r: radius }));
       if (list.length >= 2) overlay.append(svg('circle', { class: 'sky-mark sky-mark--end', cx: list.at(-1)[0], cy: list.at(-1)[1], r: radius }));
-    };
+    }
+
+    function toggle(next = !whole) {
+      if (!crop) return;
+      whole = next;
+      if (whole) expanded.add(collapse);
+      else expanded.delete(collapse);
+      draw();
+    }
+
     img.addEventListener('load', draw);
     if (img.complete && img.naturalWidth > 0) draw();
-    return h('figure', { class: 'sky-still' }, img, overlay);
+    return el;
+  }
+
+  // MARK: Playing an entry's recording
+
+  /** What the player's title says the light was, and on which camera: never a height or a distance (a flight's stays in its row). */
+  function playerWhat(entry) {
+    const kind = entryBucket(entry) === 'unexplained' ? TEXT.kinds[entry.kind] ?? TEXT.kinds.track : KIND_WORDS[entry.display] ?? '';
+    return [kind, cameraById(current)?.name].filter(Boolean).join(' · ');
+  }
+
+  /** A Play button and the line that says when the player could not be loaded. -> { button, problem } */
+  function playBlock(entry, { small = false } = {}) {
+    const problem = h('p', { class: 'small sky-said bad sky-play-problem', role: 'alert', hidden: true });
+    const button = h('button', {
+      class: `btn small${small ? '' : ' primary'} sky-play`, type: 'button', 'aria-label': `Play the recording of ${timeText(entry.start, zoneName, { seconds: true })}`,
+      onclick: () => play(entry, button, problem),
+    }, icon('play'), TEXT.play);
+    return { button, problem };
+  }
+
+  /** Opens the clip player over the log: one at a time; closing it puts the focus back on this Play, and the log is where it was. */
+  async function play(entry, opener, problem) {
+    if (player || opening || destroyed || !log) return;
+    opening = true;
+    problem.hidden = true;
+    const camera = cameraById(current) ?? { id: current, name: '' };
+    let handle = null;
+    let closedEarly = false;
+    try {
+      handle = await openPlayer({
+        camera, entry, zone: zoneName, heading: timeText(entry.start, zoneName, { seconds: true }), what: playerWhat(entry),
+        still: entry.hasStill ? stillAddress(entry) : null, watchHref: watchAddress(current, entry),
+        onClose: () => {
+          closedEarly = handle === null;
+          player = null;
+          if (!destroyed) opener.focus?.({ preventScroll: true });
+        },
+      });
+    } catch {
+      problem.textContent = TEXT.playerFailed;
+      problem.hidden = false;
+    }
+    opening = false;
+    if (!handle || closedEarly) return;
+    if (destroyed) { handle.close?.(); return; }
+    player = handle;
   }
 
   // MARK: Corrections
@@ -481,17 +584,20 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
   }
 
   function unexplainedCard(entry) {
+    const playing = playBlock(entry);
     const card = h('article', { class: `card sky-entry${entry.id === target ? ' sky-target' : ''}`, dataset: { entry: entry.id }, tabindex: '-1' },
       stillBlock(entry),
       h('div', { class: 'sky-entry-body' },
         h('div', { class: 'sky-entry-head' },
           h('h3', null, h('time', { datetime: new Date(entry.start).toISOString() }, timeText(entry.start, zoneName, { seconds: true }))),
           h('span', { class: 'sky-kind' }, TEXT.kinds[entry.kind] ?? TEXT.kinds.track), labelTag(entry)),
+        entry.detail ? h('p', { class: 'sky-detail' }, entry.detail) : null,
         h('ul', { class: 'sky-facts' }, facts(entry).map((line) => h('li', null, line))),
         entry.ai ? h('p', { class: 'sky-ai' }, h('span', { class: 'sky-ai-label' }, TEXT.ai), ' ', entry.ai.sentence) : null,
         h('div', { class: 'row sky-actions' },
-          h('a', { class: 'btn small', href: watchAddress(current, entry) }, icon('film'), TEXT.watch),
+          playing.button,
           h('a', { class: 'btn small', href: clipAddress(current, entry, zoneName), download: true }, icon('download'), TEXT.download)),
+        playing.problem,
         correctionBlock(entry)));
     if (entry.id === target) targetNode = card;
     return card;
@@ -523,13 +629,18 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
   function explainedRow(entry) {
     const probable = entry.display === 'probablePlane';
     const where = directionText(entry.measures.azimuth, entry.measures.elevation);
+    const playing = playBlock(entry, { small: true });
     const row = h('li', { class: `sky-row${entry.id === target ? ' sky-target' : ''}`, dataset: { entry: entry.id }, tabindex: '-1' },
       h('div', { class: 'sky-row-main' },
-        h('span', { class: 'sky-row-time' }, timeText(entry.start, zoneName, { seconds: true })),
-        h('span', { class: 'sky-row-what' }, entry.detail ?? (probable ? KIND_WORDS.plane : KIND_WORDS[entry.display] ?? '')),
-        probable ? h('span', { class: 'sky-tag' }, TEXT.probable) : null,
-        labelTag(entry),
-        where ? h('span', { class: 'sky-row-where muted' }, where) : null),
+        stillBlock(entry, { small: true }),
+        h('div', { class: 'sky-row-text' },
+          h('span', { class: 'sky-row-time' }, timeText(entry.start, zoneName, { seconds: true })),
+          h('span', { class: 'sky-row-what' }, entry.detail ?? (probable ? KIND_WORDS.plane : KIND_WORDS[entry.display] ?? '')),
+          probable ? h('span', { class: 'sky-tag' }, TEXT.probable) : null,
+          labelTag(entry),
+          where ? h('span', { class: 'sky-row-where muted' }, where) : null),
+        playing.button),
+      playing.problem,
       correctionBlock(entry));
     if (entry.id === target) targetNode = row;
     return row;
@@ -646,6 +757,7 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     }
     body.classList.remove('sky-stale');
     refreshers.clear();
+    expanded.clear();
     const camera = cameraById(current);
     summaryEl = h('p', { class: 'sky-summary', role: 'status' });
     countsEl = h('ul', { class: 'sky-counts' });
@@ -666,6 +778,7 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
         conditions ? h('p', { class: 'sky-conditions' }, conditions) : null,
         learning),
       stripBox,
+      cappedNotes(),
       unexplainedSection(unexplained),
       explainedSection(explained),
       statusBox);
@@ -701,6 +814,14 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     if (phase === 'ready') { drawStatus(); drawNote(); }
   });
 
+  // Escape shows the close-ups of the stills shown whole again (the clip player, while it is open, has Escape for itself).
+  const onKey = (event) => {
+    if (event.key !== 'Escape' || player || !expanded.size) return;
+    for (const collapse of [...expanded]) collapse();
+    event.preventDefault?.();
+  };
+  document.addEventListener('keydown', onKey);
+
   // The Setup panel (the box's own settings) is there while the plugin is on; with it off, Sky Watcher does nothing at all.
   let panel = null;
   if (pluginIsOn) {
@@ -718,6 +839,9 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
       destroyed = true;
       stopCameras();
       panel?.destroy();
+      document.removeEventListener('keydown', onKey);
+      player?.close?.();     // leaving the page stops the clip player and frees its stream
+      player = null;
     },
   };
 }

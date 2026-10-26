@@ -54,6 +54,20 @@ function shown(root) {
   return parts.join('');
 }
 const paragraphs = (root) => all(root, (node) => node.localName === 'p' && visible(node)).map((node) => node.textContent);
+/** Time that moves only when the test says: { setTimeout, clearTimeout, advance(ms) }. */
+function fakeTimers() {
+  let now = 0;
+  let next = 1;
+  const due = new Map();
+  return {
+    setTimeout(fn, ms) { const id = next++; due.set(id, { at: now + ms, fn }); return id; },
+    clearTimeout(id) { due.delete(id); },
+    advance(ms) {
+      now += ms;
+      for (const [id, timer] of [...due].sort((a, b) => a[1].at - b[1].at)) if (timer.at <= now) { due.delete(id); timer.fn(); }
+    },
+  };
+}
 const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 const flip = (input, on) => { input.checked = on; input.dispatchEvent({ type: 'change', target: input }); };
 const type = (input, value) => { input.value = value; input.dispatchEvent({ type: 'input', target: input }); input.dispatchEvent({ type: 'change', target: input }); };
@@ -63,13 +77,14 @@ const pressed = (root, attribute) => all(root, (node) => node.localName === 'but
  * The card with fake requests: `settings` answers `box` (an Error: it could not be read), `save` and `saveLocation` record what they were
  * sent and fail with the errors the test queued in `refusals`, one for each call.
  */
-function cardWith({ at = camera(), box = boxWith(null), geolocate, refusals = [], placeRefusals = [] } = {}) {
+function cardWith({ at = camera(), box = boxWith(null), geolocate, refusals = [], placeRefusals = [], timers } = {}) {
   const calls = { saves: [], places: [] };
   const card = page.createSkyDetectorCard(at, {
     save: async (value) => { calls.saves.push(value); const error = refusals.shift(); if (error) throw error; },
     saveLocation: async (place) => { calls.places.push(place); const error = placeRefusals.shift(); if (error) throw error; },
     settings: async () => { if (box instanceof Error) throw box; return box; },
     geolocate,
+    timers,
   });
   return { card, calls, refusals, placeRefusals };
 }
@@ -244,7 +259,7 @@ test('Use this browser’s location fills the fields; refusal says type it in', 
   type(field(denied.card.el, 'latitude'), '12');
   button(denied.card.el, 'Use this browser’s location').click();
   await settle();
-  assert.match(shown(denied.card.el), /This browser didn’t share its location\. Type it in instead\./);
+  assert.match(shown(denied.card.el), /Your browser didn’t share its location\. Type it in instead: latitude and longitude, with a minus sign for west\./);
   assert.equal(field(denied.card.el, 'latitude').value, '12', 'what was typed stays');
   assert.equal(field(denied.card.el, 'longitude').value, '');
   denied.card.destroy();
@@ -255,8 +270,41 @@ test('Use this browser’s location fills the fields; refusal says type it in', 
   flip(theSwitch(none.card.el), true);
   button(none.card.el, 'Use this browser’s location').click();
   await settle();
-  assert.match(shown(none.card.el), /Type it in instead\./);
+  assert.match(shown(none.card.el), /Your browser didn’t share its location\. Type it in instead: latitude and longitude, with a minus sign for west\./);
   none.card.destroy();
+});
+
+test('a browser that never answers is said to have refused after 10 seconds; one that answers late still fills the fields', async () => {
+  const timers = fakeTimers();
+  let answer = null;
+  const late = { getCurrentPosition(ok) { answer = ok; } };
+  const { card } = cardWith({ geolocate: late, timers });
+  await settle();
+  flip(theSwitch(card.el), true);
+  button(card.el, 'Use this browser’s location').click();
+  await settle();
+  assert.match(shown(card.el), /Asking this browser…/);
+  timers.advance(10_000);
+  const sentence = 'Your browser didn’t share its location. Type it in instead: latitude and longitude, with a minus sign for west.';
+  assert.ok(shown(card.el).includes(sentence), 'said next to the fields after 10 s');
+  assert.doesNotMatch(shown(card.el), /Asking this browser…/);
+  // The person allowed it in the end: the fields are filled and the sentence goes.
+  answer({ coords: { latitude: 41.5, longitude: -87.25 } });
+  assert.equal(field(card.el, 'latitude').value, '41.5');
+  assert.equal(field(card.el, 'longitude').value, '-87.25');
+  assert.ok(!shown(card.el).includes(sentence));
+  card.destroy();
+
+  // An answer in time stops the clock: no sentence after it.
+  const quick = fakeTimers();
+  const grant = { getCurrentPosition(ok) { ok({ coords: { latitude: 40, longitude: -100 } }); } };
+  const granted = cardWith({ geolocate: grant, timers: quick });
+  await settle();
+  flip(theSwitch(granted.card.el), true);
+  button(granted.card.el, 'Use this browser’s location').click();
+  quick.advance(20_000);
+  assert.ok(!shown(granted.card.el).includes(sentence));
+  granted.card.destroy();
 });
 
 test('a camera set up before turns on at once with what it had, and the place the box already has is in the fields', async () => {

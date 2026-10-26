@@ -238,8 +238,21 @@ public struct SkyLearning: Codable, Sendable, Equatable {
     }
 }
 
-/// A night's (or a day's) log of one camera, as `BridgeEngine.skyNightLog` reads it: the entries and conditions of `from…to`, their counts, and
-/// the camera's aim and learning now. `night` names the log (the local date of its sunset; a day by its own date).
+/// A clock hour in which a camera followed more lights that nothing explains than it logs (`SkyLightFilter.unexplainedPerHour`, 60): when the
+/// hour began, and how many more there were, counted and not logged ("4 PM: 212 more lights weren't logged").
+public struct SkyCappedHour: Codable, Sendable, Equatable {
+    public var hour: Date
+    public var count: Int
+
+    public init(hour: Date, count: Int) {
+        self.hour = hour
+        self.count = count
+    }
+}
+
+/// A night's (or a day's) log of one camera, as `BridgeEngine.skyNightLog` reads it: the entries and conditions of `from…to`, their counts, the
+/// hours of it in which more lights were followed than logged (`capped`, oldest first), and the camera's aim and learning now. `night` names the
+/// log (the local date of its sunset; a day by its own date).
 public struct SkyNightLog: Sendable, Equatable {
     public var camera: UUID
     public var night: String
@@ -251,9 +264,10 @@ public struct SkyNightLog: Sendable, Equatable {
     public var counts: SkyCounts
     public var aim: SkyAimStatus
     public var learning: SkyLearning
+    public var capped: [SkyCappedHour]
 
     public init(camera: UUID, night: String, view: SkyLogView, from: Date, to: Date, entries: [SkyEntry], conditions: [SkyConditions], counts: SkyCounts,
-                aim: SkyAimStatus, learning: SkyLearning) {
+                aim: SkyAimStatus, learning: SkyLearning, capped: [SkyCappedHour] = []) {
         self.camera = camera
         self.night = night
         self.view = view
@@ -264,6 +278,7 @@ public struct SkyNightLog: Sendable, Equatable {
         self.counts = counts
         self.aim = aim
         self.learning = learning
+        self.capped = capped
     }
 }
 

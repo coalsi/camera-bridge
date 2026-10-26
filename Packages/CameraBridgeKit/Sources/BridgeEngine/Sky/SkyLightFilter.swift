@@ -1,6 +1,6 @@
 import Foundation
 
-/// Which lights that nothing explains are worth an entry in the sky log, and how many pictures of them a camera keeps (Ruling S24).
+/// Which lights that nothing explains are worth an entry in the sky log, how many a camera logs, and which have pictures (Rulings S24 and S31).
 ///
 /// Phase 1 logged every light the tracker kept, and about 2 to 3 a minute were not lights, mostly faint stars, each with a picture of its own.
 /// Now:
@@ -8,13 +8,18 @@ import Foundation
 ///   when its mean speed along its path (`SkyMeasures.speed`: stars drift at about 0.004°/s, planes and satellites move at 0.1 to 1°/s) is under
 ///   `slowDegreesPerSecond` while the lens's aim is good or precise, and, while the aim is rough and degrees through a lens that is only guessed
 ///   are not to be trusted, when its speed is under `slowPixelsPerSecond` in analysed pixels (about the same speed to a camera that sees 180°
-///   across 1920 pixels). It is asked only of a light that no flight explains: a plane is a plane whatever its speed.
-/// - **A camera keeps at most `stillsPerHour` pictures** in a clock hour (of the box's zone); a later light that nothing explains is logged
-///   without one.
+///   across 1920 pixels). It is asked only of a light that no flight explains: a plane is a plane whatever its speed. So are the lights at a
+///   busy spot (`SkyClutterMap`) and those in the band along the edge nearest the Sun (`SkySunGuard`).
+/// - **A camera logs at most `unexplainedPerHour` lights that nothing explains** in a clock hour (of the box's zone): the owner's camera logged
+///   about 2,500 junk entries in one afternoon, which made the page unusable and the day's file (which the night after it shares) huge. The
+///   later ones are counted, not logged, and one line of the log says how many for the hour (`SkyLogStore.recordCapped`).
+/// - **Every light that is logged and wants a picture has one** (`wantsStill`: what nothing explains, and the rules' meteors, bugs and birds;
+///   Ruling S31): the hour's entries bound the pictures. One the camera's ring could not give is made later from the recordings
+///   (`SkyStillBackfill`).
 ///
 /// And the pictures must not fill the recordings drive (Ruling S27): recording pauses on every camera when the drive's free space falls
-/// below its floor, and the size rule never counts what the sky log keeps. So a picture is taken only while the drive has `stillRoomFactor`
-/// times its floor free (`stillsHaveRoom`), and a camera's pictures stay under `stillBytesPerCamera`, the oldest nights' going first
+/// below its floor, and the size rule never counts what the sky log keeps. So a picture is taken only while the drive has its floor and
+/// `stillRoomMargin` more free (`stillsHaveRoom`), and a camera's pictures stay under `stillBytesPerCamera`, the oldest nights' going first
 /// (`SkyLogStore.pruneStills`, looked at every `stillPruneInterval`).
 enum SkyLightFilter {
     /// A light that nothing explains and that crosses the sky slower than this (degrees a second) is skipped while the aim is good or precise.
@@ -29,21 +34,31 @@ enum SkyLightFilter {
     /// however little it moved. The overnight test's strangest lights rose, held for seconds and faded on one spot; faint stars and wires never
     /// stand this far above the noise (and a bright star is on the slow background, which the tracker already drops).
     static let brightSignificance = 6.0
-    /// A camera keeps at most this many pictures of unexplained lights in a clock hour.
-    static let stillsPerHour = 30
+    /// A camera logs at most this many lights that nothing explains in a clock hour; the rest are counted.
+    static let unexplainedPerHour = 200
     /// A camera's pictures stay under this many bytes on the recordings drive.
     static let stillBytesPerCamera: UInt64 = 2 * 1_073_741_824
-    /// A picture is taken only while the drive has at least this many times its floor free (below the floor recording pauses).
-    static let stillRoomFactor: UInt64 = 2
+    /// A picture is taken only while the drive has its floor and at least this much more free (below the floor recording pauses). It was twice
+    /// the floor (Ruling S27), which a full recorder almost never has: retention keeps it at about twice its floor free (Ruling S31).
+    static let stillRoomMargin: UInt64 = 1_073_741_824
     /// A camera's folders of pictures are measured at most this often (seconds).
     static let stillPruneInterval: TimeInterval = 600
 
-    /// Whether the recordings drive has room for a picture of the sky: measured, recording not paused, and at least `stillRoomFactor` times
-    /// its floor free. A drive that has not been measured, or whose floor is not known, has none.
+    /// Whether the recordings drive has room for a picture of the sky: measured, recording not paused, and its floor and `stillRoomMargin` more
+    /// free, so that a picture can never take it down to the floor. A drive that has not been measured, or whose floor is not known, has none.
     static func stillsHaveRoom(_ storage: ArchiveStorageStatus?) -> Bool {
         guard let storage, storage.pause == nil, storage.floorBytes > 0 else { return false }
-        let (needed, overflow) = storage.floorBytes.multipliedReportingOverflow(by: stillRoomFactor)
+        let (needed, overflow) = storage.floorBytes.addingReportingOverflow(stillRoomMargin)
         return !overflow && storage.freeBytes >= needed
+    }
+
+    /// Whether an entry of this label has a picture: what nothing explains, and what the rules say is a meteor, a bug or a bird (Ruling S31). A
+    /// plane or a satellite is explained by what the feeds say of it.
+    static func wantsStill(_ label: SkyLabel) -> Bool {
+        switch label {
+        case .unexplained, .meteor, .bug, .bird: true
+        case .plane, .probablePlane, .satellite, .satelliteFlare: false
+        }
     }
 
     /// Whether a light that nothing explains moved too slowly to be logged: `measures.speed` (degrees a second along its path) while the aim is
@@ -96,8 +111,8 @@ enum SkyLightFilter {
     }
 }
 
-/// How many of something happened in each clock hour (`SkyLightFilter.clockHour`): the pictures a camera asked for, the slow lights it skipped.
-/// Only the newest `kept` hours are remembered, so that a count nobody reads does not grow.
+/// How many of something happened in each clock hour (`SkyLightFilter.clockHour`): the lights a camera logged, and those it skipped or did not
+/// log, by why. Only the newest `kept` hours are remembered, so that a count nobody reads does not grow.
 struct SkyHourCounts: Sendable, Equatable {
     static let kept = 8
 
@@ -106,6 +121,9 @@ struct SkyHourCounts: Sendable, Equatable {
     func count(in hour: Date) -> Int {
         counts[hour] ?? 0
     }
+
+    /// No hour has anything counted.
+    var isEmpty: Bool { counts.isEmpty }
 
     /// One more in `hour`; the count there now.
     @discardableResult

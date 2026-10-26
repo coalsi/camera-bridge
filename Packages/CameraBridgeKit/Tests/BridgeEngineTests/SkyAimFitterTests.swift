@@ -809,6 +809,30 @@ import TestSupport
         #expect(await store.current() == fit)
     }
 
+    @Test func aRefitRunsOffTheStoresActor() async throws {
+        // A refit of a few thousand matches takes seconds on the box. It runs on a thread of its own, outside Swift's cooperative pool: the
+        // store answers meanwhile (the detector's pictures never wait for it, nor does the rest of the bridge for a thread), and an aim started
+        // again meanwhile is not overwritten by the fit of the matches it dropped.
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let clock = Box(SkyFixtures.aimEpoch.addingTimeInterval(7_200))
+        let store = Self.store(in: directory, clock: clock)
+        var random = SkyRandom(seed: 41)
+        let many = Self.planes.data + SkyFixtures.stars(through: SkyFixtures.truthDual, perLens: 400, noise: Self.starNoise, using: &random)
+        let adding = Task { await store.add(many) }
+        #expect(await eventually(timeout: .seconds(60), every: .milliseconds(1)) { await store.isFitting() }, "the store answers while it fits")
+        let during = await store.status()
+        #expect(during.quality == .rough && during.planes == 0, "and says what it had: \(during)")
+        await store.reset(reason: "Again.")
+        let dropped = await adding.value
+        let after = await store.status(), left = await store.correspondences()
+        #expect(dropped == nil && after.note == "Again." && after.quality == .rough && left.isEmpty, "the reset stands: \(after)")
+        // With nothing under way, a fit is taken as before.
+        let next = await store.add(Self.planes.data)
+        let fitting = await store.isFitting()
+        #expect(next?.quality == .good && !fitting)
+    }
+
     @Test func aNewCardKeepsTheMatches() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
@@ -829,6 +853,66 @@ import TestSupport
                                 pictureHeight: Self.height, now: { clock.value }, seed: 21)
         #expect(await again.current()?.model.layout != .dual)
         #expect(await again.correspondences() == Self.planes.data)
+    }
+
+    @Test func theCardIsKeptWithTheAim() async throws {
+        // Ruling S25b: the card an aim started from (facing, tilt, lenses) is kept with it, so that a card changed while the detector was off
+        // starts the aim again when the store is opened, as a change while it runs does (Ruling S25): no fit, no matches, no note.
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let clock = Box(SkyFixtures.aimEpoch.addingTimeInterval(600))
+        let north = SkyAimStore.Card(facing: 0, tilt: 20, lensLayout: nil), turned = SkyAimStore.Card(facing: 10, tilt: 20, lensLayout: nil)
+        func open(_ card: SkyAimStore.Card?) -> SkyAimStore {
+            SkyAimStore(directory: directory.url, log: Log(category: "Sky"), start: Self.card, card: card, pictureWidth: Self.width,
+                        pictureHeight: Self.height, now: { clock.value }, seed: 21)
+        }
+        func savedFacing() throws -> Double? {
+            let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.file(SkyAimStore.aimFileName))) as? [String: Any]
+            return (saved?["card"] as? [String: Any])?["facing"] as? Double
+        }
+        let first = open(north)
+        #expect(!first.cardChanged)
+        let fit = try #require(await first.add(Self.planes.data))
+        #expect(try savedFacing() == 0)
+        // The same card again: the aim stays. Nor does a store told no card change anything.
+        let same = open(north)
+        let sameFit = await same.current(), sameMatches = await same.correspondences()
+        #expect(!same.cardChanged && sameFit == fit && sameMatches == Self.planes.data)
+        #expect(await open(nil).current() == fit)
+        // A new card while it was off: the aim starts again from it, and the card is kept; opened again with it, nothing changes.
+        let moved = open(turned)
+        let movedFit = await moved.current(), movedMatches = await moved.correspondences(), movedStatus = await moved.status()
+        #expect(moved.cardChanged && movedFit == nil && movedMatches.isEmpty && movedStatus == SkyAimStatus.unaimed(), "\(movedStatus)")
+        #expect(try savedFacing() == 10)
+        let reopened = open(turned)
+        let left = await open(nil).correspondences()
+        #expect(!reopened.cardChanged && left.isEmpty, "what it dropped stays dropped")
+        // Starting again for another reason keeps the card; a new start with a card keeps that one.
+        await reopened.reset(reason: SkyAimStore.movedNote)
+        #expect(try savedFacing() == 10)
+        await reopened.setStart(Self.card, pictureWidth: Self.width, pictureHeight: Self.height, card: north)
+        #expect(try savedFacing() == 0)
+
+        // A state saved before the card was kept has none: its fit stays (nothing says which card it was made from), and the card is saved,
+        // so that a change while the detector is off is noticed from then on.
+        let older = try TemporaryDirectory()
+        defer { older.remove() }
+        func openOlder(_ card: SkyAimStore.Card?) -> SkyAimStore {
+            SkyAimStore(directory: older.url, log: Log(category: "Sky"), start: Self.card, card: card, pictureWidth: Self.width,
+                        pictureHeight: Self.height, now: { clock.value }, seed: 21)
+        }
+        let kept = try #require(await openOlder(nil).add(Self.planes.data))
+        let file = older.file(SkyAimStore.aimFileName)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        #expect(!text.contains("\"card\"") && text.contains("\"fit\""), "told no card, the store keeps none, as one before it did")
+        let upgraded = openOlder(turned)
+        let upgradedFit = await upgraded.current()
+        #expect(!upgraded.cardChanged && upgradedFit == kept)
+        let saved = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect((saved["card"] as? [String: Any])?["facing"] as? Double == 10, "\(saved)")
+        let later = openOlder(north)
+        let laterFit = await later.current()
+        #expect(later.cardChanged && laterFit == nil)
     }
 
     @Test func aStarAimIsNotMovedByPlanes() async throws {

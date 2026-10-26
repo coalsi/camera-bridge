@@ -67,6 +67,9 @@ final class SkyDetectorRig: Sendable {
     let stillsAsked = Box<[Date]>([])
     /// Whether the recordings drive has room for a picture (`Context.roomForStills`); a test sets it.
     let room = Box(true)
+    /// What the camera's recording gives for a picture made later (`Context.recordedStill`, Ruling S31), and the times it was asked for.
+    let recorded = Box(SkyRecordedStill.gone)
+    let recordedAsked = Box<[Date]>([])
     let context: SkyCameraDetector.Context
     let detector: SkyCameraDetector
     let observer: SkyObserver
@@ -77,7 +80,7 @@ final class SkyDetectorRig: Sendable {
         let data = try data ?? TemporaryDirectory()
         let recordings = try TemporaryDirectory()
         let clock = Box(start)
-        let asked = stillsAsked, room = room
+        let asked = stillsAsked, room = room, recorded = recorded, recordedAsked = recordedAsked, logStore = log
         self.camera = camera
         self.data = data
         self.recordings = recordings
@@ -91,16 +94,31 @@ final class SkyDetectorRig: Sendable {
                                                 if stillDelay > .zero { try? await Task.sleep(for: stillDelay) }   // a keyframe that takes its time to decode
                                                 return (SkyLogStoreTests.jpeg("still"), date)
                                             },
-                                            roomForStills: { room.value })
+                                            roomForStills: { room.value },
+                                            recordedStill: { date in
+                                                recordedAsked.update { $0.append(date) }
+                                                return recorded.value
+                                            },
+                                            readLog: { night in
+                                                await logStore.flush()
+                                                return logStore.read(camera: camera, night: night, folder: folder).entries
+                                            })
         detector = SkyCameraDetector(context: context, directory: data.url.appending(path: "sky/\(camera.uuidString)", directoryHint: .isDirectory),
                                      flights: flights, log: log, now: { clock.value }, seed: 7)
     }
 
-    /// The same camera's detector again, on the same folders (a restart).
-    func again() -> SkyCameraDetector {
+    /// The same camera's detector again, on the same folders (a restart); with `settings`, its card as it was changed while it was off.
+    func again(settings: SkyDetectorSettings? = nil) -> SkyCameraDetector {
         let clock = clock
+        var context = context
+        if let settings { context.settings = settings }
         return SkyCameraDetector(context: context, directory: data.url.appending(path: "sky/\(camera.uuidString)", directoryHint: .isDirectory),
                                  flights: flights, log: log, now: { clock.value }, seed: 7)
+    }
+
+    /// The camera's aim file (`aim.json`).
+    var aimFile: URL {
+        data.url.appending(path: "sky/\(camera.uuidString)/\(SkyAimStore.aimFileName)", directoryHint: .notDirectory)
     }
 
     func night(_ date: Date) -> String { SkyNight.logName(for: date, observer: observer, zone: Self.zone) }
@@ -231,11 +249,14 @@ final class SkyDetectorRig: Sendable {
     }
 
     @Test func aGapEndsOpenTracksWithoutEntries() async throws {
-        // A light followed for 4 s, then a gap: the track it was ends, and nothing is logged; nor is the gap itself.
+        // A light followed for 4 s, then a gap: the track it was ends, and nothing is logged; nor is the gap itself. It goes at 2°/s, so that in
+        // its 4 s it gets well past the 12 analysed pixels a light must reach to be kept (`SkyLightFilter.wandersInPlace`), wherever the card
+        // puts it (at the stray's 1°/s it got 12.4 px through the card as it was until the 2026-10-25 beta, 12.1 through the level lenses).
+        let quick = SkyPath(start: Self.stray.start, bearing: Self.stray.bearing, legs: [SkyPath.Leg(duration: 8, speed: 2)])
         var scene = SkyScene(model: Self.dualModel, start: Self.start)
         scene.lights = [{ date in
             let into = date.timeIntervalSince(Self.start)
-            return into >= 1 && into <= 5 ? Self.stray.direction(at: into - 1) : nil
+            return into >= 1 && into <= 5 ? quick.direction(at: into - 1) : nil
         }]
         let gapped = try SkyDetectorRig(settings: Self.dualCard, pictureWidth: 4256, pictureHeight: 1888)
         defer { gapped.remove() }

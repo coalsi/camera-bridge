@@ -273,40 +273,30 @@ import Testing
             #expect(lens.principalPoint == PixelPoint(x: 0.5, y: 0.5) && lens.radial.isEmpty, "\(lens)")
         }
 
-        // The picture's centre, on the seam, faces (0, 20) through either lens, and the two lenses meet all down the seam.
-        for lens in 0...1 {
-            let centre = try #require(dual.direction(at: PixelPoint(x: 0.5, y: 0.5), lens: lens))
-            #expect(SkyFixtures.azimuthDifference(centre.azimuth, 0) <= 1e-9 && abs(centre.elevation - 20) <= 1e-9, "\(lens): \(centre)")
-        }
-        #expect(dual.direction(at: PixelPoint(x: 0.5, y: 0.5))?.lens == 1)
-        for y in stride(from: 0.0, through: 1, by: 0.1) {
-            let left = try #require(dual.direction(at: PixelPoint(x: 0.5, y: y), lens: 0))
-            let right = try #require(dual.direction(at: PixelPoint(x: 0.5, y: y), lens: 1))
-            #expect(SkyMath.separation(left, right) <= 1e-9, "\(y)")
-        }
-
-        // Each lens is the housing (facing 0, tilted up 20°) turned 45° about the housing's own up: that is its axis, its principal point
-        // looks there, and straight above the principal point is the housing's up.
-        let forward = SIMD3(0, cos(20 * Self.radians), sin(20 * Self.radians)), right = SIMD3<Double>(1, 0, 0)
-        let up = SIMD3(0, -sin(20 * Self.radians), cos(20 * Self.radians))
+        // Each lens is turned to its own azimuth about the vertical (north ∓ 45°), then tilted up 20° about its own horizontal axis: that is its
+        // axis, its principal point looks there, straight above the principal point is the vertical through it (no roll), and its middle row
+        // runs along its own horizontal axis. (Before, each was the tilted housing turned about the housing's own up, which rolled it.)
         for (index, side) in [(0, -1.0), (1, 1.0)] {
-            let axis = forward * cos(45 * Self.radians) + right * (side * sin(45 * Self.radians))
+            let turn = side * 45 * Self.radians, tilt = 20 * Self.radians
+            let axis = SIMD3(sin(turn) * cos(tilt), cos(turn) * cos(tilt), sin(tilt))
+            let level = SIMD3(cos(turn), -sin(turn), 0)   // the lens's horizontal axis, to its right
+            let up = SIMD3(-sin(turn) * sin(tilt), -cos(turn) * sin(tilt), cos(tilt))
             let expected = Self.direction(axis)
             let lens = dual.lenses[index]
-            #expect(SkyFixtures.azimuthDifference(lens.yaw, expected.azimuth) <= 1e-9 && abs(lens.pitch - expected.elevation) <= 1e-9, "\(lens)")
+            #expect(SkyFixtures.azimuthDifference(lens.yaw, side * 45) <= 1e-9 && abs(lens.pitch - 20) <= 1e-9 && abs(lens.roll) <= 1e-9, "\(lens)")
             let principal = try #require(dual.direction(at: PixelPoint(x: index == 0 ? 0.25 : 0.75, y: 0.5)))
             #expect(principal.lens == index && SkyMath.separation(principal.direction, expected) <= 1e-9)
             let above = try #require(dual.direction(at: PixelPoint(x: index == 0 ? 0.25 : 0.75, y: 0.2)))
-            let normal = SIMD3(axis.y * up.z - axis.z * up.y, axis.z * up.x - axis.x * up.z, axis.x * up.y - axis.y * up.x)
-            #expect(abs((Self.vector(above.direction) * normal).sum()) <= 1e-9, "above the principal point is the housing's up")
+            #expect(SkyFixtures.azimuthDifference(above.direction.azimuth, expected.azimuth) <= 1e-9 && above.direction.elevation > 20,
+                    "straight above the principal point is the vertical through it: \(above)")
 
-            // 180° across the middle row: half a degree inside the outer edge is in the picture, half a degree outside is not; and the
-            // same at the top and bottom of the lens's own centre column.
-            let inside = Self.direction(forward * cos(89.5 * Self.radians) + right * (side * sin(89.5 * Self.radians)))
+            // 90° across its middle row: half a degree inside its outer edge is in the picture, half a degree outside is not; and the same at the
+            // top and bottom of the lens's own centre column.
+            let inside = Self.direction(axis * cos(44.5 * Self.radians) + level * (side * sin(44.5 * Self.radians)))
             let edge = dual.project(inside)
             #expect(edge.count == 1 && edge.first?.lens == index, "\(edge)")
             if let x = edge.first?.point.x { #expect(index == 0 ? x < 0.01 : x > 0.99, "\(x)") }
-            #expect(dual.project(Self.direction(forward * cos(90.5 * Self.radians) + right * (side * sin(90.5 * Self.radians)))).isEmpty)
+            #expect(dual.project(Self.direction(axis * cos(45.5 * Self.radians) + level * (side * sin(45.5 * Self.radians)))).isEmpty)
             for vertical in [-1.0, 1.0] {
                 let near = (halfVertical / 2 - 0.5) * Self.radians, far = (halfVertical / 2 + 0.5) * Self.radians
                 let top = dual.project(Self.direction(axis * cos(near) + up * (vertical * sin(near))))
@@ -351,6 +341,99 @@ import Testing
         let odd = SkyCameraModel.initial(facing: .nan, tilt: 200, pictureWidth: 0, pictureHeight: -5)
         #expect(odd.lenses.allSatisfy { $0.yaw.isFinite && $0.pitch == 90 })
         #expect(SkyCameraModel.initial(facing: -90, tilt: 0, pictureWidth: 640, pictureHeight: 480).lenses.first?.yaw == 270)
+    }
+
+    /// A dual card as it was made until the 2026-10-25 beta: the housing (facing, tilt) turned ±45° about its own up, so that a tilted card
+    /// rolled each lens. Here only to show that a level card is made as it was.
+    static func housingTurned(facing: Double, tilt: Double) -> SkyCameraModel {
+        let vertical = SkyCameraModel.Lens.verticalFOV(horizontalFOV: 90, frameAspect: 2128.0 / 1888)
+        let centre = PixelPoint(x: 0.5, y: 0.5)
+        let housing = SkyCameraModel.Lens(yaw: facing, pitch: tilt, roll: 0, horizontalFOV: 90, verticalFOV: vertical, principalPoint: centre, radial: []).axes
+        let lenses = [-45.0, 45.0].map { turn -> SkyCameraModel.Lens in
+            let angle = turn * radians
+            return SkyCameraModel.Lens(up: housing.up, forward: housing.forward * cos(angle) + housing.right * sin(angle), horizontalFOV: 90,
+                                       verticalFOV: vertical, principalPoint: centre, radial: [])
+        }
+        return SkyCameraModel(layout: .dual, seam: 0.5, lenses: lenses)
+    }
+
+    @Test func aSteepDualCardKeepsEachLensLevel() throws {
+        // North Sky's card: facing north and tilted up 45°, a 4256×1888 stitched picture. Each lens is turned to its own azimuth about the
+        // vertical (north ∓ 45°), then tilted up about its own horizontal axis: it looks at its azimuth at the card's tilt, with no roll. (Turned
+        // about the tilted housing's up instead, as before, each was rolled 35°, and the level skyline ran from −18° to +18° across each half.)
+        let card = SkyCameraModel.initial(facing: 0, tilt: 45, pictureWidth: 4256, pictureHeight: 1888)
+        #expect(card.layout == .dual && card.seam == 0.5 && card.lenses.count == 2)
+        for (index, azimuth) in [(0, 315.0), (1, 45.0)] {
+            let lens = card.lenses[index]
+            #expect(SkyFixtures.azimuthDifference(lens.yaw, azimuth) <= 1e-9 && abs(lens.pitch - 45) <= 1e-9 && abs(lens.roll) <= 1e-9, "\(lens)")
+            let centre = try #require(card.direction(at: PixelPoint(x: index == 0 ? 0.25 : 0.75, y: 0.5)))
+            #expect(centre.lens == index && SkyFixtures.azimuthDifference(centre.direction.azimuth, azimuth) <= 1e-9
+                    && abs(centre.direction.elevation - 45) <= 1e-9, "the half's centre: \(centre)")
+        }
+        #expect(Self.housingTurned(facing: 0, tilt: 45).lenses.map { abs($0.roll) }.allSatisfy { abs($0 - 35.26) < 0.01 }, "the old card's roll")
+
+        // The level horizon (elevation 0 along each lens's azimuth span, its axis ± 44°) is one row in each half, within a pixel of 1888: for a
+        // level pinhole tilted up by t, 0.5 + 0.5 · tan t / tan(vertical / 2) of the height. At 45° that row is below the picture (each lens's
+        // own projection is not cut at the edges); at 20° it is in it.
+        for tilt in [45.0, 20.0] {
+            let model = SkyCameraModel.initial(facing: 0, tilt: tilt, pictureWidth: 4256, pictureHeight: 1888)
+            let row = 0.5 + 0.5 * tan(tilt * Self.radians) * 2128 / 1888
+            for (index, azimuth) in [(0, 315.0), (1, 45.0)] {
+                let points = try stride(from: -44.0, through: 44, by: 2).map {
+                    try #require(model.project(SkyDirection(azimuth: SkyMath.normalizedDegrees(azimuth + $0), elevation: 0), lens: index))
+                }
+                let rows: [Double] = points.map { $0.y * 1888 }
+                let highest: Double = rows.min() ?? .infinity, lowest: Double = rows.max() ?? 0
+                #expect(lowest - highest <= 1 && rows.allSatisfy { abs($0 - row * 1888) <= 1 }, "tilt \(tilt), lens \(index): \(rows)")
+            }
+        }
+
+        // The price of level lenses on a steep card: pinholes tilted up lean their sides towards the zenith, so the halves no longer meet along
+        // the seam. Near its top both lenses see the same sky; near its foot, neither does. The fit gives each lens its own pose.
+        let top = try #require(card.direction(at: PixelPoint(x: 0.5, y: 0.02), lens: 0))
+        #expect(card.project(top).map(\.lens) == [0, 1], "the top of the seam is in both halves")
+        let foot = try #require(card.direction(at: PixelPoint(x: 0.5, y: 0.98), lens: 0))
+        #expect(card.project(SkyDirection(azimuth: 0, elevation: foot.elevation)).isEmpty, "due north at the foot of the seam is in neither")
+
+        // A level card is made as before: each lens at facing ∓ 45°, level, unrolled; the picture's centre faces the card; the halves meet all down
+        // the seam; and every direction falls where it did.
+        for facing in [0.0, 137.5, 330] {
+            let level = SkyCameraModel.initial(facing: facing, tilt: 0, pictureWidth: 4256, pictureHeight: 1888)
+            let before = Self.housingTurned(facing: facing, tilt: 0)
+            for (lens, old) in zip(level.lenses, before.lenses) {
+                #expect(SkyFixtures.azimuthDifference(lens.yaw, old.yaw) <= 1e-9 && abs(lens.pitch - old.pitch) <= 1e-9 && abs(lens.roll - old.roll) <= 1e-9,
+                        "\(facing): \(lens) against \(old)")
+                #expect(lens.horizontalFOV == old.horizontalFOV && lens.verticalFOV == old.verticalFOV && lens.principalPoint == old.principalPoint)
+            }
+            for (lens, turn) in [(0, -45.0), (1, 45.0)] {
+                #expect(SkyFixtures.azimuthDifference(level.lenses[lens].yaw, facing + turn) <= 1e-9 && level.lenses[lens].roll == 0)
+            }
+            for lens in 0...1 {
+                let centre = try #require(level.direction(at: PixelPoint(x: 0.5, y: 0.5), lens: lens))
+                #expect(SkyFixtures.azimuthDifference(centre.azimuth, facing) <= 1e-9 && abs(centre.elevation) <= 1e-9, "\(facing), \(lens): \(centre)")
+            }
+            for y in stride(from: 0.0, through: 1, by: 0.1) {
+                let left = try #require(level.direction(at: PixelPoint(x: 0.5, y: y), lens: 0))
+                let right = try #require(level.direction(at: PixelPoint(x: 0.5, y: y), lens: 1))
+                #expect(SkyMath.separation(left, right) <= 1e-9, "\(facing), the seam at \(y)")
+            }
+            for azimuth in stride(from: 0.0, to: 360, by: 15) {
+                for elevation in stride(from: -60.0, through: 80, by: 20) {
+                    let direction = SkyDirection(azimuth: azimuth, elevation: elevation)
+                    for lens in 0...1 {
+                        // Behind a pinhole there is no point; at 90° off its axis, rounding decides which side a direction is on.
+                        let axis = SkyDirection(azimuth: before.lenses[lens].yaw, elevation: before.lenses[lens].pitch)
+                        guard SkyMath.separation(direction, axis) < 85 else { continue }
+                        let now = try #require(level.project(direction, lens: lens)), then = try #require(before.project(direction, lens: lens))
+                        #expect(abs(now.x - then.x) <= 1e-9 && abs(now.y - then.y) <= 1e-9, "\(facing): \(direction) through \(lens)")
+                    }
+                }
+            }
+        }
+
+        // A single lens is made as it was: facing (facing, tilt), unrolled, however steep.
+        let single = try #require(SkyCameraModel.initial(facing: 135, tilt: 45, pictureWidth: 1920, pictureHeight: 1080).lenses.first)
+        #expect(single.yaw == 135 && single.pitch == 45 && single.roll == 0 && single.horizontalFOV == 100)
     }
 
     @Test func rollLowersTheFramesRightSide() throws {
@@ -489,9 +572,10 @@ import Testing
             #expect(once.map(\.lens) == [lens] && once.allSatisfy { !truth.isInSeamBand($0.point) }, "\(x): \(once)")
         }
 
-        let seamCentre = SkyDirection(azimuth: 0, elevation: 20)
-        // The initial model's halves meet exactly: on the seam, a direction is at x = 0.5 in both.
-        let meeting = SkyCameraModel.initial(facing: 0, tilt: 20, pictureWidth: 4256, pictureHeight: 1888)
+        let seamCentre = SkyDirection(azimuth: 0, elevation: 0)
+        // A level card's halves meet exactly: on the seam, a direction is at x = 0.5 in both. (A tilted card's level lenses do not: see
+        // `aSteepDualCardKeepsEachLensLevel`.)
+        let meeting = SkyCameraModel.initial(facing: 0, tilt: 0, pictureWidth: 4256, pictureHeight: 1888)
         let both = meeting.project(seamCentre)
         #expect(both.map(\.lens) == [0, 1], "\(both)")
         for hit in both { #expect(abs(hit.point.x - 0.5) <= 1e-9 && abs(hit.point.y - 0.5) <= 1e-9, "\(hit)") }
@@ -518,14 +602,14 @@ import Testing
         #expect(gapped.project(seamCentre).isEmpty)
 
         // A few degrees either side of the seam: one lens, outside the band.
-        for (direction, lens) in [(SkyDirection(azimuth: 3, elevation: 20), 1), (SkyDirection(azimuth: 357, elevation: 20), 0)] {
+        for (direction, lens) in [(SkyDirection(azimuth: 3, elevation: 0), 1), (SkyDirection(azimuth: 357, elevation: 0), 0)] {
             let once = overlapping.project(direction)
             #expect(once.map(\.lens) == [lens], "\(direction): \(once)")
             #expect(once.allSatisfy { !overlapping.isInSeamBand($0.point) })
         }
 
         // Each lens's own projection is not cut at the seam (fitting sees a sighting that a wrong aim puts on the other side).
-        let beyond = try #require(overlapping.project(SkyDirection(azimuth: 3, elevation: 20), lens: 0))
+        let beyond = try #require(overlapping.project(SkyDirection(azimuth: 3, elevation: 0), lens: 0))
         #expect(beyond.x > 0.5)
     }
 

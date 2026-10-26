@@ -312,7 +312,8 @@ import TestSupport
             #expect(answer.headers["Referrer-Policy"] == "no-referrer")
             #expect(answer.headers["Cross-Origin-Resource-Policy"] == "same-origin")
             #expect(answer.headers["Cross-Origin-Opener-Policy"] == "same-origin")
-            #expect(answer.headers["Permissions-Policy"]?.contains("camera=()") == true)
+            // The page may ask the browser where it is (Sky Watcher's "Use this browser's location"); camera, microphone, payment and USB stay off.
+            #expect(answer.headers["Permissions-Policy"] == "camera=(), microphone=(), geolocation=(self), payment=(), usb=()")
         }
         for path in ["/api/v1/status", "/api/v1/cameras", "/api/v1/nothing"] {
             #expect(await session.get(path).headers["Cache-Control"] == "no-store", "\(path)")

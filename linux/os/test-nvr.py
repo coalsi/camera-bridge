@@ -41,7 +41,7 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' 
 # BridgeWeb/WebApp.swift addSecurityHeaders: the other six headers of every answer (the page, the API and the media alike); the CSP above is the seventh.
 SECURITY_HEADERS = (("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "DENY"), ("Referrer-Policy", "no-referrer"),
                     ("Cross-Origin-Opener-Policy", "same-origin"), ("Cross-Origin-Resource-Policy", "same-origin"),
-                    ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()"))
+                    ("Permissions-Policy", "camera=(), microphone=(), geolocation=(self), payment=(), usb=()"))
 # The FakeBox below implements what the phases need, not the whole contract, and says so on every answer; test-vm.sh does not run
 # conformance.mjs (which checks the whole contract) against a server that sends this header. The daemon never sends it.
 STAND_IN_HEADER = ("X-CB-Stand-In", "linux/os/test-nvr.py FakeBox")
@@ -1832,7 +1832,7 @@ def selftest():
         # the headers written out once more, so that the case does not compare the FakeBox with the table it is built from
         golden = {"Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
                   "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Resource-Policy": "same-origin",
-                  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()"}
+                  "Permissions-Policy": "camera=(), microphone=(), geolocation=(self), payment=(), usb=()"}
         assert dict(SECURITY_HEADERS) == {name: value for name, value in golden.items() if name != "Content-Security-Policy"}, "the table is not the golden headers"
         assert STAND_IN_HEADER[0] == "X-CB-Stand-In", "test-vm.sh looks for the header x-cb-stand-in"
         vm_script = os.path.join(here, "test-vm.sh")

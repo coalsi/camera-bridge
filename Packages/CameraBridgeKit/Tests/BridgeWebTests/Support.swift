@@ -74,6 +74,7 @@ final class FakeBackend: BridgeBackend {
         /// conditions, the aim and the learning it reports, and the stills by entry id.
         var skyEntries: [SkyEntry] = []
         var skyConditions: [SkyConditions] = []
+        var skyCapped: [SkyCappedHour] = []
         var skyAim = SkyAimStatus(quality: .rough, planes: 0, stars: 0, residualPixels: nil, updated: nil)
         var skyLearning = SkyLearning(ready: false, planes: 0, satellites: 0)
         var skyStills: [String: Data] = [:]
@@ -271,7 +272,8 @@ final class FakeBackend: BridgeBackend {
             guard state.configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
             let entries = state.skyEntries.filter { $0.camera == cameraID }.sorted { ($0.start, $0.id) < ($1.start, $1.id) }
             return SkyNightLog(camera: cameraID, night: night ?? "2026-10-24", view: view, from: Self.skyFrom, to: Self.skyTo, entries: entries,
-                               conditions: state.skyConditions, counts: SkyCounts(counting: entries), aim: state.skyAim, learning: state.skyLearning)
+                               conditions: state.skyConditions, counts: SkyCounts(counting: entries), aim: state.skyAim, learning: state.skyLearning,
+                               capped: state.skyCapped)
         }
     }
 

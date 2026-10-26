@@ -242,7 +242,9 @@ test('the night route answers the log as Task 5 describes it', opts, async () =>
   await ready();
   const { status, json } = await night(BACKYARD());
   assert.equal(status, 200);
-  assert.deepEqual(Object.keys(json).sort(), ['aim', 'camera', 'conditions', 'counts', 'entries', 'from', 'learning', 'night', 'serverTime', 'to', 'view']);
+  assert.deepEqual(Object.keys(json).sort(), ['aim', 'camera', 'capped', 'conditions', 'counts', 'entries', 'from', 'learning', 'night', 'serverTime', 'to', 'view']);
+  assert.ok(Array.isArray(json.capped) && json.capped.every((hour) => Number.isInteger(hour.hour) && Number.isInteger(hour.count) && hour.count > 0),
+    'the hours with more lights than were logged: [{ hour, count }]');
   assert.equal(json.camera, BACKYARD());
   assert.match(json.night, /^\d{4}-\d{2}-\d{2}$/);
   assert.equal(json.view, 'night');
@@ -453,6 +455,29 @@ test('the page reads the dev server’s night, shows it and takes a correction',
     browser.restore();
   }
   await reset();
+});
+
+test('the dev server lets the page ask this browser for its location, as the box does', opts, async () => {
+  await ready();
+  const policy = 'camera=(), microphone=(), geolocation=(self), payment=(), usb=()';
+  const page = await server.api.send('GET', '/', { absolute: true, auth: false });
+  const api = await server.api.get('settings');
+  assert.equal(page.headers['permissions-policy'], policy, 'the page');
+  assert.equal(api.headers['permissions-policy'], policy, 'and the API');
+});
+
+test('Back Yard’s recordings hold the night’s lights, so the clip player has something to play', opts, async () => {
+  await ready();
+  const { json } = await night(BACKYARD());
+  const catalog = await server.api.get('nvr/cameras');
+  assert.equal(catalog.status, 200);
+  const extent = catalog.json.cameras.find((entry) => entry.id.toUpperCase() === BACKYARD().toUpperCase());
+  assert.ok(extent, 'Back Yard records');
+  const lights = json.entries.filter((entry) => entry.label === 'unexplained');
+  assert.ok(lights.length >= 3);
+  for (const light of lights) {
+    assert.ok(extent.oldest <= light.start - 15_000 && light.end + 15_000 <= extent.newest, `${light.id}: its window is in the recordings`);
+  }
 });
 
 function all(root, match) {

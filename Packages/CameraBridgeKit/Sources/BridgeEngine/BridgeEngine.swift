@@ -144,6 +144,10 @@ public final class BridgeEngine {
     /// The detectors running, by camera, as the service last said; and the runtime whose pictures each one is given (`startSkyIfWanted`).
     @ObservationIgnored var skyDetectors: [UUID: SkyCameraDetector] = [:]
     @ObservationIgnored var skyLinks: [UUID: SkyLink] = [:]
+    /// The decoder of the sky log's pictures made later from the recordings (Ruling S31), and the lock that makes them one at a time for all the
+    /// cameras (`skyRecordedStill`).
+    @ObservationIgnored let skyRecordingDecoders: SnapshotDecoderPool
+    @ObservationIgnored let skyRecordingPictures = AsyncSerialLock()
     /// Bumped by every operation that changes what `refreshStatus` reads (cameras, runtimes, the sensors bridge, the
     /// state): a refresh that read before it publishes nothing (the operation refreshes again).
     @ObservationIgnored private var statusGeneration = 0
@@ -179,6 +183,8 @@ public final class BridgeEngine {
         archive = coordinator.reader
         skyService = SkyService(dataDirectory: environment.dataDirectory, http: tuning.skyHTTP ?? URLSessionSkyHTTP(), logStore: coordinator.store.skyLog,
                                 pollInterval: tuning.skyPollInterval)
+        skyRecordingDecoders = SnapshotDecoderPool(codecs: environment.codecs, idleLifetime: EventPictures.decoderIdleLifetime,
+                                                   blockingWork: SnapshotDecoderPool.offCooperativePool)
         // Settings and cameras are shown before the first start (a missing or unreadable file is handled by `start`).
         if let configuration = try? store.load() {
             storedSettings = configuration.settings
@@ -223,6 +229,7 @@ public final class BridgeEngine {
         nvr = coordinator
         archive = coordinator.reader
         skyService = nil
+        skyRecordingDecoders = SnapshotDecoderPool(codecs: environment.codecs, idleLifetime: EventPictures.decoderIdleLifetime)
         nvrStorage = snapshot.nvrStorage
         state = snapshot.state
         cameras = snapshot.cameras

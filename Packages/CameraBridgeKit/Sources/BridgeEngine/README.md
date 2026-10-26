@@ -1179,7 +1179,9 @@ clockwise, and elevation, in degrees) and `SkyLogView` (`night`, `day`), for the
   choice. What projecting needs is worked out once per lens, not per projection. Large radial terms bow the halves' seam columns in
   opposite directions, so a track crossing the seam is matched across it by direction, with an angular tolerance (about 3°). A direction projects through every lens that sees it (both near the seam, where the halves
   overlap); a pixel maps back through the lens of its half; a band of 1 % of the width around the seam is low trust, kept but not used
-  for fitting. Tests: `SkyGeometryTests`, `SkyCameraModelTests`.
+  for fitting. A dual card's lenses (`initial`) are turned to facing ∓ 45° about the vertical, then tilted up by the card's tilt, never
+  rolled, so a level skyline is level across each half however steep the card (the halves then meet along the seam only at tilt 0).
+  Tests: `SkyGeometryTests`, `SkyCameraModelTests`.
 
 ## Additions beyond the contract: the sky detector's aim (2026-10-25, docs/CONTRACT_CHANGES.md)
 
@@ -1209,7 +1211,7 @@ status without `lenses` or `note` decodes with none). Internal:
   an aircraft (its samples in one `add`) keeps at most 12 samples, each 1° from the others; the latest 2,000 matches of each source are
   kept, planes for 30 days; a refit happens at most once per 10 new matches or per hour. 10 plane matches in a row each more than 3 × the
   fit's plane RMS and half their lens's match tolerance off (one aircraft's samples counting once) start the aim again; a fit with no plane
-  matches judges none.
+  matches judges none. A fit runs on a thread of its own, outside the cooperative pool, while the store answers with the aim it had.
 - `SkyCameraModel.Lens.undistortedRadius` falls back to a bracketed search where Newton's ten steps do not settle (steep or wavy terms far
   out, or next to the fold), and `localPoint(ofUnit:)` projects a direction given as its unit vector. Tests: `SkyAimFitterTests`.
 
@@ -1331,8 +1333,9 @@ Public:
   entries by what the log shows (`SkyCounts(counting:)`: planes include probable ones, satellites their flares; an entry the box explained and the
   person was not sure of is `notSure`, one it did not explain stays `unexplained` whatever the person said; `explained` is the sum of all but the
   unexplained); `SkyLearning` is how many planes and satellites the box has matched against what it needs (30 and 10); `SkyNightLog` is one night's or
-  day's log with its counts and the camera's aim; `SkyLogError` says in the person's words why the log cannot answer (no place, no folder, a night that
-  is not a date, no such entry, no picture).
+  day's log with its counts and the camera's aim, and `capped` (2026-10-25, the clutter fix): the hours of its view in which the camera followed more
+  lights that nothing explains than it logs, each a `SkyCappedHour` (`hour`, the clock hour's start, and `count`, how many more), oldest first;
+  `SkyLogError` says in the person's words why the log cannot answer (no place, no folder, a night that is not a date, no such entry, no picture).
 - **The engine.** `BridgeEngine.skyNightLog(cameraID:night:view:)` reads a log (`night` is the log's name, nil for the latest; `view` is `SkyLogView`,
   the night from sunset to sunrise or the day from sunrise to sunset), `BridgeEngine.correctSkyEntry(cameraID:entryID:night:label:)` records a
   person's word and answers the entry, `BridgeEngine.skyStill(cameraID:night:entryID:)` reads an entry's picture, and `BridgeEngine.findFlightFeeds()`
@@ -1343,10 +1346,15 @@ Internal:
 - `SkyLogStore` (`Sky/SkyLogStore.swift`; the Sky Watcher's log beside the recordings, owned by `ArchiveStore.skyLog` next to the events). Layout:
   `<recordings>/.sky/<CAMERA-UUID>/<yyyy-MM-dd>.jsonl`, one file per camera per night, mode 0600 in folders of 0700, append-only, one JSON object per line
   with sorted keys and times in milliseconds: `{"entry": {…}, "v": 1}`, `{"correction": {"at", "label"}, "id", "v": 1}`, `{"ai": {…}, "id", "v": 1}`,
-  `{"alerted": true, "id", "v": 1}` and `{"conditions": {…}, "v": 1}`; an entry's picture is `<yyyy-MM-dd>/<id>.jpg` in the camera's folder (at most 2 MiB).
-  The first entry line of an id wins and the lines after it apply to it in order (the last correction and the last answer win; a line for an id the file
-  does not hold is ignored); a line that does not parse (a torn last line, a later version's, one over 64 KiB) is skipped, and the next append starts on
-  a line of its own. An entry is kept within bounds (its path thinned to 64 points, text cut to length, an end never before the start, a number that is
+  `{"alerted": true, "id", "v": 1}`, `{"id", "still": true, "v": 1}` (its picture was made later, from the recording: Ruling S31),
+  `{"conditions": {…}, "v": 1}` and `{"capped": {"at", "count", "hour"}, "v": 1}` (`count` more lights in the clock hour `hour` were not logged; an
+  hour's lines add up, one read twice counts once); an entry's picture is `<yyyy-MM-dd>/<id>.jpg` in the camera's folder (at most 2 MiB).
+  The first entry line of an id wins and the lines after it apply to it in order (the last correction and the last answer win, a picture's line sets
+  `hasStill`; a line for an id the file does not hold is ignored); a line that does not parse (a torn last line, a later version's, one over 64 KiB) is
+  skipped, and the next append starts on a line of its own. A line of a kind a reader does not know is skipped too (every key it knows is absent, or
+  names an entry it applies nothing to): the builds before the picture's and the capped lines skip them. `SkyLogStore.contents` reads all of it
+  (`SkyLogContents`: the entries, the conditions, the capped hours), `read` the entries and the conditions; a file over 16 MiB is read from its end, so
+  a night is read whole after a day that flooded the file before it. An entry is kept within bounds (its path thinned to 64 points, text cut to length, an end never before the start, a number that is
   not one written as a word that reads back). Writes run on one serial queue and never wait for a drive: what cannot be written waits (at most 1,000
   lines, and 16 MiB of pictures; the oldest go first, never the one being written; `retry()` tries again, and the janitor calls it every pass). A write that
   finds a link where a folder or a file belongs is given up, not waited on; `.sky`, a camera's folder, a night's file and its folder of pictures are never
@@ -1410,7 +1418,7 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
 - **Each picture** (`SkyCameraDetector.frame`, on its actor): the mask (the ground, the horizon below 1° once the aim is good, the Sun within 15°; the Sun and the night
   are worked out once a minute), the analyzer, the tracker on the box's clock (`SkyFrame.wallClock + clockOffset`). A whole-picture change ends every open track unlogged
   (`endAll(dropped:)`, its drops thrown away too) and starts none for `quietAfterChange` (3 s on the stream's clock): one such jump made 49 lights on the owner's camera.
-  The drops of the tracker go to `droppedTrack(_:)`, a hook Tasks 9 and 10 fill. A gap (`gap(at:reason:)`) or a new runtime (`restarted()`) cuts what was open: a track
+  The drops of the tracker go to `droppedTrack(_:analysisWidth:analysisHeight:)`: they count towards their spot being busy (below), and Tasks 9 and 10 read them there. A gap (`gap(at:reason:)`) or a new runtime (`restarted()`) cuts what was open: a track
   a gap cut is not logged, and a gap is never a track. The aim is read from a copy kept on the detector: a picture never waits for the store's fit.
 - **Each ended track** (a queue of its own, in order, off the picture path): measured with the current aim; a stationary one is left (Task 10's); `classify` (Phase 1:
   `FlightMatcher` on the shared `FlightHistory`, off the actor; a match is `.plane`, or `.probablePlane` while the aim is rough, by `.flight`, with its call sign and
@@ -1422,12 +1430,43 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   first seen while it is never bright (Rulings S28 and S29, `SkyLightFilter.wandersInPlace`: a faint star or a wire whose centroid wanders; a light that turns back
   counts by its farthest point, and one that stands 6σ or more above the sky at its strongest is kept however little it moved), is no entry and
   has no picture, only a count that the
-  journal gets once a clock hour ("Sky Watcher, North Sky: 41 slow lights skipped this hour (likely stars)"; a plane is a plane whatever its speed), and a camera keeps at
-  most 30 pictures of unexplained lights in a clock hour of the box's zone: the later ones are logged without. **The pictures stay off a full drive** (Ruling S27):
-  one is taken only while the recordings drive has at least twice its floor free (`SkyLightFilter.stillsHaveRoom`, from `nvr.storageStatus()`; below the floor every
-  camera's recording pauses, and the size rule never counts what the sky log keeps), a picture that cannot be made 1920 wide is not kept at full size
-  (`BridgeEngine.skyStillJPEG`), and each camera's pictures stay under 2 GiB, the oldest nights' folders going first (`SkyLogStore.pruneStills`, from the retention
-  janitor every 10 minutes; never the logs or the recordings, never the newest night, no link followed; an entry whose picture went answers "There is no picture of it").
+  journal gets once a clock hour ("Sky Watcher, North Sky: 41 slow lights skipped this hour (likely stars)"; a plane is a plane whatever its speed).
+- **Daytime clutter** (2026-10-25: the owner's camera logged about 2,500 lights that were not lights in one afternoon, tree tops and shimmer above the ground cut, then
+  four a minute of glare on the west edge in the late sun). Each is no entry, only a count with its own journal line a clock hour:
+  - **Busy spots** (`Sky/SkyClutterMap.swift`): every ended track that no flight explains, kept or dropped by the tracker
+    (`SkyCameraDetector.droppedTrack(_:analysisWidth:analysisHeight:)`), counts in the analyser's 64-pixel tile it began in and in the one it was seen in most; a
+    count is worth 1 and decays (to 1/e in 2 hours), a tile's score is capped at 20, and a tile is busy once its score reaches 10 (ten tracks in a short while,
+    about five an hour kept up; a real sky's two or three an hour at one spot stay near 6) until it falls under 5 (83 minutes after ten at once, 2.8 hours after an
+    afternoon of them). A light that nothing explains and that began and stayed in busy tiles is not logged ("Sky Watcher, North Sky: 14 lights at busy spots
+    skipped this hour (trees, wires or glare)"); one that crosses out of them is, and a plane is a plane there: over the tree line or a wire a real light is
+    still logged, which a mask would not do. The status's `aim.note` says "Ignoring 3 busy spots (trees, wires or glare)" (touching tiles are one spot). The map
+    is kept in memory and in `clutter.json` beside the aim, written with the state, so a restart does not learn it again; a changed card (Ruling S25, also the
+    2-hour restart and a card changed while off) deletes it, and another analysed size starts it afresh. Replayed on the owner's 2,539 entries it would have
+    logged 114: the one spot (x 0 to 13 %, y 75 to 90 % of the picture) was learnt within the first four minutes.
+  - **The Sun's guard** (`Sky/SkySunGuard.swift`): while the Sun is up (above −6°) and outside the view but within 25° of its nearest picture edge (40° while the
+    aim is rough: a card is only guessed), a light whose whole path lies in the band along that edge, 25° of the lens's field deep (40° while rough: North Sky's
+    left lens's outer 44 %), is not logged ("… 3 lights near the Sun skipped this hour (likely glare)"). A dual camera's seam is no edge. With the Sun in the view
+    its circle of the mask is the guard, as before; planes are matched first and logged wherever they are.
+  - **At most 200 an hour** (`SkyLightFilter.unexplainedPerHour`): a camera logs at most 200 lights that nothing explains in a clock hour of the box's zone (of the
+    light's start); the rest are counted, and once the hour is over (the next minute's `tick`, or the stop) one line of the log of each night they belong to
+    says how many (`SkyLogStore.recordCapped`, `{"capped": {"at", "count", "hour"}, "v": 1}`), as does the journal ("… 212 more lights were not logged this hour
+    (at most 200 are logged an hour)"). The log's view carries the hours it holds (`SkyNightLog.capped`) and the page shows a note for each. A detector that
+    restarts in the hour counts afresh (its lines add up).
+- **A picture for every logged light** (Ruling S31): there is no limit of pictures an hour any more (the hour's 60 entries bound them): every logged entry that wants
+  one (`SkyLightFilter.wantsStill`: unexplained, and the rules' meteors, bugs and birds) asks for its still. **The pictures stay off a full drive** (Rulings S27
+  and S31): one is taken only while the recordings drive has its floor and 1 GiB more free (`SkyLightFilter.stillsHaveRoom`, from `nvr.storageStatus()`; below the
+  floor every camera's recording pauses, and the size rule never counts what the sky log keeps; it was twice the floor, which a full recorder, kept by retention at
+  about twice its floor free, almost never had), a picture that cannot be made 1920 wide is not kept at full size (`BridgeEngine.skyStillJPEG`), and each camera's
+  pictures stay under 2 GiB, the oldest nights' folders going first (`SkyLogStore.pruneStills`, from the retention janitor every 10 minutes; never the logs or the
+  recordings, never the newest night, no link followed; an entry whose picture went answers "There is no picture of it"). **Pictures made later**
+  (`Sky/SkyStillBackfill.swift`): a light logged without one (no room then, a long track whose middle had left the camera's ring, an older build's 30 an hour) gets
+  one from the recording. Once a minute (`tick`), while the drive has room, at most 4 of the lights of the log the time is filed in and the one before it, newest
+  first, that ended a minute ago or more: `BridgeEngine.skyRecordedStill` reads the recording's keyframe of the light's middle (the governing one, or the next when it
+  is nearer: `ArchiveReading` `.keyframe` and `.initialization`, `FMP4FrameSlicer.frame(fromKeyframeBytes:info:start:)`), decodes it on a pool of its own one at a
+  time for all the cameras, and makes it as a live still is (full size at 0.8, then 1920 wide); the picture is written and then a line `{"id", "still": true, "v": 1}`,
+  so the log stays append-only and the entry reads `hasStill`. The logs are read off the actor on the store's read queue (`Context.readLog`), again only once every
+  candidate was tried and 10 minutes passed. A recording that is gone (before the oldest, a gap, a camera that does not record, a time 10 minutes past the newest) or
+  that makes no picture is given up quietly; one not written yet is asked again, five times at the most: no retry storm. What was given up is kept in memory only.
 - **The conditions** (`SkyConditionsRecorder`): the visible share once a minute (`SkyVisibility`): clear at 0.6 or more, not visible below 0.3, cloudy between, unknown when
   not known; a span is written when the state changes or once it has lasted an hour, and a silence of more than 5 minutes ends it at its last look.
 - **The status** (`SkyCameraDetector.status`; `skyCameraStatus` adds the flight feed's trouble as `problem` when the detector has none): `running` while a picture came in
@@ -1443,14 +1482,17 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   changes the card. **A camera that moved** (Ruling S25): the aim starts again from the card, rough as a new camera's is (so that the wide search can run), when the
   card's facing, tilt or lenses change through the settings update (the ground and the night profile change nothing of where it looks), or when the aim is good or precise
   and the stretch above has held its 2 hours; the journal says so ("Sky Watcher, North Sky: no planes matched for 2 hours with the aim good; starting the aim again") and
-  so does `aim.note`.
+  so does `aim.note`. The aim keeps the card it started from in `aim.json` (`SkyAimStore.Card`), so a card changed while the plugin or the camera's switch was off starts
+  it again, quietly, when the detector next opens it (Ruling S25b; an `aim.json` from before keeps its fit and saves the card).
 - **Stopping** (Ruling S27; `SkyCameraDetector.stop`, `SkyService`, `BridgeEngine.stopAllSky`): the engine stops the detectors with its locks held, and the daemon gives the
   whole engine ten seconds, so a stop is quick. The lights that wait in the queue are dropped, none takes a picture once the detector is told to stop, and the light the
   queue is at work on gets one second (a keyframe's decode can stall for ten) and no longer; what it leaves unfinished can write nothing of the aim (`SkyAimStore.close`).
   `SkyService` stops its detectors together, `stopAllSky` is bounded to 2 s, and `stopServices` closes the recordings (`nvr.detachAll`) before it stops the sky.
 - **Kept per camera** in `<data>/sky/<camera-uuid>/` (`SkyService.directory(of:in:)`, beside the aim's `aim.json` and `matches.jsonl`): `detector.json` (0600) with the
-  visibility's memory, the open conditions span, the planes learned and the card the search found with the card it was found for. No place is in it; nothing logged names
-  the place. Kept when the detector is turned off; deleted with the camera.
+  visibility's memory, the open conditions span, the planes learned and the card the search found with the card it was found for, and `clutter.json` (0600) with the
+  busy spots (tiles, scores and times). No place is in them; nothing logged names the place. Kept when the detector is turned off; deleted with the camera.
 - Tests: `SkyDetectorTests` (synthetic pictures through the whole pipeline: a matched plane, an unexplained light with its still, a gap, a brightness jump, the status, the
-  conditions; the aim improved by twelve planes and kept over a restart; the note and the wide search; in `SkyDetectorPolicyTests.swift` and `SkyStillsAndStopTests.swift`, Rulings S24, S25 and S27) and `SkyServiceTests` (the feed asked only while a detector runs,
-  the aim kept and removed; on macOS `SkyEngineTests`: the switch, the plugin both ways and across a pause, a cleared place or folder, a removed camera).
+  conditions; the aim improved by twelve planes and kept over a restart; the note and the wide search; in `SkyDetectorPolicyTests.swift` and `SkyStillsAndStopTests.swift`, Rulings S24, S25 and S27;
+  in `SkyClutterTests.swift` the busy spots, the Sun's guard, the hourly cap, a picture for every logged light and the pictures made later), `SkyClutterMapTests`,
+  `SkySunGuardTests` and `SkyRecordedStillTests` (the recording's keyframe nearest a time, and what is gone or not yet), and `SkyServiceTests` (the feed asked only while a
+  detector runs, the aim kept and removed; on macOS `SkyEngineTests`: the switch, the plugin both ways and across a pause, a cleared place or folder, a removed camera).

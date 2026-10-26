@@ -1,6 +1,7 @@
 // Sky Watcher's words and numbers, with no page in them: every sentence of the camera page's card and of the sky log, the direction, speed,
-// blink and shape of a light in plain words, the summary and the conditions line, the aim, the dots of the night's strip, the groups of the
-// explained entries, a path in picture coordinates, and the addresses. Nothing here touches the document or sends a request.
+// blink and shape of a light in plain words, the summary and the conditions line, the hours with more lights than were logged, the aim, the dots
+// of the night's strip, the groups of the explained entries, a path in picture coordinates, and the addresses. Nothing here touches the document
+// or sends a request.
 //
 // One camera cannot tell how far away something is, so nothing here ever claims a real size, distance or speed: a speed is only ever "faster
 // across the sky than planes at that height".
@@ -21,7 +22,7 @@ export const SKY_TEXT = {
     locationKept: 'Kept only on this box.',
     useBrowser: 'Use this browser’s location',
     finding: 'Asking this browser…',
-    notShared: 'This browser didn’t share its location. Type it in instead.',
+    notShared: 'Your browser didn’t share its location. Type it in instead: latitude and longitude, with a minus sign for west.',
     latitude: 'Latitude',
     longitude: 'Longitude',
     latitudeRange: 'Latitude is a number from −90 to 90.',
@@ -86,9 +87,11 @@ export const SKY_TEXT = {
     nothingUnexplained: 'Nothing unexplained. Everything that crossed the sky was a plane, a satellite, a meteor, a bug or a bird.',
     nothingAtAll: 'Nothing crossed the sky in this time.',
     thatWasA: 'That was a…',
-    watch: 'Watch',
+    play: 'Play',
     download: 'Download clip',
     noPicture: 'No picture kept',
+    closeUp: 'Close-up',
+    wholePicture: 'Whole picture',
     probable: 'probably a plane',
     showMore: 'Show more',
     status: 'Status',
@@ -111,7 +114,34 @@ export const SKY_TEXT = {
     tonight: 'Tonight so far',
     notSaved: 'That didn’t save. Try again in a moment.',
     failed: 'The sky log couldn’t be read. Try again in a moment.',
+    playerFailed: 'The player couldn’t open. Try again in a moment.',
     kinds: { track: 'Moving light', newLight: 'New light', flash: 'Flash' },
+  },
+  // The clip player (sky-player.js): the recording around one light, in a modal on the sky log.
+  player: {
+    close: 'Close',
+    zoom: 'Zoom',
+    zoomHint: 'Magnify around the light',
+    watch: 'Watch on the Monitor',
+    position: 'Where in the recording',
+    light: 'The light',
+    widenOne: '±1 min',
+    widenFive: '±5 min',
+    widenOneLabel: 'A minute more before and after',
+    widenFiveLabel: 'Five minutes more before and after',
+    narrow: 'Back to 15 s',
+    missingTitle: 'There’s no recording of this moment',
+    missingBody: 'It may have been removed to make room for newer recordings.',
+    driveTitle: 'The recordings drive isn’t connected',
+    driveBody: 'Connect it again to play this moment.',
+    unreachableTitle: 'The recordings can’t be reached right now',
+    unreachableBody: 'Try again in a moment.',
+    loadingTitle: 'The recordings are loading',
+    loadingBody: 'This takes a moment after the box starts.',
+    unplayableTitle: 'This browser can’t play recordings',
+    unplayableBody: 'Safari, or Chrome on a Mac, can play them.',
+    still: 'Here’s the still picture Sky Watcher kept.',
+    retry: 'Try again',
   },
 };
 
@@ -271,6 +301,22 @@ export function dayLabel(name) {
 export function shiftDate(name, days) {
   const ms = dayStart(name);
   return ms === null ? null : new Date(ms + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * The hours in which the box followed more lights than it logs (at most 200 an hour), each as a note in the box's hours: "4 PM: 212 more lights
+ * weren’t logged (busy hour)", in the order of the hours. What is not an hour and a count says nothing.
+ */
+export function cappedText(capped, zone) {
+  return (Array.isArray(capped) ? capped : [])
+    .map((item) => ({ hour: toMs(item?.hour), count: finite(item?.count) }))
+    .filter((item) => item.hour !== null && item.count !== null && item.count >= 1)
+    .sort((a, b) => a.hour - b.hour)
+    .map(({ hour, count }) => {
+      const whole = Math.round(count);
+      const lights = whole === 1 ? '1 more light wasn’t' : `${whole.toLocaleString('en-US')} more lights weren’t`;
+      return `${hourText(clockParts(hour, zone))}: ${lights} logged (busy hour)`;
+    });
 }
 
 const CONDITION_WORDS = { clear: 'clear', cloudy: 'cloudy', notVisible: 'sky not visible', unknown: 'sky conditions unknown' };
@@ -564,6 +610,39 @@ export function pathPoints(path, width, height) {
   const points = readPath(path);
   const drawn = points.length <= MAX_DRAWN ? points : Array.from({ length: MAX_DRAWN }, (_, i) => points[Math.round((i * (points.length - 1)) / (MAX_DRAWN - 1))]);
   return drawn.map((point) => `${round2(point.x * width)},${round2(point.y * height)}`).join(' ');
+}
+
+/** The close-up's shape and its smallest size, in the still's own pixels (a still is the whole picture, 1920 wide), and its padding. */
+export const CLOSE_UP = Object.freeze({ aspect: 16 / 9, minWidth: 160, minHeight: 90, pad: 0.5 });
+
+/**
+ * The close-up of a still of `width` × `height`: the rectangle of the picture, in its own pixels, around the light's path. The path's box with
+ * half its size more on every side, at least 160 × 90, of the close-up's 16:9 shape, as big as the picture at most, and inside it (moved in
+ * from an edge or a corner, never cut). A single point is a box of no size: the smallest close-up, centred on it. -> { x, y, width, height },
+ * or null when there is no close-up to give: no picture size yet, no point, or a light that crossed more of the sky than a close-up holds (the
+ * whole picture is its view).
+ */
+export function closeUpRect(path, width, height, { aspect = CLOSE_UP.aspect, minWidth = CLOSE_UP.minWidth, minHeight = CLOSE_UP.minHeight, pad = CLOSE_UP.pad } = {}) {
+  if (!(width > 0 && height > 0)) return null;
+  const points = readPath(path);
+  if (!points.length) return null;
+  const xs = points.map((point) => Math.min(1, Math.max(0, point.x)) * width);
+  const ys = points.map((point) => Math.min(1, Math.max(0, point.y)) * height);
+  const left = Math.min(...xs);
+  const right = Math.max(...xs);
+  const top = Math.min(...ys);
+  const bottom = Math.max(...ys);
+  let w = Math.max((right - left) * (1 + 2 * pad), minWidth);
+  let h = Math.max((bottom - top) * (1 + 2 * pad), minHeight);
+  if (w / h > aspect) h = w / aspect;
+  else w = h * aspect;
+  const fit = Math.min(1, width / w, height / h);   // no bigger than the picture, in the same shape
+  w *= fit;
+  h *= fit;
+  if (right - left > w + 0.01 || bottom - top > h + 0.01) return null;
+  const x = Math.min(Math.max((left + right) / 2 - w / 2, 0), width - w);
+  const y = Math.min(Math.max((top + bottom) / 2 - h / 2, 0), height - h);
+  return { x: Number(round2(x)), y: Number(round2(y)), width: Number(round2(w)), height: Number(round2(h)) };
 }
 
 /** The Watch screen at the entry's moment, three seconds early (the box says which millisecond). */

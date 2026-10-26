@@ -74,6 +74,7 @@ import TestSupport
             state.skyAim = SkyAimStatus(quality: .good, planes: 23, stars: 0, residualPixels: 14, updated: Self.start,
                                         lenses: [SkyLensAimStatus(quality: .good, planes: 23, stars: 0, residualPixels: 14)], note: "Aiming again.")
             state.skyLearning = SkyLearning(ready: false, planes: 12, satellites: 3)
+            state.skyCapped = [SkyCappedHour(hour: Self.start.addingTimeInterval(-912), count: 212)]
         }
         let before = Date()
         let answer = await session.get("/api/v1/sky/cameras/\(id.uuidString)/night?date=2026-10-24&view=night")
@@ -131,6 +132,10 @@ import TestSupport
         let learning = answer.object("learning")
         #expect(learning["ready"] as? Bool == false && learning["planes"] as? Int == 12 && learning["satellites"] as? Int == 3)
         #expect(learning["planesNeeded"] as? Int == 30 && learning["satellitesNeeded"] as? Int == 10)
+        // The hours in which more lights were followed than are logged (at most 60 an hour), and how many more: the page's note.
+        let capped = answer.array("capped")
+        #expect(capped.count == 1 && jsonInt(capped[0]["hour"]) == startMs - 912_000 && capped[0]["count"] as? Int == 212, "\(capped)")
+        #expect(Set(capped[0].keys) == ["hour", "count"])
     }
 
     @Test func theLatestNightAndTheDayViewAreAskedForAndAnEmptyAimIsNull() async throws {

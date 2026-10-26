@@ -11,10 +11,12 @@ let setupMod;
 let store;
 let setPlugins;
 let ApiError;
+let closeUpRect;
 before(async () => {
   browser = installFakeBrowser();
   ({ ApiError } = await import('../web/js/api.js'));
   mod = await import('../web/js/screens/sky-log.js');
+  ({ closeUpRect } = await import('../web/js/screens/sky-model.js'));
   setupMod = await import('../web/js/screens/sky-setup.js');
   ({ store, setPlugins } = await import('../web/js/store.js'));
 });
@@ -104,7 +106,7 @@ const detailsOf = (root, group) => all(root, (node) => node.localName === 'detai
  * `plugin` whether the Sky Watcher plugin is on (it is, unless a test says it is not) and `setup` makes the Setup panel (none: the tests of the
  * log leave the box's settings out).
  */
-function pageWith({ log = night(), cameras = [northSky()], query = '', cameraID = SKY, correct, zone = CHICAGO, plugin = true, setup = () => null } = {}) {
+function pageWith({ log = night(), cameras = [northSky()], query = '', cameraID = SKY, correct, zone = CHICAGO, plugin = true, setup = () => null, openPlayer = async () => ({ close() {} }) } = {}) {
   const calls = { loads: [], corrections: [], addresses: [] };
   const listeners = new Set();
   const page = mod.createSkyLogPage({
@@ -128,6 +130,7 @@ function pageWith({ log = night(), cameras = [northSky()], query = '', cameraID 
     zone: () => zone,
     plugin: () => plugin,
     setup,
+    openPlayer,
   });
   return { page, calls, listeners, el: page.el };
 }
@@ -160,7 +163,8 @@ test('the log lists the unexplained first, the explained grouped and collapsed',
   const card = shown(cards[0]);
   for (const sentence of ['3:12:08 AM', 'Low in the northwest, 8° up', 'Lasted 4.2 seconds', 'About 6× faster across the sky than planes at that height', 'Blinks about once a second',
     'Curved', 'Looks larger than planes and satellites do there', 'A bright light moving fast, probably a drone.', 'That was a…']) assert.match(card, new RegExp(sentence.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), sentence);
-  assert.equal(link(cards[0], 'Watch').getAttribute('href'), `#/camera/${SKY}/watch/${chicago(3, 12) + 8000 - 3000}`);
+  assert.ok(button(cards[0], 'Play'), 'its recording plays on this page');
+  assert.equal(link(cards[0], 'Watch'), undefined, 'the Monitor is a second way, inside the player');
   const clip = link(cards[0], 'Download clip').getAttribute('href');
   assert.equal(clip, `/api/v1/nvr/cameras/${SKY}/clip?from=${chicago(3, 12) + 8000 - 3000}&to=${chicago(3, 12) + 8000 + 4200 + 3000}&tz=America%2FChicago&part=1`);
   assert.deepEqual(['Plane', 'Bird', 'Bug', 'Satellite', 'Meteor', 'Not sure'].map((word) => Boolean(button(cards[0], word))), Array(6).fill(true));
@@ -199,20 +203,192 @@ test('the still has the path drawn over it in the picture’s own coordinates', 
 
   Object.assign(img, { naturalWidth: 400, naturalHeight: 177 });   // the still has arrived: 400 × 177
   img.dispatchEvent({ type: 'load', target: img });
-  assert.equal(overlay.getAttribute('viewBox'), '0 0 400 177');
   const line = all(overlay, (node) => node.localName === 'polyline')[0];
-  assert.equal(line.getAttribute('points'), '40,35.4 120,44.25');
+  assert.equal(line.getAttribute('points'), '40,35.4 120,44.25', 'the path in the picture’s pixels');
   const marks = all(overlay, (node) => node.localName === 'circle');
   assert.equal(marks.length, 2, 'where it began and where it ended');
   assert.equal(marks[0].getAttribute('cx'), '40');
   assert.equal(marks[1].getAttribute('cy'), '44.25');
+  const crop = closeUpRect(UNEXPLAINED().path, 400, 177);
+  assert.equal(overlay.getAttribute('viewBox'), `${crop.x} ${crop.y} ${crop.width} ${crop.height}`, 'and the close-up shows the part around it');
 
   // A bigger picture: the same path in its coordinates.
   Object.assign(img, { naturalWidth: 4256, naturalHeight: 1888 });
   img.dispatchEvent({ type: 'load', target: img });
-  assert.equal(overlay.getAttribute('viewBox'), '0 0 4256 1888');
+  const big = closeUpRect(UNEXPLAINED().path, 4256, 1888);
+  assert.equal(overlay.getAttribute('viewBox'), `${big.x} ${big.y} ${big.width} ${big.height}`);
   assert.equal(all(overlay, (node) => node.localName === 'polyline')[0].getAttribute('points'), '425.6,377.6 1276.8,472');
   assert.equal(all(overlay, (node) => node.localName === 'polyline').length, 1, 'drawn again, not added to');
+  page.destroy();
+});
+
+// MARK: Close-ups
+
+/** The close-up of a card or a row: the button that holds its still. */
+const stillOf = (root) => byClass(root, 'sky-still').find((node) => node.localName === 'button');
+const arrive = (root, width = 1920, height = 852) => {
+  const img = tag(root, 'img')[0];
+  Object.assign(img, { naturalWidth: width, naturalHeight: height });
+  img.dispatchEvent({ type: 'load', target: img });
+  return img;
+};
+
+test('a still shows a close-up of the light; a tap shows the whole picture, and another tap or Escape the close-up again', async () => {
+  const { page, el } = pageWith();
+  await settle();
+  const card = byClass(el, 'sky-entry')[0];
+  const still = stillOf(card);
+  assert.ok(still, 'the still is something to tap');
+  assert.equal(still.dataset.view, 'loading', 'nothing to crop before the picture is known');
+  arrive(card);
+  const crop = closeUpRect(UNEXPLAINED().path, 1920, 852);
+  assert.deepEqual(crop, { x: 0, y: 0, width: 768, height: 432 });
+  assert.equal(still.dataset.view, 'closeup');
+  // The picture is placed so that the crop fills the close-up's 16:9 frame: 1920 / 768 = 250 % of its width, moved by the crop's corner.
+  assert.equal(still.style.getPropertyValue('--sky-crop-w'), '250');
+  assert.equal(still.style.getPropertyValue('--sky-crop-x'), '0');
+  assert.equal(still.style.getPropertyValue('--sky-crop-y'), '0');
+  const overlay = byClass(card, 'sky-path')[0];
+  assert.equal(overlay.getAttribute('viewBox'), '0 0 768 432');
+  assert.equal(still.getAttribute('aria-pressed'), 'false');
+  assert.match(still.getAttribute('aria-label'), /Whole picture/);
+
+  still.click();
+  assert.equal(still.dataset.view, 'whole', 'the whole picture, with the path');
+  assert.equal(overlay.getAttribute('viewBox'), '0 0 1920 852');
+  assert.equal(still.getAttribute('aria-pressed'), 'true');
+  still.click();
+  assert.equal(still.dataset.view, 'closeup', 'another tap goes back');
+  still.click();
+  document.dispatchEvent({ type: 'keydown', key: 'Escape', target: document.body, preventDefault() {} });
+  assert.equal(still.dataset.view, 'closeup', 'and so does Escape');
+  assert.equal(overlay.getAttribute('viewBox'), '0 0 768 432');
+
+  // A light in the corner of the picture: its close-up is moved in, never cut.
+  const corner = raw('u9', 'unexplained', chicago(2, 0), { hasStill: true, path: [{ t: 0, x: 0.98, y: 0.97 }, { t: 1, x: 0.995, y: 0.99 }] });
+  const other = pageWith({ log: night({ entries: [corner], counts: { ...COUNTS, unexplained: 1, explained: 0, planes: 0, satellites: 0, meteors: 0, bugsAndBirds: 0 } }) });
+  await settle();
+  arrive(byClass(other.el, 'sky-entry')[0]);
+  assert.equal(byClass(other.el, 'sky-path')[0].getAttribute('viewBox'), '1760 762 160 90');
+  const s = stillOf(byClass(other.el, 'sky-entry')[0]);
+  assert.equal(s.style.getPropertyValue('--sky-crop-w'), '1200');
+  assert.equal(s.style.getPropertyValue('--sky-crop-x'), '1100');
+  assert.equal(s.style.getPropertyValue('--sky-crop-y'), '846.67');
+
+  // A light that crossed the whole sky is shown whole: there is no close-up of it to give.
+  const across = raw('u8', 'unexplained', chicago(2, 0), { hasStill: true, path: [{ t: 0, x: 0.05, y: 0.1 }, { t: 9, x: 0.95, y: 0.9 }] });
+  const wide = pageWith({ log: night({ entries: [across], counts: { ...COUNTS, unexplained: 1, explained: 0, planes: 0, satellites: 0, meteors: 0, bugsAndBirds: 0 } }) });
+  await settle();
+  arrive(byClass(wide.el, 'sky-entry')[0]);
+  const whole = byClass(wide.el, 'sky-still')[0];
+  assert.equal(whole.dataset.view, 'whole');
+  assert.equal(whole.getAttribute('aria-disabled'), 'true', 'and nothing to tap');
+  page.destroy();
+  other.page.destroy();
+  wide.page.destroy();
+});
+
+test('an unexplained card shows its detail under the line that says what it is', async () => {
+  const detailed = { ...UNEXPLAINED(), detail: 'Closest flight: none within the view' };
+  const { page, el } = pageWith({ log: night({ entries: [detailed], counts: { ...COUNTS, unexplained: 1, explained: 0, planes: 0, satellites: 0, meteors: 0, bugsAndBirds: 0 } }) });
+  await settle();
+  const card = byClass(el, 'sky-entry')[0];
+  const detail = byClass(card, 'sky-detail')[0];
+  assert.ok(detail && visible(detail));
+  assert.equal(detail.textContent, 'Closest flight: none within the view');
+  const body = byClass(card, 'sky-entry-body')[0];
+  const order = body.childNodes.filter((node) => node.tagName);
+  assert.equal(order.indexOf(detail), order.indexOf(byClass(card, 'sky-entry-head')[0]) + 1, 'right under it');
+  page.destroy();
+  // None to show: no line.
+  const plain = pageWith();
+  await settle();
+  assert.equal(byClass(plain.el, 'sky-detail').length, 0);
+  plain.page.destroy();
+});
+
+test('an explained row shows its still small, as a close-up, and every row can play its recording', async () => {
+  const meteor = raw('m1', 'meteor', chicago(1, 30), { by: 'rule', hasStill: true, path: [{ t: 0, x: 0.4, y: 0.2 }, { t: 0.6, x: 0.45, y: 0.3 }] });
+  const plane = raw('p1', 'plane', chicago(20, 5, 24), { by: 'flight', detail: 'TEST123 · 35,000 ft' });
+  const { page, el } = pageWith({ log: night({ entries: [meteor, plane], counts: { unexplained: 0, planes: 1, satellites: 0, meteors: 1, bugsAndBirds: 0, notSure: 0, explained: 2 } }) });
+  await settle();
+  await open(detailsOf(el, 'meteors'));
+  const row = byClass(detailsOf(el, 'meteors'), 'sky-row')[0];
+  const still = stillOf(row);
+  assert.ok(still, 'the meteor’s still');
+  assert.ok(still.classList.contains('sky-still--small'), 'small');
+  assert.equal(tag(row, 'img')[0].getAttribute('src'), `/api/v1/sky/cameras/${SKY}/entries/m1/still?night=2026-10-24`);
+  arrive(row);
+  assert.equal(still.dataset.view, 'closeup');
+  const crop = closeUpRect(meteor.path, 1920, 852);
+  assert.equal(byClass(row, 'sky-path')[0].getAttribute('viewBox'), `${crop.x} ${crop.y} ${crop.width} ${crop.height}`);
+  assert.ok(button(row, 'Play'), 'its recording');
+  await open(detailsOf(el, 'planes'));
+  const planeRow = byClass(detailsOf(el, 'planes'), 'sky-row')[0];
+  assert.equal(stillOf(planeRow), undefined, 'a row with no still has no picture');
+  assert.equal(tag(planeRow, 'img').length, 0);
+  assert.ok(button(planeRow, 'Play'), 'and plays all the same');
+  page.destroy();
+});
+
+test('Play opens the clip player on this page with the entry, the camera and the way to the Monitor; closing it leaves the log as it was', async () => {
+  const opened = [];
+  let closePlayer = null;
+  const openPlayer = async (options) => {
+    opened.push(options);
+    return { close: () => { closePlayer = 'closed'; options.onClose?.(); } };
+  };
+  const { page, el, calls } = pageWith({ openPlayer });
+  await settle();
+  const card = byClass(el, 'sky-entry')[0];
+  const play = button(card, 'Play');
+  assert.match(play.getAttribute('aria-label'), /Play the recording of 3:12:08 AM/);
+  play.click();
+  await settle();
+  assert.equal(opened.length, 1);
+  const [options] = opened;
+  assert.equal(options.camera.id, SKY);
+  assert.equal(options.entry.id, 'u1');
+  assert.equal(options.entry.start, chicago(3, 12) + 8000);
+  assert.equal(options.zone, CHICAGO);
+  assert.equal(options.heading, '3:12:08 AM');
+  assert.equal(options.what, 'Moving light · North Sky');
+  assert.equal(options.still, `/api/v1/sky/cameras/${SKY}/entries/u1/still?night=2026-10-24`);
+  assert.equal(options.watchHref, `#/camera/${SKY}/watch/${chicago(3, 12) + 8000 - 3000}`);
+  play.click();
+  await settle();
+  assert.equal(opened.length, 1, 'one player at a time');
+  options.onClose();
+  await settle();
+  assert.equal(byClass(el, 'sky-entry')[0], card, 'the log is not drawn again: it stays where it was');
+  assert.equal(calls.loads.length, 1);
+
+  // A row's Play: the player says what it was, never with a size or a distance.
+  await open(detailsOf(el, 'planes'));
+  button(byClass(detailsOf(el, 'planes'), 'sky-row')[0], 'Play').click();
+  await settle();
+  assert.equal(opened.length, 2);
+  assert.equal(opened[1].what, 'Plane · North Sky', 'the flight’s height stays in the row');
+  assert.equal(opened[1].still, null, 'no still kept');
+
+  // Leaving the page closes the player.
+  page.destroy();
+  assert.equal(closePlayer, 'closed');
+});
+
+test('a player that cannot be loaded says so, and Play works again', async () => {
+  let tries = 0;
+  const openPlayer = async () => { tries += 1; throw new TypeError('Failed to fetch dynamically imported module'); };
+  const { page, el } = pageWith({ openPlayer });
+  await settle();
+  const card = byClass(el, 'sky-entry')[0];
+  button(card, 'Play').click();
+  await settle();
+  assert.match(shown(card), /The player couldn’t open\. Try again in a moment\./);
+  assert.doesNotMatch(shown(card), /dynamically/, 'never the script’s own words');
+  button(card, 'Play').click();
+  await settle();
+  assert.equal(tries, 2);
   page.destroy();
 });
 
@@ -225,8 +401,51 @@ test('an entry with no kept picture says so and still has its facts and correcti
   assert.match(shown(card), /No picture kept/);
   assert.match(shown(card), /Low in the northwest, 8° up/);
   assert.ok(button(card, 'Bird'));
-  assert.equal(link(card, 'Watch') !== undefined, true, 'its moment is still in the recordings');
+  assert.ok(button(card, 'Play'), 'its moment is still in the recordings');
   page.destroy();
+});
+
+test('a picture the box made later from the recording is shown the next time the log is read', async () => {
+  let reads = 0;
+  const log = (request) => {
+    reads += 1;
+    // The box logged the light without a picture (no room then); by the next read it made one from the recording, and its log says so.
+    const light = raw('u2', 'unexplained', chicago(2, 0), { hasStill: reads > 1 });
+    return night({ night: request.night ?? '2026-10-24', entries: [light], counts: { ...COUNTS, unexplained: 1, explained: 0, planes: 0, satellites: 0, meteors: 0, bugsAndBirds: 0 } });
+  };
+  const { page, el } = pageWith({ log });
+  await settle();
+  const before = byClass(el, 'sky-entry')[0];
+  assert.equal(tag(before, 'img').length, 0);
+  assert.match(shown(before), /No picture kept/);
+  button(el, 'Earlier').click();
+  await settle();
+  button(el, 'Later').click();
+  await settle();
+  const after = byClass(el, 'sky-entry')[0];
+  assert.equal(tag(after, 'img')[0]?.getAttribute('src'), `/api/v1/sky/cameras/${SKY}/entries/u2/still?night=2026-10-24`);
+  assert.doesNotMatch(shown(after), /No picture kept/);
+  page.destroy();
+});
+
+test('an hour with more lights than the box logs says so under the strip', async () => {
+  const capped = [{ hour: chicago(22, 0, 24), count: 212 }, { hour: chicago(5, 0), count: 1 }];
+  const { page, el } = pageWith({ log: night({ capped }) });
+  await settle();
+  const notes = byClass(el, 'sky-capped');
+  assert.equal(notes.length, 1);
+  assert.deepEqual(byClass(notes[0], 'sky-capped-hour').map((node) => node.textContent),
+    ['10 PM: 212 more lights weren’t logged (busy hour)', '5 AM: 1 more light wasn’t logged (busy hour)']);
+  const children = [...byClass(el, 'sky-body')[0].childNodes];
+  assert.equal(children.indexOf(notes[0]), children.indexOf(byClass(el, 'sky-strip')[0]) + 1, 'right under the strip');
+  page.destroy();
+  // A night without one, and a bridge from before that sends none, have no note.
+  for (const extra of [{ capped: [] }, {}]) {
+    const plain = pageWith({ log: night(extra) });
+    await settle();
+    assert.equal(byClass(plain.el, 'sky-capped').length, 0);
+    plain.page.destroy();
+  }
 });
 
 test('a light that is not a moving track reads as what it is', async () => {

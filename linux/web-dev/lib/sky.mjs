@@ -7,8 +7,9 @@
 //
 //   GET   plugins                                                the plugins this server has: { plugins: [{ id, name, summary, needs, needsInternet, internetNote, enabled }] }
 //   PATCH plugins/:id {enabled}                                  the switch; answers the list
-//   GET   sky/cameras/:id/night?date=yyyy-MM-dd&view=night|day   the log: { camera, night, view, from, to, serverTime, entries, conditions, counts, aim, learning }
-//                                                                 (times are epoch ms; an entry carries `display` and `watch`, its optional fields are null)
+//   GET   sky/cameras/:id/night?date=yyyy-MM-dd&view=night|day   the log: { camera, night, view, from, to, serverTime, entries, conditions, counts, aim, learning,
+//                                                                 capped } (times are epoch ms; an entry carries `display` and `watch`, its optional fields are
+//                                                                 null; `capped` the hours with more lights than were logged, [{ hour, count }])
 //   GET   sky/cameras/:id/entries/:eid/still?night=…            image/jpeg, or 404
 //   POST  sky/cameras/:id/entries/:eid/correction {night, label}  the entry, or 400 for a label that is not one
 //   POST  sky/feeds/find                                         { feeds: [url] }
@@ -351,6 +352,14 @@ function conditionsOf(name, view, now) {
   return spans.filter((span) => span.from < now).map((span) => ({ ...span, to: Math.min(span.to, now) }));
 }
 
+/** The hours in which the box followed more lights than it logs (at most 60 an hour): the latest night's 9 PM had 37 more, once it is over. */
+function cappedOf(name, view, now) {
+  if (view !== 'night' || name !== latestName(now, 'night')) return [];
+  const [y, m, d] = parseName(name);
+  const hour = new Date(y, m - 1, d, 21).getTime();
+  return hour + HOUR <= now ? [{ hour, count: 37 }] : [];
+}
+
 const lens = (quality, planes, stars, residualPixels) => ({ quality, planes, stars, residualPixels });
 function aimStatus(kind, rightNow) {
   const now = Math.floor(rightNow / HOUR) * HOUR;   // the fit's time moves once an hour, not with every request (the page is told of a camera that changed)
@@ -492,7 +501,7 @@ export class SkyDev {
     const entries = this.entries(camera, name, view, now);
     return {
       camera: camera.definition.id, night: name, view, from, to, serverTime: now, entries, conditions: conditionsOf(name, view, now), counts: countsOf(entries),
-      aim: aimStatus(this.aim, now), learning: learningStatus(this.learning),
+      aim: aimStatus(this.aim, now), learning: learningStatus(this.learning), capped: cappedOf(name, view, now),
     };
   }
 

@@ -36,10 +36,24 @@ function shown(root) {
   walk(root);
   return parts.join(' ').replace(/\s+/g, ' ');
 }
+/** Time that moves only when the test says: { setTimeout, clearTimeout, advance(ms) }. */
+function fakeTimers() {
+  let now = 0;
+  let next = 1;
+  const due = new Map();
+  return {
+    setTimeout(fn, ms) { const id = next++; due.set(id, { at: now + ms, fn }); return id; },
+    clearTimeout(id) { due.delete(id); },
+    advance(ms) {
+      now += ms;
+      for (const [id, timer] of [...due].sort((a, b) => a[1].at - b[1].at)) if (timer.at <= now) { due.delete(id); timer.fn(); }
+    },
+  };
+}
 const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 const type = (input, value) => { input.value = value; input.dispatchEvent({ type: 'input', target: input }); };
 
-function cardWith(settings, { feeds = [FEED], refusals = [], geolocate, open } = {}) {
+function cardWith(settings, { feeds = [FEED], refusals = [], geolocate, open, timers } = {}) {
   const calls = { saves: [], finds: 0, adopted: [] };
   const card = page.createSkySettingsCard(settings, {
     save: async (partial) => {
@@ -51,6 +65,7 @@ function cardWith(settings, { feeds = [FEED], refusals = [], geolocate, open } =
     find: async () => { calls.finds += 1; if (feeds instanceof Error) throw feeds; return { feeds }; },
     onSettings: (next) => calls.adopted.push(next),
     geolocate,
+    timers,
     open,   // undefined: the card’s own rule (open until the box has a place)
   });
   return { card, calls, refusals };
@@ -138,7 +153,24 @@ test('the browser’s location fills the fields, and a refusal says to type it i
   const deny = cardWith(settingsWith({}), { geolocate: { getCurrentPosition(ok, fail) { fail({ code: 1 }); } } });
   button(deny.card.el, 'Use this browser’s location').click();
   await settle();
-  assert.match(shown(deny.card.el), /This browser didn’t share its location\. Type it in instead\./);
+  assert.match(shown(deny.card.el), /Your browser didn’t share its location\. Type it in instead: latitude and longitude, with a minus sign for west\./);
+});
+
+test('the browser’s location that never comes is said after 10 seconds, next to the fields', async () => {
+  const timers = fakeTimers();
+  const silent = { getCurrentPosition() { /* a browser that asks nobody and answers nothing (the box’s policy forbade it) */ } };
+  const { card } = cardWith(settingsWith({}), { geolocate: silent, timers });
+  button(card.el, 'Use this browser’s location').click();
+  await settle();
+  assert.match(shown(card.el), /Asking this browser…/);
+  timers.advance(9_999);
+  assert.doesNotMatch(shown(card.el), /didn’t share/);
+  timers.advance(1);
+  const note = all(card.el, (node) => node.classList?.contains('sky-place-note'))[0];
+  assert.equal(note.textContent, 'Your browser didn’t share its location. Type it in instead: latitude and longitude, with a minus sign for west.');
+  const fields = all(card.el, (node) => node.classList?.contains('inline-fields'))[0];
+  assert.equal(note.parentNode, fields.parentNode, 'beside the two fields');
+  card.destroy();
 });
 
 test('the feed is saved, or taken off; Find a feed lists what answers on the network and Use this one keeps it', async () => {

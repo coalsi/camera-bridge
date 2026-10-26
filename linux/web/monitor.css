@@ -12,17 +12,27 @@
   display: flex; flex-direction: column; gap: 10px; padding: 12px; flex: 1 1 auto; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden;
   background: var(--mon-bg); color: var(--mon-text); position: relative;
 }
+/* Sky Watcher's clip player (screens/sky-player.js, a dialog on the sky log) is the Monitor's playback for one light: the same dark colours
+   (web-tests/sky-player.test.mjs keeps them equal to the wall's), and the rules below written :is(.monitor, .sky-player) give it the Monitor's
+   own buttons, menus and transport. Its layout is in sky.css. */
+.sky-player {
+  --mon-bg: #000; --mon-panel: #0b0b0d; --mon-line: #1f1f25; --mon-text: #e8e8ea; --mon-dim: #8a8a93;
+  --bg: #000; --bg-raised: #0b0b0d; --surface: #0b0b0d; --surface-2: #1a1a1f; --border: #1f1f25; --border-strong: #3a3a42;
+  --text: #e8e8ea; --text-2: #b4b4bc; --text-3: #8a8a93; --link: #e06a5a; --focus: #efe6d8; --brand-accent: #e06a5a;
+  --danger: #ff6a61; --warning: #f0b254;
+  color-scheme: dark;
+}
 .monitor:fullscreen { height: 100vh; border-radius: 0; padding: 10px; }
 .monitor h1 { font-size: 1.1rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--mon-dim); }
 .mon-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .mon-big-clock { font-size: 1.35rem; font-weight: 650; font-variant-numeric: tabular-nums; margin-left: auto; }
 .mon-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.monitor .btn { background: #15151a; border-color: #2c2c34; color: var(--mon-text); }
-.monitor .btn:hover { background: #1d1d24; }
-.monitor .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
-.monitor .btn[aria-pressed="true"] { background: #2a2a33; border-color: #4a4a52; }
-.monitor .btn.primary[aria-pressed="true"] { background: #2a2a33; border-color: var(--brand-accent); color: var(--mon-text); }
-.monitor select { width: auto; min-height: 32px; padding: 2px 30px 2px 10px; background-color: #15151a; color: var(--mon-text); border-color: #2c2c34; font-size: 0.85rem; }
+:is(.monitor, .sky-player) .btn { background: #15151a; border-color: #2c2c34; color: var(--mon-text); }
+:is(.monitor, .sky-player) .btn:hover { background: #1d1d24; }
+:is(.monitor, .sky-player) .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+:is(.monitor, .sky-player) .btn[aria-pressed="true"] { background: #2a2a33; border-color: #4a4a52; }
+:is(.monitor, .sky-player) .btn.primary[aria-pressed="true"] { background: #2a2a33; border-color: var(--brand-accent); color: var(--mon-text); }
+:is(.monitor, .sky-player) select { width: auto; min-height: 32px; padding: 2px 30px 2px 10px; background-color: #15151a; color: var(--mon-text); border-color: #2c2c34; font-size: 0.85rem; }
 .mon-none { flex: 1; display: grid; place-items: center; gap: 12px; align-content: center; color: var(--mon-dim); }
 
 /* The wall: the tiles share the height that is left; a picture fits its tile (Fit: no cropping) or fills it (Fill), the name and the clock sit
@@ -116,15 +126,15 @@
 .mon-bottom { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 10px; flex: none; }
 .mon-timeline, .mon-activity { min-height: 0; display: flex; flex-direction: column; gap: 8px; background: var(--mon-panel); border: 1px solid var(--mon-line); border-radius: 8px; padding: 8px 10px; }
 .mon-activity { max-height: 260px; contain: size; }
-.monitor .nvr-transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.monitor .nvr-readout { font-variant-numeric: tabular-nums; font-weight: 650; }
+:is(.monitor, .sky-player) .nvr-transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+:is(.monitor, .sky-player) .nvr-readout { font-variant-numeric: tabular-nums; font-weight: 650; }
 .monitor .nvr-grid-presets { display: flex; flex-wrap: wrap; gap: 6px; }
 .monitor .nvr-pager { margin-left: auto; }
 /* Frame by frame beside Play; the speed menu (a time-lapse speed in the brand's red); the keys; Live at the right end, over the timeline's live edge. */
-.monitor .nvr-frame { min-width: 36px; padding-inline: 8px; }
-.monitor .nvr-frame svg, .monitor .nvr-golive svg { width: 18px; height: 18px; }
-.monitor .nvr-speed[data-lapse="true"] { border-color: #ff6a61; color: #ffb3ad; }
-.monitor .nvr-readout[data-held="true"] { color: #ffd36b; }
+:is(.monitor, .sky-player) .nvr-frame { min-width: 36px; padding-inline: 8px; }
+:is(.monitor, .sky-player) .nvr-frame svg, .monitor .nvr-golive svg { width: 18px; height: 18px; }
+:is(.monitor, .sky-player) .nvr-speed[data-lapse="true"] { border-color: #ff6a61; color: #ffb3ad; }
+:is(.monitor, .sky-player) .nvr-readout[data-held="true"] { color: #ffd36b; }
 .monitor .nvr-golive { order: 99; margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
 .nvr-keys { position: relative; }
 .nvr-keys > summary { list-style: none; cursor: pointer; }

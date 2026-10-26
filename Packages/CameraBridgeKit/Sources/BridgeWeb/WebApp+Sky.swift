@@ -24,7 +24,8 @@ extension WebApp {
 
     /// `GET /sky/cameras/:id/night?date=yyyy-MM-dd&view=night|day`: the log of a night (sunset to sunrise) or a day (sunrise to sunset), named by
     /// the local date of its sunset or its own date; no `date` is the latest, and no `view` the night. `200 {camera, night, view, from, to,
-    /// serverTime, entries, conditions, counts, aim, learning}`; `409 no_location` or `no_folder` with the sentence to show; `404` for a camera
+    /// serverTime, entries, conditions, counts, aim, learning, capped}` (`capped`: the hours in which more lights were followed than are logged,
+    /// `[{hour, count}]`); `409 no_location` or `no_folder` with the sentence to show; `404` for a camera
     /// the bridge does not have; `503`/`504` while the recordings' drive is away or does not answer.
     func skyNight(_ ctx: RequestContext) async throws -> HTTPResponse {
         let id = try ctx.uuid("id")
@@ -385,6 +386,12 @@ struct SkyNightResource: Encodable {
         var satellitesNeeded = SkyLearning.satellitesNeeded
     }
 
+    /// A clock hour (its start) in which more lights were followed than are logged, and how many more ("4 PM: 212 more lights weren't logged").
+    struct Capped: Encodable {
+        var hour: Int64
+        var count: Int
+    }
+
     var camera: String
     var night: String
     var view: String
@@ -396,6 +403,7 @@ struct SkyNightResource: Encodable {
     var counts: SkyCounts
     var aim: Aim
     var learning: Learning
+    var capped: [Capped]
 
     init(_ log: SkyNightLog, serverTime: Date) {
         camera = log.camera.uuidString
@@ -412,6 +420,7 @@ struct SkyNightResource: Encodable {
                   lenses: log.aim.lenses.map { Lens(quality: $0.quality.rawValue, planes: $0.planes, stars: $0.stars, residualPixels: OrNull($0.residualPixels.flatMap { $0.isFinite ? $0 : nil })) },
                   note: OrNull(log.aim.note))
         learning = Learning(ready: log.learning.ready, planes: log.learning.planes, satellites: log.learning.satellites)
+        capped = log.capped.map { Capped(hour: milliseconds($0.hour), count: $0.count) }
     }
 }
 

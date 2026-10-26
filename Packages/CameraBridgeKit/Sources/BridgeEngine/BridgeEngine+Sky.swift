@@ -1,5 +1,6 @@
 import BridgeSupport
 import CameraAdapters
+import FMP4
 import Foundation
 import MediaCore
 
@@ -67,9 +68,10 @@ extension BridgeEngine {
         let stored = try await nvr.store.skyRead { try Self.readNight(log, camera: cameraID, night: name, folder: folder) }
         let entries = stored.entries.filter { $0.start >= span.lowerBound && $0.start < span.upperBound }
         let conditions = stored.conditions.filter { $0.to > span.lowerBound && $0.from < span.upperBound }
+        let capped = stored.capped.filter { $0.hour.addingTimeInterval(3_600) > span.lowerBound && $0.hour < span.upperBound }
         let status = await skyStatus(of: cameraID)
         return SkyNightLog(camera: cameraID, night: name, view: view, from: span.lowerBound, to: span.upperBound, entries: entries, conditions: conditions,
-                           counts: SkyCounts(counting: entries), aim: status.aim, learning: status.learning)
+                           counts: SkyCounts(counting: entries), aim: status.aim, learning: status.learning, capped: capped)
     }
 
     /// Records the person's word on an entry ("That was a bird") in the log of `night` and answers the entry as it reads now. The word counts
@@ -111,9 +113,9 @@ extension BridgeEngine {
         guard SkyLogStore.isValidNight(name), SkyNight.localDay(named: name, zone: BridgeTime.zone) != nil else { throw SkyLogError.unknownNight }
     }
 
-    nonisolated static func readNight(_ log: SkyLogStore, camera: UUID, night: String, folder: URL) throws -> (entries: [SkyEntry], conditions: [SkyConditions]) {
+    nonisolated static func readNight(_ log: SkyLogStore, camera: UUID, night: String, folder: URL) throws -> SkyLogContents {
         guard SkyLogStore.folderExists(folder) else { throw ArchiveUnavailable.folderMissing }
-        return log.read(camera: camera, night: night, folder: folder)
+        return log.contents(camera: camera, night: night, folder: folder)
     }
 
     /// The camera's aim and learning for the log: its detector's while it runs; otherwise not fitted, with nothing matched.
@@ -202,16 +204,86 @@ extension BridgeEngine {
     }
 
     /// What a camera's detector is told of it: its settings, the place as an observer (kept on the box), the bridge's zone, the picture's size
-    /// when the camera has shown one, the recordings folder, and its stills.
+    /// when the camera has shown one, the recordings folder, its stills, and for the lights logged without one a picture of its recording and
+    /// its logs (Ruling S31: read on the store's read queue, and the pictures made one at a time for all the cameras, off the main actor, at
+    /// utility priority).
     func skyContext(_ camera: CameraConfiguration) -> SkyCameraDetector.Context? {
         guard let location = settings.sky.location, location.isValid, let detectorSettings = camera.skyDetector else { return nil }
         let id = camera.id, folder = skyFolder
         let size = cameras.first { $0.id == id }?.mainStreamInfo
+        let archive = archive, store = nvr.store, log = skyLog, codecs = environment.codecs
+        let decoders = skyRecordingDecoders, oneAtATime = skyRecordingPictures
         return SkyCameraDetector.Context(cameraID: id, cameraName: camera.name, settings: detectorSettings,
                                          observer: SkyObserver(latitude: location.latitude, longitude: location.longitude, heightMeters: location.heightMeters),
                                          zone: BridgeTime.zone, pictureWidth: size?.width ?? 0, pictureHeight: size?.height ?? 0, folder: { folder },
                                          still: { [weak self] date in await self?.skyStillPicture(cameraID: id, around: date) },
-                                         roomForStills: { [weak self] in await self?.skyStillsHaveRoom() ?? false })
+                                         roomForStills: { [weak self] in await self?.skyStillsHaveRoom() ?? false },
+                                         recordedStill: { date in
+                                             await Task.detached(priority: .utility) {
+                                                 await oneAtATime.withLock {
+                                                     await Self.skyRecordedStill(camera: id, at: date, archive: archive, decoders: decoders, codecs: codecs)
+                                                 }
+                                             }.value
+                                         },
+                                         readLog: { night in
+                                             guard let folder else { return nil }
+                                             return try? await store.skyRead { try Self.readNight(log, camera: id, night: night, folder: folder).entries }
+                                         })
+    }
+
+    /// A time this long after the newest recording that holds nothing is a camera that does not record now (rather than a fragment not written
+    /// yet): its picture is not to be had from the recordings.
+    nonisolated static let skyRecordingLag: TimeInterval = 600
+
+    /// A picture of the camera's recording at `date` (the box's clock, which the recordings keep too) for a light of the sky log that has none
+    /// (Ruling S31): the keyframe of the group of pictures that holds the time, or the next keyframe when that is nearer, made as a live one is
+    /// (`CameraRuntime.skyStill`: the camera's own picture, never straightened, at full size and quality 0.8; then at most 1920 wide,
+    /// `skyStillJPEG`). `.gone` when nothing was recorded then or it is gone (before the oldest recording, in a gap, a camera with none, a time
+    /// `skyRecordingLag` past the newest, a file that went); `.later` while the recordings load, the time is not written yet or the drive does
+    /// not answer; `.failed` when no picture could be made of it.
+    nonisolated static func skyRecordedStill(camera: UUID, at date: Date, archive: any ArchiveReading, decoders: SnapshotDecoderPool,
+                                             codecs: any MediaCodecs) async -> SkyRecordedStill {
+        guard archive.isReady else { return .later }
+        guard date.timeIntervalSince1970.isFinite, let extent = archive.extent(camera: camera), date >= extent.oldest else { return .gone }
+        guard date < extent.newest else { return date.timeIntervalSince(extent.newest) > skyRecordingLag ? .gone : .later }
+        guard let target = await archive.fragment(camera: camera, containing: date) else { return .gone }
+        var key = target
+        if target.backToKey > 0 {
+            let id = ArchiveIdentity.fragmentID(fileKey: target.fileKey, index: target.index - target.backToKey)
+            guard let governing = await archive.fragment(camera: camera, id: id) else { return .gone }
+            key = governing
+        }
+        guard key.hasKeyframe else { return .gone }
+        if let next = await nextKeyframe(after: target, camera: camera, before: date.addingTimeInterval(date.timeIntervalSince(key.start)), archive: archive) {
+            key = next
+        }
+        do {
+            let bytes = try await archive.read(key, .keyframe)
+            let info = try FMP4InitReader.parse(try await archive.read(key, .initialization))
+            let frame = try FMP4FrameSlicer.frame(fromKeyframeBytes: bytes, info: info, start: key.start)
+            let picture = try await decoders.jpeg(fromKeyframe: frame, maxWidth: nil, maxHeight: nil, quality: 0.8)
+            guard let smaller = await skyStillJPEG(picture, codecs: codecs) else { return .failed }
+            return .made(smaller)
+        } catch ArchiveError.fileGone {
+            return .gone
+        } catch ArchiveError.timedOut {
+            return .later
+        } catch {
+            return .failed
+        }
+    }
+
+    /// The first fragment after `fragment` that starts on a keyframe and begins before `deadline` (one after it is no nearer than the keyframe
+    /// already found); nil when there is none.
+    nonisolated private static func nextKeyframe(after fragment: ArchiveFragment, camera: UUID, before deadline: Date,
+                                                 archive: any ArchiveReading) async -> ArchiveFragment? {
+        var last = fragment
+        for _ in 0..<64 {
+            guard let next = await archive.fragment(camera: camera, startingAfter: last.start), next.start > last.start, next.start < deadline else { return nil }
+            if next.hasKeyframe { return next }
+            last = next
+        }
+        return nil
     }
 
     /// Whether the recordings drive has room for a picture of the sky: at least twice its floor free (Ruling S27, `SkyLightFilter`). Pictures

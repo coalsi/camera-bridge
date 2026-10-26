@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ApiError } from '../web/js/api.js';
 import {
-  SKY_ROUTE, SKY_TEXT, aimLines, aimText, blinkText, clipAddress, compassWord, conditionsText, countEntries, countLabel, countsAfter, dayLabel, defaultLensLayout, directionText,
-  durationText, entryBucket, groupExplained, learningText, normalizeEntry, pathPoints, refusalOf, shapeText, shiftDate, skyWatching, speedText, streamText,
-  stripDots, stripTicks, summaryText, timeText, toMs, watchAddress,
+  CLOSE_UP, SKY_ROUTE, SKY_TEXT, aimLines, aimText, blinkText, cappedText, clipAddress, closeUpRect, compassWord, conditionsText, countEntries, countLabel, countsAfter, dayLabel,
+  defaultLensLayout, directionText, durationText, entryBucket, groupExplained, learningText, normalizeEntry, pathPoints, refusalOf, shapeText, shiftDate, skyWatching, speedText,
+  streamText, stripDots, stripTicks, summaryText, timeText, toMs, watchAddress,
 } from '../web/js/screens/sky-model.js';
 
 const CHICAGO = 'America/Chicago';
@@ -96,6 +96,17 @@ test('times read as the box’s clock, in the zone given', () => {
   assert.equal(shiftDate('2026-12-31', 1), '2027-01-01');
   assert.equal(shiftDate('2026-03-01', -1), '2026-02-28');
   assert.equal(shiftDate('nonsense', 1), null);
+});
+
+test('an hour with more lights than the box logs reads as a note, in the box’s hours', () => {
+  assert.deepEqual(cappedText([{ hour: chicago(17), count: 1 }, { hour: chicago(16), count: 212 }], CHICAGO),
+    ['4 PM: 212 more lights weren’t logged (busy hour)', '5 PM: 1 more light wasn’t logged (busy hour)'], 'in the order of the hours');
+  assert.deepEqual(cappedText([{ hour: chicago(23), count: 1834 }], CHICAGO), ['11 PM: 1,834 more lights weren’t logged (busy hour)']);
+  assert.deepEqual(cappedText([{ hour: Date.UTC(2026, 9, 25, 10, 30), count: 3 }], 'Asia/Kolkata'), ['4 PM: 3 more lights weren’t logged (busy hour)']);
+  assert.deepEqual(cappedText([{ hour: Date.UTC(2026, 9, 25, 9, 30), count: 3 }], 'Asia/Kolkata'), ['3 PM: 3 more lights weren’t logged (busy hour)']);
+  assert.deepEqual(cappedText([{ hour: 'soon', count: 3 }, { hour: chicago(18), count: 0 }, { hour: chicago(19), count: -2 }, { hour: chicago(20) }, null], CHICAGO), [],
+    'what is not an hour and a count says nothing');
+  assert.deepEqual(cappedText(undefined, CHICAGO), [], 'a bridge from before says nothing of it');
 });
 
 test('conditions read as one line', () => {
@@ -306,6 +317,59 @@ test('the path is in picture coordinates', () => {
   assert.equal(pathPoints([[0, 0.1, 0.2], [1, 'x', 0.3], [2, NaN, 0.3], [3, 0.2, 0.3]], 400, 177), '40,35.4 80,53.1', 'a point that is not numbers is skipped');
   assert.equal(pathPoints([[0, 0.1, 0.2], [1, 0.3, 0.25]], 0, 177), '', 'no picture size yet');
   assert.equal(pathPoints(Array.from({ length: 200 }, (_, i) => [i, i / 200, 0.5]), 100, 100).split(' ').length, 64, 'at most 64 points are drawn');
+});
+
+// MARK: The close-up
+
+/** A still of the stitched 4256 × 1888 view, as the box keeps it: 1920 wide. */
+const STILL_W = 1920;
+const STILL_H = 852;
+/** True when every point of `path` lies inside `rect` (in the still's pixels). */
+const holds = (rect, path) => path.every(([, x, y]) => x * STILL_W >= rect.x - 0.01 && x * STILL_W <= rect.x + rect.width + 0.01 && y * STILL_H >= rect.y - 0.01 && y * STILL_H <= rect.y + rect.height + 0.01);
+const insidePicture = (rect) => rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= STILL_W + 0.01 && rect.y + rect.height <= STILL_H + 0.01;
+
+test('the close-up of a still is the path’s box, padded, at least 160 × 90, 16:9 and inside the picture', () => {
+  assert.deepEqual(CLOSE_UP, { aspect: 16 / 9, minWidth: 160, minHeight: 90, pad: 0.5 });
+
+  // In the middle: a box of 192 × 42.6, half its size more on each side (384 wide), as tall as 16:9 makes it.
+  const middle = [[0, 0.45, 0.4], [2, 0.5, 0.42], [4, 0.55, 0.45]];
+  const a = closeUpRect(middle, STILL_W, STILL_H);
+  assert.deepEqual(a, { x: 768, y: 254.1, width: 384, height: 216 });
+  assert.ok(holds(a, middle) && insidePicture(a));
+  assert.equal(Math.round((a.width / a.height) * 1000) / 1000, 1.778, 'the close-up’s shape');
+
+  // At the left edge: the smallest close-up, moved in so that it is not cut.
+  const edge = [[0, 0.01, 0.5], [1, 0.03, 0.52]];
+  const b = closeUpRect(edge, STILL_W, STILL_H);
+  assert.deepEqual(b, { x: 0, y: 389.52, width: 160, height: 90 });
+  assert.ok(holds(b, edge) && insidePicture(b));
+
+  // In the bottom-right corner: moved in from both edges.
+  const corner = [[0, 0.98, 0.97], [1, 0.995, 0.99]];
+  const c = closeUpRect(corner, STILL_W, STILL_H);
+  assert.deepEqual(c, { x: 1760, y: 762, width: 160, height: 90 });
+  assert.ok(holds(c, corner) && insidePicture(c));
+  assert.deepEqual(closeUpRect([[0, 0, 0]], STILL_W, STILL_H), { x: 0, y: 0, width: 160, height: 90 }, 'and the top-left one');
+
+  // A single point (a flash, a light that did not move): the smallest close-up, centred on it.
+  assert.deepEqual(closeUpRect([[0, 0.5, 0.3]], STILL_W, STILL_H), { x: 880, y: 210.6, width: 160, height: 90 });
+  assert.deepEqual(closeUpRect([{ t: 0, x: 0.5, y: 0.3 }], STILL_W, STILL_H), { x: 880, y: 210.6, width: 160, height: 90 }, 'points as objects too');
+
+  // A light that crossed most of the sky does not fit a close-up: the whole picture is the view.
+  assert.equal(closeUpRect([[0, 0.05, 0.1], [9, 0.95, 0.9]], STILL_W, STILL_H), null);
+  // A big box that fits once the padding is smaller keeps the light whole.
+  const wide = [[0, 0.2, 0.3], [5, 0.7, 0.6]];
+  const d = closeUpRect(wide, STILL_W, STILL_H);
+  assert.ok(d && holds(d, wide) && insidePicture(d), JSON.stringify(d));
+  assert.equal(d.height, STILL_H, 'as tall as the picture');
+
+  // Nothing to crop: no picture size yet, or no point.
+  assert.equal(closeUpRect(middle, 0, STILL_H), null);
+  assert.equal(closeUpRect([], STILL_W, STILL_H), null);
+  assert.equal(closeUpRect([[0, 'x', 0.5]], STILL_W, STILL_H), null);
+  // Another picture size, the same rule: the made-up still of the dev server is 400 × 177.
+  const small = closeUpRect([[0, 0.5, 0.5]], 400, 177);
+  assert.deepEqual(small, { x: 120, y: 43.5, width: 160, height: 90 });
 });
 
 test('an entry opens its moment in the recordings three seconds early, and downloads from there', () => {

@@ -259,7 +259,12 @@ final class PlannerFixtureArchive: ArchiveReading, Sendable {
         case .initialization: data = stored.initData
         case .header: data = stored.fragments[fragment.index].prefix(stored.headerLengths[fragment.index])
         case .fragment: data = stored.fragments[fragment.index]
-        case .keyframe: throw ArchiveError.unreadable("The fixture does not serve key pictures.")
+        case .keyframe:
+            // The first video sample, as the store reads it: `keyLength` bytes from the end of the header (the sky log's pictures made later).
+            guard fragment.hasKeyframe, fragment.keyLength > 0 else { throw ArchiveError.noKeyframe }
+            let bytes = stored.fragments[fragment.index], from = stored.headerLengths[fragment.index]
+            guard from + fragment.keyLength <= bytes.count else { throw ArchiveError.unreadable("That part is not in the file.") }
+            data = bytes.subdata(in: (bytes.startIndex + from)..<(bytes.startIndex + from + fragment.keyLength))
         }
         return tamper?(fragment, part, data) ?? data
     }

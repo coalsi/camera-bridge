@@ -39,6 +39,13 @@ export class FakeText extends FakeNode {
   set textContent(value) { this.data = String(value); }
 }
 
+/** An element's style: properties as plain fields (el.style.left), and custom properties through the CSSOM's three methods. */
+export class FakeStyle {
+  setProperty(name, value) { this[name] = String(value); }
+  getPropertyValue(name) { return Object.hasOwn(this, name) ? this[name] : ''; }
+  removeProperty(name) { const value = this.getPropertyValue(name); delete this[name]; return value; }
+}
+
 export class FakeElement extends FakeNode {
   constructor(tagName) {
     super();
@@ -46,7 +53,7 @@ export class FakeElement extends FakeNode {
     this.attributes = new Map();
     this.listeners = new Map();
     this.dataset = {};
-    this.style = {};
+    this.style = new FakeStyle();
     this.className = '';
     this.hidden = false;
     const element = this;

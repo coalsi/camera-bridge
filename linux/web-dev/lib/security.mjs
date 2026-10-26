@@ -22,7 +22,7 @@ export const SECURITY_HEADERS = {
   'Referrer-Policy': 'no-referrer',
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Resource-Policy': 'same-origin',
-  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(self), payment=(), usb=()',
 };
 
 /** The headers every answer gets; an /api/ answer is never cached unless its handler said otherwise. */

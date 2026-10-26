@@ -13,7 +13,8 @@ const TEXT = SKY_TEXT.card;
 const AI_LIMIT = { min: 1, max: 1000 };   // the most questions a day Sky Watcher may ask the AI (the bridge's range)
 const DEFAULT_AI_LIMIT = 50;
 const ASSUME_MS = 15_000;       // a save the bridge answered is believed this long, until the camera's own word agrees
-const LOCATION_WAIT_MS = 10_000;
+const LOCATION_WAIT_MS = 10_000;   // a browser that has not answered by then is taken to have said no (some never call back when not allowed)
+const realTimers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) };
 let sequence = 0;
 
 const round4 = (value) => Math.round(value * 10_000) / 10_000;
@@ -40,14 +41,17 @@ function parseCoordinate(text, limit) {
  *   dirty()  something was typed since the fields were last filled by `set`
  *   onFilled(place)  the browser's answer filled the fields
  *   geolocate        navigator.geolocation, or what a test gives
+ *   timers           { setTimeout, clearTimeout }: the 10 s the browser has to answer
+ * "Use this browser’s location" fills the fields from the browser. A browser that has no location to give, says no, or has not answered within
+ * 10 s gets a plain sentence beside the fields: type it in instead. An answer that comes later still fills them.
  */
-export function createLocationFields({ geolocate = browserLocation(), onFilled = () => {}, onChange = () => {} } = {}) {
+export function createLocationFields({ geolocate = browserLocation(), onFilled = () => {}, onChange = () => {}, timers = realTimers } = {}) {
   const id = `sky-place-${++sequence}`;
   let destroyed = false;
   let typed = false;
   const latitudeError = h('span', { class: 'error', id: `${id}-latitude-error`, role: 'alert', hidden: true });
   const longitudeError = h('span', { class: 'error', id: `${id}-longitude-error`, role: 'alert', hidden: true });
-  const note = h('p', { class: 'small muted sky-place-note', role: 'status', hidden: true });
+  const note = h('p', { class: 'small sky-place-note', role: 'status', hidden: true });
   const edit = () => { typed = true; };
   const input = (name, errorEl) => h('input', {
     type: 'text', inputmode: 'decimal', autocomplete: 'off', spellcheck: 'false', value: '', id: `${id}-${name}`, dataset: { field: name }, 'aria-describedby': errorEl.id,
@@ -59,6 +63,7 @@ export function createLocationFields({ geolocate = browserLocation(), onFilled =
   function say(text) {
     note.textContent = text;
     note.hidden = !text;
+    note.dataset.tone = text === TEXT.notShared ? 'refused' : '';
   }
 
   function fail(errorEl, input, text) {
@@ -87,20 +92,32 @@ export function createLocationFields({ geolocate = browserLocation(), onFilled =
     return north === null || east === null ? undefined : { latitude: north, longitude: east };
   }
 
+  let asking = null;   // the 10 s the browser has to answer
+
+  function stopAsking() {
+    if (asking !== null) timers.clearTimeout(asking);
+    asking = null;
+  }
+
   function useBrowser() {
     say('');
+    stopAsking();
     if (typeof geolocate?.getCurrentPosition !== 'function') return say(TEXT.notShared);
     say(TEXT.finding);
-    const refused = () => { if (!destroyed) say(TEXT.notShared); };
+    const refused = () => { stopAsking(); if (!destroyed) say(TEXT.notShared); };
+    // The browser's own timeout starts only once the person allowed it, and a page the box's policy keeps from asking may hear nothing at all.
+    asking = timers.setTimeout(() => { asking = null; if (!destroyed) say(TEXT.notShared); }, LOCATION_WAIT_MS);
     try {
       geolocate.getCurrentPosition((position) => {
         if (destroyed) return;
         const { latitude: north, longitude: east } = position?.coords ?? {};
         if (!Number.isFinite(north) || !Number.isFinite(east)) return refused();
+        stopAsking();
         set({ latitude: round4(north), longitude: round4(east) });
         typed = true;
         say('');
         onFilled(read());
+        return undefined;
       }, refused, { enableHighAccuracy: false, timeout: LOCATION_WAIT_MS, maximumAge: 600_000 });
     } catch {
       refused();
@@ -121,7 +138,7 @@ export function createLocationFields({ geolocate = browserLocation(), onFilled =
     el, read, set, say,
     dirty: () => typed,
     focus: () => latitude.focus?.(),
-    destroy() { destroyed = true; },
+    destroy() { destroyed = true; stopAsking(); },
   };
 }
 
@@ -132,10 +149,10 @@ export function createLocationFields({ geolocate = browserLocation(), onFilled =
  *                        took them, rejects with its sentence (an ApiError) when it refused
  *   saveLocation(place)  PATCH settings { sky: { location } }: where the box is, once for the whole bridge
  *   settings()           GET settings (its `sky.location` fills the fields)
- *   geolocate            the browser's location service, or what a test gives
+ *   geolocate            the browser's location service, or what a test gives; timers: { setTimeout, clearTimeout } for its 10 s
  */
 export function createSkyDetectorCard(camera, { save, saveLocation = (place) => patch('settings', { sky: { location: place } }), settings = () => get('settings'),
-  geolocate = browserLocation() } = {}) {
+  geolocate = browserLocation(), timers = realTimers } = {}) {
   let current = camera;
   let box;                         // { location } as the bridge keeps it; null when it could not be read, undefined until it answers
   let asking = false;              // the questions are open: the person is turning it on for the first time
@@ -189,6 +206,7 @@ export function createSkyDetectorCard(camera, { save, saveLocation = (place) => 
   const ground = numberField('ground', TEXT.groundTitle, TEXT.groundHint, 0, 60);
   const place = createLocationFields({
     geolocate,
+    timers,
     onFilled: () => { if (!asking && isOn()) savePlace(); },
     onChange: () => { if (!asking && isOn()) savePlace(); },
   });
@@ -470,7 +488,7 @@ export function createSkyDetectorCard(camera, { save, saveLocation = (place) => 
  *   onSettings(s)   the page takes the settings the bridge answered with
  */
 export function createSkySettingsCard(settings, { onSettings = () => {}, save = (partial) => patch('settings', { sky: partial }), find = () => post('sky/feeds/find'),
-  geolocate = browserLocation(), open = !isPlace(settings?.sky?.location) } = {}) {
+  geolocate = browserLocation(), timers = realTimers, open = !isPlace(settings?.sky?.location) } = {}) {
   const T = SKY_TEXT.settings;
   let saved = { location: null, feed: '', limit: DEFAULT_AI_LIMIT };
   let feedTyped = false;           // the address field was typed in since it was last filled from the settings
@@ -480,7 +498,7 @@ export function createSkySettingsCard(settings, { onSettings = () => {}, save = 
   let destroyed = false;
   const id = `sky-settings-${++sequence}`;
 
-  const place = createLocationFields({ geolocate });
+  const place = createLocationFields({ geolocate, timers });
   const feed = h('input', {
     type: 'url', inputmode: 'url', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', value: '', id: `${id}-feed`, dataset: { field: 'feed' }, 'aria-describedby': `${id}-hint`,
     oninput: () => { feedTyped = true; },

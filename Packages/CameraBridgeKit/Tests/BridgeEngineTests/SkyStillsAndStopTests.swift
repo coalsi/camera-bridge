@@ -8,8 +8,9 @@ import Testing
 // Ruling S27, from the pre-beta check (they join `SkyDetectorTests`, `SkyServiceTests`, `SkyLogStoreTests` and the archive store's tests).
 //
 // Pictures of the sky must not fill the recordings drive, which pauses recording on every camera when its free space falls below its floor:
-// a picture is taken only while the drive has at least twice its floor free; a camera's pictures stay under 2 GiB, the oldest nights' going
-// first (never the logs or the recordings); a picture that could not be made smaller is not kept at full size.
+// a picture is taken only while the drive has its floor and 1 GiB more free (Ruling S31; twice the floor before, which a full recorder, kept at
+// twice its floor by retention, almost never had); a camera's pictures stay under 2 GiB, the oldest nights' going first (never the logs or the
+// recordings); a picture that could not be made smaller is not kept at full size.
 //
 // Stopping a detector must be quick, as the engine stops it with its locks held and the daemon gives the whole engine ten seconds: the lights
 // still waiting are dropped, none takes a picture once the detector is told to stop, and the call returns within about a second whatever the
@@ -22,43 +23,46 @@ extension SkyDetectorTests {
 
     // MARK: The drive's room
 
-    @Test func picturesNeedTwiceTheFloorFreeOnTheRecordingsDrive() {
-        func storage(free: UInt64, floor: UInt64 = 2 * Self.gibibyte, pause: ArchivePause? = nil) -> ArchiveStorageStatus {
-            ArchiveStorageStatus(folder: URL(fileURLWithPath: "/recordings"), pause: pause, usedBytes: 0, freeBytes: free, totalBytes: 500 * Self.gibibyte,
+    @Test func picturesNeedTheFloorAndAGibibyteFreeOnTheRecordingsDrive() {
+        func storage(free: UInt64, floor: UInt64 = 23 * Self.gibibyte, pause: ArchivePause? = nil) -> ArchiveStorageStatus {
+            ArchiveStorageStatus(folder: URL(fileURLWithPath: "/recordings"), pause: pause, usedBytes: 0, freeBytes: free, totalBytes: 463 * Self.gibibyte,
                                  floorBytes: floor)
         }
-        #expect(SkyLightFilter.stillRoomFactor == 2 && SkyLightFilter.stillBytesPerCamera == 2 * Self.gibibyte)
+        #expect(SkyLightFilter.stillRoomMargin == Self.gibibyte && SkyLightFilter.stillBytesPerCamera == 2 * Self.gibibyte)
         #expect(!SkyLightFilter.stillsHaveRoom(nil), "the drive has not been measured yet")
-        #expect(!SkyLightFilter.stillsHaveRoom(storage(free: 4 * Self.gibibyte - 1)), "under twice the floor")
-        #expect(SkyLightFilter.stillsHaveRoom(storage(free: 4 * Self.gibibyte)), "twice the floor")
-        #expect(SkyLightFilter.stillsHaveRoom(storage(free: 400 * Self.gibibyte, floor: 50 * Self.gibibyte)))
-        #expect(!SkyLightFilter.stillsHaveRoom(storage(free: 90 * Self.gibibyte, floor: 50 * Self.gibibyte)), "a Mac's startup drive has a floor of 50 GiB")
+        // A full recorder, as the owner's box is: retention keeps twice the floor free (46 of 463 GB, the floor 5 % of the drive). Pictures are made.
+        #expect(SkyLightFilter.stillsHaveRoom(storage(free: 46 * Self.gibibyte)), "a full recorder has room for pictures")
+        #expect(SkyLightFilter.stillsHaveRoom(storage(free: 24 * Self.gibibyte)), "the floor and a gibibyte")
+        #expect(!SkyLightFilter.stillsHaveRoom(storage(free: 24 * Self.gibibyte - 1)), "a picture never takes the drive down to the floor, where recording pauses")
+        #expect(SkyLightFilter.stillsHaveRoom(storage(free: 90 * Self.gibibyte, floor: 50 * Self.gibibyte)), "a Mac's startup drive, with its floor of 50 GiB")
         #expect(!SkyLightFilter.stillsHaveRoom(storage(free: 400 * Self.gibibyte, pause: .diskFull)), "recording is paused already")
         #expect(!SkyLightFilter.stillsHaveRoom(storage(free: 400 * Self.gibibyte, pause: .folderMissing)))
         #expect(!SkyLightFilter.stillsHaveRoom(storage(free: 400 * Self.gibibyte, floor: 0)), "a floor that is not known is not room")
+        #expect(!SkyLightFilter.stillsHaveRoom(storage(free: .max, floor: .max)), "and the sum does not overflow")
     }
 
-    @Test func noPictureIsTakenWhileTheDriveHasNoRoomForOneAndNoneIsCountedMeanwhile() async throws {
+    @Test func noPictureIsTakenWhileTheDriveHasNoRoomForOne() async throws {
         let rig = try SkyDetectorRig(settings: Self.dualCard, pictureWidth: 4256, pictureHeight: 1888)
         defer { rig.remove() }
         await rig.detector.start()
         let hour = Self.start
-        func light(_ index: Int) -> SkyTrack {
-            Self.straightTrack(from: (40, 30 + Double(index % 20) * 10), pixelsPerSecond: 5, seconds: 6, at: hour.addingTimeInterval(Double(index) * 20))
-        }
+        func light(_ index: Int) -> SkyTrack { Self.spread(index, at: hour.addingTimeInterval(Double(index) * 20)) }
         // The drive is nearly full: the lights are logged, with no picture asked for.
         rig.room.set(false)
         for index in 0..<5 { await rig.detector.handle(light(index), analysisWidth: 640, analysisHeight: 284, pictureWidth: 4256) }
         #expect(rig.stillsAsked.value.isEmpty)
-        // It has room again: the hour's thirty pictures are all there still (the lights that were refused one did not use them up).
+        // It has room again: every light from then on has its picture (there is no limit of pictures an hour any more).
         rig.room.set(true)
         for index in 5..<40 { await rig.detector.handle(light(index), analysisWidth: 640, analysisHeight: 284, pictureWidth: 4256) }
         let entries = await rig.logged().entries.sorted { $0.start < $1.start }
         #expect(entries.count == 40)
         #expect(entries.prefix(5).allSatisfy { !$0.hasStill && $0.label == .unexplained }, "logged without a picture")
-        #expect(entries.dropFirst(5).prefix(30).allSatisfy { $0.hasStill }, "the thirty after it have theirs")
-        #expect(entries.suffix(5).allSatisfy { !$0.hasStill }, "and then the hour's limit")
-        #expect(rig.stillsAsked.value.count == 30)
+        #expect(entries.dropFirst(5).allSatisfy { $0.hasStill }, "the 35 after it have theirs")
+        #expect(rig.stillsAsked.value.count == 35)
+        for entry in entries {
+            let picture = rig.log.still(camera: rig.camera, night: rig.night(entry.start), entryID: entry.id, folder: rig.recordings.url)
+            #expect((picture != nil) == entry.hasStill, "the picture is on disk exactly when the entry says so")
+        }
         await rig.detector.stop()
     }
 
@@ -90,8 +94,8 @@ extension SkyDetectorTests {
         defer { rig.remove() }
         await rig.detector.start()
         for track in Self.lights(200) { await rig.detector.receive(track, analysisWidth: 640, analysisHeight: 284, pictureWidth: 4256) }
-        // The queue is at work on the first, whose picture takes 0.3 s; 199 wait behind it. Draining them made thirty pictures (the hour's limit),
-        // about ten seconds' work, before the stop returned.
+        // The queue is at work on the first, whose picture takes 0.3 s; 199 wait behind it. Draining them made thirty pictures (the hour's limit
+        // then), about ten seconds' work, before the stop returned; with a picture for every logged light it would make sixty (the hour's entries).
         #expect(await eventually(timeout: .seconds(30)) { rig.stillsAsked.value.count >= 1 })
         let began = ContinuousClock.now
         await rig.detector.stop()

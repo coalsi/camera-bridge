@@ -385,7 +385,8 @@ public final class WebApp: Sendable {
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        // The page may ask the browser where it is (Sky Watcher's "Use this browser's location", for the box's own pages only); the rest stay off.
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(self), payment=(), usb=()"
         if isAPI, response.headers["Cache-Control"] == nil { response.headers["Cache-Control"] = "no-store" }
     }
 

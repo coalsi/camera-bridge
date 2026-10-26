@@ -21,7 +21,8 @@ import { labelStyle, showLabel } from '../labels.js';
 import { createFetcher } from '../nvr/fetcher.js';
 import { createCatalog } from '../nvr/catalog.js';
 import { PlaybackClock } from '../nvr/clock.js';
-import { SPEED_GROUPS, isTimelapse, speedDescription, speedLabel } from '../nvr/speed.js';
+import { speedLabel } from '../nvr/speed.js';
+import { createTransport } from '../nvr/transport.js';
 import { createSession } from '../nvr/session.js';
 import { createCell } from '../nvr/cell.js';
 import { MseSurface } from '../nvr/surface.js';
@@ -477,30 +478,16 @@ export function renderNVR({ params, navigate, setTitle }) {
 
   // MARK: Transport, pager, notice
 
-  const playButton = h('button', { class: 'btn primary', type: 'button', onclick: () => controller.togglePlay(), title: 'Play or pause (Space)' }, icon('play'), h('span', null, 'Play'));
-  playButton.dataset.playing = 'false';
-  // One picture back or forward (← and → while paused): a step pauses first and never plays.
-  const frameBackButton = h('button', { class: 'btn small nvr-frame', type: 'button', 'aria-label': 'One picture back', title: 'One picture back (← while paused)',
-    dataset: { nvr: 'frame-back' }, onclick: () => controller.stepFrame(-1) }, icon('frameBack'));
-  const frameForwardButton = h('button', { class: 'btn small nvr-frame', type: 'button', 'aria-label': 'One picture forward', title: 'One picture forward (→ while paused)',
-    dataset: { nvr: 'frame-forward' }, onclick: () => controller.stepFrame(1) }, icon('frameForward'));
+  // Play or Pause, a picture back or forward, the readout, the speed menu and the keys' help: the transport Sky Watcher's clip player has too
+  // (nvr/transport.js).
+  const transport = createTransport({
+    onPlay: () => controller.togglePlay(), onStep: (direction) => controller.stepFrame(direction), onSpeed: (rate) => controller.setSpeed(rate), keyMap: KEY_MAP,
+  });
+  const { playButton, frameBackButton, frameForwardButton, readout, speedGroup, keysHelp } = transport;
   // At the live edge there is nothing to play (the wall is live video): the row says Live. Looking back in the recordings, Play/Pause and
   // Live appear; Live sits at the right end of the row, over the timeline's live edge, and points that way.
   const liveButton = h('button', { class: 'btn primary nvr-golive', type: 'button', onclick: () => controller.goLive(), title: 'Back to live (L)',
     'aria-label': 'Back to live', dataset: { nvr: 'go-live' } }, h('span', null, 'Live'), icon('toLive'));
-  const readout = h('span', { class: 'nvr-readout', role: 'timer', 'aria-live': 'off' });
-  // Playback speed while a recording plays or stands; live is always 1×. One menu in four groups (nvr/speed.js); the keys , and . step it.
-  // A new speed while paused waits for Play.
-  const speedSelect = h('select', { class: 'nvr-speed', 'aria-label': 'Playback speed', title: 'Playback speed (, slower, . faster)', dataset: { nvr: 'speed' },
-    onchange: (event) => { controller.setSpeed(Number(event.target.value)); event.target.blur(); } },
-  SPEED_GROUPS.map((group) => h('optgroup', { label: group.label },
-    group.speeds.map((rate) => h('option', { value: String(rate), title: speedDescription(rate) },
-      group.id === 'lapse' ? `${speedLabel(rate)}  ·  ${speedDescription(rate).replace('Time-lapse: ', '').split(',')[0]}` : speedLabel(rate))))));
-  const speedGroup = h('label', { class: 'nvr-speed-group', hidden: true }, h('span', { class: 'sr-only' }, 'Speed'), speedSelect);
-  // The page's keys (KEY_MAP), one click away.
-  const keysHelp = h('details', { class: 'nvr-keys' },
-    h('summary', { class: 'btn small', title: 'Keyboard shortcuts', 'aria-label': 'Keyboard shortcuts' }, icon('keyboard')),
-    h('dl', { class: 'nvr-keys-list' }, KEY_MAP.map(([keys, words]) => [h('dt', null, h('kbd', null, keys)), h('dd', null, words)])));
   const presetButtons = PRESETS.map((preset) => h('button', {
     class: 'btn small', type: 'button', 'aria-pressed': 'false', dataset: { preset },
     onclick: () => { activePreset = preset; writeStored('cb.nvr.zoom', preset); timeline.setPreset(preset); render(); },
@@ -523,23 +510,10 @@ export function renderNVR({ params, navigate, setTitle }) {
 
   function renderTransport(view) {
     const t = view.transport;
-    if (playButton.dataset.playing !== String(t.playing)) {
-      replace(playButton, icon(t.playing ? 'pause' : 'play'), h('span', null, t.playing ? 'Pause' : 'Play'));
-      playButton.dataset.playing = String(t.playing);
-    }
     const atLive = t.mode === 'snapshots' || t.mode === 'live';
-    playButton.hidden = atLive;
-    playButton.disabled = !t.canPlay;
+    transport.render(t, { atLive, text: readoutText(t) });
     liveButton.hidden = atLive;
     liveButton.disabled = !t.canGoLive;
-    setData(readout, 'live', String(atLive));
-    setText(readout, readoutText(t));
-    speedGroup.hidden = atLive || !t.canSpeed;
-    if (speedSelect.value !== String(t.rate)) speedSelect.value = String(t.rate);
-    speedSelect.title = `${speedDescription(t.rate)} (, slower, . faster)${t.mode === 'paused' ? '. Paused: the speed applies on Play' : ''}`;
-    setData(speedSelect, 'lapse', String(isTimelapse(t.rate)));
-    for (const button of [frameBackButton, frameForwardButton]) { button.hidden = atLive; button.disabled = !t.canStep; }
-    setData(readout, 'held', String(t.mode === 'paused'));
     syncPresets();
   }
 

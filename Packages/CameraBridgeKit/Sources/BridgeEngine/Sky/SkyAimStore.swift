@@ -18,9 +18,14 @@ import Synchronization
 ///   lens's match tolerance (the samples of one aircraft in a row count as one match, by their median), mean that the camera has moved.
 ///   The aim starts again (`reset(reason:)`): rough, with no matches, and the card says "The camera seems to have moved; aiming again."
 ///   until the aim is good again. A fit with no plane matches (from stars alone) judges none: a star's residual says nothing of a plane's.
+/// - **The card** the aim started from (`Card`: facing, tilt, lenses) is kept with it (Ruling S25b). Opened with another, the store starts the
+///   aim again from it (`cardChanged`), as the detector does when the card changes while it runs (Ruling S25): the card was changed while the
+///   detector was off. A state saved before the card was kept has none: its fit stays, and the card is kept from then on.
 ///
-/// A fit runs on the actor, in a few seconds at most on the box for a few thousand matches. A line of `matches.jsonl` that does not parse
-/// (a crash mid-write, a later version) is skipped, and the next one starts on a line of its own.
+/// A fit takes a few seconds at most on the box for a few thousand matches. It runs on a thread of its own, outside Swift's cooperative pool,
+/// so the store answers meanwhile (with the aim it had) and no thread of the pool is held; one runs at a time, and one under way when the aim
+/// starts again is not taken. A line of `matches.jsonl` that does not parse (a crash mid-write, a later version) is skipped, and the next one
+/// starts on a line of its own.
 actor SkyAimStore {
     static let aimFileName = "aim.json"
     static let matchesFileName = "matches.jsonl"
@@ -36,6 +41,14 @@ actor SkyAimStore {
     static let planeSamplesPerPass = 12
     static let planeSpacing = 1.0
 
+    /// The card an aim starts from, as the person set it: which way the camera faces (degrees from true north), how far it is tilted up, and
+    /// its lenses (nil: by the picture's shape).
+    struct Card: Codable, Sendable, Equatable {
+        var facing: Double
+        var tilt: Double
+        var lensLayout: SkyLensLayout?
+    }
+
     /// What `aim.json` holds.
     private struct State: Codable {
         var v = SkyAimStore.version
@@ -49,6 +62,8 @@ actor SkyAimStore {
         /// Plane matches in a row that were further off the aim than a moved camera's threshold.
         var run = 0
         var note: String?
+        /// The card the aim started from (Ruling S25b); nil in a state saved before it was kept.
+        var card: Card?
     }
 
     private let directory: URL
@@ -64,11 +79,19 @@ actor SkyAimStore {
     private var saveFailureLogged = false
     /// Set by `close()`, from outside the actor: a fit that is running (a few seconds) must not hold it up.
     private nonisolated let closedFlag = Mutex(false)
+    /// One more each time the aim starts again or its start changes lenses: a fit under way then is of what was dropped, and is not taken.
+    private var generation = 0
+    /// The generation whose refit is under way, if one is.
+    private var fitting: Int?
 
-    /// The store of `directory`, with what it holds there. `start` is the card's model (facing and tilt, the picture's size and layout);
-    /// `pictureWidth` and `pictureHeight` are the original picture's, in pixels. `seed` makes the fits repeatable (tests); without it they
-    /// draw from `SystemRandomNumberGenerator`.
-    init(directory: URL, log: Log, start: SkyCameraModel, pictureWidth: Int, pictureHeight: Int,
+    /// Whether the store was opened with another card than the aim's (it was changed while the detector was off): the aim has started again
+    /// from it, with no fit, no matches and no note (Ruling S25b). The caller tells the journal.
+    nonisolated let cardChanged: Bool
+
+    /// The store of `directory`, with what it holds there. `start` is the card's model (facing and tilt, the picture's size and layout), and
+    /// `card` the card it is made from (nil: not known, and nothing kept of it); `pictureWidth` and `pictureHeight` are the original
+    /// picture's, in pixels. `seed` makes the fits repeatable (tests); without it they draw from `SystemRandomNumberGenerator`.
+    init(directory: URL, log: Log, start: SkyCameraModel, card: Card? = nil, pictureWidth: Int, pictureHeight: Int,
          now: @escaping @Sendable () -> Date = { Date() }, seed: UInt64? = nil) {
         self.directory = directory
         self.log = log
@@ -80,6 +103,18 @@ actor SkyAimStore {
         let aimURL = directory.appending(path: Self.aimFileName, directoryHint: .notDirectory)
         let matchesURL = directory.appending(path: Self.matchesFileName, directoryHint: .notDirectory)
         var state = Self.loadState(from: aimURL, log: log)
+        var startedAgain = false, cardIsNew = false
+        if let card, state.card != card {
+            if state.card != nil {
+                // The card was changed while the detector was off (Ruling S25b): the aim starts again from it, as when it is changed while the
+                // detector runs (Ruling S25), quietly: no fit, no matches, no note.
+                state = State()
+                startedAgain = true
+            }
+            // A state saved before the card was kept has none: its fit stays (nothing says which card it was made from), and this card is kept.
+            state.card = card
+            cardIsNew = true
+        }
         if let fit = state.fit, !Self.fits(fit.model, start) {
             // The card's layout changed while the bridge was off: the fit's lenses no longer apply (the matches still do).
             state.fit = nil
@@ -87,11 +122,15 @@ actor SkyAimStore {
             state.pending = max(state.pending, Self.refitMatches)
         }
         self.state = state
-        let loaded = Self.loadMatches(from: matchesURL)
+        cardChanged = startedAgain
+        let loaded = startedAgain ? [] : Self.loadMatches(from: matchesURL)
         let kept = Self.trimmed(loaded, now: now())
         matches = kept
-        if kept.count != loaded.count, (try? Self.write(kept, to: matchesURL, directory: directory)) == nil {
+        if startedAgain || kept.count != loaded.count, (try? Self.write(kept, to: matchesURL, directory: directory)) == nil {
             log.warning("The sky aim's matches (\(Self.matchesFileName)) could not be saved")
+        }
+        if cardIsNew, (try? Self.write(state, to: aimURL, directory: directory)) == nil {
+            log.warning("The sky aim (\(Self.aimFileName)) could not be saved; it is kept in memory and saved again with the next change")
         }
     }
 
@@ -131,6 +170,11 @@ actor SkyAimStore {
         state.attempted
     }
 
+    /// Whether a refit is under way (on its own thread).
+    func isFitting() -> Bool {
+        fitting != nil
+    }
+
     // MARK: Changing
 
     /// Adds new matches (those that cannot be used are left out, and each aircraft's samples are thinned: `thinned`) and refits when it is
@@ -150,15 +194,16 @@ actor SkyAimStore {
         let time = now()
         let due = state.pending >= Self.refitMatches
             || state.attempted.map { time.timeIntervalSince($0) >= Self.refitInterval || $0 > time } ?? true
-        return due ? refit() : nil
+        return due ? await refit() : nil
     }
 
     /// Starts aiming again: the fit and the matches are dropped, the quality is rough, and `reason` is what the card says
     /// (`status().note`) until the aim is good again; nil says nothing (the person moved the card themselves: it is a camera just added).
-    /// `quietly`: the caller has told the journal itself, in words that name the camera.
+    /// `quietly`: the caller has told the journal itself, in words that name the camera. The card stays the aim's.
     func reset(reason: String?, quietly: Bool = false) {
         if !quietly { log.notice(reason.map { "The sky aim starts again: \($0)" } ?? "The sky aim starts again") }
-        state = State(note: reason)
+        generation += 1
+        state = State(note: reason, card: state.card)
         matches = []
         rejectionLogged = false
         saveMatches()
@@ -167,36 +212,51 @@ actor SkyAimStore {
 
     /// A new card model (its facing and tilt, the picture's size and layout) and the original picture's size. A new layout (one lens or
     /// two) drops the fit, whose lenses no longer apply, and fits the matches again from the new start; otherwise the fit stays, since once
-    /// there is one the matches, not the card, say where the camera looks.
-    func setStart(_ model: SkyCameraModel, pictureWidth: Int, pictureHeight: Int) {
+    /// there is one the matches, not the card, say where the camera looks. `card`: the card the aim starts from now, kept with it (Ruling
+    /// S25b; nil keeps the one it has).
+    func setStart(_ model: SkyCameraModel, pictureWidth: Int, pictureHeight: Int, card: Card? = nil) async {
         self.pictureWidth = pictureWidth
         self.pictureHeight = pictureHeight
         let changed = !Self.fits(model, start)
         start = model
+        if let card, card != state.card {
+            state.card = card
+            saveState()
+        }
         guard changed, state.fit != nil || !matches.isEmpty else { return }
+        generation += 1   // a fit under way is of the old lenses
         state.fit = nil
         state.fitted = nil
-        _ = refit()
+        _ = await refit()
         saveState()
     }
 
     // MARK: Fitting
 
-    /// Fits the matches from the current aim and keeps the fit when it is accepted.
-    private func refit() -> AimFit? {
+    /// Fits the matches from the current aim and keeps the fit when it is accepted. The fit runs on a thread of its own (`onItsOwnThread`), so
+    /// the store answers meanwhile; one at a time (matches that come while one is under way wait for the next), and when the aim starts again
+    /// meanwhile, the fit of what it dropped is not taken.
+    private func refit() async -> AimFit? {
+        guard fitting != generation else { return nil }
+        let mine = generation
+        fitting = mine
+        defer { if fitting == mine { fitting = nil } }
         state.pending = 0
         state.attempted = now()
-        let starting = state.fit?.model ?? start
-        let attempt: AimFitter.Attempt
-        if var generator = seeded {
-            attempt = AimFitter.attempt(matches, starting: starting, pictureWidth: pictureWidth, pictureHeight: pictureHeight,
-                                        previous: state.fit, using: &generator)
-            seeded = generator
-        } else {
+        let matches = matches, starting = state.fit?.model ?? start, previous = state.fit, seeded = seeded
+        let width = pictureWidth, height = pictureHeight
+        let (attempt, generator) = await Self.onItsOwnThread { () -> (AimFitter.Attempt, SkyRandom?) in
+            if var generator = seeded {
+                let attempt = AimFitter.attempt(matches, starting: starting, pictureWidth: width, pictureHeight: height, previous: previous,
+                                                using: &generator)
+                return (attempt, generator)
+            }
             var generator = SystemRandomNumberGenerator()
-            attempt = AimFitter.attempt(matches, starting: starting, pictureWidth: pictureWidth, pictureHeight: pictureHeight,
-                                        previous: state.fit, using: &generator)
+            return (AimFitter.attempt(matches, starting: starting, pictureWidth: width, pictureHeight: height, previous: previous, using: &generator),
+                    nil)
         }
+        guard mine == generation else { return nil }   // the aim started again meanwhile: this is the fit of what it dropped
+        if let generator { self.seeded = generator }
         guard attempt.accepted else {
             if !rejectionLogged && !attempt.notes.isEmpty {
                 log.info("The sky aim was not refined (\(attempt.notes.joined(separator: "; "))); the aim it had is kept")
@@ -351,14 +411,30 @@ actor SkyAimStore {
         try PrivateFiles.write(try lines(matches), to: url)
     }
 
+    /// Replaces `url` with `state` (atomically).
+    private static func write(_ state: State, to url: URL, directory: URL) throws {
+        try PrivateFiles.prepareDirectory(directory)
+        try PrivateFiles.write(try makeEncoder().encode(state), to: url)
+    }
+
     private func saveState() {
         guard !isClosed else { return }
         do {
-            try PrivateFiles.prepareDirectory(directory)
-            try PrivateFiles.write(try Self.makeEncoder().encode(state), to: aimURL)
+            try Self.write(state, to: aimURL, directory: directory)
             saveFailureLogged = false
         } catch {
             saveFailed(Self.aimFileName)
+        }
+    }
+
+    /// Runs `work` on a thread of its own, at a low priority, and waits for it without holding a thread of Swift's cooperative pool: a fit of
+    /// a few thousand matches takes seconds on the box, and would otherwise hold one of the pool's few threads (one a core) all that time.
+    private static func onItsOwnThread<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            let thread = Thread { continuation.resume(returning: work()) }
+            thread.name = "Sky aim fit"
+            thread.qualityOfService = .utility
+            thread.start()
         }
     }
 

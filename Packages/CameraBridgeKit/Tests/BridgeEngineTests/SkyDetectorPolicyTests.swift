@@ -7,12 +7,13 @@ import Testing
 // Two pre-beta rulings on the sky detector, tested before they were built (they join `SkyDetectorTests` and `SkyServiceTests`).
 //
 // Ruling S24 (fewer junk entries): a light that nothing explains and that moves too slowly, a star, is no entry and has no picture, only a count
-// that the journal gets once an hour; a camera keeps at most 30 pictures of such lights in a clock hour, and logs the later ones without; a light
-// that a flight explains is a plane whatever its speed.
+// that the journal gets once an hour; a light that a flight explains is a plane whatever its speed. (Its 30 pictures an hour went with Ruling S31:
+// every logged light has its picture, `SkyClutterTests.swift`.)
 //
 // Ruling S25 (a camera that moved): the aim starts again from the card, rough as a new camera's is, when the card's facing, tilt or lenses change
 // or when a good aim has matched no plane in the 2 hours that planes flew through the view. The ground and the night profile are not where the
-// camera looks, and change nothing.
+// camera looks, and change nothing. Ruling S25b: so too when the card was changed while the detector was off (the plugin or the camera's switch);
+// an aim saved before its card was kept keeps its fit, and its card from then on.
 //
 // All made up, as in `SkyDetectorTests`: the place is 40.0000, −100.0000, the aircraft are the fixtures', nothing is downloaded.
 
@@ -74,7 +75,7 @@ extension SkyDetectorTests {
     // MARK: Ruling S24: the rule and its numbers
 
     @Test func theSlowLightRuleKeepsItsNumbersInOnePlace() {
-        #expect(SkyLightFilter.slowDegreesPerSecond == 0.05 && SkyLightFilter.slowPixelsPerSecond == 0.5 && SkyLightFilter.stillsPerHour == 30)
+        #expect(SkyLightFilter.slowDegreesPerSecond == 0.05 && SkyLightFilter.slowPixelsPerSecond == 0.5 && SkyLightFilter.unexplainedPerHour == 200)
         func measured(_ speed: Double, duration: Double = 10) -> SkyMeasures {
             SkyMeasures(azimuth: 0, elevation: 0, azimuthEnd: 0, elevationEnd: 0, duration: duration, speed: speed, acceleration: 0, turnRate: 0,
                         maxTurn: 0, straightness: 1, shape: .straight, sizeDegrees: 0, brightness: 0, blinks: false, blinkRate: nil, focus: 0)
@@ -249,31 +250,8 @@ extension SkyDetectorTests {
         await rig.detector.stop()
     }
 
-    @Test func aCameraKeepsThirtyStillsAnHourAndTheNextHourStartsFresh() async throws {
-        let rig = try SkyDetectorRig(settings: Self.dualCard, pictureWidth: 4256, pictureHeight: 1888)
-        defer { rig.remove() }
-        await rig.detector.start()
-        // 33 lights nothing explains in one clock hour (22:00 to 23:00 in Chicago), then 3 in the next; each goes at 5 pixels a second for 6 s.
-        let hour = Self.start
-        let starts = (0..<33).map { hour.addingTimeInterval(Double($0) * 100) } + (0..<3).map { hour.addingTimeInterval(3_600 + Double($0) * 100) }
-        for (index, start) in starts.enumerated() {
-            let track = Self.straightTrack(from: (40, 30 + Double(index % 20) * 10), pixelsPerSecond: 5, seconds: 6, at: start)
-            await rig.detector.handle(track, analysisWidth: 640, analysisHeight: 284, pictureWidth: 4256)
-        }
-        let entries = await rig.logged().entries.sorted { $0.start < $1.start }
-        #expect(entries.count == 36, "every light is logged, with a picture or without")
-        let inFirst = entries.filter { $0.start < hour.addingTimeInterval(3_600) }, inSecond = entries.filter { $0.start >= hour.addingTimeInterval(3_600) }
-        #expect(inFirst.count == 33 && inSecond.count == 3)
-        #expect(inFirst.prefix(30).allSatisfy { $0.hasStill }, "the first thirty of the hour have a picture")
-        #expect(inFirst.suffix(3).allSatisfy { !$0.hasStill && $0.label == .unexplained }, "the 31st and later are logged without")
-        #expect(inSecond.allSatisfy { $0.hasStill }, "the next hour starts fresh")
-        #expect(rig.stillsAsked.value.count == 33, "and no picture is asked for beyond the thirty")
-        for entry in entries {
-            let picture = rig.log.still(camera: rig.camera, night: rig.night(entry.start), entryID: entry.id, folder: rig.recordings.url)
-            #expect((picture != nil) == entry.hasStill, "the picture is on disk exactly when the entry says so")
-        }
-        await rig.detector.stop()
-    }
+    // A camera's thirty pictures an hour are gone (Ruling S31): every unexplained light that is logged has its picture, and the hour's 60 entries
+    // bound them (`SkyClutterTests.swift`: `everyLoggedUnexplainedLightHasItsPicture`, `atMostSixtyUnexplainedEntriesAnHourAndALineSaysHowManyMoreWereNot`).
 
     // MARK: Ruling S25: a camera that moved
 
@@ -314,6 +292,72 @@ extension SkyDetectorTests {
         await again.start()
         #expect(await again.status.aim == SkyAimStatus.unaimed())
         await again.stop()
+    }
+
+    // MARK: Ruling S25b: a card changed while the detector was off
+
+    /// The matches kept in the rig's camera's folder.
+    static func matchesKept(_ rig: SkyDetectorRig) async -> [AimCorrespondence] {
+        await SkyAimStore(directory: rig.aimFile.deletingLastPathComponent(), log: Log(category: "SkyTest"), start: singleModel, pictureWidth: 1920,
+                          pictureHeight: 1080).correspondences()
+    }
+
+    @Test(arguments: CardChange.allCases) func aCardChangedWhileTheDetectorWasOffStartsTheAimAgain(_ change: CardChange) async throws {
+        // The person changes the card while the plugin or the camera's switch is off, so no detector is told: the next one to start finds the aim
+        // was made from another card, and starts it again from this one, as a change while it runs does.
+        let id = UUID()
+        let rig = try await Self.goodAimedRig(camera: id)
+        defer { rig.remove() }
+        let before = await rig.detector.status
+        await rig.detector.stop()
+        #expect(await Self.matchesKept(rig).count > 0)
+        let capture = CameraLogCapture.start(camera: id)
+        defer { capture.stop() }
+        let later = rig.again(settings: change.settings)
+        await later.start()
+        let after = await later.status
+        #expect(after.aim == SkyAimStatus.unaimed(), "\(change): rough, nothing matched, no note: the state of a camera just added, \(after.aim)")
+        #expect(after.learning == before.learning, "what the box learned of this sky is not the aim")
+        #expect(capture.lines.filter { $0.contains("again") } == ["Sky Watcher, North Sky: the camera's card changed while Sky Watcher was off; starting the aim again"],
+                "one line says it: \(capture.lines)")
+        await later.stop()
+        // The matches went with the fit, and the new card is the aim's now: started with it again, the detector says nothing more.
+        #expect(await Self.matchesKept(rig).isEmpty)
+        let again = rig.again(settings: change.settings)
+        await again.start()
+        #expect(await again.status.aim == SkyAimStatus.unaimed())
+        #expect(capture.lines.filter { $0.contains("again") }.count == 1, "\(capture.lines)")
+        await again.stop()
+    }
+
+    @Test func anAimSavedBeforeItsCardWasKeptKeepsItsFitAndThenItsCard() async throws {
+        // An aim from before Ruling S25b has no card in its file. Its fit stays, whatever the card says now (nothing tells which card it was
+        // made from), and the card is saved, so that a change while the detector is off is noticed from then on.
+        let id = UUID()
+        let rig = try await Self.goodAimedRig(camera: id)
+        defer { rig.remove() }
+        let good = await rig.detector.status.aim
+        await rig.detector.stop()
+        let text = try String(contentsOf: rig.aimFile, encoding: .utf8)
+        let older = text.replacingOccurrences(of: #""card":\{[^{}]*\},?"#, with: "", options: .regularExpression)
+        #expect(older != text && !older.contains("\"card\""), "the card is kept with the aim: \(text.count) characters")
+        try Data(older.utf8).write(to: rig.aimFile)
+        let capture = CameraLogCapture.start(camera: id)
+        defer { capture.stop() }
+        var tilted = Self.singleCard
+        tilted.tilt = 35
+        let upgraded = rig.again(settings: tilted)
+        await upgraded.start()
+        #expect(await upgraded.status.aim == good, "the fit is kept")
+        await upgraded.stop()
+        let saved = try String(contentsOf: rig.aimFile, encoding: .utf8)
+        #expect(saved.contains(#""card":{"facing":315,"tilt":35}"#), "and the card it is on now is saved: \(saved.prefix(120))")
+        // A change while it is off is noticed now.
+        let later = rig.again(settings: Self.singleCard)
+        await later.start()
+        #expect(await later.status.aim == SkyAimStatus.unaimed())
+        #expect(capture.lines.filter { $0.contains("again") }.count == 1, "\(capture.lines)")
+        await later.stop()
     }
 
     @Test func theGroundAndTheNightProfileAreNotWhereTheCameraLooks() async throws {
@@ -457,6 +501,30 @@ extension SkyServiceTests {
         await detector.settle()
         let restarted = await detector.status.aim
         #expect(running[id] === detector && restarted == SkyAimStatus.unaimed(), "\(restarted)")
+        await service.stop()
+    }
+
+    // Ruling S25b: the plugin (or the camera's switch) is off, so there is no detector to tell; the card changes; the plugin is switched on.
+    @Test func aCardChangedWhileThePluginWasOffStartsTheAimAgain() async throws {
+        let data = try TemporaryDirectory()
+        let id = UUID()
+        let earlier = try SkyDetectorRig(settings: SkyDetectorTests.singleCard, pictureWidth: 1920, pictureHeight: 1080, data: data, camera: id)
+        defer { earlier.remove() }
+        await earlier.detector.start()
+        var random = SkyRandom(seed: 12)
+        await SkyDetectorTests.teachTheAim(earlier.detector, flights: earlier.flights, clock: earlier.clock, using: &random)
+        #expect(await earlier.detector.status.aim.quality == .good)
+        await earlier.detector.stop()
+        var turned = SkyDetectorTests.singleCard
+        turned.facing = 345
+        let service = SkyService(dataDirectory: data.url, http: SkyFakeFeed(), logStore: SkyLogStore(log: .silent), now: { earlier.clock.value })
+        let recordings = earlier.recordings.url
+        let context = SkyCameraDetector.Context(cameraID: id, cameraName: "North Sky", settings: turned, observer: SkyFixtures.observer,
+                                                zone: SkyDetectorRig.zone, pictureWidth: 1920, pictureHeight: 1080, folder: { recordings },
+                                                still: { _ in nil })
+        let detector = try #require(await service.update(settings: SkySettings(location: Self.place), cameras: [id: context])[id])
+        let aim = await detector.status.aim
+        #expect(aim == SkyAimStatus.unaimed(), "\(aim)")
         await service.stop()
     }
 }

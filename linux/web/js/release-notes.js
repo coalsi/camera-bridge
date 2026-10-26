@@ -15,6 +15,18 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.124',
+    date: '2026-10-25',
+    title: 'Sky Watcher: close-ups, a player on the page, and a cleaner log',
+    items: [
+      'Each entry in the sky log shows a close-up of the object with its path drawn on it; tap it for the whole picture. Meteors and other explained lights show their picture too, and an unexplained light shows its note.',
+      'Play any entry without leaving Sky Watcher: a player opens on the page with the recording from 15 seconds before to 15 seconds after (widen it to a minute or five), slow motion, a picture at a time, the light’s path over the video and a zoom for tiny lights.',
+      'Every light that is logged keeps its picture, and pictures that could not be kept at the time are made later from the recordings.',
+      'Spots that keep making lights (a tree top, a wire, a lamp, glare) are learned and only counted, the edge of the picture nearest the Sun is left out by day, and at most 200 unexplained lights are logged an hour, so one bad hour can’t bury a night.',
+      '“Use this browser’s location” now works, and a steep camera with two lenses starts its aim with a level horizon.',
+    ],
+  },
+  {
     version: '0.1.123',
     date: '2026-10-25',
     title: 'Sky Watcher keeps the lights that hold still',

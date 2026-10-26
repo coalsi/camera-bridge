@@ -156,7 +156,7 @@ POST   /api/v1/ai/try                 {cameraID}: Try it, the pictures around no
                                       refused.", "Today’s limit of 200 descriptions is reached.", …); 409 {error, message} "A try is already
                                       running." (one at a time); 404 for a camera the bridge does not have; 400 with the field cameraID
 GET    /api/v1/sky/cameras/{id}/night?date=yyyy-MM-dd&view=night|day     the Sky Watcher's log of one camera: {camera, night, view, from, to, serverTime,
-                                      entries[], conditions[], counts, aim, learning}. A night (sunset to sunrise) is named by the local date of its
+                                      entries[], conditions[], counts, aim, learning, capped[]}. A night (sunset to sunrise) is named by the local date of its
                                       sunset, a day (sunrise to sunset) by its own date, in the bridge's time zone; no date: the latest (the night in
                                       progress or the one that ended this morning; for the day view, today's); no view: the night. Times are epoch
                                       milliseconds. An entry: {id, camera, kind (track | newLight | flash), start, end, path[{t (s from its start),
@@ -172,7 +172,10 @@ GET    /api/v1/sky/cameras/{id}/night?date=yyyy-MM-dd&view=night|day     the Sky
                                       {unexplained, planes, satellites, meteors, bugsAndBirds, notSure, explained}, counted by what the log shows (a person's
                                       word wins; a light the box explained and the person was not sure of is notSure; explained = all but unexplained). aim:
                                       {quality (rough | good | precise), planes, stars, residualPixels|null, updated|null, lenses[{quality, planes, stars,
-                                      residualPixels|null}], note|null}; learning: {ready, planes, satellites, planesNeeded, satellitesNeeded}. 400 with the
+                                      residualPixels|null}], note|null}; learning: {ready, planes, satellites, planesNeeded, satellitesNeeded}. capped[]:
+                                      {hour (the clock hour's start), count}: the hours of the view in which more lights that nothing explains were
+                                      followed than the 60 a camera logs an hour, and how many more (the page's "4 PM: 212 more lights weren’t
+                                      logged"). 400 with the
                                       field date or view; 404 for a camera the bridge does not have; 409 no_location ("Set where the box is first.") or
                                       no_folder ("Choose a recordings folder first: the sky log is kept with the recordings."); 503 archive_unavailable
                                       (Retry-After) while the recordings' drive is away, 504 drive_slow while it does not answer
