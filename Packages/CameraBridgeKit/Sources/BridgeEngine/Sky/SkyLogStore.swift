@@ -250,7 +250,8 @@ final class SkyLogStore: Sendable {
     /// The entry as it is kept, or nil when it cannot be: an id that is not safe in a path, or a start that is not a time. Times to the
     /// millisecond; an end that is not a time or is before the start is the start; the path without points that are not numbers, then at most 64 of
     /// them, evenly picked, the first and the last among them; the detail, the AI's sentence, model and kind cut to length; at most 8 reasons, each
-    /// cut to length; and no group (the lights that moved together are found as the log is read: `SkyFormations`).
+    /// cut to length; no group (the lights that moved together are found as the log is read: `SkyFormations`), and no parts or part's picture (the
+    /// lights the log kept in pieces are joined as it is read: `SkyStitch.joined`); `pieces` between 1 and `maximumPieces`.
     static func bounded(_ entry: SkyEntry) -> SkyEntry? {
         guard SkyEntry.isValidID(entry.id), entry.start.timeIntervalSince1970.isFinite, abs(entry.start.timeIntervalSince1970) < 1e11 else { return nil }
         var entry = entry
@@ -267,10 +268,16 @@ final class SkyLogStore: Sendable {
         entry.ai = entry.ai.map(bounded)
         if let ratio = entry.speedVsPlanes, !ratio.isFinite { entry.speedVsPlanes = nil }
         entry.reasons = entry.reasons.prefix(SkyEntry.maximumReasons).map { String($0.prefix(SkyEntry.maximumReasonLength)) }
-        // A group is found as the log is read (`SkyFormations`), never kept.
+        // A group is found as the log is read (`SkyFormations`), never kept; so are the parts of a light the log kept in pieces (`SkyStitch.joined`).
         entry.group = nil
+        entry.parts = []
+        entry.stillPart = nil
+        entry.pieces = min(max(1, entry.pieces), Self.maximumPieces)
         return entry
     }
+
+    /// A light kept says it was seen in at most this many pieces.
+    static let maximumPieces = 10_000
 
     static func bounded(_ answer: SkyAIAnswer) -> SkyAIAnswer {
         SkyAIAnswer(kind: String(answer.kind.prefix(SkyAIAnswer.maximumKindLength)), sentence: String(answer.sentence.prefix(SkyAIAnswer.maximumSentenceLength)),
@@ -533,13 +540,14 @@ final class SkyLogStore: Sendable {
     }
 
     /// The lines read, applied: see `contents`. A capped line read twice (it waited, and then it was in the file) counts once; the distinct
-    /// lines of an hour add up.
+    /// lines of an hour add up. Each entry's last correction is remembered with when it was made (`SkyLogContents.corrected`).
     static func parse(_ lines: [Data], camera: UUID) -> SkyLogContents {
         let decoder = makeDecoder()
         var entries: [SkyEntry] = []
         var position: [String: Int] = [:]
         var conditions: [SkyConditions] = []
         var capped: [Line.Capped] = []
+        var corrected: [String: Date] = [:]
         for raw in lines {
             guard raw.count <= maximumLineBytes, let line = try? decoder.decode(Line.self, from: raw), line.v == version else { continue }
             if let entry = line.entry {
@@ -547,7 +555,10 @@ final class SkyLogStore: Sendable {
                 position[entry.id] = entries.count
                 entries.append(entry)
             } else if let id = line.id, let index = position[id] {
-                if let correction = line.correction { entries[index].correction = correction.label }
+                if let correction = line.correction {
+                    entries[index].correction = correction.label
+                    corrected[id] = correction.at
+                }
                 if let answer = line.ai { entries[index].ai = answer }
                 if line.alerted == true { entries[index].alerted = true }
                 if line.still == true { entries[index].hasStill = true }
@@ -560,7 +571,7 @@ final class SkyLogStore: Sendable {
         entries.sort { ($0.start, $0.id) < ($1.start, $1.id) }
         conditions.sort { ($0.from, $0.to) < ($1.from, $1.to) }
         let hours = Dictionary(grouping: capped, by: \.hour).map { SkyCappedHour(hour: $0.key, count: $0.value.reduce(0) { $0 + $1.count }) }
-        return SkyLogContents(entries: entries, conditions: conditions, capped: hours.sorted { $0.hour < $1.hour })
+        return SkyLogContents(entries: entries, conditions: conditions, capped: hours.sorted { $0.hour < $1.hour }, corrected: corrected)
     }
 
     /// The JPEG of an entry, or nil when there is none (or the name is not a night's or an id, or a link is in the way, or the file is larger
@@ -634,11 +645,13 @@ final class SkyLogStore: Sendable {
 }
 
 /// What a camera's night file holds, read (`SkyLogStore.contents`): its entries with the lines after them applied, the conditions, and the hours
-/// in which more lights were followed than logged, oldest first, each hour's lines added up.
+/// in which more lights were followed than logged, oldest first, each hour's lines added up; and when each entry's last correction was made (the
+/// latest word on a light joined from several shows: `SkyStitch.joined`).
 struct SkyLogContents: Sendable, Equatable {
     var entries: [SkyEntry] = []
     var conditions: [SkyConditions] = []
     var capped: [SkyCappedHour] = []
+    var corrected: [String: Date] = [:]
 }
 
 // MARK: - A camera's pictures on the drive (Ruling S27)

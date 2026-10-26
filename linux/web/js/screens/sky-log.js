@@ -27,7 +27,7 @@ import { createSkySetupPanel } from './sky-setup.js';
 import {
   BUCKETS, CORRECTIONS, GRID_KINDS, GRID_SORTS, SKY_ROUTE, SKY_TEXT, aimLines, blinkText, cappedByHour, cappedText, chipCounts, clipAddress, conditionsText, correctionText,
   countEntries, countLabel, countsAfter, dayLabel, defaultLensLayout, defaultSort, directionText, durationText, entryBucket, gridChoice, gridQuery, groupText, groupsOf,
-  isTimeSort, kindWord, learningText, matchesFilters, normalizeEntry, priorityOf, priorityWord, readGridQuery, readGroupQuery, reasonsOf, shapeText, shiftDate, skyWatching,
+  isTimeSort, kindWord, learningText, matchesFilters, normalizeEntry, piecesText, priorityOf, priorityWord, readGridQuery, readGroupQuery, reasonsOf, shapeText, shiftDate, skyWatching,
   sortEntries, speedText, streamText, stripDots, stripTicks, summaryText, timeText, toMs, watchAddress,
 } from './sky-model.js';
 
@@ -646,8 +646,11 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
 
   // MARK: The still and the player
 
-  /** The address of an entry's picture: the whole one, or with `size` 'thumb' the small one the grid's cards use (the player keeps the whole one). */
-  const stillAddress = (entry, size = '') => `/api/v1/sky/cameras/${encodeURIComponent(current)}/entries/${encodeURIComponent(entry.id)}/still?night=${encodeURIComponent(log.night)}${size ? `&size=${size}` : ''}`;
+  /**
+   * The address of an entry's picture: the whole one, or with `size` 'thumb' the small one the grid's cards use (the player keeps the whole one). A light
+   * the box joined from pieces has the picture of one of its parts (`stillPart`).
+   */
+  const stillAddress = (entry, size = '') => `/api/v1/sky/cameras/${encodeURIComponent(current)}/entries/${encodeURIComponent(entry.stillPart?.id ?? entry.id)}/still?night=${encodeURIComponent(log.night)}${size ? `&size=${size}` : ''}`;
 
   /** What the player's title says the light was, and on which camera: never a height or a distance (a flight's stays in the details). */
   function playerWhat(entry) {
@@ -701,7 +704,10 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     return () => { list.delete(fn); if (!list.size) refreshers.delete(id); };
   }
 
-  /** The facts under a light: where, how long, how fast against planes, blinking, the shape of its path, and what makes it stand out. */
+  /**
+   * The facts under a light: where, how long (and in how many pieces it was seen: "1 light, seen in 15 parts"), how fast against planes, blinking, the
+   * shape of its path, and what makes it stand out.
+   */
   function facts(entry) {
     const m = entry.measures;
     const track = entry.kind === 'track';
@@ -709,6 +715,7 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     return [
       capitalize(directionText(m.azimuth, m.elevation)),
       seconds ? `Lasted ${seconds}` : '',
+      piecesText(entry),
       track ? capitalize(speedText(entry.speedVsPlanes)) : '',
       blinkText(m.blinks, m.blinkRate),
       track ? shapeText(m.shape) : '',
@@ -888,12 +895,15 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
         : [h('p', null, TEXT.noCameras), h('a', { class: 'btn primary', href: '#/add' }, TEXT.addCamera)]);
   }
 
-  /** The entry the address names: shown even when the filters would leave it out (they are cleared), its card brought into view and marked. */
+  /**
+   * The entry the address names (or the light it is a part of, joined from pieces): shown even when the filters would leave it out (they are cleared),
+   * its card brought into view and marked.
+   */
   function showTarget() {
     const named = target;
     target = null;
     if (!named) return;
-    const entry = log.entries.find((candidate) => candidate.id === named);
+    const entry = log.entries.find((candidate) => candidate.id === named) ?? log.entries.find((candidate) => candidate.parts.includes(named));
     if (!entry) return;
     if (!matchesFilters(entry, narrowing())) {
       group = null;
@@ -904,7 +914,7 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
       fadeStrip();
       drawGrid();
     }
-    const card = grid.reveal(named);
+    const card = grid.reveal(entry.id);
     if (!card) return;
     card.classList.add('sky-target');
     card.scrollIntoView?.({ block: 'center' });   // at once: the grid gives back cards that are far from the screen

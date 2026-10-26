@@ -659,9 +659,11 @@ extension SkyNightLogEngineTests {
         let night = try await rig.night("2026-10-24", .night)
         #expect(night.entries.map(\.id) == ["n-1", "n-2", "n-3", "n-4"], "\(night.entries.count)")
         #expect(began.duration(to: .now) < .seconds(30))
-        // The day reads as much of itself as fits after it: its newest part.
+        // The day reads as much of itself as fits after it: its newest part (its lights, which all follow one path a moment apart, are joined as it
+        // is read: `SkyStitch`).
         let afternoon = try await rig.night("2026-10-24", .day)
-        #expect(afternoon.entries.count > 1_000 && afternoon.entries.count < count, "\(afternoon.entries.count) of \(count)")
+        let read = afternoon.entries.reduce(0) { $0 + max(1, $1.parts.count) }
+        #expect(read > 1_000 && read < count, "\(read) of \(count), as \(afternoon.entries.count) lights")
     }
 }
 

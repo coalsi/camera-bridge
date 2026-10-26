@@ -10,7 +10,7 @@ import {
   CLOSE_UP, GRID_KINDS, GRID_SORTS, SKY_ROUTE, SKY_TEXT, aimLines, aimText, blinkText, cappedByHour, cappedText, cardLine, chipCounts, clipAddress, closeUpRect, compassWord,
   conditionsText, countEntries, countLabel, countsAfter, dayLabel, defaultLensLayout, defaultSort, directionText, durationShort, durationText, entryBucket, gridChoice, gridQuery,
   groupsOf, groupText, hourGroups, hourLabel, hourStart, isTimeSort, kindChip, kindWord, lastedSeconds, learningText, matchesFilters, normalizeEntry,
-  pathPoints, priorityOf, priorityWord, readGridQuery, readGroupQuery, reasonsOf, refusalOf, shapeText, shiftDate, shortLine, skyWatching,
+  pathPoints, piecesText, priorityOf, priorityWord, readGridQuery, readGroupQuery, reasonsOf, refusalOf, shapeText, shiftDate, shortLine, skyWatching,
   sortEntries, speedText, streamText, stripDots, stripTicks, summaryText, THUMB_WIDTH, thumbGeometry, thumbRect, timeText, toMs, watchAddress,
 } from '../web/js/screens/sky-model.js';
 
@@ -751,4 +751,22 @@ test('the words of the plugin: the page that is off, the empty page, the Setup p
   assert.equal(SKY_TEXT.settings.title, 'Setup');
   assert.deepEqual([SKY_TEXT.settings.aiTitle, SKY_TEXT.settings.aiLabel, SKY_TEXT.settings.aiRange],
     ['Asking the AI', 'Most questions a day', 'Use a whole number from 1 to 1,000.']);
+});
+
+test('a light seen in pieces says how many, and its parts and the part whose picture it is are read safely', () => {
+  const path = [{ t: 0, x: 0.4, y: 0.3 }, { t: 2, x: 0.45, y: 0.28 }];
+  const joined = normalizeEntry({ id: 'j1', start: 1000, end: 31_000, pieces: 15, parts: ['j1', 'j2', 'j3', 7, '', 'a/b'], stillPart: { id: 'j3', path } });
+  assert.equal(joined.pieces, 15);
+  assert.deepEqual(joined.parts, ['j1', 'j2', 'j3'], 'only ids');
+  assert.deepEqual(joined.stillPart, { id: 'j3', path });
+  assert.equal(piecesText(joined), '1 light, seen in 15 parts');
+  assert.equal(piecesText(normalizeEntry({ id: 'j', start: 1, end: 2, pieces: 2 })), '1 light, seen in 2 parts');
+  const whole = normalizeEntry({ id: 'w', start: 1000, end: 2000 });
+  assert.deepEqual([whole.pieces, whole.parts, whole.stillPart, piecesText(whole)], [1, [], null, ''], 'a light seen whole: one piece, no parts');
+  for (const pieces of [0, -3, 2.5, 'many', null, Infinity]) assert.equal(normalizeEntry({ id: 'w', start: 1, end: 2, pieces }).pieces, 1, String(pieces));
+  assert.equal(normalizeEntry({ id: 'w', start: 1, end: 2, stillPart: { id: '../x', path } }).stillPart, null, 'a part that is no id is none');
+  assert.deepEqual(normalizeEntry({ id: 'w', start: 1, end: 2, stillPart: { id: 'k', path: 'junk' } }).stillPart, { id: 'k', path: [] });
+  // One light, however many pieces: the chips and the counts count it once.
+  assert.equal(chipCounts([joined, whole]).all, 2);
+  assert.equal(countEntries([joined, whole]).unexplained, 2);
 });

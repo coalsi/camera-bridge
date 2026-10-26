@@ -58,12 +58,27 @@ public struct SkyAIAnswer: Codable, Sendable, Equatable {
     }
 }
 
+/// The part of a light joined as the log is read (`SkyStitch.joined`) whose picture is the light's: its id (the picture is that entry's) and its own
+/// path (the small picture of it is cut around that path).
+public struct SkyStillPart: Codable, Sendable, Equatable {
+    public var id: String
+    public var path: [SkyPathPoint]
+
+    public init(id: String, path: [SkyPathPoint]) {
+        self.id = id
+        self.path = path
+    }
+}
+
 /// One light in the sky log. Times are the box's clock; the path is in the original picture; the measures are on the sky, in degrees and
 /// ratios, never in real units. `label` is what the box decided and `by` what decided it; `correction` is the person's word, which wins on
 /// screen (`SkyDisplay.label`) and counts most to the box's learning. `candidate`: unexplained and unusual (`unusual` not empty: Task 11), so it
 /// may alert once the camera has learned its sky. `hasStill`: a picture of it was kept (`SkyLogStore.writeStill`). An unexplained light has
 /// `priority` and `reasons` (`SkyGuide`: how interesting it is and why, in short phrases for the page); `doubtful` when the rules doubt it is a
 /// light at all (`SkyRules.doubt`), and `group` (set when the log is read, `SkyFormations`) names the lights it moved together with.
+/// `pieces`: how many pieces it was seen in (tracks joined while it was followed, `SkyStitchHold`; the logged lights joined as the log is read,
+/// `SkyStitch.joined`), 1 for a light seen whole. A light joined as the log is read has `parts` (the ids of the logged lights it was joined from, in
+/// the order they began, its own first) and `stillPart` (the part whose picture is its); neither is ever kept in the log.
 /// `sortedLater`: logged before the rules, and sorted by them as the log was read (`SkySortLater`): its label, `by`, `detail` and the guide's
 /// fields are the rules' now, not the log's. Neither it nor `group` is ever kept.
 public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
@@ -92,6 +107,9 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
     public var reasons: [String]
     public var doubtful: Bool
     public var group: String?
+    public var pieces: Int
+    public var parts: [String]
+    public var stillPart: SkyStillPart?
     /// Set as the log is read (`SkySortLater`), never written or read back (it is not one of the coding keys).
     public var sortedLater: Bool
 
@@ -104,7 +122,8 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
     public init(id: String, camera: UUID, kind: SkyEntryKind, start: Date, end: Date, path: [SkyPathPoint], measures: SkyMeasures, label: SkyLabel,
                 by: SkyLabelSource? = nil, detail: String? = nil, unusual: [SkyUnusualReason] = [], speedVsPlanes: Double? = nil, candidate: Bool = false,
                 alerted: Bool = false, hasStill: Bool = false, ai: SkyAIAnswer? = nil, correction: SkyCorrection? = nil, priority: SkyPriority? = nil,
-                reasons: [String] = [], doubtful: Bool = false, group: String? = nil, sortedLater: Bool = false) {
+                reasons: [String] = [], doubtful: Bool = false, group: String? = nil, sortedLater: Bool = false, pieces: Int = 1, parts: [String] = [],
+                stillPart: SkyStillPart? = nil) {
         self.id = id
         self.camera = camera
         self.kind = kind
@@ -126,6 +145,9 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
         self.reasons = reasons
         self.doubtful = doubtful
         self.group = group
+        self.pieces = max(1, pieces)
+        self.parts = parts
+        self.stillPart = stillPart
         self.sortedLater = sortedLater
     }
 
@@ -139,7 +161,37 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, camera, kind, start, end, path, measures, label, by, detail, unusual, speedVsPlanes, candidate, alerted, hasStill, ai, correction
-        case priority, reasons, doubtful, group
+        case priority, reasons, doubtful, group, pieces, parts, stillPart
+    }
+
+    /// Every field as before; `pieces` only when more than one, `parts` only when there are some and `stillPart` only when there is one, so that a light
+    /// seen whole is written as it always was.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(camera, forKey: .camera)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(start, forKey: .start)
+        try container.encode(end, forKey: .end)
+        try container.encode(path, forKey: .path)
+        try container.encode(measures, forKey: .measures)
+        try container.encode(label, forKey: .label)
+        try container.encodeIfPresent(by, forKey: .by)
+        try container.encodeIfPresent(detail, forKey: .detail)
+        try container.encode(unusual, forKey: .unusual)
+        try container.encodeIfPresent(speedVsPlanes, forKey: .speedVsPlanes)
+        try container.encode(candidate, forKey: .candidate)
+        try container.encode(alerted, forKey: .alerted)
+        try container.encode(hasStill, forKey: .hasStill)
+        try container.encodeIfPresent(ai, forKey: .ai)
+        try container.encodeIfPresent(correction, forKey: .correction)
+        try container.encodeIfPresent(priority, forKey: .priority)
+        try container.encode(reasons, forKey: .reasons)
+        try container.encode(doubtful, forKey: .doubtful)
+        try container.encodeIfPresent(group, forKey: .group)
+        if pieces > 1 { try container.encode(pieces, forKey: .pieces) }
+        if !parts.isEmpty { try container.encode(parts, forKey: .parts) }
+        try container.encodeIfPresent(stillPart, forKey: .stillPart)
     }
 
     /// An entry written without the fields a later build added (or with a value it cannot read) reads with their defaults; the entry's own
@@ -167,6 +219,9 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
         reasons = ((try? container.decodeIfPresent([String].self, forKey: .reasons)) ?? nil) ?? []
         doubtful = (try? container.decodeIfPresent(Bool.self, forKey: .doubtful)) ?? false
         group = (try? container.decodeIfPresent(String.self, forKey: .group)) ?? nil
+        pieces = max(1, ((try? container.decodeIfPresent(Int.self, forKey: .pieces)) ?? nil) ?? 1)
+        parts = ((try? container.decodeIfPresent([String].self, forKey: .parts)) ?? nil) ?? []
+        stillPart = (try? container.decodeIfPresent(SkyStillPart.self, forKey: .stillPart)) ?? nil
         sortedLater = false
     }
 }

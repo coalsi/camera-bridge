@@ -175,9 +175,12 @@ GET    /api/v1/sky/cameras/{id}/night?date=yyyy-MM-dd&view=night|day     the Sky
                                       the most telling first), doubtful (the rules doubt it was a light at all), group|null (the lights that moved together
                                       share it: "g-" and the first one's id, set as the log is read), sortedLater (since 2026-10-26: logged before the rules
                                       and sorted by them as the log is read; its label, by, detail and the guide's keys are theirs, and the log is not
-                                      written), ai|null {kind, sentence, model, at},
-                                      correction|null (plane | bird | bug | satellite | meteor | notSure), watch (the recordings' moment to open: start
-                                      minus 3 s)}. conditions[]: {from, to, state (clear | cloudy | notVisible | unknown), cloudCover|null}. counts:
+                                      written), pieces (how many pieces the box saw the light in: 1 for a light seen whole), parts[] (a light the log kept
+                                      in pieces, joined as it is read, before it is sorted: its parts' ids, its own first; [] otherwise; it is one entry and
+                                      counts once), stillPart|null {id, path[]} (the part whose picture the light shows: its still and small picture are asked
+                                      for by that part's id; null for a light the log kept whole), ai|null {kind, sentence, model, at}, correction|null (plane
+                                      | bird | bug | satellite | meteor | notSure), watch (the recordings' moment to open: start minus 3 s)}. conditions[]:
+                                      {from, to, state (clear | cloudy | notVisible | unknown), cloudCover|null}. counts:
                                       {unexplained, planes, satellites, meteors, bugsAndBirds, notSure, explained}, counted by what the log shows (a person's
                                       word wins; a light the box explained and the person was not sure of is notSure; explained = all but unexplained). aim:
                                       {quality (rough | good | precise), planes, stars, residualPixels|null, updated|null, lenses[{quality, planes, stars,
@@ -200,8 +203,9 @@ GET    /api/v1/sky/cameras/{id}/entries/{eid}/still?night=yyyy-MM-dd[&size=thumb
                                       is the whole picture, 200 all the same, for a minute only (private, max-age=60). size=full and no size are the whole
                                       picture; any other size is 400 with the field size
 POST   /api/v1/sky/cameras/{id}/entries/{eid}/correction   {night, label}: "That was a…", label plane | bird | bug | satellite | meteor | notSure -> the entry
-                                      (as in the log); the last word of an entry wins; 400 with the field label or night; 404 for an entry the night's log
-                                      does not hold
+                                      (as the log reads it: one logged before the rules sorted by them); the last word of an entry wins; a word on a joined
+                                      light (sent with any part's id) is written to every part of it, and the answer is the joined light, sorted as one; 400
+                                      with the field label or night; 404 for an entry the night's log does not hold
 POST   /api/v1/sky/feeds/find         "Find a feed": the flight feeds (dump1090, readsb, tar1090, PiAware) on the box's own network, one address per host
                                       -> {feeds: [url]}; it asks only the hosts in the box's neighbour table, a few places each, for at most 20 s
 POST   /api/v1/bridge/pause | resume

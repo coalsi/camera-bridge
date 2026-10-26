@@ -143,7 +143,8 @@ export function createSkyGrid({ thumbAddress, stillAddress, picture = () => null
     function draw() {
       const natural = { width: img.naturalWidth, height: img.naturalHeight };
       if (!(natural.width > 0 && natural.height > 0)) return;
-      const geometry = source === 'thumb' ? thumbGeometry(entry.path, natural, picture()) : { mode: 'whole', picture: natural };
+      // A light the box joined from pieces has one part's picture, whose small one the box cut around that part's path; its whole path is drawn over it.
+      const geometry = source === 'thumb' ? thumbGeometry(entry.stillPart?.path ?? entry.path, natural, picture()) : { mode: 'whole', picture: natural };
       if (!geometry) {
         wholeInstead();
         return;

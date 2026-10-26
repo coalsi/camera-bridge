@@ -55,7 +55,15 @@ public struct SkyCameraStatus: Sendable, Equatable {
 /// their flashes and stationary points there. Once a minute the background is judged for how much sky is visible (`SkyVisibility`), and the
 /// conditions are written.
 ///
-/// **Each ended track** (off the picture path, one at a time in order, on a queue of its own: a picture never waits for one): measured with
+/// **One light, not fifteen** (the owner, 2026-10-26): a track that ended, and a flash the tracker dropped, is first held (`SkyStitchHold`, on the
+/// actor), so that the pieces of one light (`SkyStitch`: a gap of up to 6 s where it faded or crossed the seam, a frozen picture, the same light
+/// followed twice, by day its contrail) are one: a light is held until nothing can continue it (6 s after its last piece, longer only while an open
+/// track may still be part of it), then handed over as one track (its pieces' samples, and the pictures of its gaps as missed, so that its blinking is
+/// measured over the whole light) with how many pieces it was seen in (`SkyEntry.pieces`). Flashes alone are logged only as a chain in a line (3 or more,
+/// over 5 s: `SkyEntryKind.flash`, which the rules call a probable plane when straight). What is held is let go at a gap, a restart, a new picture size,
+/// and at the stop (to the queue, whose waiting lights the stop drops as before).
+///
+/// **Each ended light** (off the picture path, one at a time in order, on a queue of its own: a picture never waits for one): measured with
 /// the current aim; a stationary one is left for Task 10; then `classify` (the flight feed, then the rules: `SkyRules`) and, when it wants one
 /// (`SkyLightFilter.wantsStill`: what nothing explains, the rules' meteors, bugs and birds, and their probable planes and satellites), a picture
 /// of its middle (`Context.still`, while the drive has room), whose small one is then asked for (`Context.stillWritten`); then the entry,
@@ -78,7 +86,8 @@ public struct SkyCameraStatus: Sendable, Equatable {
 /// alerts), and ranked with its reasons (`SkyGuide`). Many lights that begin in one picture are the camera changing its picture: the tracker
 /// counts its births per picture (`SkyTracker.beganWith`).
 /// Every logged light that wants a picture (`SkyLightFilter.wantsStill`) has one while the drive has room (Ruling S31); one it could not have
-/// then is made later from the recording, a few a minute (`SkyStillBackfill`, `Context.recordedStill`). Either way its small picture for the
+/// then, or whose middle the camera's ring no longer held (a long light: `SkyLightFilter.stillIsOf`), is made later from the recording, a few a
+/// minute (`SkyStillBackfill`, `Context.recordedStill`). Either way its small picture for the
 /// log's grid is asked for as soon as the picture is written (`Context.stillWritten`), not at the grid's first view.
 ///
 /// **An aim far off** (Ruling S18): once a minute the aircraft of the feed that the aim puts in the view (within 60 km, 2° up, above the ground)
@@ -171,6 +180,10 @@ actor SkyCameraDetector: SkyFrameSink {
 
     private var analyzer: SkyFrameAnalyzer?
     private var tracker: SkyTracker?
+    /// The lights held after their track ended until nothing can continue them (`SkyStitchHold`), for the analysed size the tracker follows; and the
+    /// stream time of the last picture (a clock that goes back lets them go).
+    private var hold: SkyStitchHold?
+    private var lastPictureTime: TimeInterval?
     private var sunCircles: [SkyMask.Circle] = []
     private var isNight = true
     private var skyChecked: Date?
@@ -219,7 +232,8 @@ actor SkyCameraDetector: SkyFrameSink {
     private var behindLogged = false
 
     private enum Work: Sendable {
-        case ended(SkyTrack, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int)
+        /// A light that ended: its track (its pieces' joined, `SkyStitchHold`), how many pieces it was seen in and its kind.
+        case ended(SkyTrack, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int, pieces: Int, kind: SkyEntryKind)
         case setStart
         /// The card changed (Ruling S25): the aim starts again from it.
         case restartAim
@@ -280,12 +294,13 @@ actor SkyCameraDetector: SkyFrameSink {
         logger.info("Sky Watcher watches the sky for \(context.cameraName)")
     }
 
-    /// Takes no more pictures and starts no more work, writes the conditions span that was open and what is kept. The lights that wait in the
-    /// queue are dropped (the last seconds of the sky), and the light the queue is at work on gets `stopPatience` to finish: the engine stops
-    /// the detectors with its locks held, and the daemon gives the whole engine ten seconds (Ruling S27). What it leaves unfinished ends on its
-    /// own, and can write nothing of the aim (`SkyAimStore.close`).
+    /// Takes no more pictures and starts no more work, writes the conditions span that was open and what is kept. The lights held for a piece that
+    /// might continue them go to the queue (`SkyStitchHold.flush`), whose waiting lights are dropped (the last seconds of the sky), and the light the
+    /// queue is at work on gets `stopPatience` to finish: the engine stops the detectors with its locks held, and the daemon gives the whole engine ten
+    /// seconds (Ruling S27). What it leaves unfinished ends on its own, and can write nothing of the aim (`SkyAimStore.close`).
     func stop() async {
         guard !stopped else { return }
+        releaseHeld()
         stopped = true
         maintenance?.cancel()
         maintenance = nil
@@ -299,8 +314,10 @@ actor SkyCameraDetector: SkyFrameSink {
         if started { logger.info("Sky Watcher stopped for \(context.cameraName)") }
     }
 
-    /// Waits until everything queued before it is done (tests).
-    func settle() async {
+    /// Waits until everything queued before it is done (tests); with `releasingHeld`, the lights held for a piece that might continue them go to the
+    /// queue first (a test's pictures end before the 6 s that would let them go).
+    func settle(releasingHeld: Bool = true) async {
+        if releasingHeld { releaseHeld() }
         guard worker != nil else { return }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             switch work.yield(.barrier(continuation)) {
@@ -377,13 +394,15 @@ actor SkyCameraDetector: SkyFrameSink {
         cut()
     }
 
-    /// What was open ends unlogged (a gap is never a track, and a track cut by one is not logged); the background starts again.
+    /// What was open ends unlogged (a gap is never a track, and a track cut by one is not logged); the lights held go to the queue (nothing after the
+    /// gap continues them); the background starts again.
     private func cut() {
         if let tracker {
             var dropped: [SkyDroppedTrack] = []
             _ = tracker.endAll(dropped: &dropped)
             for track in dropped { droppedTrack(track, analysisWidth: tracker.width, analysisHeight: tracker.height) }
         }
+        releaseHeld()
         analyzer?.reset()
         quietFrom = nil
         quietUntil = nil
@@ -443,6 +462,7 @@ actor SkyCameraDetector: SkyFrameSink {
                 var dropped: [SkyDroppedTrack] = []
                 _ = old.endAll(dropped: &dropped)   // another size: what was open is cut off
             }
+            releaseHeld()   // and what was held goes on as it is: its pieces are of the other size
             analyzer = SkyFrameAnalyzer(width: image.width, height: image.height)
             tracker = SkyTracker(width: image.width, height: image.height)
             tracker.model = model
@@ -451,6 +471,14 @@ actor SkyCameraDetector: SkyFrameSink {
             self.tracker = tracker
             quietFrom = nil
             quietUntil = nil
+        }
+        // The hold follows the tracker's picture (its size, and a dual camera's seam); a clock that went back lets go of what it held.
+        let seam = model.layout == .dual ? model.seam : nil
+        if let last = lastPictureTime, frame.time < last { releaseHeld() }
+        lastPictureTime = frame.time
+        if hold?.picture != SkyStitch.Picture(width: Double(image.width), height: Double(image.height), seam: seam) {
+            releaseHeld()
+            hold = SkyStitchHold(picture: SkyStitch.Picture(width: Double(image.width), height: Double(image.height), seam: seam))
         }
         refreshSky(at: wallClock, pictureWidth: pictureWidth, pictureHeight: pictureHeight)
         let mask = SkyMask(groundPercent: context.settings.groundPercent, belowElevation: quality == .rough ? nil : 1, excluded: sunCircles, model: model)
@@ -467,10 +495,43 @@ actor SkyCameraDetector: SkyFrameSink {
                 quietUntil = nil
             }
             let ended = tracker.update(quietUntil == nil ? result.detections : [], at: frame.time, wallClock: wallClock, dropped: &dropped)
-            for track in ended { receive(track, analysisWidth: image.width, analysisHeight: image.height, pictureWidth: pictureWidth) }
+            for track in ended { keep(track, flash: false, pictureWidth: pictureWidth) }
         }
-        for track in dropped { droppedTrack(track, analysisWidth: image.width, analysisHeight: image.height) }
+        for track in dropped {
+            droppedTrack(track, analysisWidth: image.width, analysisHeight: image.height)
+            if track.reason == .barelyMoved, Self.isFlash(track.track) { keep(track.track, flash: true, pictureWidth: pictureWidth) }
+        }
+        if let released = hold?.release(at: frame.time, open: tracker.openTracks), let picture = hold?.picture {
+            for light in released { hand(light, picture: picture, pictureWidth: pictureWidth) }
+        }
         sampleVisibility(analyzer, mask: mask, at: wallClock)
+    }
+
+    /// A flash, as the tracker drops one (`SkyDroppedTrack`): streak-born, or followed for under this long (s).
+    static let flashLongest: TimeInterval = 1.5
+
+    static func isFlash(_ track: SkyTrack) -> Bool {
+        guard let first = track.samples.first?.time, let last = track.samples.last?.time else { return false }
+        return track.streakBorn || last - first < flashLongest
+    }
+
+    /// A track that ended (or a flash the tracker dropped) to the hold (`SkyStitchHold`); what it lets go to keep within its bound, to the queue.
+    private func keep(_ track: SkyTrack, flash: Bool, pictureWidth: Int) {
+        guard let picture = hold?.picture, let released = hold?.add(track, flash: flash, byDay: !isNight) else { return }
+        for light in released { hand(light, picture: picture, pictureWidth: pictureWidth) }
+    }
+
+    /// A light the hold let go, to the queue as one track (nothing for a flash alone: the tracker dropped it, and it was handed over as such).
+    private func hand(_ light: SkyStitchHold.Released, picture: SkyStitch.Picture, pictureWidth: Int) {
+        guard let joined = light.track() else { return }
+        enqueue(.ended(joined.track, analysisWidth: Int(picture.width), analysisHeight: Int(picture.height), pictureWidth: pictureWidth, pieces: joined.pieces,
+                       kind: joined.kind))
+    }
+
+    /// Every light held, to the queue: at a gap, a restart, a new picture size or clock, the stop, and a test's settle.
+    private func releaseHeld() {
+        guard let picture = hold?.picture, let released = hold?.flush() else { return }
+        for light in released { hand(light, picture: picture, pictureWidth: pictureWidth) }
     }
 
     /// The status's numbers of a picture.
@@ -550,10 +611,32 @@ actor SkyCameraDetector: SkyFrameSink {
 
     // MARK: The queue
 
-    /// A track that ended, from the tracker (`analyse` hands them over here; a test hands in the ones the tracker did not make), to the queue.
-    func receive(_ track: SkyTrack, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int) {
-        enqueue(.ended(track, analysisWidth: analysisWidth, analysisHeight: analysisHeight, pictureWidth: pictureWidth))
+    /// A light that ended, to the queue as it is (the tracker's go through the hold first: `keep`; a test hands in the ones the tracker did not make).
+    func receive(_ track: SkyTrack, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int, pieces: Int = 1, kind: SkyEntryKind = .track) {
+        enqueue(.ended(track, analysisWidth: analysisWidth, analysisHeight: analysisHeight, pictureWidth: pictureWidth, pieces: pieces, kind: kind))
     }
+
+    /// A track that ended to the hold, as the tracker's go (tests: a light in pieces without pictures to find it in), at `analysisWidth` ×
+    /// `analysisHeight` of a `pictureWidth` picture; `flash`: one the tracker dropped as a flash.
+    func handOver(_ track: SkyTrack, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int, flash: Bool = false) {
+        let seam = model.layout == .dual ? model.seam : nil
+        let picture = SkyStitch.Picture(width: Double(analysisWidth), height: Double(analysisHeight), seam: seam)
+        if hold?.picture != picture {
+            releaseHeld()
+            hold = SkyStitchHold(picture: picture)
+        }
+        self.pictureWidth = pictureWidth
+        keep(track, flash: flash, pictureWidth: pictureWidth)
+    }
+
+    /// The lights the hold lets go at `time` (the stream's seconds), with no track open (tests).
+    func releaseHeld(at time: TimeInterval) {
+        guard let picture = hold?.picture, let released = hold?.release(at: time, open: []) else { return }
+        for light in released { hand(light, picture: picture, pictureWidth: pictureWidth) }
+    }
+
+    /// How many lights the hold keeps now (tests).
+    var heldCount: Int { hold?.count ?? 0 }
 
     private func enqueue(_ item: Work) {
         guard !stopped else { return }
@@ -572,10 +655,10 @@ actor SkyCameraDetector: SkyFrameSink {
 
     private func perform(_ item: Work) async {
         switch item {
-        case .ended(let track, let analysisWidth, let analysisHeight, let pictureWidth):
+        case .ended(let track, let analysisWidth, let analysisHeight, let pictureWidth, let pieces, let kind):
             pending -= 1
             guard !stopped else { return }   // told to stop while it waited: dropped
-            await handle(track, analysisWidth: analysisWidth, analysisHeight: analysisHeight, pictureWidth: pictureWidth)
+            await handle(track, analysisWidth: analysisWidth, analysisHeight: analysisHeight, pictureWidth: pictureWidth, pieces: pieces, kind: kind)
         case .setStart:
             guard !stopped, let store = aimStore, let size = aimSize else { return }
             await store.setStart(card(width: size.width, height: size.height), pictureWidth: size.width, pictureHeight: size.height)
@@ -588,16 +671,17 @@ actor SkyCameraDetector: SkyFrameSink {
         }
     }
 
-    /// An ended track to the log, or to the hour's count of what was skipped or not logged. Internal for the tests, which hand it tracks without
-    /// the tracker. Every track that no flight explains counts towards its spot being busy, after it was judged.
-    func handle(_ track: SkyTrack, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int) async {
+    /// An ended light (`pieces`: how many pieces it was seen in; `kind`: a track, or a chain of flashes) to the log, or to the hour's count of what was
+    /// skipped or not logged. Internal for the tests, which hand it tracks without the tracker. Every track that no flight explains counts towards its
+    /// spot being busy, after it was judged.
+    func handle(_ track: SkyTrack, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int, pieces: Int = 1, kind: SkyEntryKind = .track) async {
         let measures = TrackMeasurer.measure(track, model: model, analysisWidth: analysisWidth, pictureWidth: pictureWidth)
         guard !TrackMeasurer.isStationary(measures) else {   // a light that stood still: Task 10's (and it stood at its spot)
             learnClutter(track, analysisWidth: analysisWidth, analysisHeight: analysisHeight)
             return
         }
         let verdict = await classified(track, measures: measures, analysisWidth: analysisWidth, analysisHeight: analysisHeight,
-                                       pictureWidth: pictureWidth)
+                                       pictureWidth: pictureWidth, pieces: pieces, kind: kind)
         var entry = verdict.entry
         if entry.by != .flight { learnClutter(track, analysisWidth: analysisWidth, analysisHeight: analysisHeight) }
         let hour = SkyLightFilter.clockHour(of: entry.start, in: context.zone)
@@ -621,12 +705,13 @@ actor SkyCameraDetector: SkyFrameSink {
         }
         let folder = context.folder()
         // Every logged light that wants a picture has one (Ruling S31: a software decode of a keyframe and a file each): not once the detector is
-        // told to stop, nor while the drive is short of room (Ruling S27); one that cannot be had now is made later from the recording
-        // (`backfillStills`). Its small picture is asked for once the picture and the line are handed to the log.
+        // told to stop, nor while the drive is short of room (Ruling S27); one that cannot be had now, or that the camera's ring no longer holds (the
+        // middle of a long light: `SkyLightFilter.stillIsOf`), is made later from the recording (`backfillStills`). Its small picture is asked for once
+        // the picture and the line are handed to the log.
         if SkyLightFilter.wantsStill(entry.label, by: entry.by), !stopped, await context.roomForStills(), !stopped {
             let middle = SkyStillBackfill.middle(of: entry)
             if let still = await context.still(middle.addingTimeInterval(-clockOffset)), !still.jpeg.isEmpty,
-               still.jpeg.count <= SkyLogStore.maximumStillBytes {
+               still.jpeg.count <= SkyLogStore.maximumStillBytes, SkyLightFilter.stillIsOf(entry, at: still.at.addingTimeInterval(clockOffset)) {
                 log.writeStill(still.jpeg, entryID: entry.id, camera: entry.camera, night: night, folder: folder)
                 entry.hasStill = true
             }
@@ -695,8 +780,9 @@ actor SkyCameraDetector: SkyFrameSink {
         return await classified(track, measures: measures, analysisWidth: width, analysisHeight: height, pictureWidth: pictureWidth).entry
     }
 
-    private func classified(_ track: SkyTrack, measures: SkyMeasures, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int) async -> Classified {
-        var entry = Self.entry(of: track, measures: measures, camera: context.cameraID)
+    private func classified(_ track: SkyTrack, measures: SkyMeasures, analysisWidth: Int, analysisHeight: Int, pictureWidth: Int, pieces: Int = 1,
+                            kind: SkyEntryKind = .track) async -> Classified {
+        var entry = Self.entry(of: track, measures: measures, camera: context.cameraID, kind: kind, pieces: pieces)
         let times = track.samples.map(\.wallClock).filter { $0.timeIntervalSince1970.isFinite }
         guard let from = times.min(), let to = times.max() else { return Classified(entry: entry) }
         let nearby = await flights.tracks(overlapping: from...to)
@@ -752,7 +838,7 @@ actor SkyCameraDetector: SkyFrameSink {
         let samples = track.samples.filter { $0.time.isFinite && $0.point.x.isFinite && $0.point.y.isFinite }.sorted { $0.time < $1.time }
         let middle = SkyStillBackfill.middle(of: entry)
         let observer = context.observer
-        var light = SkyRuleLight(measures: measures, streakBorn: track.streakBorn, samples: samples.count,
+        var light = SkyRuleLight(measures: measures, kind: entry.kind, streakBorn: track.streakBorn, samples: samples.count,
                                  sunElevation: SunEphemeris.direction(at: middle, observer: observer).elevation)
         if let first = samples.first, let tracker {
             let began = tracker.beganWith(at: first.time, near: SkyRules.meteorAloneWithin, many: SkyRules.cameraChangeLights,
@@ -781,15 +867,16 @@ actor SkyCameraDetector: SkyFrameSink {
     }
 
     /// `track` as an unexplained entry: its times (the box's), its path (at most 64 points, evenly picked, the first and the last among them; in
-    /// the original picture, 0…1) and `measures`.
-    static func entry(of track: SkyTrack, measures: SkyMeasures, camera: UUID) -> SkyEntry {
+    /// the original picture, 0…1) and `measures`; `kind` a track or a chain of flashes, seen in `pieces` pieces (`SkyStitchHold`).
+    static func entry(of track: SkyTrack, measures: SkyMeasures, camera: UUID, kind: SkyEntryKind = .track, pieces: Int = 1) -> SkyEntry {
         let samples = track.samples.filter { $0.wallClock.timeIntervalSince1970.isFinite }.sorted { $0.wallClock < $1.wallClock }
         let start = samples.first?.wallClock ?? Date(timeIntervalSince1970: 0)
         let end = max(start, samples.last?.wallClock ?? start)
         let path = SkyAimSearch.evenly(samples, SkyPathPoint.maximumPerEntry).map {
             SkyPathPoint(t: $0.wallClock.timeIntervalSince(start), x: $0.point.x, y: $0.point.y)
         }
-        return SkyEntry(id: newID(at: start), camera: camera, kind: .track, start: start, end: end, path: path, measures: measures, label: .unexplained)
+        return SkyEntry(id: newID(at: start), camera: camera, kind: kind, start: start, end: end, path: path, measures: measures, label: .unexplained,
+                        pieces: pieces)
     }
 
     /// An entry's id: its start in milliseconds and a random part, in hex ("19a1b2c3d4e-0f1e2d3c"): safe in a path, and unique.

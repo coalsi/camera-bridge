@@ -292,10 +292,18 @@ extension SkyNightLogEngineTests {
                  shape: SkyPathShape = .straight, size: Double = 0.3) -> SkyEntry {
             SkySortLaterTests.old(id, at: start, speed: speed, duration: duration, elevation: elevation, straightness: straightness, shape: shape, size: size)
         }
+        // The three that began at once are in three places of the picture: three lights at one place, going one way together, would be one light
+        // followed three times, which the reading joins first (`SkyStitch`).
+        func apart(_ entry: SkyEntry, by down: Double) -> SkyEntry {
+            var moved = entry
+            moved.path = entry.path.map { SkyPathPoint(t: $0.t, x: $0.x, y: $0.y + down) }
+            return moved
+        }
         let entries = [
             old("o-sat", at(0), 0.6, 20), old("o-said", at(10), 0.6, 20), old("o-unsure", at(20), 0.6, 20), guided, plane, rule,
             old("o-fast", at(60), 5, 3, elevation: 40, straightness: 0.96, shape: .curved), old("o-meteor", at(90), 12, 0.8, elevation: 50, size: 0.4),
-            old("o-c1", at(120), 1, 3, elevation: 20), old("o-c2", at(120), 1, 3, elevation: 20), old("o-c3", at(120), 1, 3, elevation: 20),
+            old("o-c1", at(120), 1, 3, elevation: 20), apart(old("o-c2", at(120), 1, 3, elevation: 20), by: 0.15),
+            apart(old("o-c3", at(120), 1, 3, elevation: 20), by: 0.3),
             old("o-bird", SkyLogStoreTests.local(24, 14), 20, 2.5, straightness: 0.95, shape: .curved, size: 0.4),
         ]
         for entry in entries { await rig.file(entry) }

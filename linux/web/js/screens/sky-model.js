@@ -537,6 +537,24 @@ const MAX_REASONS = 8;
 /** The bridge's own words for a light that moved with others: the page says "1 of 3 moving together" instead. */
 const TOGETHER = 'Several lights moving together';
 
+/** An entry's id as the bridge makes them (letters, digits, - and _, at most 64): it names the entry's picture in an address. */
+const ENTRY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const isEntryID = (value) => typeof value === 'string' && ENTRY_ID.test(value);
+
+/** The part of a joined light whose picture is its, read safely: { id, path }, or null (a light the log kept whole, or one with no picture). */
+function readStillPart(value) {
+  return value && typeof value === 'object' && isEntryID(value.id) ? { id: value.id, path: readPath(value.path) } : null;
+}
+
+/**
+ * How many pieces a light was seen in, when more than one: "1 light, seen in 15 parts". The box joins the pieces of one light (a plane whose light faded
+ * for a few seconds, a light crossing the seam of a camera's two lenses, one followed twice) into one entry; '' for a light seen whole.
+ */
+export function piecesText(entry) {
+  const pieces = entry?.pieces;
+  return Number.isInteger(pieces) && pieces > 1 ? `1 light, seen in ${pieces.toLocaleString('en-US')} parts` : '';
+}
+
 /** The points of a path as { t, x, y }, from objects or [t, x, y] triples; what is not numbers is left out. */
 function readPath(path) {
   const points = [];
@@ -548,7 +566,11 @@ function readPath(path) {
   return points;
 }
 
-/** An entry as the bridge sent it, read safely: numbers are numbers, lists are lists, the display label and the Watch time are filled in. */
+/**
+ * An entry as the bridge sent it, read safely: numbers are numbers, lists are lists, the display label and the Watch time are filled in. A light the box
+ * joined from pieces has `pieces` (1 for one seen whole), `parts` (the ids of the lights the log kept that it was joined from) and `stillPart` (the part
+ * whose picture is its: { id, path }; null for a light the log kept whole, or one with no picture).
+ */
 export function normalizeEntry(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = typeof raw.id === 'string' && raw.id ? raw.id : null;
@@ -587,6 +609,9 @@ export function normalizeEntry(raw) {
     doubtful: raw.doubtful === true,
     // Logged before the rules, and sorted by them as the bridge read the night (its label, by, detail and the guide's fields are theirs).
     sortedLater: raw.sortedLater === true,
+    pieces: Number.isInteger(raw.pieces) && raw.pieces >= 1 ? raw.pieces : 1,
+    parts: (Array.isArray(raw.parts) ? raw.parts : []).filter(isEntryID),
+    stillPart: readStillPart(raw.stillPart),
   };
 }
 

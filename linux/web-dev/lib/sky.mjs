@@ -418,10 +418,21 @@ function dayEntries(name, camera) {
   return finish(entries, 'd', name, camera);
 }
 
-/** Sorted by time, with ids that tell the view and the night (so a still or a correction can find its entry again). */
+/**
+ * Sorted by time, with ids that tell the view and the night (so a still or a correction can find its entry again). One moving light in eleven is one the
+ * bridge joined from pieces (SkyStitch: a light that faded for a few seconds, crossed the seam, was followed twice): seen in 2 to 15, its parts' ids (its
+ * own first) and its picture its own, cut around the first half of its path (the bridge's `stillPart`); the others are seen whole.
+ */
 function finish(entries, prefix, name, camera) {
   entries.sort((a, b) => a.start - b.start || a.label.localeCompare(b.label));
-  entries.forEach((entry, index) => { entry.id = `${prefix}${String(index).padStart(3, '0')}-${name}`; entry.camera = camera; });
+  entries.forEach((entry, index) => {
+    entry.id = `${prefix}${String(index).padStart(3, '0')}-${name}`;
+    entry.camera = camera;
+    const joined = entry.kind === 'track' && index % 11 === 5;
+    entry.pieces = joined ? 2 + (index % 14) : 1;
+    entry.parts = joined ? Array.from({ length: Math.min(entry.pieces, 4) }, (_, part) => (part === 0 ? entry.id : `${entry.id}-${part + 1}`)) : [];
+    entry.stillPart = joined && entry.hasStill ? { id: entry.id, path: entry.path.slice(0, Math.max(2, Math.ceil(entry.path.length / 2))) } : null;
+  });
   // A group is named after its first light, as the bridge names it.
   const first = new Map();
   for (const entry of entries) {
@@ -645,9 +656,12 @@ export class SkyDev {
     return bytes(picture, 'image/jpeg', { 'Cache-Control': 'no-store' });
   }
 
-  /** The small picture of an entry: its close-up cut out of STILL, or STILL itself when there is no close-up or no ffmpeg to cut it with. */
+  /**
+   * The small picture of an entry: its close-up cut out of STILL, or STILL itself when there is no close-up or no ffmpeg to cut it with. A light joined
+   * from pieces whose picture is its own part's is cut around that part's path, as the box cuts a part's picture around the part's own path.
+   */
   thumbnail(entry) {
-    const rect = thumbRect(entry.path, STILL_SIZE.width, STILL_SIZE.height);
+    const rect = thumbRect(entry.stillPart?.id === entry.id ? entry.stillPart.path : entry.path, STILL_SIZE.width, STILL_SIZE.height);
     if (!rect || rect.width > THUMB_WIDTH) return STILL;
     const key = `${rect.x},${rect.y},${rect.width},${rect.height}`;
     if (!this.thumbnails.has(key)) {

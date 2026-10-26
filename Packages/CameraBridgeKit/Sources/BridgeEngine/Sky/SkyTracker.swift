@@ -212,6 +212,9 @@ final class SkyTracker {
     /// The tracks open now (born, not ended).
     var activeCount: Int { open.count }
 
+    /// The tracks open now, as followed so far: what may still join a light the detector holds (`SkyStitchHold`).
+    var openTracks: [SkyTrack] { open.map(\.track) }
+
     /// How many tracks were born whose first picture was at each stream time, for the last `birthsKept` seconds: many lights that begin in
     /// one picture are the camera changing its picture, not the sky (`SkyRules.doubt`).
     private(set) var births: [TimeInterval: Int] = [:]

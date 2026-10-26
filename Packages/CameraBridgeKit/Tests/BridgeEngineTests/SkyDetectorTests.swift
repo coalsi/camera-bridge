@@ -65,6 +65,9 @@ final class SkyDetectorRig: Sendable {
     let log = SkyLogStore(log: .silent)
     let clock: Box<Date>
     let stillsAsked = Box<[Date]>([])
+    /// How far after the time asked for the camera's ring answers with a picture (s): its keyframes are the last 12 s or so, so a light whose middle is
+    /// older than that gets the oldest it holds; a test sets it.
+    let stillLate = Box<TimeInterval>(0)
     /// Whether the recordings drive has room for a picture (`Context.roomForStills`); a test sets it.
     let room = Box(true)
     /// What the camera's recording gives for a picture made later (`Context.recordedStill`, Ruling S31), and the times it was asked for.
@@ -82,7 +85,7 @@ final class SkyDetectorRig: Sendable {
         let data = try data ?? TemporaryDirectory()
         let recordings = try TemporaryDirectory()
         let clock = Box(start)
-        let asked = stillsAsked, room = room, recorded = recorded, recordedAsked = recordedAsked, logStore = log, written = stillsWritten
+        let asked = stillsAsked, late = stillLate, room = room, recorded = recorded, recordedAsked = recordedAsked, logStore = log, written = stillsWritten
         self.camera = camera
         self.data = data
         self.recordings = recordings
@@ -94,7 +97,7 @@ final class SkyDetectorRig: Sendable {
                                             still: { date in
                                                 asked.update { $0.append(date) }
                                                 if stillDelay > .zero { try? await Task.sleep(for: stillDelay) }   // a keyframe that takes its time to decode
-                                                return (SkyLogStoreTests.jpeg("still"), date)
+                                                return (SkyLogStoreTests.jpeg("still"), date.addingTimeInterval(late.value))
                                             },
                                             roomForStills: { room.value },
                                             recordedStill: { date in

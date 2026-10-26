@@ -496,6 +496,66 @@ test('the picture size the bridge sends is read safely', async () => {
   }
 });
 
+/** A light the box joined from three it logged in pieces (seen in five), its picture its third part's, cut around that part's path. */
+const JOINED = () => raw('j1', 'unexplained', chicago(3, 12), { hasStill: true, pieces: 5, parts: ['j1', 'j2', 'j3'], end: chicago(3, 12) + 30_000,
+  path: [{ t: 0, x: 0.1, y: 0.2 }, { t: 30, x: 0.5, y: 0.4 }], stillPart: { id: 'j3', path: FLAT },
+  measures: { azimuth: 312, elevation: 8, azimuthEnd: 330, elevationEnd: 14, duration: 30, speed: 0.6, shape: 'straight', blinks: true, blinkRate: 0.25 } });
+
+test('a light seen in pieces is one card with its part’s picture, counted once, and its player says how many and plays the whole of it', async () => {
+  const player = playerSpy();
+  const log = night({ entries: [JOINED(), raw('p1', 'plane', chicago(20, 5, 24), { by: 'flight' })], counts: undefined, picture: PICTURE });
+  const { page, el } = pageWith({ log, openPlayer: player.open });
+  await settle();
+  assert.deepEqual(tiles(el).map((card) => card.dataset.entry).sort(), ['j1', 'p1'], 'one card for the light');
+  assert.ok(chipText(el).includes('Unexplained 1') && chipText(el).includes('All 2 *'), `${chipText(el)}`);
+  const card = tileOf(el, 'j1');
+  assert.equal(img(card).getAttribute('src'), thumbAddress('j3'), 'its picture is the part’s');
+  // The part's small picture is the close-up the box cut around the part's path; the whole light's path is drawn over it, in the still's pixels.
+  const pic = arrive(card, 384, 216);
+  assert.equal(pic.dataset.view, 'thumb');
+  const overlay = byClass(pic, 'sky-path')[0];
+  assert.equal(overlay.getAttribute('viewBox'), '768 254 384 216', 'the rectangle the box cut around the part’s path');
+  assert.equal(tag(overlay, 'polyline')[0].getAttribute('points'), '192,170.4 960,340.8', 'the whole light’s path');
+  card.click();
+  await settle();
+  const [options] = player.opened;
+  assert.equal(options.still, fullAddress('j3'), 'the player’s picture is the part’s too');
+  assert.equal(options.entry.end - options.entry.start, 30_000, 'it plays the whole of the light, with its whole path');
+  assert.equal(options.entry.path.length, 2);
+  const text = shown(options.details);
+  assert.ok(text.includes('1 light, seen in 5 parts'), text);
+  assert.ok(text.includes('Lasted 30 seconds'), text);
+  page.destroy();
+  // A light seen whole says nothing of parts.
+  const whole = pageWith({ openPlayer: player.open });
+  await settle();
+  tileOf(whole.el, 'u1').click();
+  await settle();
+  assert.ok(!shown(player.opened[1].details).includes('seen in'));
+  whole.page.destroy();
+});
+
+test('a part of a joined light named in the address shows the light, and a word on it goes to the bridge with the light’s id', async () => {
+  const scrolled = [];
+  FakeElement.prototype.scrollIntoView = function scrollIntoView(options) { scrolled.push([this, options]); };
+  try {
+    const player = playerSpy();
+    const log = night({ entries: [JOINED()], counts: undefined, picture: PICTURE });
+    const { page, el, calls } = pageWith({ log, query: 'entry=j2', openPlayer: player.open });
+    await settle();
+    assert.ok(tileOf(el, 'j1')?.classList.contains('sky-target'), 'the light j2 is part of');
+    tileOf(el, 'j1').click();
+    await settle();
+    button(player.opened[0].details, 'Bird').click();
+    await settle();
+    assert.deepEqual(calls.corrections.map((request) => [request.entryID, request.label]), [['j1', 'bird']]);
+    assert.ok(chipText(el).includes('Bugs & birds 1'), `${chipText(el)}`);
+    page.destroy();
+  } finally {
+    delete FakeElement.prototype.scrollIntoView;
+  }
+});
+
 test('every card of a night asks for the small picture, however many are made', async () => {
   const { page, el, observer } = pageWith({ log: busyNight(300, { picture: PICTURE }) });
   await settle();

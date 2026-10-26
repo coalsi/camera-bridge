@@ -15,6 +15,15 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.128',
+    date: '2026-10-26',
+    title: 'Sky Watcher: one object, not fifteen',
+    items: [
+      'A light that the camera loses for a moment (a plane’s strobe between flashes, a brief fade, the seam between two lenses) is joined back into one object when its pieces line up in time, direction and speed. Its card shows the whole path and how many parts it was seen in, and the dark gaps help tell a blinking plane.',
+      'Lights logged earlier are joined the same way when you open the page; correcting a joined light corrects every part. Two planes that cross, and lights flying side by side, stay apart.',
+    ],
+  },
+  {
     version: '0.1.127',
     date: '2026-10-26',
     title: 'Sky Watcher sorts what it sees, and ranks the unexplained',

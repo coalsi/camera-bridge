@@ -273,8 +273,13 @@ test('the night route answers the log as Task 5 describes it', opts, async () =>
   }
 
   // Every entry has the fields of SkyEntry, with `display` and `watch`; times are epoch ms, optional fields null.
-  const keys = ['ai', 'alerted', 'by', 'camera', 'candidate', 'correction', 'detail', 'display', 'doubtful', 'end', 'group', 'hasStill', 'id', 'kind', 'label', 'measures', 'path', 'priority',
-    'reasons', 'sortedLater', 'speedVsPlanes', 'start', 'unusual', 'watch'];
+  const keys = ['ai', 'alerted', 'by', 'camera', 'candidate', 'correction', 'detail', 'display', 'doubtful', 'end', 'group', 'hasStill', 'id', 'kind', 'label', 'measures', 'parts', 'path',
+    'pieces', 'priority', 'reasons', 'sortedLater', 'speedVsPlanes', 'start', 'stillPart', 'unusual', 'watch'];
+  // A light the bridge joined from pieces: how many, its parts (its own id first) and its picture's part; one seen whole: one piece, no parts, its own picture.
+  const joined = entries.filter((entry) => entry.pieces > 1);
+  assert.ok(joined.length > 10 && joined.every((entry) => entry.kind === 'track' && entry.parts[0] === entry.id && entry.parts.length >= 2), `${joined.length} lights seen in pieces`);
+  assert.ok(joined.some((entry) => entry.stillPart?.id === entry.id && entry.stillPart.path.length >= 2 && entry.stillPart.path.length < entry.path.length));
+  assert.ok(entries.filter((entry) => entry.pieces === 1).every((entry) => entry.parts.length === 0 && entry.stillPart === null));
   for (const entry of entries) {
     assert.deepEqual(Object.keys(entry).sort(), keys, entry.id);
     assert.equal(entry.watch, entry.start - 3000);

@@ -288,7 +288,10 @@ private func plain(_ value: Double) -> Double { value.isFinite ? value : 0 }
 
 /// One entry of the log as the page reads it: the entry's own fields, `display` (the label the log shows: the person's word wins), `watch`
 /// (the recordings' moment to open, three seconds before it began) and `sortedLater` (logged before the rules and sorted by them as the log was
-/// read: `SkySortLater`). Optional values are null, not left out.
+/// read: `SkySortLater`). Optional values are null, not left out. A light seen in pieces says how many (`pieces`); one the log kept in pieces and
+/// joined as it is read has its parts' ids (`parts`, its own first; [] for a light the log kept whole) and the part whose picture is its
+/// (`stillPart`: `{id, path}`, the still and its small picture are that part's, cut around that path; null for a light the log kept whole, and for a
+/// joined one with no picture).
 struct SkyEntryResource: Encodable {
     var entry: SkyEntry
 
@@ -298,13 +301,18 @@ struct SkyEntryResource: Encodable {
 
     private enum CodingKeys: String, CodingKey {
         case id, camera, kind, start, end, path, measures, label, display, by, detail, unusual, speedVsPlanes, candidate, alerted, hasStill, ai, correction, watch
-        case priority, reasons, doubtful, group, sortedLater
+        case priority, reasons, doubtful, group, sortedLater, pieces, parts, stillPart
     }
 
     private struct Point: Encodable {
         var t: Double
         var x: Double
         var y: Double
+    }
+
+    private struct StillPart: Encodable {
+        var id: String
+        var path: [Point]
     }
 
     private struct Answer: Encodable {
@@ -340,6 +348,11 @@ struct SkyEntryResource: Encodable {
         try container.encode(entry.doubtful, forKey: .doubtful)
         try container.encode(OrNull(entry.group), forKey: .group)
         try container.encode(entry.sortedLater, forKey: .sortedLater)
+        try container.encode(max(1, entry.pieces), forKey: .pieces)
+        try container.encode(entry.parts, forKey: .parts)
+        try container.encode(OrNull(entry.stillPart.map { part in
+            StillPart(id: part.id, path: part.path.map { Point(t: plain($0.t), x: plain($0.x), y: plain($0.y)) })
+        }), forKey: .stillPart)
     }
 }
 

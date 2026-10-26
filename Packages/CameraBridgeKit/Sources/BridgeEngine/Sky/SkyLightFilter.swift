@@ -57,6 +57,18 @@ enum SkyLightFilter {
         return !overflow && storage.freeBytes >= needed
     }
 
+    /// A picture from the camera's ring of recent keyframes (its last 12 s or so) is a light's when it is of the middle half of its time, or within
+    /// this long of its middle (s: a short light, between two keyframes).
+    static let stillReach: TimeInterval = 4
+
+    /// Whether the ring's picture at `time` (the box's clock) is `entry`'s. A light is handed over 7 s or more after it ended (`SkyStitchHold`), so
+    /// the ring no longer holds the middle of a long one and answers with the oldest picture it has: that light is logged without one, and the
+    /// recording gives it the picture of its middle (`SkyStillBackfill`).
+    static func stillIsOf(_ entry: SkyEntry, at time: Date) -> Bool {
+        let reach = max(stillReach, entry.end.timeIntervalSince(entry.start) / 4)
+        return abs(time.timeIntervalSince(SkyStillBackfill.middle(of: entry))) <= reach
+    }
+
     /// Whether an entry of this label, given by `source`, has a picture (Ruling S31): what nothing explains, what the rules say is a meteor, a bug or
     /// a bird, and (2026-10-26, so that the owner can check the rules by eye) their probable planes and satellites and a satellite's flare. A plane a
     /// flight explains (a probable one while the aim is rough) and a satellite an orbit names are explained by the feed's word on them: no picture.

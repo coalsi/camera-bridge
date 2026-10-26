@@ -48,9 +48,10 @@ extension BridgeEngine {
     /// The log of one camera's night or day. `night` is the log's name (`SkyNight.logName`: the local date of the night's sunset, a day's own
     /// date, in the bridge's time zone), nil for the latest: the night in progress or the one that ended this morning, or for the day view the day
     /// `now` is in. `view` picks what is shown of it: the night from sunset to sunrise, the day from sunrise to sunset. Times and nights are the
-    /// sun's at the place the box is. The lights logged before the rules are sorted by them now (`SkySortLater`: shown as if logged so, marked
-    /// `sortedLater`; the log is not written). Throws `EngineError.unknownCamera`, `SkyLogError` (no place, no recordings folder, a night that is
-    /// not a date) and, while the drive cannot be read, `ArchiveUnavailable` or `ArchiveError.timedOut`.
+    /// sun's at the place the box is. The lights the log kept in pieces are one entry each (`SkyStitch.joined`), and the lights logged before the
+    /// rules are sorted by them now (`SkySortLater`, a joined light as one: shown as if logged so, marked `sortedLater`); the log is not written.
+    /// Throws `EngineError.unknownCamera`, `SkyLogError` (no place, no recordings folder, a night that is not a date) and, while the drive cannot be
+    /// read, `ArchiveUnavailable` or `ArchiveError.timedOut`.
     public func skyNightLog(cameraID: UUID, night: String?, view: SkyLogView) async throws -> SkyNightLog {
         try await skyNightLog(cameraID: cameraID, night: night, view: view, now: Date())
     }
@@ -72,14 +73,44 @@ extension BridgeEngine {
         let capped = stored.capped.filter { $0.hour.addingTimeInterval(3_600) > span.lowerBound && $0.hour < span.upperBound }
         let status = await skyStatus(of: cameraID)
         let picture = await skyPictureSize(of: inView, camera: cameraID, night: name, folder: folder)
-        // The lights logged before the rules are sorted by them (`SkySortLater`), and then the lights that moved together are found
-        // (`SkyFormations`), as the log is read: a person's word on one counts at once. Off the main actor: a night can hold thousands.
-        let sorter = inView.contains(where: SkySortLater.needsSorting)
+        // The lights the log kept in pieces are joined first (`SkyStitch.joined`); then the lights logged before the rules are sorted by them
+        // (`SkySortLater`: a joined light as one), and the lights that moved together are found among them (`SkyFormations`), as the log is read: a
+        // person's word on one counts at once. Off the main actor: a night can hold thousands.
+        let joined = await skyJoined(inView, cameraID: cameraID, observer: observer, stills: picture, corrected: stored.corrected)
+        let sorter = joined.contains(where: SkySortLater.needsSorting)
             ? SkySortLater(observer: observer, camera: await skySortingCamera(cameraID, stills: picture)) : nil
         let night = stored.entries
-        let entries = await Task.detached(priority: .userInitiated) { SkyFormations.mark(sorter?.sort(inView, night: night) ?? inView) }.value
+        let entries = await Task.detached(priority: .userInitiated) { SkyFormations.mark(sorter?.sort(joined, night: night) ?? joined) }.value
         return SkyNightLog(camera: cameraID, night: name, view: view, from: span.lowerBound, to: span.upperBound, entries: entries, conditions: conditions,
                            counts: SkyCounts(counting: entries), aim: status.aim, learning: status.learning, capped: capped, picture: picture)
+    }
+
+    /// `entries` (a night's, in their order) with the lights the log kept in pieces joined into one entry each (`SkyStitch.joined`), off the main actor (a
+    /// night can hold thousands): in the camera's picture as the joining reads it (`skyStitchPicture`), by day where the Sun was at −6° or above at
+    /// `observer` (the box's place; with none, never by day), the latest correction of a joined light's parts showing (`corrected`).
+    func skyJoined(_ entries: [SkyEntry], cameraID: UUID, observer: SkyObserver?, stills: SkyPictureSize?, corrected: [String: Date]) async -> [SkyEntry] {
+        guard entries.count >= 2 else { return entries }
+        let picture = skyStitchPicture(cameraID, stills: stills)
+        return await Task.detached(priority: .userInitiated) {
+            SkyStitch.joined(entries, picture: picture, isDay: { date in
+                observer.map { SunEphemeris.direction(at: date, observer: $0).elevation >= SunEphemeris.darkElevation } ?? false
+            }, corrected: corrected)
+        }.value
+    }
+
+    /// A camera's picture as the joining reads it: the analysed size (the picture's, at most `SkyStreamChoice.maximumAnalysisWidth` wide, from the camera's
+    /// main stream as last seen, else from the night's `stills`, else 1,920 × 1,080) and, for two lenses side by side (as the camera is set, else 2:1 and
+    /// wider), the seam.
+    func skyStitchPicture(_ cameraID: UUID, stills: SkyPictureSize?) -> SkyStitch.Picture {
+        let stream = cameras.first { $0.id == cameraID }?.mainStreamInfo.flatMap { info -> SkyPictureSize? in
+            info.width > 0 && info.height > 0 ? SkyPictureSize(width: info.width, height: info.height) : nil
+        }
+        let size = stream ?? stills
+        let width = Double(size?.width ?? SkyStreamChoice.maximumAnalysisWidth), height = Double(size?.height ?? 1_080)
+        let analysed = min(width, Double(SkyStreamChoice.maximumAnalysisWidth))
+        let layout = configurations.first { $0.id == cameraID }?.skyDetector?.lensLayout
+        let dual = layout.map { $0 == .dual } ?? (width / height >= 2)
+        return SkyStitch.Picture(width: analysed, height: analysed * height / width, seam: dual ? SkyCameraModel.defaultSeam : nil)
     }
 
     /// What the log's reader knows of a camera to sort the lights logged before the rules (`SkySortLater`): its detector's while it runs (the aim
@@ -116,10 +147,11 @@ extension BridgeEngine {
         return try? await nvr.store.skyRead { log.pictureSize(ofStills: Array(ids), camera: camera, night: night, folder: folder) }
     }
 
-    /// Records the person's word on an entry ("That was a bird") in the log of `night` and answers the entry as it reads now (one logged before the
-    /// rules sorted by them, as `skyNightLog` shows it). The word counts most to what the box learns; the last one of an entry wins, and "not sure"
-    /// takes the doubt back. Throws `EngineError.unknownCamera` and `SkyLogError` (`unknownNight` for a name that is not a date, `unknownEntry` for
-    /// one the night's log does not hold, `noFolder`).
+    /// Records the person's word on an entry ("That was a bird") in the log of `night` and answers the entry as it reads now: a light the log kept in
+    /// pieces is one entry (`SkyStitch.joined`, within the view the entry began in, as `skyNightLog` shows it), and the word goes to every part of it
+    /// (one line each, append-only); one logged before the rules is sorted by them (`SkySortLater`, a joined light as one). The word counts most to what
+    /// the box learns; the last one of an entry wins, and "not sure" takes the doubt back. Throws `EngineError.unknownCamera` and `SkyLogError`
+    /// (`unknownNight` for a name that is not a date, `unknownEntry` for one the night's log does not hold, `noFolder`).
     public func correctSkyEntry(cameraID: UUID, entryID: String, night: String, label: SkyCorrection) async throws -> SkyEntry {
         guard !isPreview else { throw SkyLogError.unavailable }
         guard configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
@@ -128,13 +160,26 @@ extension BridgeEngine {
         guard let folder = skyFolder else { throw SkyLogError.noFolder }
         let log = skyLog
         let stored = try await nvr.store.skyRead { try Self.readNight(log, camera: cameraID, night: night, folder: folder) }
-        guard var entry = stored.entries.first(where: { $0.id == entryID }) else { throw SkyLogError.unknownEntry }
-        log.recordCorrection(label, entryID: entryID, camera: cameraID, night: night, folder: folder, at: Date())
+        guard let said = stored.entries.first(where: { $0.id == entryID }) else { throw SkyLogError.unknownEntry }
+        let observer = settings.sky.location.map { SkyObserver(latitude: $0.latitude, longitude: $0.longitude, heightMeters: $0.heightMeters) }
+        // Joined as the page showed it: within the view (the night or the day) the entry began in, as `skyNightLog` joins it.
+        let spans = observer.map { observer in
+            [SkyLogView.night, .day].map { SkyNight.logSpan(named: night, view: $0, observer: observer, zone: BridgeTime.zone) }
+        } ?? []
+        let inView = spans.first { said.start >= $0.lowerBound && said.start < $0.upperBound }.map { span in
+            stored.entries.filter { $0.start >= span.lowerBound && $0.start < span.upperBound }
+        } ?? stored.entries
+        let stills = await skyPictureSize(of: inView, camera: cameraID, night: night, folder: folder)
+        let joined = await skyJoined(inView, cameraID: cameraID, observer: observer, stills: stills, corrected: stored.corrected)
+        var entry = joined.first { $0.id == entryID || $0.parts.contains(entryID) } ?? said
+        let at = Date()
+        for part in entry.parts.isEmpty ? [entryID] : entry.parts {
+            log.recordCorrection(label, entryID: part, camera: cameraID, night: night, folder: folder, at: at)
+        }
         entry.correction = label
-        if SkySortLater.needsSorting(entry), let location = settings.sky.location {
-            let observer = SkyObserver(latitude: location.latitude, longitude: location.longitude, heightMeters: location.heightMeters)
-            let picture = await skyPictureSize(of: stored.entries, camera: cameraID, night: night, folder: folder)
-            let sorter = SkySortLater(observer: observer, camera: await skySortingCamera(cameraID, stills: picture))
+        // The answer is the entry as the log reads it: one logged before the rules sorted by them, a joined light as one, as `skyNightLog` sorts it.
+        if SkySortLater.needsSorting(entry), let observer {
+            let sorter = SkySortLater(observer: observer, camera: await skySortingCamera(cameraID, stills: stills))
             let one = entry, all = stored.entries
             entry = await Task.detached(priority: .userInitiated) { sorter.sort([one], night: all).first ?? one }.value
         }

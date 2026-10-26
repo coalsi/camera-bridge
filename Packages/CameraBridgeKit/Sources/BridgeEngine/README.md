@@ -1386,8 +1386,9 @@ Public:
   (`SkyUnusualReason`), `speedVsPlanes`, `candidate`, `alerted`, `hasStill`, `ai` (a `SkyAIAnswer`) and the person's `correction` (`SkyCorrection`: plane,
   bird, bug, satellite, meteor, notSure); since 2026-10-26 the guide to the unexplained: `priority` (`SkyPriority`: high, medium, low), `reasons` (at most 8
   short phrases), `doubtful` and `group` (set when the log is read, never kept; see "the sky detector's rules"), and `sortedLater` (logged before the rules and
-  sorted by them as the log is read, never kept: "older lights sorted when the night is read"). `SkyDisplay.label` is what the log shows:
-  a correction wins, and "not sure" shows the entry's own label.
+  sorted by them as the log is read, never kept: "older lights sorted when the night is read"); since "one light, not fifteen" (2026-10-26) `pieces` (how
+  many pieces the box saw the light in), and `parts` and `stillPart` (a light the log kept in pieces, joined as it is read; never kept). `SkyDisplay.label`
+  is what the log shows: a correction wins, and "not sure" shows the entry's own label.
   `SkyConditions` (`SkyConditionState`: clear, cloudy, notVisible, unknown) say how the sky was for a stretch of time; `SkyCounts` count a night's
   entries by what the log shows (`SkyCounts(counting:)`: planes include probable ones, satellites probable ones and their flares; an entry the box explained and the
   person was not sure of is `notSure`, one it did not explain stays `unexplained` whatever the person said; `explained` is the sum of all but the
@@ -1414,7 +1415,7 @@ Internal:
   names an entry it applies nothing to): the builds before the picture's and the capped lines skip them. `SkyLogStore.contents` reads all of it
   (`SkyLogContents`: the entries, the conditions, the capped hours), `read` the entries and the conditions; a file over 16 MiB is read from its end, so
   a night is read whole after a day that flooded the file before it. An entry is kept within bounds (its path thinned to 64 points, text cut to length, an end never before the start, a number that is
-  not one written as a word that reads back). Writes run on one serial queue and never wait for a drive: what cannot be written waits (at most 1,000
+  not one written as a word that reads back, `pieces` 1 to 10,000, never `parts` or `stillPart`). Writes run on one serial queue and never wait for a drive: what cannot be written waits (at most 1,000
   lines, and 16 MiB of pictures; the oldest go first, never the one being written; `retry()` tries again, and the janitor calls it every pass). A write that
   finds a link where a folder or a file belongs is given up, not waited on; `.sky`, a camera's folder, a night's file and its folder of pictures are never
   written, read or pruned through a link. A read sees what waits for the drive as well as the file. Nothing is kept while no place for recordings is chosen,
@@ -1479,6 +1480,8 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   (`endAll(dropped:)`, its drops thrown away too) and starts none for `quietAfterChange` (3 s on the stream's clock): one such jump made 49 lights on the owner's camera.
   The drops of the tracker go to `droppedTrack(_:analysisWidth:analysisHeight:)`: they count towards their spot being busy (below), and Tasks 9 and 10 read them there. A gap (`gap(at:reason:)`) or a new runtime (`restarted()`) cuts what was open: a track
   a gap cut is not logged, and a gap is never a track. The aim is read from a copy kept on the detector: a picture never waits for the store's fit.
+- **One light, not fifteen** (2026-10-26, below): a track that ended, and a flash the tracker dropped, is first held (`SkyStitchHold`) until nothing can
+  continue it, so that a light seen in pieces is classified and logged once, as one track.
 - **Each ended track** (a queue of its own, in order, off the picture path): measured with the current aim; a stationary one is left (Task 10's); `classify` (the
   flights: `FlightMatcher` on the shared `FlightHistory`, off the actor; a match is `.plane`, or `.probablePlane` while the aim is rough, by `.flight`, with its call sign and
   height, and its correspondences go to `SkyAimStore.add` in one call; then, for what no flight explains and no filter below skips, the rules: "the sky detector's
@@ -1679,7 +1682,8 @@ Two follow-ups to the rules (above). The owner's box logged the night of Oct 25 
 sorted. And the rules' probable planes and satellites had no picture, so the rules could not be checked by eye. Public: `SkyEntry.sortedLater` (set as the log is
 read and never kept, as `group` is; in `SkyEntry.init` with a default of false, so a caller written before it compiles unchanged). Internal, in `Sky/SkySortLater.swift`
 and the detector, the filter, the backfill and the thumbnails:
-- **Sorted when the night is read** (`SkySortLater`, from `BridgeEngine.skyNightLog`, and for the entry a correction answers): every entry of the view that is
+- **Sorted when the night is read** (`SkySortLater`, from `BridgeEngine.skyNightLog` once the lights the log kept in pieces are joined, a joined light as one:
+  "one light, not fifteen", below; and for the entry a correction answers): every entry of the view that is
   unexplained, named by nothing (`by` nil) and has none of the guide's fields (`SkySortLater.needsSorting`) is judged as the detector judges a light now
   (`SkyRules.judge`, which the detector calls too: the rules' verdict, by `.rule` with its `detail`; or the doubts, the unusual rule against the camera's baseline
   now, or the defaults before it learned, `candidate`, and the guide's priority and reasons), shown as if logged so and marked `sortedLater`; then the lights that
@@ -1710,3 +1714,79 @@ and the detector, the filter, the backfill and the thumbnails:
   cost), `SkyNightLogEngineTests.oldLightsAreSortedByTheRulesAsTheNightIsReadAndTheLogStaysAsItWas` and `.aNightOfTwoThousandOldLightsIsReadQuickly`, and in
   `SkyRulesPicturesTests.swift` the pictures and the hour's room, the backfill, and the small pictures made with the big ones (`SkyDetectorTests`,
   `SkyThumbnailEngineTests`, `SkyThumbnailGateTests`).
+
+## Additions beyond the contract: one light, not fifteen (2026-10-26, docs/CONTRACT_CHANGES.md)
+
+The owner, after browsing the log: "a lot of events are one event just more than a few seconds, like if you look at the timing of the event and the
+location it should understand it's one object not 15". The tracker loses a light whenever it misses it for 1.5 s or the light leaves its gate, and a new
+track begins where it shows again: a plane whose lights fade for a few seconds, a light crossing a dual camera's seam (the stitch hides a strip of sky, so
+in the picture the light waits at the seam, for up to 6 s on the owner's camera), a picture that froze for a moment, a light followed twice at once, and
+by day the freshly lit parts of a plane's contrail. On the owner's night of Oct 25 one plane at 7:32 PM was eight entries of 2 to 39 s along one line. In
+`Sky/SkyStitch.swift` (the rule), `Sky/SkyStitchHold.swift` (live) and `Sky/SkyStitch+Log.swift` (older logs). Public: `SkyEntry.pieces` (how many pieces
+the box saw the light in: 1, or more for a light joined live; kept in the log only when more than 1), `SkyEntry.parts` (a light the log kept in pieces,
+joined as it is read: every part's id in the order they began, its own first; empty otherwise) and `SkyEntry.stillPart`, a `SkyStillPart` (`id` and
+`path`: the part whose picture the joined light shows, and that part's path, as its small picture is cut around it); `parts` and `stillPart` are never
+kept; the three are in `SkyEntry.init` with defaults. Internal:
+- **The rule** (`SkyStitch`, one for both sides): pieces in the analysed picture's pixels (x times its width, y times its height), times on one clock.
+  - **A continuation** (`Link.next`): a piece that begins at most `longestGap` (6 s) after the light ended (or up to 1 s before: seen twice for a
+    moment), and ends after it, where the light would be by then: the light's end, fitted over its last 6 s, carried on at its speed over the gap; across
+    its way within 4 pixels and a quarter of its travel over the gap; along it as much behind, and ahead by that and up to 1.5 s more of its travel (at
+    most 30 pixels: after a frozen picture a light shows again ahead of where it was, never behind). When both moved for 1.5 s or more they go the same
+    way within 30° at 0.5 to 2 times the speed (the piece's first 3 s against the light's last 6 s or its last 3 s: a turning light's way lags over the
+    longer time, a slow light that jitters says it better over it). A piece too short to say (or a flash) is placed by the light's motion and must go its
+    way as far as its chord can tell (within 30° and the angle 4 pixels make across its chord, once it is 2 pixels long) and at most twice as fast (a
+    contrail threw pieces of 0.2 to 0.8 s at 6 to 15 times its plane's speed along its line); a light too short to say is placed by the piece's own
+    motion, carried back over the gap.
+  - **Across a dual camera's seam** (`Link.seam`: the light ends within 2 % of the width of the seam in one half and the piece begins near it in the
+    other) the light may have waited at the seam the whole gap: the piece may begin anywhere from the light's end to where it would be, 8 pixels more
+    across.
+  - **The same light followed twice** (`Link.sameLight`): within 4 pixels of each other (the median) at 3 or more pictures that both were seen in, the
+    same way at about the same speed when both moved long enough to say. Lights side by side (a formation) are further apart than that, and lights that
+    cross go different ways.
+  - **By day, a plane's contrail** (`Link.trail`): a light that drew a line for 10 s and 60 pixels or more leaves a contrail whose freshly lit parts the
+    tracker follows as lights of their own (on the owner's morning of Oct 26 one plane made 22 entries); a piece seen by day with 90 % of its points
+    within 4 pixels of the line the light drew in the 15 s before is part of that light, not of its path. Never at night: a satellite train keeps to one
+    line too.
+  - **Flashes** (live: what the tracker drops as barely moved, streak-born or under 1.5 s) have no way of their own: one joins a light that moves, and two
+    a little apart (6 pixels a second at most, 0.4 s or more apart) begin a chain that the next must continue, in a line.
+  - A piece joins the light it fits best (the same light first, then a continuation, then a contrail); a light it joins takes in another light that is the
+    same one, or that it continues (`Joiner`). A light is never longer than 10 minutes. The gap window was tuned on the owner's logs (below): 6 s joins
+    the seam crossings (1.6 to 5.6 s) and the fades; a longer wait mostly joins faint lights low over the horizon, where it also joins different ones.
+- **Live** (`SkyStitchHold`, on the detector's actor): a track that ended, kept by the tracker or a flash it dropped, joins the light it belongs to or begins
+  one. A light is held for 6 s after its last piece ended and 1 s more (the tracker reports a track three pictures after it began), longer only while a
+  track open now may still be part of it (`SkyTracker.openTracks`, as followed so far), at most 100 lights (the light that ended first goes first), and
+  everything is let go at a gap, a restart, a new picture size, a clock that went back and the stop (to the queue, whose waiting lights the stop drops, as
+  before: Ruling S27). Let go, it is one track (`SkyStitchHold.Released.track`): its spine's samples (its own pieces', not its contrail's), the pictures
+  it was missed in its pieces' own and, in each gap between them, one at their pace, so that its blinking, strobe and seen share are measured over the
+  whole light (a light seen in pieces at a steady rhythm is a strobe: a probable plane), with how many pieces it was seen in (`pieces`); then classified
+  and logged once, with one picture of its middle. A flash alone is nothing (the tracker dropped it); 3 or more flashes in a line, over 5 s and 16 pixels
+  end to end, are a chain (`SkyEntryKind.flash`, which the rules call a probable plane when straight). The tracker's coasting is unchanged (1.5 s, pinned
+  by its tests): the hold joins what it loses, and a coast long enough for a 6-s gap would let a track take another light into its gate.
+- **The picture of a held light** (`SkyLightFilter.stillIsOf`): the camera's ring of recent keyframes holds its last 12 s or so, and a light is handed over
+  7 s or more after it ended, so the ring no longer holds the middle of a long one. Its picture is kept when it is of the middle half of the light's time,
+  or within 4 s of its middle (`stillReach`: a short light, between two keyframes); otherwise the light is logged without one, and the recording gives it
+  the picture of its middle (`SkyStillBackfill`, a minute later).
+- **Older logs** (`SkyStitch.joined`, first in `BridgeEngine.skyNightLog`: then the lights logged before the rules are sorted, a joined light of them as
+  one, so that `sortedLater`, the rules' word and the guide are the joined light's (`SkySortLater`, above), and then the lights that moved together are
+  grouped; the log is not written): the moving lights of the view, in the order they began, joined by the same rule (by day where the Sun was at −6° or
+  above at the box's place), in the camera's picture as the joining reads it (`BridgeEngine.skyStitchPicture`: the analysed size from the camera's main
+  stream or the night's pictures, at most 1,920 wide; the seam when the camera has two lenses side by side, as set or 2:1 and wider). A joined light is one
+  entry in the place of its first part (`SkyStitch.entry(of:entries:picture:corrected:)`): the first part's id and camera, `parts`, `pieces` the sum of
+  its parts'; from the first part's start to the last one's end; its path the spine's, at most 64 points evenly picked; its measures put together from
+  the parts' (`measures(of:)`: from where the first was first seen to where the last was last seen, the path the parts' own and the sky crossed in each
+  gap, speed, straightness, turns, size, brightness and focus weighted by how long each lasted, its blinking and strobe from its pictures, the gaps dark);
+  what it is, a flight's when a part matched one (the longest such), else its longest piece's (a light whose pieces were logged before the rules is then
+  sorted as one); the person's latest word on any part (by when it was said:
+  `SkyLogContents.corrected`); alerted when any part was; its picture the part nearest its middle that has one (`stillPart`), else none.
+- **A word on a joined light** (`BridgeEngine.correctSkyEntry`): written to every part (one line each, the same time), as the view the entry began in joins
+  it, and the answer is the joined light as the log reads it (sorted as one when its parts were logged before the rules); a part's earlier word still shows
+  until a later one.
+- **On the owner's logs** (a scratch replay, read-only, the place in memory only): Oct 25's 1,533 entries are 1,262 lights (the night view 1,055 → 858,
+  the day view 478 → 404; 177 lights joined from 448 entries: 195 continuations, 56 the same light twice, 14 across the seam, 6 contrail pieces; the
+  largest of 8 parts, the plane of 7:32 PM and another at 6:37 PM, each one straight line in its pictures); Oct 24's 673 are 638, Oct 26's 292 are 229
+  (its largest, 11 parts, a plane's contrail at 10:11 AM). With a window of 3, 4, 5, 6, 8 and 10 s, Oct 25 is 1,310, 1,295, 1,279, 1,262, 1,244 and
+  1,234 lights. Joining a night of 1,533 entries takes about 0.3 s (a debug build).
+- Tests: `SkyStitchTests` (strobe gaps, a frozen picture, the seam, two planes crossing, a formation, a turn and a reversal, the same light twice, the
+  contrail by day only, the hold's wait, bound and flush, flash chains, older logs, a joined light's measures and label, the lines as they were),
+  `SkyStitchDetectorTests` (a light in pieces logged once with one picture of its middle, a picture the ring no longer holds, a gap and the stop, a light
+  that fades twice end to end), `SkyStitchNightLogTests` (older logs read as one light and not written, a word on a joined light, a light across sunset).

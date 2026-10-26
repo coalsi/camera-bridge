@@ -58,6 +58,30 @@ import TestSupport
 
     // MARK: The night's log
 
+    @Test func aJoinedLightSaysItsPartsAndWhosePictureItIs() async throws {
+        // A light the log kept in three pieces, joined as the night is read (`SkyStitch.joined`): how many pieces, the parts' ids, and the part whose
+        // picture is its, with that part's own path (the small picture is cut around it). A light the log kept whole: one piece, no parts, its own picture.
+        let (backend, session, id) = try await ready()
+        var joined = Self.entry("u-1", camera: id, at: 0, hasStill: true)
+        joined.pieces = 5
+        joined.parts = ["u-1", "u-2", "u-3"]
+        joined.stillPart = SkyStillPart(id: "u-3", path: [SkyPathPoint(t: 0, x: 0.4, y: 0.3), SkyPathPoint(t: 2, x: 0.45, y: 0.28)])
+        let whole = Self.entry("u-4", camera: id, at: 60)
+        backend.write { state in state.skyEntries = [joined, whole] }
+        let answer = await session.get("/api/v1/sky/cameras/\(id.uuidString)/night?date=2026-10-24&view=night")
+        #expect(answer.status == 200, "\(answer.text)")
+        let entries = answer.array("entries")
+        #expect(entries.count == 2)
+        let joinedJSON = entries[0], wholeJSON = entries[1]
+        #expect(joinedJSON["pieces"] as? Int == 5 && (joinedJSON["parts"] as? [String]) == ["u-1", "u-2", "u-3"])
+        let still = try #require(joinedJSON["stillPart"] as? [String: Any])
+        #expect(still["id"] as? String == "u-3" && Set(still.keys) == ["id", "path"])
+        let path = try #require(still["path"] as? [[String: Any]])
+        #expect(path.count == 2 && path[1]["t"] as? Double == 2 && path[1]["x"] as? Double == 0.45 && path[1]["y"] as? Double == 0.28)
+        #expect(wholeJSON["pieces"] as? Int == 1 && (wholeJSON["parts"] as? [String]) == [] && wholeJSON.keys.contains("stillPart") && wholeJSON["stillPart"] is NSNull,
+                "always there: one piece, no parts, null")
+    }
+
     @Test func nightRouteAnswersTheLog() async throws {
         let (backend, session, id) = try await ready()
         let plane = Self.entry("p-1", camera: id, at: 0, label: .plane, by: .flight, detail: "TEST123 · 35,000 ft")
