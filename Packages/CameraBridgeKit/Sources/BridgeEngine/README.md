@@ -1263,7 +1263,9 @@ status without `lenses` or `note` decodes with none). Internal:
 Finding and following the lights that cross a sky camera's view, in `Sky/` (Foundation's math and `SIMD3`, and MediaCore's `GrayImage`).
 Public: `SkyPathShape` (`straight`, `curved`, `suddenStop`, `sharpTurn`) and `SkyMeasures`, a track's measures on the sky (where it was
 first and last seen, duration, speed in °/s and its acceleration, turn rate and largest turn within a second, straightness, shape,
-size in degrees, brightness, blinking and its rate, focus): never a real size, distance or speed. Internal:
+size in degrees, brightness, blinking and its rate, focus; and, since the rules of 2026-10-26, optional: `strobePeriod` and `strobeStrength`
+(a regular flash like a plane's strobe), `seenShare` (the share of its pictures it was seen in), `wobble` (degrees off a smooth path) and
+`turns` (turns of 45° or more); nil in an entry logged before them): never a real size, distance or speed. Internal:
 - `SkyFrameAnalyzer.swift`: `SkyFrameAnalyzer` (owned by one detector actor, its buffers allocated once per picture size) compares each
   analysed picture with a running mean of the sky (5 % a picture), smooths the difference by a 3×3 kernel (a matched filter for a small dot,
   which cuts a camera's single-pixel speckle many times over) and thresholds it per 64×64 tile at max(8, 4σ) about the tile's own level
@@ -1302,7 +1304,12 @@ size in degrees, brightness, blinking and its rate, focus): never a real size, d
   shape (a sharp turn of 60° within a second at 0.2°/s or more; a sudden stop from 0.5°/s or more to 10 % within 0.6 s, then staying a
   second, by the least-squares speed over it; straight under 15° of turning and 0.97 straightness; else curved), the size from the area and
   the local degrees per pixel, the brightness in the original picture's pixels, and blinking from dips below 30 % of the median flux
-  (missing pictures count as dips). `isStationary`: under 0.05°/s over 2 s or more.
+  (missing pictures count as dips). `isStationary`: under 0.05°/s over 2 s or more. The overnight prototype's measures (2026-10-26): the strobe
+  (the flux of every picture from the first to the last, a missing one dark, less its running median over 11 pictures; the first lag of 0.6
+  to 1.6 s whose autocorrelation is over 0.25, a peak, and 0.3 over the half lag's: its period and strength; at least 20 pictures; the
+  camera's 2 s keyframe pulse is outside the range), the seen share, the wobble (quadratic fits over time, 30 s at a time, on the plane
+  touching the sky at the track's middle) and the turns. The tracker counts the tracks born in each picture (`SkyTracker.beganWith`, the
+  last 10 minutes): many beginning at once is the camera changing its picture.
 - `SkyVisibility.swift`: `SkyVisibility` counts the stars (local maxima 5σ above the sky around them) in an 8×4 grid of the background once
   a minute at night; a cell is visible at 30 % of the 90th percentile of its counts on past nights; unknown until 3 nights, and by day. A
   night's counts are a small histogram per cell, and a night closes after 24 hours (a polar night).
@@ -1312,7 +1319,7 @@ size in degrees, brightness, blinking and its rate, focus): never a real size, d
 
 Where the aircraft are, and which one a track is, in `Sky/` (Foundation, and `CameraAdapters.NeighborTable` for the feed finder; the
 live transport is the existing `AuthenticatingHTTPClient`). Public: `SkyLabel` (`unexplained`, `plane`, `probablePlane`, `satellite`,
-`satelliteFlare`, `meteor`, `bug`, `bird`), what the sky log calls a light. Internal:
+`probableSatellite` (2026-10-26, the rules), `satelliteFlare`, `meteor`, `bug`, `bird`), what the sky log calls a light. Internal:
 - `SkyHTTP.swift`: `SkyHTTP`, one bounded GET (a status is an answer, whatever it is; a wait that ran out or an answer that is too long is an
   error that names no address), and `URLSessionSkyHTTP`, its live form: one `AuthenticatingHTTPClient` for the bridge's life, shared by every
   instance, with no credentials, the certificate checks on and redirects never followed. Each call has its own timeout and byte limit: the
@@ -1377,9 +1384,12 @@ Public:
   `camera`, `kind` (`SkyEntryKind`: `track`, `newLight`, `flash`), `start`, `end`, `path` (`SkyPathPoint`: seconds from the start and `x`, `y` in the camera's
   original picture, 0 to 1; at most 64), `measures` (`SkyMeasures`), `label` (`SkyLabel`) with `by` (`SkyLabelSource`) and `detail`, `unusual`
   (`SkyUnusualReason`), `speedVsPlanes`, `candidate`, `alerted`, `hasStill`, `ai` (a `SkyAIAnswer`) and the person's `correction` (`SkyCorrection`: plane,
-  bird, bug, satellite, meteor, notSure). `SkyDisplay.label` is what the log shows: a correction wins, and "not sure" shows the entry's own label.
+  bird, bug, satellite, meteor, notSure); since 2026-10-26 the guide to the unexplained: `priority` (`SkyPriority`: high, medium, low), `reasons` (at most 8
+  short phrases), `doubtful` and `group` (set when the log is read, never kept; see "the sky detector's rules"), and `sortedLater` (logged before the rules and
+  sorted by them as the log is read, never kept: "older lights sorted when the night is read"). `SkyDisplay.label` is what the log shows:
+  a correction wins, and "not sure" shows the entry's own label.
   `SkyConditions` (`SkyConditionState`: clear, cloudy, notVisible, unknown) say how the sky was for a stretch of time; `SkyCounts` count a night's
-  entries by what the log shows (`SkyCounts(counting:)`: planes include probable ones, satellites their flares; an entry the box explained and the
+  entries by what the log shows (`SkyCounts(counting:)`: planes include probable ones, satellites probable ones and their flares; an entry the box explained and the
   person was not sure of is `notSure`, one it did not explain stays `unexplained` whatever the person said; `explained` is the sum of all but the
   unexplained); `SkyLearning` is how many planes and satellites the box has matched against what it needs (30 and 10); `SkyNightLog` is one night's or
   day's log with its counts and the camera's aim, and `capped` (2026-10-25, the clutter fix): the hours of its view in which the camera followed more
@@ -1469,12 +1479,13 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   (`endAll(dropped:)`, its drops thrown away too) and starts none for `quietAfterChange` (3 s on the stream's clock): one such jump made 49 lights on the owner's camera.
   The drops of the tracker go to `droppedTrack(_:analysisWidth:analysisHeight:)`: they count towards their spot being busy (below), and Tasks 9 and 10 read them there. A gap (`gap(at:reason:)`) or a new runtime (`restarted()`) cuts what was open: a track
   a gap cut is not logged, and a gap is never a track. The aim is read from a copy kept on the detector: a picture never waits for the store's fit.
-- **Each ended track** (a queue of its own, in order, off the picture path): measured with the current aim; a stationary one is left (Task 10's); `classify` (Phase 1:
-  `FlightMatcher` on the shared `FlightHistory`, off the actor; a match is `.plane`, or `.probablePlane` while the aim is rough, by `.flight`, with its call sign and
-  height, and its correspondences go to `SkyAimStore.add` in one call); nothing explains it: `.unexplained`, a candidate while learning, with a still of its middle
+- **Each ended track** (a queue of its own, in order, off the picture path): measured with the current aim; a stationary one is left (Task 10's); `classify` (the
+  flights: `FlightMatcher` on the shared `FlightHistory`, off the actor; a match is `.plane`, or `.probablePlane` while the aim is rough, by `.flight`, with its call sign and
+  height, and its correspondences go to `SkyAimStore.add` in one call; then, for what no flight explains and no filter below skips, the rules: "the sky detector's
+  rules"); nothing explains it: `.unexplained`, ranked, with a still of its middle
   (`CameraRuntime.skyStill`, at most 1920 wide, `BridgeEngine.skyStillPicture`). Entries are filed with `SkyNight.logName` (Ruling S4), their path at most 64 points
-  evenly picked, their id the start's milliseconds and a random part in hex. The learning counts the planes matched with a good aim (ready at 30; satellites are not asked
-  for while no orbits are loaded). **Fewer junk entries** (Ruling S24, `SkyLightFilter`): a light that nothing explains and that crawls (a mean speed along its path under
+  evenly picked, their id the start's milliseconds and a random part in hex. The learning is the baseline's planes, matched with a good aim (ready at 30; satellites
+  are not asked for while no orbits are loaded). **Fewer junk entries** (Ruling S24, `SkyLightFilter`): a light that nothing explains and that crawls (a mean speed along its path under
   0.05°/s while the lens's aim is good or precise, under 0.5 analysed pixels a second while it is rough: a star), or that never gets 12 analysed pixels from where it was
   first seen while it is never bright (Rulings S28 and S29, `SkyLightFilter.wandersInPlace`: a faint star or a wire whose centroid wanders; a light that turns back
   counts by its farthest point, and one that stands 6σ or more above the sky at its strongest is kept however little it moved), is no entry and
@@ -1496,20 +1507,22 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
     aim is rough: a card is only guessed), a light whose whole path lies in the band along that edge, 25° of the lens's field deep (40° while rough: North Sky's
     left lens's outer 44 %), is not logged ("… 3 lights near the Sun skipped this hour (likely glare)"). A dual camera's seam is no edge. With the Sun in the view
     its circle of the mask is the guard, as before; planes are matched first and logged wherever they are.
-  - **At most 200 an hour** (`SkyLightFilter.unexplainedPerHour`): a camera logs at most 200 lights that nothing explains in a clock hour of the box's zone (of the
-    light's start); the rest are counted, and once the hour is over (the next minute's `tick`, or the stop) one line of the log of each night they belong to
+  - **At most 200 an hour** (`SkyLightFilter.unexplainedPerHour`): a camera logs at most 200 lights that no flight explains and that the rules leave unexplained or call
+    a meteor, a bug or a bird (`SkyLightFilter.countsAgainstTheHour`; never their probable planes and satellites, which are logged whatever the hour holds: 2026-10-26)
+    in a clock hour of the box's zone (of the light's start); the rest are counted, and once the hour is over (the next minute's `tick`, or the stop) one line of the log of each night they belong to
     says how many (`SkyLogStore.recordCapped`, `{"capped": {"at", "count", "hour"}, "v": 1}`), as does the journal ("… 212 more lights were not logged this hour
     (at most 200 are logged an hour)"). The log's view carries the hours it holds (`SkyNightLog.capped`) and the page shows a note for each. A detector that
     restarts in the hour counts afresh (its lines add up).
-- **A picture for every logged light** (Ruling S31): there is no limit of pictures an hour any more (the hour's 60 entries bound them): every logged entry that wants
-  one (`SkyLightFilter.wantsStill`: unexplained, and the rules' meteors, bugs and birds) asks for its still. **The pictures stay off a full drive** (Rulings S27
+- **A picture for every logged light** (Ruling S31): there is no limit of pictures an hour any more: every logged entry that wants one
+  (`SkyLightFilter.wantsStill(_:by:)`: unexplained, the rules' meteors, bugs and birds, and since 2026-10-26 their probable planes and satellites and a satellite's
+  flare; never a flight's plane or an orbit's named satellite) asks for its still, and its small one is made once it is written (`Context.stillWritten`). **The pictures stay off a full drive** (Rulings S27
   and S31): one is taken only while the recordings drive has its floor and 1 GiB more free (`SkyLightFilter.stillsHaveRoom`, from `nvr.storageStatus()`; below the
   floor every camera's recording pauses, and the size rule never counts what the sky log keeps; it was twice the floor, which a full recorder, kept by retention at
   about twice its floor free, almost never had), a picture that cannot be made 1920 wide is not kept at full size (`BridgeEngine.skyStillJPEG`), and each camera's
   pictures stay under 2 GiB, the oldest nights' folders going first (`SkyLogStore.pruneStills`, from the retention janitor every 10 minutes; never the logs or the
   recordings, never the newest night, no link followed; an entry whose picture went answers "There is no picture of it"). **Pictures made later**
-  (`Sky/SkyStillBackfill.swift`): a light logged without one (no room then, a long track whose middle had left the camera's ring, an older build's 30 an hour) gets
-  one from the recording. Once a minute (`tick`), while the drive has room, at most 4 of the lights of the log the time is filed in and the one before it, newest
+  (`Sky/SkyStillBackfill.swift`): a light logged without one (no room then, a long track whose middle had left the camera's ring, an older build's 30 an hour, the
+  rules' probable planes and satellites before they had pictures) gets one from the recording, and then its small one. Once a minute (`tick`), while the drive has room, at most 4 of the lights of the log the time is filed in and the one before it, newest
   first, that ended a minute ago or more: `BridgeEngine.skyRecordedStill` reads the recording's keyframe of the light's middle (the governing one, or the next when it
   is nearer: `ArchiveReading` `.keyframe` and `.initialization`, `FMP4FrameSlicer.frame(fromKeyframeBytes:info:start:)`), decodes it on a pool of its own one at a
   time for all the cameras, and makes it as a live still is (full size at 0.8, then 1920 wide); the picture is written and then a line `{"id", "still": true, "v": 1}`,
@@ -1538,14 +1551,14 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   queue is at work on gets one second (a keyframe's decode can stall for ten) and no longer; what it leaves unfinished can write nothing of the aim (`SkyAimStore.close`).
   `SkyService` stops its detectors together, `stopAllSky` is bounded to 2 s, and `stopServices` closes the recordings (`nvr.detachAll`) before it stops the sky.
 - **Kept per camera** in `<data>/sky/<camera-uuid>/` (`SkyService.directory(of:in:)`, beside the aim's `aim.json` and `matches.jsonl`): `detector.json` (0600) with the
-  visibility's memory, the open conditions span, the planes learned and the card the search found with the card it was found for, and `clutter.json` (0600) with the
-  busy spots (tiles, scores and times). No place is in them; nothing logged names the place. Kept when the detector is turned off; deleted with the camera.
+  visibility's memory, the open conditions span, the planes learned and the card the search found with the card it was found for, `clutter.json` (0600) with the
+  busy spots (tiles, scores and times), and `baseline.json` (0600) with what the camera learned of its sky (`SkyBaseline`). No place is in them; nothing logged names the
+  place. Kept when the detector is turned off; deleted with the camera.
 - Tests: `SkyDetectorTests` (synthetic pictures through the whole pipeline: a matched plane, an unexplained light with its still, a gap, a brightness jump, the status, the
   conditions; the aim improved by twelve planes and kept over a restart; the note and the wide search; in `SkyDetectorPolicyTests.swift` and `SkyStillsAndStopTests.swift`, Rulings S24, S25 and S27;
   in `SkyClutterTests.swift` the busy spots, the Sun's guard, the hourly cap, a picture for every logged light and the pictures made later), `SkyClutterMapTests`,
   `SkySunGuardTests` and `SkyRecordedStillTests` (the recording's keyframe nearest a time, and what is gone or not yet), and `SkyServiceTests` (the feed asked only while a
   detector runs, the aim kept and removed; on macOS `SkyEngineTests`: the switch, the plugin both ways and across a pause, a cleared place or folder, a removed camera).
-
 
 ## Additions beyond the contract: the Sky Watcher's small pictures (2026-10-26, docs/CONTRACT_CHANGES.md)
 
@@ -1567,6 +1580,10 @@ Internal:
   none (the whole picture, small) for a light that crossed more of the sky than a close-up holds. It is a copy, and the page draws the path with its own, so the two must give the
   same rectangle to the pixel: `SkyCloseUpTests` checks this one against the page's answers to hundreds of paths (`Tests/BridgeEngineTests/Fixtures/sky-closeup-vectors.json`,
   made from the page's functions by `linux/web-tests/support/sky-closeup-vectors.mjs`, which `sky-model.test.mjs` keeps equal to them). Change one and change the other.
+- **Made with the picture** (2026-10-26; the grid's first views were slow): once the detector has handed a picture to the log, live or made later from the recording, it says
+  so (`SkyCameraDetector.Context.stillWritten`), and the engine makes its thumbnail at background priority as soon as the log's queue has written the picture and its line
+  (`SkyThumbnails.prepare`: the same lookup, room, failure memory and making as a page's request, in the same two places, but after every page's request that waits:
+  `SkyThumbnailGate.run(background:)`; one that finds `maximumWaiting` waiting in all is left for the page's first view). The page's first view then reads it.
 - **Made once, kept beside the picture** (`SkyThumbnails`, `SkyLogStore+Thumbnails.swift`): the first request finds there is a picture and no thumbnail (`thumbnailLookup`: a stat of the
   picture, and a kept thumbnail is read: a regular file in real folders, a JPEG, stamped with the time of the picture it was made from, so that a clock that was set back does not make
   every thumbnail stale), and takes its turn (below). Then, on a thread of its own, it reads the picture (`readStill`, only if it is still the one that was stamped), its size
@@ -1593,5 +1610,103 @@ Internal:
 - `EngineTuning.skyThumbnailDeadline`, `skyThumbnailFailureMemory`, `skyThumbnailWaiting` and `skyThumbnailRoom` shorten, shrink and decide the limits in tests.
 - Tests: `SkyCloseUpTests` and `JPEGHeaderTests` (`SkyThumbnailGeometryTests.swift`), `SkyThumbnailStoreTests` (kept beside the picture, owner and mode, remade with the picture, never
   through a link, counted and pruned, the entry's path, a night's picture size), `SkyThumbnailEngineTests` (cut around the light, made once, a replaced picture, the whole picture when it cannot be
-  made and its memory, no room on the drive, two at a time, in the order asked, a full queue, a codec that hangs, the night's picture size) and `SkyThumbnailRealCodecsTests` (a real still through the codecs
+  made and its memory, no room on the drive, two at a time, in the order asked, a full queue, a codec that hangs, the night's picture size; in `SkyRulesPicturesTests.swift`, made with the
+  picture and after the page's requests) and `SkyThumbnailRealCodecsTests` (a real still through the codecs
   of the platform), with `CroppedPictureTests` in PlatformLinuxCodecsTests and `CroppedPictureAppleTests` in PlatformAppleTests for the codecs.
+
+## Additions beyond the contract: the sky detector's rules and the guide to the unexplained (2026-10-26, docs/CONTRACT_CHANGES.md)
+
+The owner, after a night of Sky Watcher: the unexplained were mostly planes and birds, and he wanted the rest ranked, "multiple objects moving the same direction-ish,
+large, fast, a sudden change in direction". The plan's Task 11 (the rules, the unusual rule learned per camera, candidates and the alert gate) and the overnight prototype's
+probable planes and satellites, in `Sky/SkyRules.swift`, `Sky/SkyBaseline.swift`, `Sky/SkyGuide.swift` and `Sky/SkyAlertGate.swift`. Public: `SkyLabel.probableSatellite`,
+`SkyPriority` (`high`, `medium`, `low`), `SkyEntry.priority`, `reasons`, `doubtful` and `group`, and the new optional `SkyMeasures.strobePeriod`,
+`strobeStrength`, `seenShare`, `wobble` and `turns` ("the sky detector's lights"). Internal:
+- **The pipeline** (`SkyCameraDetector.classified`): the flights, then the skips (slow, wandering, busy spots, the Sun's guard), then the rules, in order (`SkyRules.verdict`,
+  each with its `detail`, by `.rule`):
+  - **a bug on silk** (the prototype's "drop"): a meteor's streak (below) at 1.5 to 8°/s going straight down the picture (within 8°); first, as in the prototype,
+    since gravity fits better than a meteor;
+  - **a meteor**: at most 2 s, at least 0.98 straight, no blink, streak-born or seen in 3 pictures (the plan's); 1.5°/s or more (the plan's 4°/s: the overnight test's
+    meteors crossed 1.84 to 5.1°/s in the engine's degrees, its clear meteor 2.6°/s, and its satellites at most 1.13°/s); the Sun under −6°, alone (no other light
+    began within 1 s of it) and no faster than a meteor can cross at its height (72 km/s at the distance of a height of 100 km in its direction, with half again for a
+    rough aim; about 5°/s on the horizon) (the owner's nights: dusk birds are short, fast and straight; at dusk a camera change made 31 streaks along the wires in one
+    picture; the fastest streaks low down were the tracker linking lights along the skyline);
+  - **a bug**: blurred (focus at most 0.35) and 1° across or more, or turned by 45° three times or more (the plan's); never a steady light (a bright plane's lights spread
+    to a degree on the owner's camera);
+  - **a probable plane** by its strobe (a regular flash every 0.6 to 1.6 s of strength 0.3 or more, 0.25 or more over 30 s; followed 5 s or more), or a chain of flashes in
+    a line (an entry of kind `flash`, straight);
+  - **a bird**: the Sun at −6° or above, 0.1 to 4° across, 1 to 300°/s, curved or straight (the plan's 0.2–4°, 1–30°/s and "in focus" changed by the owner's nights: his
+    dusk birds crossed up to 148°/s, birds by day are dark blobs whose focus reads 0 to 0.33, some 0.13° across);
+  - **a steady light** (5 s or more, 0.98 straight, within 0.25° or half its size of a smooth path, seen in 40 % of its pictures or more, no strobe): by day slower than
+    3°/s and 0.95 straight is enough, a plane; at night at 0.15 to 2°/s a **probable satellite** where a satellite could be in sunlight (some point of its line of sight
+    at 200 to 1,500 km outside the Earth's shadow: `SkyRules.satelliteCouldBeSunlit`, from the Sun and the box's place, which never leaves the box), else a probable
+    plane; slower, followed 8 s or more, a distant plane.
+- **The unexplained**: first the doubts (`SkyRules.doubt`): it began with 2 or more other lights in its picture or within a second, or as the camera changed its picture
+  (5 began at once, from 1 s before to 10 s after); it went out and came back (straightness under 0.3); a ragged path (2°/s or more, and off a smooth path by more than 0.3° and
+  more than a quarter of its step); too fast and small (60°/s, under 0.25°); faster than a meteor could cross at its height (the meteor's bound: on the owner's evening,
+  tracks along the power lines and the skyline). A doubted light is low, never unusual, never a candidate (`doubtful`). Then the unusual rule (`SkyBaseline`): in its band
+  of elevation (0–10, 10–30, 30–60, 60–90°; all bands when its own has fewer than 10), `faster` over 1.5 × the larger p95 speed of planes and satellites, `larger` over 1.5 ×
+  the planes' p95 size, `brighter` over 1.5 × the p95 brightness; before learning (30 planes) a p95 speed of 2°/s and size of 0.75° (the plan's 0.3°: the rules' planes on the
+  owner's camera were 0.76° at the 95th percentile), and no `brighter`; `suddenStop` and `sharpTurn` from the shape only when it can be trusted (1°/s or more for 2 s or more,
+  at most two turns, within 0.2° of a smooth path). `speedVsPlanes`: the speed over the median plane speed in its band (nil under 10 planes). The baseline learns from planes
+  matched with a good aim (later: orbits' satellites), the last 500 of each kind in each band, in `baseline.json`, kept through a new card (Ruling S25: what the box learned of
+  the sky is not the aim). `candidate` is unexplained and unusual. **`SkyAlertGate`** (Task 12 raises the alerts): a candidate alerts once learning is ready, unless the sky was
+  known not visible and unless one alerted for the camera in the last 300 s, which it joins.
+- **The guide** (`SkyGuide.assess`): **high** when faster, larger, a stop or a turn; **medium** when only brighter, a long, low, steady light that is neither a plane's nor a
+  satellite's (20 s or more, under 15° up, neither blinking nor flashing like a strobe: every long, low light the rules left on the owner's nights blinked,
+  and was a distant plane), or a light that appeared and stayed on one spot for seconds (2 to 60 s, ending within 0.7° of where it began: the
+  prototype's "barely moved"; kept only when bright, Ruling S29); **low** otherwise. The reasons are short phrases: "Fast across the sky (about 6× a plane at that height)"
+  (before learning, "about 3× typical planes", against the default speed), "Looks larger than planes here" ("than typical planes"), "Stopped suddenly", "Turned sharply",
+  "Looks brighter than planes and satellites here", the doubt, or "Too short to tell a plane from a satellite", "Too short to tell what it was", "Nothing unusual about it".
+- **Lights that moved together** (`SkyFormations.mark`, on the night's entries as `BridgeEngine.skyNightLog` reads them, after the older lights are sorted, so a person's word counts at
+  once; the lights are taken in the order they began, and a group one of whose lights ended before a light began and its second together can take no later light, so it
+  is passed over: a night of hundreds of sorted unexplained lights groups in milliseconds): unexplained lights
+  the guide ranked, not doubted, seen together for 1 s or more, their headings within 20°, their speeds within 1.5×, 0.5 to 20° apart, not one behind the other on one line
+  within 3° (two pieces of one light), not begun in one picture; every one moves with all the others of its group; each gets `group` ("g-" and its first light's id), the
+  priority high and "Several lights moving together" first. The owner's words were "within the same few minutes": lights minutes apart made 70 to 95 such groups of plane
+  and satellite fragments on the night of Oct 25; seen together, 3 (2 as the box would log that night now).
+- **On the owner's logs** (a scratch replay, read-only, the place in memory only): of the prototype's labelled night of Oct 24, the rules agree on 224 of its 277 planes,
+  318 of its 363 satellites (29 more are planes: no satellite can be in sunlight there), 6 of its 7 meteors (the seventh, not quite straight and not alone, ranks high) and all 7
+  of its bugs; 16 of its 19 unexplained rank medium ("appeared and stayed on one spot"). Of the 1,533 unexplained of Oct 25, 910 are explained (403 birds, 257 probable
+  planes, 195 probable satellites, 43 bugs, 12 meteors); with the busy spots and the Sun's guard of that day, 1,106 would be logged, 407 of them unexplained: 9 high,
+  12 medium, 386 low.
+- Tests: `SkyRulesTests` (the plan's nine, the strobe, the steady light and the shadow, a meteor that is no satellite, the bug on silk, the doubts, the trusted shapes,
+  the baseline kept, the guide's levels and words, the groups), `SkyNightLogEngineTests.theGuideIsKeptAndLightsThatMovedTogetherAreGroupedAsTheLogIsRead`, and the
+  detector suites, whose made-up lights now meet the rules.
+
+## Additions beyond the contract: older lights sorted when the night is read, and the rules' planes and satellites with a picture (2026-10-26, docs/CONTRACT_CHANGES.md)
+
+Two follow-ups to the rules (above). The owner's box logged the night of Oct 25 before them: 1,533 lights, every one "unexplained", which the replay of the rules
+sorted. And the rules' probable planes and satellites had no picture, so the rules could not be checked by eye. Public: `SkyEntry.sortedLater` (set as the log is
+read and never kept, as `group` is; in `SkyEntry.init` with a default of false, so a caller written before it compiles unchanged). Internal, in `Sky/SkySortLater.swift`
+and the detector, the filter, the backfill and the thumbnails:
+- **Sorted when the night is read** (`SkySortLater`, from `BridgeEngine.skyNightLog`, and for the entry a correction answers): every entry of the view that is
+  unexplained, named by nothing (`by` nil) and has none of the guide's fields (`SkySortLater.needsSorting`) is judged as the detector judges a light now
+  (`SkyRules.judge`, which the detector calls too: the rules' verdict, by `.rule` with its `detail`; or the doubts, the unusual rule against the camera's baseline
+  now, or the defaults before it learned, `candidate`, and the guide's priority and reasons), shown as if logged so and marked `sortedLater`; then the lights that
+  moved together are found on the whole view, the sorted ones among them. The log is not written: it stays append-only, and the next read sorts again, with what
+  the camera has learned by then. A person's word wins as ever (`SkyDisplay`; "not sure" shows what the rules say), and the counts are of what is shown. What an
+  older entry does not keep comes from the night and its path, as the replay took it: how it began, from the start times of every light of the log
+  (`SkySortLater.Beginnings`: in its picture, within a second, and 5 at once from 1 s before it to 10 s after; the tracker counts the tracks it drops too, so
+  these doubts are fewer than live ones); the Sun at its middle and whether a satellite could be in sunlight there; its way across the camera's picture (a bug on
+  silk; none while the picture's size is not known); and the five measures it was logged without, from its path through the camera's aim now
+  (`TrackMeasurer.pathMeasures`, the cheap part of `measure`): the wobble and the turns from any path, the strobe and the share of its pictures it was seen in only
+  from a whole path (under 64 points, one a picture it was seen in: the pictures it was missed in are found in the gaps at the camera's pace, every point at one
+  brightness), never from a path thinned to 64. They decide the rules only: the entry keeps the measures it was logged with. It is taken as not streak-born. The
+  camera is its running detector's (`SkyCameraDetector.sortingCamera`: the aim, the analysed width, the picture's size, the pace and the baseline); otherwise
+  (`BridgeEngine.skySortingCamera`) the card over the picture's size as last seen (the camera's stream, else the night's pictures) with the camera's
+  `baseline.json` (`SkyCameraDetector.readBaseline(in:)`) or the defaults; without a picture's size no path is measured again. It runs off the main actor: a
+  night of 2,000 old lights is sorted and grouped in about 25 ms of a release build on a Mac (0.5 to 1.2 s of a debug build), and the engine reads such a
+  night (4.6 MB) whole in about 0.11 s, against 0.09 s for the same night logged with the rules. The grouping passes over the groups that can take no later
+  light (above), which a night of hundreds of sorted unexplained lights needs, and the measurer's fits and strobe add up without an array a point (the same
+  numbers). The page shows a small "Sorted later" in the player only.
+- **The rules' planes and satellites keep a picture** (`SkyLightFilter.wantsStill(_:by:)`): their probable planes and satellites and a satellite's flare want
+  one, as the unexplained and the rules' meteors, bugs and birds do; a flight's plane (`by: .flight`, a probable one while the aim is rough) and an orbit's
+  named satellite do not. They do not count against the hour's 200 (`SkyLightFilter.countsAgainstTheHour`: the unexplained, meteors, bugs and birds that no
+  flight explains, as before), so that a busy hour of satellites never takes the room of a light nothing explains; the room rule and each camera's 2 GiB bound
+  their pictures with the rest. A new one has its picture live; an older one (tonight's log and last night's) gets it from the backfill.
+- **The small picture is made with the big one** (`SkyCameraDetector.Context.stillWritten`, `SkyThumbnails.prepare`, `SkyThumbnailGate.run(background:)`): see "the
+  Sky Watcher's small pictures".
+- Tests: `SkySortLaterTests` (which lights are sorted, as the detector sorts one now, a thinned path, how a light began, a bug on silk, what the camera learned, the
+  cost), `SkyNightLogEngineTests.oldLightsAreSortedByTheRulesAsTheNightIsReadAndTheLogStaysAsItWas` and `.aNightOfTwoThousandOldLightsIsReadQuickly`, and in
+  `SkyRulesPicturesTests.swift` the pictures and the hour's room, the backfill, and the small pictures made with the big ones (`SkyDetectorTests`,
+  `SkyThumbnailEngineTests`, `SkyThumbnailGateTests`).

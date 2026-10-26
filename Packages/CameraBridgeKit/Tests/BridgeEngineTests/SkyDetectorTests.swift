@@ -70,6 +70,8 @@ final class SkyDetectorRig: Sendable {
     /// What the camera's recording gives for a picture made later (`Context.recordedStill`, Ruling S31), and the times it was asked for.
     let recorded = Box(SkyRecordedStill.gone)
     let recordedAsked = Box<[Date]>([])
+    /// The pictures the detector said it wrote (`Context.stillWritten`, for their thumbnails), as "<night>/<id>".
+    let stillsWritten = Box<[String]>([])
     let context: SkyCameraDetector.Context
     let detector: SkyCameraDetector
     let observer: SkyObserver
@@ -80,7 +82,7 @@ final class SkyDetectorRig: Sendable {
         let data = try data ?? TemporaryDirectory()
         let recordings = try TemporaryDirectory()
         let clock = Box(start)
-        let asked = stillsAsked, room = room, recorded = recorded, recordedAsked = recordedAsked, logStore = log
+        let asked = stillsAsked, room = room, recorded = recorded, recordedAsked = recordedAsked, logStore = log, written = stillsWritten
         self.camera = camera
         self.data = data
         self.recordings = recordings
@@ -102,7 +104,8 @@ final class SkyDetectorRig: Sendable {
                                             readLog: { night in
                                                 await logStore.flush()
                                                 return logStore.read(camera: camera, night: night, folder: folder).entries
-                                            })
+                                            },
+                                            stillWritten: { id, night in written.update { $0.append("\(night)/\(id)") } })
         detector = SkyCameraDetector(context: context, directory: data.url.appending(path: "sky/\(camera.uuidString)", directoryHint: .isDirectory),
                                      flights: flights, log: log, now: { clock.value }, seed: 7)
     }
@@ -153,8 +156,10 @@ final class SkyDetectorRig: Sendable {
     /// A stitched dual camera facing north-north-west, 15° up (4256 × 1888, analysed 640 wide): the fixtures' TEST123 crosses its left lens.
     static let dualCard = SkyDetectorSettings(enabled: true, facing: 330, tilt: 15)
     static var dualModel: SkyCameraModel { SkyCameraModel.initial(facing: 330, tilt: 15, pictureWidth: 4256, pictureHeight: 1888) }
-    /// A light with no aircraft: up in the north-north-east, going east at 1°/s for 8 s (the right lens).
-    static let stray = SkyPath(start: SkyDirection(azimuth: 20, elevation: 35), bearing: Double.pi / 2, legs: [SkyPath.Leg(duration: 8, speed: 1)])
+    /// A light with no aircraft: up in the north-north-east, going east at 1°/s for 8 s (the right lens), bending right as it goes (12°/s), so
+    /// that the rules leave it unexplained (a straight steady light at night is a probable plane or satellite).
+    static let stray = SkyPath(start: SkyDirection(azimuth: 20, elevation: 35), bearing: Double.pi / 2,
+                               legs: [SkyPath.Leg(duration: 8, speed: 1, turnRate: 12)])
 
     // MARK: Lights to the log
 
@@ -201,8 +206,9 @@ final class SkyDetectorRig: Sendable {
         let entries = await rig.logged().entries
         let entry = try #require(entries.first)
         #expect(entries.count == 1)
-        #expect(entry.label == .unexplained && entry.by == nil && entry.detail == nil && entry.hasStill && entry.candidate,
-                "unexplained, with its picture, and a candidate while the camera is still learning")
+        #expect(entry.label == .unexplained && entry.by == nil && entry.detail == nil && entry.hasStill && !entry.candidate,
+                "unexplained, with its picture; nothing unusual about it, so no candidate (Task 11)")
+        #expect(entry.priority == .low && entry.reasons == ["Nothing unusual about it"] && !entry.doubtful, "\(String(describing: entry.priority)) \(entry.reasons)")
         #expect(entry.path.allSatisfy { $0.x > 0.5 }, "the right lens")
         // The still is the one asked for the track's middle, and it is beside the log.
         let asked = try #require(rig.stillsAsked.value.first)
@@ -378,7 +384,7 @@ final class SkyDetectorRig: Sendable {
             let track = Self.track(along: climbing, at: at, seenBy: model, using: &random)
             rig.clock.set(at.addingTimeInterval(10))
             let entry = await rig.detector.classify(track, measures: TrackMeasurer.measure(track, model: model, analysisWidth: 1920, pictureWidth: 1920))
-            #expect(entry.label == .unexplained)
+            #expect(entry.by != .flight, "no plane explains it")
             await rig.detector.tick(at: at.addingTimeInterval(8))
             #expect(await rig.detector.status.aim.note == nil, "not before two hours: \(index)")
         }
@@ -439,7 +445,7 @@ final class SkyDetectorRig: Sendable {
             await rig.flights.add(pass.reports)
             rig.clock.set(at.addingTimeInterval(16))
             let entry = await rig.detector.classify(pass.track, measures: TrackMeasurer.measure(pass.track, model: model, analysisWidth: 1920, pictureWidth: 1920))
-            #expect(entry.label == .unexplained, "the card is 30° off: no match")
+            #expect(entry.by != .flight, "the card is 30° off: no match")
             await rig.detector.tick(at: at.addingTimeInterval(8))
         }
         let later = Self.start.addingTimeInterval(7_260)
@@ -473,8 +479,8 @@ final class SkyDetectorRig: Sendable {
         let pass3 = Self.pass(10, at: at.addingTimeInterval(240), seenBy: truth, using: &random)
         await rig.flights.add(pass3.reports)
         rig.clock.set(at.addingTimeInterval(256))
-        #expect(await again.classify(pass3.track, measures: TrackMeasurer.measure(pass3.track, model: truth, analysisWidth: 1920, pictureWidth: 1920)).label
-                == .unexplained)
+        #expect(await again.classify(pass3.track, measures: TrackMeasurer.measure(pass3.track, model: truth, analysisWidth: 1920, pictureWidth: 1920)).by
+                != .flight)
         await again.stop()
     }
 

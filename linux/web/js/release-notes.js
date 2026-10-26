@@ -15,6 +15,17 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.127',
+    date: '2026-10-26',
+    title: 'Sky Watcher sorts what it sees, and ranks the unexplained',
+    items: [
+      'Rules tell lights apart before anything is called unexplained: blinking strobes are probable planes, steady straight lights are probable satellites, and meteors, bugs and birds are recognised. On a real night they agreed with a careful hand count 85 % of the time.',
+      'Every unexplained light gets a priority (High, Medium or Low) with its reasons: several lights moving together, faster or larger than planes there, a sudden stop or a sharp turn. Filter by High priority, or sort by priority.',
+      'Lights logged before this update are sorted by the same rules when you open the page.',
+      'Probable planes and satellites keep a picture too, so you can check the rules by eye, and small pictures are made right away so the grid loads quickly.',
+    ],
+  },
+  {
     version: '0.1.126',
     date: '2026-10-25',
     title: 'Sky Watcher matches planes, a grid you scroll, and a player you can zoom',

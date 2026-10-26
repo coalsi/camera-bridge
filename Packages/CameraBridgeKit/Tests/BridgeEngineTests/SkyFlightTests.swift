@@ -1652,7 +1652,8 @@ import Testing
     }
 
     @Test func theLabelsAreTheDesigns() throws {
-        #expect(SkyLabel.allCases.map(\.rawValue) == ["unexplained", "plane", "probablePlane", "satellite", "satelliteFlare", "meteor", "bug", "bird"])
+        #expect(SkyLabel.allCases.map(\.rawValue) == ["unexplained", "plane", "probablePlane", "satellite", "probableSatellite", "satelliteFlare", "meteor", "bug",
+                                                       "bird"])
         for label in SkyLabel.allCases {
             let data = try JSONEncoder().encode([label])
             #expect(try JSONDecoder().decode([SkyLabel].self, from: data) == [label])

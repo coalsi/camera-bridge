@@ -14,15 +14,16 @@ enum SkyRecordedStill: Sendable, Equatable {
 
 /// The pictures the sky log has not got, made later from the camera's recording (Ruling S31: the owner asked that every unexplained light keep
 /// its picture). A light is logged without one when the drive had no room then, when the camera's ring no longer held its middle (a long
-/// track), or by a build that kept 30 an hour. Once a minute (the detector's `tick`), while the drive has room, a few of them (`perTick`) are
-/// made from the recording at the light's middle, the newest first, and written as a live picture is, with a line that says so
-/// (`SkyLogStore.recordStill`: the log stays append-only, and the entry then reads `hasStill`).
+/// track), or by a build that kept 30 an hour, or one that kept none for the rules' probable planes and satellites (before 2026-10-26). Once a
+/// minute (the detector's `tick`), while the drive has room, a few of them (`perTick`) are made from the recording at the light's middle, the
+/// newest first, and written as a live picture is, with a line that says so (`SkyLogStore.recordStill`: the log stays append-only, and the entry
+/// then reads `hasStill`), and its small picture is asked for (`SkyCameraDetector.Context.stillWritten`).
 ///
 /// The candidates are the entries of the log the time is filed in and of the one before it (tonight's and last night's), that want a picture
-/// (`SkyLightFilter.wantsStill`), have none, and ended at least `settle` ago (their live picture, and the recorder, come first). The logs are
-/// read again when every candidate was tried and `readInterval` has passed. A light whose recording is gone or makes no picture is given up
-/// quietly, and one not written yet is tried `laterTries` times at the most: no retry storm. What was given up is kept in memory only, for the
-/// lights of the logs it reads, so a restart tries each once more.
+/// (`SkyLightFilter.wantsStill`: not a flight's plane or an orbit's satellite), have none, and ended at least `settle` ago (their live picture,
+/// and the recorder, come first). The logs are read again when every candidate was tried and `readInterval` has passed. A light whose recording
+/// is gone or makes no picture is given up quietly, and one not written yet is tried `laterTries` times at the most: no retry storm. What was
+/// given up is kept in memory only, for the lights of the logs it reads, so a restart tries each once more.
 struct SkyStillBackfill: Sendable {
     static let perTick = 4
     static let readInterval: TimeInterval = 600
@@ -66,7 +67,7 @@ struct SkyStillBackfill: Sendable {
             for entry in entries {
                 seen.insert(entry.id)
                 let middle = Self.middle(of: entry)
-                guard SkyLightFilter.wantsStill(entry.label), !entry.hasStill, !finished.contains(entry.id), middle.timeIntervalSince1970.isFinite,
+                guard SkyLightFilter.wantsStill(entry.label, by: entry.by), !entry.hasStill, !finished.contains(entry.id), middle.timeIntervalSince1970.isFinite,
                       date.timeIntervalSince(middle) >= Self.settle else { continue }
                 items.append(Item(id: entry.id, night: night, middle: middle))
             }

@@ -84,9 +84,10 @@ extension SkyDetectorTests {
 
     // MARK: Stopping
 
-    /// 200 fast lights, each a track that went 5 pixels a second for 6 s, in one clock hour.
+    /// 200 fast lights, each a track that went 5 pixels a second for 4.8 s (too short for the rules to call it a probable plane or satellite), in
+    /// one clock hour.
     static func lights(_ count: Int) -> [SkyTrack] {
-        (0..<count).map { Self.straightTrack(from: (40, 30 + Double($0 % 20) * 10), pixelsPerSecond: 5, seconds: 6, at: Self.start.addingTimeInterval(Double($0))) }
+        (0..<count).map { Self.straightTrack(from: (40, 30 + Double($0 % 20) * 10), pixelsPerSecond: 5, seconds: 4.8, at: Self.start.addingTimeInterval(Double($0))) }
     }
 
     @Test func stoppingWithTwoHundredLightsWaitingTakesNoTimeAndNoMorePictures() async throws {

@@ -267,12 +267,14 @@ test('the night route answers the log as Task 5 describes it', opts, async () =>
   const finished = entries.filter((entry) => entry.end <= json.serverTime);
   assert.equal(finished.length, entries.length, 'nothing that has not happened yet');
   for (const key of ['unexplained', 'planes', 'satellites', 'meteors', 'bugsAndBirds']) {
-    const found = entries.filter((entry) => ({ unexplained: ['unexplained'], planes: ['plane', 'probablePlane'], satellites: ['satellite', 'satelliteFlare'], meteors: ['meteor'], bugsAndBirds: ['bug', 'bird'] })[key].includes(entry.display)).length;
+    const found = entries.filter((entry) => ({ unexplained: ['unexplained'], planes: ['plane', 'probablePlane'], satellites: ['satellite', 'probableSatellite', 'satelliteFlare'], meteors: ['meteor'],
+      bugsAndBirds: ['bug', 'bird'] })[key].includes(entry.display)).length;
     assert.equal(counts[key], found, `${key} counted as the entries say`);
   }
 
   // Every entry has the fields of SkyEntry, with `display` and `watch`; times are epoch ms, optional fields null.
-  const keys = ['ai', 'alerted', 'by', 'camera', 'candidate', 'correction', 'detail', 'display', 'end', 'hasStill', 'id', 'kind', 'label', 'measures', 'path', 'speedVsPlanes', 'start', 'unusual', 'watch'];
+  const keys = ['ai', 'alerted', 'by', 'camera', 'candidate', 'correction', 'detail', 'display', 'doubtful', 'end', 'group', 'hasStill', 'id', 'kind', 'label', 'measures', 'path', 'priority',
+    'reasons', 'sortedLater', 'speedVsPlanes', 'start', 'unusual', 'watch'];
   for (const entry of entries) {
     assert.deepEqual(Object.keys(entry).sort(), keys, entry.id);
     assert.equal(entry.watch, entry.start - 3000);
@@ -292,6 +294,14 @@ test('the night route answers the log as Task 5 describes it', opts, async () =>
   assert.ok(unexplained.some((entry) => entry.kind === 'newLight'), 'lights that rise, hold and fade');
   assert.ok(unexplained.some((entry) => entry.kind === 'track' && entry.ai && entry.speedVsPlanes > 1), 'a fast track with the AI’s sentence');
   assert.ok(entries.some((entry) => entry.kind === 'flash' && entry.label === 'probablePlane' && entry.measures.elevation < 8 && entry.measures.blinks), 'strobes crawling along the horizon');
+  // The guide: every unexplained light has a priority and its reasons, the explained none; three moved together, in one group named after the first.
+  assert.ok(unexplained.every((entry) => ['high', 'medium', 'low'].includes(entry.priority) && entry.reasons.length > 0));
+  assert.ok(entries.filter((entry) => entry.label !== 'unexplained').every((entry) => entry.priority === null && entry.reasons.length === 0 && entry.group === null));
+  assert.ok(['high', 'medium', 'low'].every((priority) => unexplained.some((entry) => entry.priority === priority)), 'every priority');
+  const together = entries.filter((entry) => entry.group);
+  assert.equal(together.length, 3);
+  assert.ok(together.every((entry) => entry.group === `g-${together[0].id}` && entry.priority === 'high' && entry.reasons[0] === 'Several lights moving together'));
+  assert.ok(entries.some((entry) => entry.label === 'probableSatellite' && entry.by === 'rule' && /^Probable satellite/.test(entry.detail)), 'probable satellites');
   const waves = entries.filter((entry) => entry.label === 'satellite').map((entry) => (entry.start - json.from) / (json.to - json.from));
   assert.ok(waves.some((x) => x < 0.2) && waves.some((x) => x > 0.8), 'satellites in waves after dusk and before dawn');
   assert.ok(waves.every((x) => x < 0.3 || x > 0.7), 'and none in the middle of the night');

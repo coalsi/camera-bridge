@@ -56,21 +56,30 @@ public struct SkyCameraStatus: Sendable, Equatable {
 /// conditions are written.
 ///
 /// **Each ended track** (off the picture path, one at a time in order, on a queue of its own: a picture never waits for one): measured with
-/// the current aim; a stationary one is left for Task 10; then `classify` (Phase 1: the flight feed) and, when nothing explains it, a picture
-/// of its middle (`Context.still`, while the drive has room); then the entry, filed by `SkyNight.logName` (a night by its sunset's date, a day
-/// by its own: Ruling S4), its path at most 64 points evenly picked. A match's correspondences go to the aim in one `SkyAimStore.add` (the
-/// store thins each call per aircraft): the fit runs on the store, never on a picture. What nothing explains is no entry, only counted (the
-/// journal gets one line a clock hour for each kind, with the count), when:
+/// the current aim; a stationary one is left for Task 10; then `classify` (the flight feed, then the rules: `SkyRules`) and, when it wants one
+/// (`SkyLightFilter.wantsStill`: what nothing explains, the rules' meteors, bugs and birds, and their probable planes and satellites), a picture
+/// of its middle (`Context.still`, while the drive has room), whose small one is then asked for (`Context.stillWritten`); then the entry,
+/// filed by `SkyNight.logName` (a night by its sunset's date, a day by its own: Ruling S4), its path at most 64 points evenly
+/// picked. A match's correspondences go to the aim in one `SkyAimStore.add` (the store thins each call per aircraft): the fit runs on the
+/// store, never on a picture; a plane matched with a good aim teaches the baseline (`SkyBaseline`). A light no flight explains is no entry,
+/// only counted (the journal gets one line a clock hour for each kind, with the count), when:
 /// - it crawls (under 0.05°/s while the aim is good, under 0.5 analysed pixels a second while it is rough: a star), or only wanders in place
 ///   (Rulings S24, S28 and S29, `SkyLightFilter`);
 /// - it began and stayed at a busy spot (`SkyClutterMap`: a tile that keeps making tracks, kept or dropped; tree tops, wires, glare): every
 ///   ended track that no flight explains is counted where it began and where it was seen most, and the status's `aim.note` says how many spots
 ///   are ignored; a light that crosses out of them is logged;
 /// - the Sun is up and just outside the view, and its whole path lies in the band along the edge nearest it (`SkySunGuard`);
-/// - the clock hour has had its `SkyLightFilter.unexplainedPerHour` (60) entries already: once the hour is over, one line of the log says how
-///   many more there were (`SkyLogStore.recordCapped`), and the page shows it.
+/// - the clock hour has had its `SkyLightFilter.unexplainedPerHour` (200) entries that count against it already (`countsAgainstTheHour`: the
+///   unexplained, and the rules' meteors, bugs and birds; never their probable planes and satellites): once the hour is over, one line of the log
+///   says how many more there were (`SkyLogStore.recordCapped`), and the page shows it.
+/// The rest go to the rules (`SkyRules`: meteors, bugs and birds, the overnight test's probable planes and satellites); what they leave is
+/// unexplained: judged against the camera's baseline (`SkyBaseline.unusual`; never a light the rules doubt is a light at all, `SkyRules.doubt`),
+/// a candidate when unusual (Task 11: it may alert once the camera has learned its sky; the gate is `SkyAlertGate`, which Task 12 wires to the
+/// alerts), and ranked with its reasons (`SkyGuide`). Many lights that begin in one picture are the camera changing its picture: the tracker
+/// counts its births per picture (`SkyTracker.beganWith`).
 /// Every logged light that wants a picture (`SkyLightFilter.wantsStill`) has one while the drive has room (Ruling S31); one it could not have
-/// then is made later from the recording, a few a minute (`SkyStillBackfill`, `Context.recordedStill`).
+/// then is made later from the recording, a few a minute (`SkyStillBackfill`, `Context.recordedStill`). Either way its small picture for the
+/// log's grid is asked for as soon as the picture is written (`Context.stillWritten`), not at the grid's first view.
 ///
 /// **An aim far off** (Ruling S18): once a minute the aircraft of the feed that the aim puts in the view (within 60 km, 2° up, above the ground)
 /// are noted (`SkyMatchWatch`). When planes have been in view for 2 hours (5 aircraft at least) and lights were followed (5 at least) but none
@@ -86,9 +95,10 @@ public struct SkyCameraStatus: Sendable, Equatable {
 /// the detector next opens it (Ruling S25b), with one line in the journal.
 ///
 /// **Kept per camera** in `directory` (`<data>/sky/<camera-uuid>/`, beside the aim's own files): `detector.json` with the visibility's memory,
-/// the open conditions span, the planes matched with a good aim (the learning) and the card the search found, and `clutter.json` with the
-/// busy spots (forgotten when the camera's card changes: it looks at other things then). Nothing in them is the place. Nothing is logged with
-/// the place in it.
+/// the open conditions span, the planes learned and the card the search found, `clutter.json` with the busy spots (forgotten when the camera's
+/// card changes: it looks at other things then), and `baseline.json` with what the camera learned of its sky (`SkyBaseline`: the speeds,
+/// sizes and brightnesses of the matched planes and satellites by band; kept through a new card, Ruling S25). Nothing in them is the place.
+/// Nothing is logged with the place in it.
 actor SkyCameraDetector: SkyFrameSink {
     /// What the detector needs to know of its camera and the box. `pictureWidth` and `pictureHeight`: the camera's picture, when known
     /// before its first picture (0: the first picture says). `folder`: the recordings folder the log is kept in. `still`: a JPEG of the
@@ -96,7 +106,8 @@ actor SkyCameraDetector: SkyFrameSink {
     /// drive has room for a picture now (`SkyLightFilter.stillsHaveRoom`): a light is logged without one while it has not. `recordedStill`: a
     /// picture of the camera's recording at a time on the box's clock (Ruling S31), for a light logged without one; the default has none.
     /// `readLog`: the entries of one of the camera's logs, by its name, read off the actor (nil when it cannot be read now); the default reads
-    /// nothing, so nothing is made later.
+    /// nothing, so nothing is made later. `stillWritten`: an entry's picture (its id, and its log's name) was just handed to the log, live or
+    /// made later, with its line: its small picture can be made (`SkyThumbnails.prepare`, at low priority); it returns at once.
     struct Context: Sendable {
         var cameraID: UUID
         var cameraName: String
@@ -110,6 +121,7 @@ actor SkyCameraDetector: SkyFrameSink {
         var roomForStills: @Sendable () async -> Bool = { true }
         var recordedStill: @Sendable (Date) async -> SkyRecordedStill = { _ in .gone }
         var readLog: @Sendable (String) async -> [SkyEntry]? = { _ in nil }
+        var stillWritten: @Sendable (_ entryID: String, _ night: String) -> Void = { _, _ in }
     }
 
     // MARK: Values
@@ -131,6 +143,7 @@ actor SkyCameraDetector: SkyFrameSink {
     /// Ended tracks waiting for the queue: beyond this a light is not logged (the box is far behind).
     static let maximumPending = 200
     static let stateFileName = "detector.json"
+    static let baselineFileName = "baseline.json"
     /// An aircraft counts as in the view within this range and above this elevation.
     static let inViewRange = 60_000.0
     static let inViewElevation = 2.0
@@ -180,7 +193,9 @@ actor SkyCameraDetector: SkyFrameSink {
     private var latestVisibility: Double?
     private var conditions = SkyConditionsRecorder()
 
-    private var learnedPlanes = 0
+    /// What the camera learned of its sky from matched planes (and, later, satellites): the unusual rule's baseline (Task 11), kept in
+    /// `baseline.json`.
+    private var baseline = SkyBaseline()
     /// The lights skipped, by the clock hour of the light and why: slow ones (Ruling S24: `SkyLightFilter`), at a busy spot, by the Sun.
     private var slowLights = SkyHourCounts()
     private var busyLights = SkyHourCounts()
@@ -192,6 +207,7 @@ actor SkyCameraDetector: SkyFrameSink {
     /// The busy spots of the picture (`SkyClutterMap`, kept in `clutter.json`); nil until a track of a known analysed size ended.
     private var clutter: SkyClutterMap?
     private var clutterSaveFailureLogged = false
+    private var baselineSaveFailureLogged = false
     /// The pictures to make later from the recording (Ruling S31).
     private var backfill = SkyStillBackfill()
     private var watch = SkyMatchWatch()
@@ -331,6 +347,7 @@ actor SkyCameraDetector: SkyFrameSink {
         lastSearch = nil
         clutter = nil
         if PrivateFiles.exists(clutterURL) { try? FileManager.default.removeItem(at: clutterURL) }
+        // What the box learned of this sky (`baseline`) is not the aim (Ruling S25): it stays.
         dirty = true
     }
 
@@ -518,7 +535,17 @@ actor SkyCameraDetector: SkyFrameSink {
 
     /// The planes matched with a good aim (the baseline's, Task 11); ready at 30. No orbits are loaded in this phase, so satellites are not needed.
     private var learning: SkyLearning {
-        SkyLearning(ready: learnedPlanes >= SkyLearning.planesNeeded, planes: learnedPlanes, satellites: 0)
+        baseline.learning(orbitsLoaded: false)
+    }
+
+    /// What the log's reader needs of the camera to sort the lights logged before the rules (`SkySortLater`): the aim now (none before the
+    /// picture's size is known), the width the pictures are analysed at, the picture's size, how many pictures a second are looked at, and what
+    /// the camera learned of its sky.
+    var sortingCamera: SkySortLater.Camera {
+        let size = aimSize.map { SkyPictureSize(width: $0.width, height: $0.height) }
+        let width = analysisWidth ?? min(max(1, size?.width ?? pictureWidth), SkyStreamChoice.maximumAnalysisWidth)
+        return SkySortLater.Camera(model: size == nil ? nil : model, analysisWidth: width, picture: size, baseline: baseline,
+                                   picturesPerSecond: picturesPerSecond ?? SkyStreamChoice.analysisRate)
     }
 
     // MARK: The queue
@@ -582,8 +609,10 @@ actor SkyCameraDetector: SkyFrameSink {
         }
         guard verdict.skipped == nil else { return }
         let night = SkyNight.logName(for: entry.start, observer: context.observer, zone: context.zone)
-        if entry.label == .unexplained {
-            // At most `SkyLightFilter.unexplainedPerHour` in a clock hour of the light's start; the rest are counted for the hour's line.
+        if SkyLightFilter.countsAgainstTheHour(entry.label, by: entry.by) {
+            // At most `SkyLightFilter.unexplainedPerHour` in a clock hour of the light's start (the unexplained, and the rules' meteors, bugs and
+            // birds; never their probable planes and satellites, so that a busy hour of them leaves the room to the rest); the rest are counted
+            // for the hour's line.
             guard unexplainedLogged.count(in: hour) < SkyLightFilter.unexplainedPerHour else {
                 unlogged[night, default: SkyHourCounts()].add(in: hour)
                 return
@@ -591,10 +620,10 @@ actor SkyCameraDetector: SkyFrameSink {
             unexplainedLogged.add(in: hour)
         }
         let folder = context.folder()
-        // Every logged light that wants a picture has one (Ruling S31: a software decode of a keyframe and a file each, at most 60 an hour by the
-        // cap above): not once the detector is told to stop, nor while the drive is short of room (Ruling S27); one that cannot be had now is
-        // made later from the recording (`backfillStills`).
-        if SkyLightFilter.wantsStill(entry.label), !stopped, await context.roomForStills(), !stopped {
+        // Every logged light that wants a picture has one (Ruling S31: a software decode of a keyframe and a file each): not once the detector is
+        // told to stop, nor while the drive is short of room (Ruling S27); one that cannot be had now is made later from the recording
+        // (`backfillStills`). Its small picture is asked for once the picture and the line are handed to the log.
+        if SkyLightFilter.wantsStill(entry.label, by: entry.by), !stopped, await context.roomForStills(), !stopped {
             let middle = SkyStillBackfill.middle(of: entry)
             if let still = await context.still(middle.addingTimeInterval(-clockOffset)), !still.jpeg.isEmpty,
                still.jpeg.count <= SkyLogStore.maximumStillBytes {
@@ -603,6 +632,7 @@ actor SkyCameraDetector: SkyFrameSink {
             }
         }
         log.record(entry, night: night, folder: folder)
+        if entry.hasStill { context.stillWritten(entry.id, night) }
     }
 
     /// The lines for each clock hour before `hour` (all of them, at the stop), once it is over: in the journal, how many lights were skipped and
@@ -653,11 +683,12 @@ actor SkyCameraDetector: SkyFrameSink {
         var skipped: Skip?
     }
 
-    /// The classification pipeline of an ended track: what explains it, as the log's entry (not written here). Phase 1: the flight feed (a match
+    /// The classification pipeline of an ended track: what explains it, as the log's entry (not written here). The flight feed first (a match
     /// is `.plane`, or `.probablePlane` while the aim is rough, by `.flight`, with the flight's call sign and height; its correspondences go to
-    /// the aim in one call); later tasks insert orbits, the rules, the local model and the AI after it, in this order. Nothing explains it:
-    /// `.unexplained`, and a candidate while the camera is still learning its sky; unless it was slow, at a busy spot or by the Sun, which
-    /// `handle` does not log.
+    /// the aim in one call), then the rules (`SkyRules`, by `.rule`, with what they rest on as `detail`); later tasks insert orbits before the
+    /// rules, and the local model and the AI after them. Nothing explains it: `.unexplained`, with its unusual reasons, whether it is a
+    /// candidate, its priority and its reasons (`judge`); unless it was slow, at a busy spot or by the Sun, which `handle` does not log (the
+    /// rules see none of those).
     func classify(_ track: SkyTrack, measures: SkyMeasures) async -> SkyEntry {
         let width = analysisWidth ?? min(max(1, pictureWidth), SkyStreamChoice.maximumAnalysisWidth)
         let height = analysisHeight ?? aimSize.map { max(1, Int((Double(width) * Double($0.height) / Double(max(1, $0.width))).rounded())) } ?? width
@@ -682,7 +713,7 @@ actor SkyCameraDetector: SkyFrameSink {
             entry.detail = match.detail
             watch.matched()
             if match.label == .plane {
-                learnedPlanes += 1
+                baseline.learn(measures, label: .plane)
                 dirty = true
             }
             if let store = aimStore, !match.correspondences.isEmpty {
@@ -698,15 +729,48 @@ actor SkyCameraDetector: SkyFrameSink {
         } else if isByTheSun(track, entry: entry) {
             return Classified(entry: entry, skipped: .byTheSun)   // its whole path lay along the edge nearest the Sun, just outside the view
         } else {
-            entry.candidate = !learning.ready
             watch.noteUnexplained()
             if quality == .rough, let kept = SkyAimSearch.record(of: track, analysisWidth: analysisWidth, pictureWidth: pictureWidth, flights: nearby,
                                                                observer: observer) {
                 records.append(kept)
                 if records.count > SkyAimSearch.maximumRecords { records.removeFirst(records.count - SkyAimSearch.maximumRecords) }
             }
+            judge(&entry, light: ruleLight(track, measures: measures, entry: entry, analysisWidth: analysisWidth, analysisHeight: analysisHeight))
         }
         return Classified(entry: entry)
+    }
+
+    /// The rules, the unusual rule against what the camera learned and the guide (`SkyRules.judge`: the log's reader applies the same to the
+    /// lights logged before the rules, `SkySortLater`).
+    private func judge(_ entry: inout SkyEntry, light: SkyRuleLight) {
+        SkyRules.judge(&entry, light: light, baseline: baseline)
+    }
+
+    /// What the rules need of `track` besides its measures: the Sun's height at its middle, how it began (`SkyTracker.beganWith`), its way
+    /// across the picture, its step from one picture to the next, and whether a satellite could be in sunlight where it was.
+    private func ruleLight(_ track: SkyTrack, measures: SkyMeasures, entry: SkyEntry, analysisWidth: Int, analysisHeight: Int) -> SkyRuleLight {
+        let samples = track.samples.filter { $0.time.isFinite && $0.point.x.isFinite && $0.point.y.isFinite }.sorted { $0.time < $1.time }
+        let middle = SkyStillBackfill.middle(of: entry)
+        let observer = context.observer
+        var light = SkyRuleLight(measures: measures, streakBorn: track.streakBorn, samples: samples.count,
+                                 sunElevation: SunEphemeris.direction(at: middle, observer: observer).elevation)
+        if let first = samples.first, let tracker {
+            let began = tracker.beganWith(at: first.time, near: SkyRules.meteorAloneWithin, many: SkyRules.cameraChangeLights,
+                                          window: SkyRules.cameraChangeWindow)
+            light.beganWith = began.count
+            light.beganNear = began.near
+            light.afterCameraChange = began.cameraChange
+        }
+        if let first = samples.first, let last = samples.last {
+            let width = Double(aimSize?.width ?? max(1, analysisWidth)), height = Double(aimSize?.height ?? max(1, analysisHeight))
+            let across = (last.point.x - first.point.x) * width, down = (last.point.y - first.point.y) * height
+            if hypot(across, down) > 0 { light.fromStraightDown = atan2(abs(across), down) * SkyMath.degrees }
+            let span = last.time - first.time
+            let pictures = samples.count + track.misses.filter { $0 > first.time && $0 < last.time }.count
+            if span > 0, pictures > 1 { light.degreesPerPicture = measures.speed * span / Double(pictures - 1) }
+        }
+        light.satelliteSunlit = SkyRules.satelliteCouldBeSunlit(SkyRules.halfway(measures), at: middle, observer: observer)
+        return light
     }
 
     /// Whether the aim of every lens that `track` was seen through is good or precise (a lens that has no fit yet, or none the status knows of,
@@ -834,6 +898,7 @@ actor SkyCameraDetector: SkyFrameSink {
                 guard !stopped else { return }   // not written once the detector is told to stop: the next run makes it again
                 log.writeStill(jpeg, entryID: item.id, camera: context.cameraID, night: item.night, folder: folder)
                 log.recordStill(entryID: item.id, camera: context.cameraID, night: item.night, folder: folder)
+                context.stillWritten(item.id, item.night)
                 backfill.finish(item)
             case .made, .gone, .failed:
                 backfill.finish(item)
@@ -962,6 +1027,7 @@ actor SkyCameraDetector: SkyFrameSink {
 
     private func loadState() {
         loadClutter()
+        loadBaseline()
         guard PrivateFiles.exists(stateURL) else { return }
         guard let data = try? Data(contentsOf: stateURL), let saved = try? Self.coder().1.decode(Saved.self, from: data) else {
             logger.warning("Sky Watcher's state for \(context.cameraName) (\(Self.stateFileName)) could not be read; it starts afresh")
@@ -969,7 +1035,6 @@ actor SkyCameraDetector: SkyFrameSink {
         }
         visibility = saved.visibility ?? SkyVisibility()
         conditions = saved.conditions ?? SkyConditionsRecorder()
-        learnedPlanes = max(0, saved.learnedPlanes ?? 0)
         let person = SkyAimSearch.Card(facing: context.settings.facing, tilt: context.settings.tilt)
         if let offset = saved.cardOffset, saved.cardFor == person, offset.facing.isFinite, offset.tilt.isFinite { cardOffset = offset }
     }
@@ -978,7 +1043,7 @@ actor SkyCameraDetector: SkyFrameSink {
         lastSave = date
         dirty = false
         let person = SkyAimSearch.Card(facing: context.settings.facing, tilt: context.settings.tilt)
-        let saved = Saved(visibility: visibility, conditions: conditions, learnedPlanes: learnedPlanes,
+        let saved = Saved(visibility: visibility, conditions: conditions, learnedPlanes: baseline.planeCount,
                           cardOffset: cardOffset == .zero ? nil : cardOffset, cardFor: cardOffset == .zero ? nil : person)
         do {
             try PrivateFiles.prepareDirectory(directory)
@@ -991,6 +1056,44 @@ actor SkyCameraDetector: SkyFrameSink {
             }
         }
         saveClutter(at: date)
+        saveBaseline()
+    }
+
+    /// `baseline.json`: the speeds, sizes and brightnesses of the matched planes and satellites, by band; no place, no time.
+    private var baselineURL: URL {
+        directory.appending(path: Self.baselineFileName, directoryHint: .notDirectory)
+    }
+
+    private func loadBaseline() {
+        guard PrivateFiles.exists(baselineURL) else { return }
+        guard let read = Self.readBaseline(in: directory) else {
+            logger.warning("Sky Watcher's baseline for \(context.cameraName) (\(Self.baselineFileName)) could not be read; it is learnt again")
+            return
+        }
+        baseline = read
+    }
+
+    /// What a camera learned of its sky, from `baseline.json` in its folder (`directory`, `SkyService.directory(of:in:)`); nil when there is none
+    /// or it cannot be read. Blocking disk work: the log's reader asks for it while the camera's detector does not run.
+    static func readBaseline(in directory: URL) -> SkyBaseline? {
+        let url = directory.appending(path: baselineFileName, directoryHint: .notDirectory)
+        guard PrivateFiles.exists(url), let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(SkyBaseline.self, from: data)
+    }
+
+    private func saveBaseline() {
+        guard baseline.planeCount + baseline.satelliteCount > 0 || PrivateFiles.exists(baselineURL) else { return }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            try PrivateFiles.prepareDirectory(directory)
+            try PrivateFiles.write(try encoder.encode(baseline), to: baselineURL)
+        } catch {
+            if !baselineSaveFailureLogged {
+                baselineSaveFailureLogged = true
+                logger.warning("Sky Watcher's baseline for \(context.cameraName) (\(Self.baselineFileName)) could not be saved; it is kept in memory")
+            }
+        }
     }
 }
 

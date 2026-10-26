@@ -212,6 +212,21 @@ final class SkyTracker {
     /// The tracks open now (born, not ended).
     var activeCount: Int { open.count }
 
+    /// How many tracks were born whose first picture was at each stream time, for the last `birthsKept` seconds: many lights that begin in
+    /// one picture are the camera changing its picture, not the sky (`SkyRules.doubt`).
+    private(set) var births: [TimeInterval: Int] = [:]
+    static let birthsKept: TimeInterval = 600
+
+    /// How many tracks began in the picture at `time` (stream seconds) and within `near` seconds of it (each at least one: unknown times, of a
+    /// track this tracker did not make or one older than `birthsKept`, count one), and whether a picture within `window` of it saw `many` or more
+    /// begin.
+    func beganWith(at time: TimeInterval, near: TimeInterval, many: Int, window: ClosedRange<TimeInterval>) -> (count: Int, near: Int, cameraChange: Bool) {
+        let count = max(1, births[time] ?? 0)
+        let close = max(count, births.filter { abs($0.key - time) <= near }.reduce(0) { $0 + $1.value })
+        let change = births.contains { $0.value >= many && window.contains(time - $0.key) }
+        return (count, close, change)
+    }
+
     /// The open tracks' filters: position (analysed pixels) and velocity (pixels a second) as of their last update, for the status and the
     /// tests.
     var filters: [(id: UUID, x: Double, y: Double, vx: Double, vy: Double)] {
@@ -273,6 +288,7 @@ final class SkyTracker {
         }
         let previous = lastTime
         lastTime = time
+        births = births.filter { time - $0.key <= Self.birthsKept }
         let found = detections.filter { $0.x.isFinite && $0.y.isFinite && $0.flux.isFinite }
         var taken = [Bool](repeating: false, count: found.count)
         let pieces = Pieces(found)
@@ -599,6 +615,7 @@ final class SkyTracker {
         let vy = span > 0 ? (last.detection.y - from.y) / span : 0
         let track = SkyTrack(id: UUID(), samples: candidate.hits.map { sample($0.detection, at: $0.time, wallClock: $0.wallClock) }, streakBorn: streak,
                              brighter: last.detection.brighter, seamJoins: candidate.seamJoins, uncertainSeamJoin: candidate.uncertain)
+        births[first.time, default: 0] += 1
         open.append(Open(track: track, x: last.detection.x, y: last.detection.y, vx: vx, vy: vy, updated: last.time, lastSeen: last.time,
                          lens: last.detection.lens))
     }

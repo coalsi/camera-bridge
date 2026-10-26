@@ -65,6 +65,10 @@ import TestSupport
         odd.unusual = [.faster, .larger]
         odd.speedVsPlanes = 6.1
         odd.candidate = true
+        odd.priority = .high
+        odd.reasons = ["Several lights moving together", "Fast across the sky (about 6× a plane at that height)"]
+        odd.group = "g-u-0"
+        odd.sortedLater = true
         odd.ai = SkyAIAnswer(kind: "drone", sentence: "A bright light moving fast.", model: "claude-haiku-5-5", at: Self.start.addingTimeInterval(70))
         let doubted = Self.entry("s-1", camera: id, at: 120, label: .satellite, by: .orbit, detail: "ISS (ZARYA)", correction: .bird)
         backend.write { state in
@@ -108,6 +112,12 @@ import TestSupport
             #expect(oddJSON.keys.contains(key) && planeJSON.keys.contains(key), "\(key) is present even when it is nothing")
         }
         #expect(planeJSON["ai"] is NSNull && planeJSON["correction"] is NSNull && planeJSON["speedVsPlanes"] is NSNull)
+        // The guide to the unexplained: its priority, reasons and group (null and none for an explained light), and whether it is doubted.
+        #expect(oddJSON["priority"] as? String == "high" && oddJSON["group"] as? String == "g-u-0" && oddJSON["doubtful"] as? Bool == false)
+        #expect((oddJSON["reasons"] as? [String]) == ["Several lights moving together", "Fast across the sky (about 6× a plane at that height)"])
+        #expect(planeJSON["priority"] is NSNull && planeJSON["group"] is NSNull && (planeJSON["reasons"] as? [String]) == [])
+        // Logged before the rules and sorted by them as the log was read: it says so (the page's hint in the player).
+        #expect(oddJSON["sortedLater"] as? Bool == true && planeJSON["sortedLater"] as? Bool == false)
         #expect(oddJSON["by"] is NSNull && oddJSON["detail"] is NSNull && oddJSON["correction"] is NSNull)
         #expect((oddJSON["unusual"] as? [String]) == ["faster", "larger"] && (oddJSON["speedVsPlanes"] as? Double) == 6.1)
         #expect(oddJSON["candidate"] as? Bool == true && oddJSON["alerted"] as? Bool == false && oddJSON["hasStill"] as? Bool == true)
@@ -119,7 +129,9 @@ import TestSupport
         let measures = try #require(planeJSON["measures"] as? [String: Any])
         #expect(measures["azimuth"] as? Double == 312 && measures["shape"] as? String == "straight" && measures["blinks"] as? Bool == true && measures["blinkRate"] as? Double == 1)
         #expect(Set(measures.keys) == ["azimuth", "elevation", "azimuthEnd", "elevationEnd", "duration", "speed", "acceleration", "turnRate", "maxTurn", "straightness",
-                                       "shape", "sizeDegrees", "brightness", "blinks", "blinkRate", "focus"])
+                                       "shape", "sizeDegrees", "brightness", "blinks", "blinkRate", "focus", "strobePeriod", "strobeStrength", "seenShare",
+                                       "wobble", "turns"])
+        #expect(measures["strobePeriod"] is NSNull && measures["turns"] is NSNull, "an entry measured before them has none")
 
         let conditions = answer.array("conditions")
         #expect(conditions.count == 2 && conditions[0]["state"] as? String == "clear" && conditions[0]["cloudCover"] as? Int == 10)

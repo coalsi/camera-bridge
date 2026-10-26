@@ -196,6 +196,8 @@
 .sky-filter[data-kind="meteors"] { --sky-tint: var(--sky-meteors); }
 .sky-filter[data-kind="bugs"] { --sky-tint: var(--sky-bugsAndBirds); }
 .sky-filter[data-kind="corrected"] { --sky-tint: var(--brand-accent); }
+.sky-filter[data-kind="high"], .sky-filter[data-kind="group"] { --sky-tint: var(--sky-unexplained); }
+.sky-filter--group svg { width: 13px; height: 13px; margin-left: 2px; }
 .sky-filter[aria-pressed="true"] {
   color: var(--text); border-color: var(--sky-tint); background: color-mix(in srgb, var(--sky-tint) 15%, var(--surface)); box-shadow: inset 0 0 0 1px var(--sky-tint);
 }
@@ -288,6 +290,17 @@
   font-size: 0.72rem; font-weight: 650; line-height: 1.35; font-variant-numeric: tabular-nums;
 }
 .sky-tile-length:empty { display: none; }
+/* An unexplained light's priority (the bridge's guide), bottom left of its picture: High in the unexplained colour, glowing as the strip's dots
+   do; Medium plain; Low quiet. The word says it too. */
+.sky-tile-priority {
+  position: absolute; left: 7px; bottom: 7px; padding: 1px 7px; border-radius: 6px; background: rgb(8 9 14 / 0.78); color: #ececf0;
+  font-size: 0.72rem; font-weight: 700; line-height: 1.35; letter-spacing: 0.01em;
+}
+.sky-tile-priority[data-priority="high"] { background: var(--sky-unexplained); color: #1b1305; box-shadow: 0 0 8px 1px var(--sky-unexplained); }
+.sky-tile-priority[data-priority="medium"] { border: 1px solid color-mix(in srgb, var(--sky-unexplained) 70%, transparent); color: var(--sky-unexplained); }
+.sky-tile-priority[data-priority="low"] { color: #a9adbd; font-weight: 600; }
+@media (prefers-reduced-motion: no-preference) { .sky-tile-priority[data-priority="high"] { animation: sky-badge 3.2s ease-in-out infinite; } }
+@keyframes sky-badge { 50% { box-shadow: 0 0 3px 0 var(--sky-unexplained); } }
 .sky-tile-meta { display: flex; flex-direction: column; min-width: 0; padding: 7px 10px 9px; }
 .sky-tile-when, .sky-tile-line { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; line-height: 1.35; }
 .sky-tile-when { font-size: 0.93rem; font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -300,9 +313,20 @@
 
 /* The light's details, in the clip player: its kind, what the box matched it to, the facts, the AI's sentence, the correction and the clip. */
 .sky-details { display: grid; align-content: start; gap: 12px; min-width: 0; font-size: 0.92rem; }
-.sky-details-kind { display: flex; flex-wrap: wrap; gap: 6px; }
+.sky-details-kind { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sky-sorted-later { color: var(--text-2); font-size: 0.75rem; }
 .sky-kind-chip { display: inline-flex; align-items: center; gap: 7px; padding: 3px 12px 3px 10px; border: 1px solid var(--border-strong); border-radius: 99px; font-weight: 700; font-size: 0.88rem; }
 .sky-detail { margin: 0; color: var(--text); overflow-wrap: anywhere; unicode-bidi: isolate; }
+/* Why an unexplained light ranks where it does: its priority and every reason; for one that moved with others, which of them it was, a button
+   that shows only them. */
+.sky-reasons { padding: 10px 12px; border: 1px solid var(--border); border-left: 3px solid var(--sky-unexplained); border-radius: 10px; background: var(--surface-2); }
+.sky-reasons[data-priority="low"] { border-left-color: var(--border-strong); }
+.sky-reasons-head { margin: 0 0 6px; }
+.sky-reasons-badge { font-weight: 700; }
+.sky-reasons-badge[data-priority="high"] { color: var(--sky-unexplained); }
+.sky-reasons-list { margin: 0; padding-left: 18px; }
+.sky-reasons-list li { margin: 2px 0; overflow-wrap: anywhere; }
+.sky-group-show { margin: 2px 0; }
 .sky-facts { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; color: var(--text-2); }
 .sky-ai { margin: 0; padding: 8px 12px; border-left: 3px solid var(--brand-accent); border-radius: 8px; background: var(--surface-2); overflow-wrap: anywhere; unicode-bidi: isolate; }
 .sky-ai-label { margin-right: 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em; color: var(--text-3); }

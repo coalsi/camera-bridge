@@ -286,8 +286,9 @@ private func milliseconds(_ date: Date) -> Int64 { WebApp.milliseconds(date) }
 /// Glibc has a function of that name.)
 private func plain(_ value: Double) -> Double { value.isFinite ? value : 0 }
 
-/// One entry of the log as the page reads it: the entry's own fields, `display` (the label the log shows: the person's word wins) and `watch`
-/// (the recordings' moment to open, three seconds before it began). Optional values are null, not left out.
+/// One entry of the log as the page reads it: the entry's own fields, `display` (the label the log shows: the person's word wins), `watch`
+/// (the recordings' moment to open, three seconds before it began) and `sortedLater` (logged before the rules and sorted by them as the log was
+/// read: `SkySortLater`). Optional values are null, not left out.
 struct SkyEntryResource: Encodable {
     var entry: SkyEntry
 
@@ -297,6 +298,7 @@ struct SkyEntryResource: Encodable {
 
     private enum CodingKeys: String, CodingKey {
         case id, camera, kind, start, end, path, measures, label, display, by, detail, unusual, speedVsPlanes, candidate, alerted, hasStill, ai, correction, watch
+        case priority, reasons, doubtful, group, sortedLater
     }
 
     private struct Point: Encodable {
@@ -333,6 +335,11 @@ struct SkyEntryResource: Encodable {
         try container.encode(OrNull(entry.ai.map { Answer(kind: $0.kind, sentence: $0.sentence, model: $0.model, at: milliseconds($0.at)) }), forKey: .ai)
         try container.encode(OrNull(entry.correction?.rawValue), forKey: .correction)
         try container.encode(milliseconds(entry.start) - 3_000, forKey: .watch)
+        try container.encode(OrNull(entry.priority?.rawValue), forKey: .priority)
+        try container.encode(entry.reasons, forKey: .reasons)
+        try container.encode(entry.doubtful, forKey: .doubtful)
+        try container.encode(OrNull(entry.group), forKey: .group)
+        try container.encode(entry.sortedLater, forKey: .sortedLater)
     }
 }
 
@@ -346,7 +353,7 @@ struct SkyMeasuresResource: Encodable {
 
     private enum CodingKeys: String, CodingKey {
         case azimuth, elevation, azimuthEnd, elevationEnd, duration, speed, acceleration, turnRate, maxTurn, straightness, shape, sizeDegrees, brightness
-        case blinks, blinkRate, focus
+        case blinks, blinkRate, focus, strobePeriod, strobeStrength, seenShare, wobble, turns
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -367,6 +374,11 @@ struct SkyMeasuresResource: Encodable {
         try container.encode(measures.blinks, forKey: .blinks)
         try container.encode(OrNull(measures.blinkRate.flatMap { $0.isFinite ? $0 : nil }), forKey: .blinkRate)
         try container.encode(plain(measures.focus), forKey: .focus)
+        try container.encode(OrNull(measures.strobePeriod.flatMap { $0.isFinite ? $0 : nil }), forKey: .strobePeriod)
+        try container.encode(OrNull(measures.strobeStrength.flatMap { $0.isFinite ? $0 : nil }), forKey: .strobeStrength)
+        try container.encode(OrNull(measures.seenShare.flatMap { $0.isFinite ? $0 : nil }), forKey: .seenShare)
+        try container.encode(OrNull(measures.wobble.flatMap { $0.isFinite ? $0 : nil }), forKey: .wobble)
+        try container.encode(OrNull(measures.turns), forKey: .turns)
     }
 }
 

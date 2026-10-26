@@ -12,10 +12,15 @@ import Foundation
 ///   busy spot (`SkyClutterMap`) and those in the band along the edge nearest the Sun (`SkySunGuard`).
 /// - **A camera logs at most `unexplainedPerHour` lights that nothing explains** in a clock hour (of the box's zone): the owner's camera logged
 ///   about 2,500 junk entries in one afternoon, which made the page unusable and the day's file (which the night after it shares) huge. The
-///   later ones are counted, not logged, and one line of the log says how many for the hour (`SkyLogStore.recordCapped`).
-/// - **Every light that is logged and wants a picture has one** (`wantsStill`: what nothing explains, and the rules' meteors, bugs and birds;
-///   Ruling S31): the hour's entries bound the pictures. One the camera's ring could not give is made later from the recordings
-///   (`SkyStillBackfill`).
+///   later ones are counted, not logged, and one line of the log says how many for the hour (`SkyLogStore.recordCapped`). Since the rules
+///   (`SkyRules`) the hour's count is of every light that no flight explains and that the rules leave unexplained or call a meteor, a bug or a
+///   bird (`countsAgainstTheHour`); the rules' probable planes and satellites are logged whatever the hour holds, so that a busy hour of them
+///   never takes the room of a light nothing explains.
+/// - **Every light that is logged and wants a picture has one** (`wantsStill`, Ruling S31: what nothing explains, the rules' meteors, bugs and
+///   birds, and since 2026-10-26 their probable planes and satellites and a satellite's flare, so that the owner can check the rules by eye; a
+///   flight's planes and an orbit's named satellites have none). One the camera's ring could not give is made later from the recordings
+///   (`SkyStillBackfill`). The hour's 200 bound the pictures of what nothing explains; the room rule and each camera's 2 GiB (below) bound
+///   them all.
 ///
 /// And the pictures must not fill the recordings drive (Ruling S27): recording pauses on every camera when the drive's free space falls
 /// below its floor, and the size rule never counts what the sky log keeps. So a picture is taken only while the drive has its floor and
@@ -34,7 +39,7 @@ enum SkyLightFilter {
     /// however little it moved. The overnight test's strangest lights rose, held for seconds and faded on one spot; faint stars and wires never
     /// stand this far above the noise (and a bright star is on the slow background, which the tracker already drops).
     static let brightSignificance = 6.0
-    /// A camera logs at most this many lights that nothing explains in a clock hour; the rest are counted.
+    /// A camera logs at most this many lights that count against the hour (`countsAgainstTheHour`) in a clock hour; the rest are counted.
     static let unexplainedPerHour = 200
     /// A camera's pictures stay under this many bytes on the recordings drive (their thumbnails, which the page's grid has made beside them, included).
     static let stillBytesPerCamera: UInt64 = 2 * 1_073_741_824
@@ -52,12 +57,25 @@ enum SkyLightFilter {
         return !overflow && storage.freeBytes >= needed
     }
 
-    /// Whether an entry of this label has a picture: what nothing explains, and what the rules say is a meteor, a bug or a bird (Ruling S31). A
-    /// plane or a satellite is explained by what the feeds say of it.
-    static func wantsStill(_ label: SkyLabel) -> Bool {
+    /// Whether an entry of this label, given by `source`, has a picture (Ruling S31): what nothing explains, what the rules say is a meteor, a bug or
+    /// a bird, and (2026-10-26, so that the owner can check the rules by eye) their probable planes and satellites and a satellite's flare. A plane a
+    /// flight explains (a probable one while the aim is rough) and a satellite an orbit names are explained by the feed's word on them: no picture.
+    static func wantsStill(_ label: SkyLabel, by source: SkyLabelSource?) -> Bool {
+        guard source != .flight else { return false }
         switch label {
-        case .unexplained, .meteor, .bug, .bird: true
-        case .plane, .probablePlane, .satellite, .satelliteFlare: false
+        case .unexplained, .meteor, .bug, .bird, .probablePlane, .probableSatellite, .satelliteFlare: return true
+        case .plane, .satellite: return false
+        }
+    }
+
+    /// Whether a logged light counts against the hour's `unexplainedPerHour`: one that no flight explains and that the rules leave unexplained or
+    /// call a meteor, a bug or a bird, as before their probable planes and satellites had pictures. Those are logged, with their pictures, whatever
+    /// the hour holds: a busy hour of satellites never takes the room of a light nothing explains.
+    static func countsAgainstTheHour(_ label: SkyLabel, by source: SkyLabelSource?) -> Bool {
+        guard source != .flight else { return false }
+        switch label {
+        case .unexplained, .meteor, .bug, .bird: return true
+        case .plane, .probablePlane, .satellite, .probableSatellite, .satelliteFlare: return false
         }
     }
 

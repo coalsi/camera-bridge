@@ -210,7 +210,8 @@ const pictureY = (elevation) => clamp01(0.88 - (elevation / 80) * 0.88);        
 
 /** One entry as the bridge stores it (Task 5's SkyEntry), before its id and any correction. */
 function make(rand, { kind = 'track', label, start, duration, azimuth, elevation, azimuthEnd = azimuth, elevationEnd = elevation, shape = 'straight', blinks = false, blinkRate = null,
-  speed = 1, size = 0.08, brightness = 120, focus = 1, by = null, detail = null, speedVsPlanes = null, unusual = [], candidate = false, alerted = false, hasStill = false, ai = null, points = 8 }) {
+  speed = 1, size = 0.08, brightness = 120, focus = 1, by = null, detail = null, speedVsPlanes = null, unusual = [], candidate = false, alerted = false, hasStill = false, ai = null, points = 8,
+  priority = null, reasons = [], together = null, sortedLater = false }) {
   const count = kind === 'track' ? points : kind === 'flash' ? 3 : 1;
   const path = [];
   for (let i = 0; i < count; i += 1) {
@@ -227,8 +228,15 @@ function make(rand, { kind = 'track', label, start, duration, azimuth, elevation
     measures: {
       azimuth: wrap(azimuth), elevation, azimuthEnd: wrap(azimuthEnd), elevationEnd, duration, speed, acceleration: 0, turnRate: shape === 'straight' ? 0.02 : 0.4, maxTurn: shape === 'sharpTurn' ? 70 : shape === 'curved' ? 18 : 4,
       straightness: shape === 'straight' ? 0.99 : 0.9, shape, sizeDegrees: size, brightness, blinks, blinkRate, focus,
+      strobePeriod: null, strobeStrength: null, seenShare: null, wobble: null, turns: null,
     },
     label, by, detail, unusual, speedVsPlanes, candidate, alerted, hasStill, ai, correction: null,
+    // The guide to the unexplained (the bridge's SkyGuide): a priority and its reasons; `together` names the made-up group a light is in (the
+    // bridge finds the groups as it reads the log; `finish` names them after their first light).
+    priority: label === 'unexplained' ? priority ?? 'low' : null, reasons: label === 'unexplained' ? (reasons.length ? reasons : ['Nothing unusual about it']) : [],
+    doubtful: false, group: null, together,
+    // Logged before the rules, and sorted by them as the bridge read the night (SkySortLater): the player says so.
+    sortedLater,
   };
 }
 
@@ -290,8 +298,12 @@ function nightEntries(name, camera, { busy = false } = {}) {
     const start = evening ? from + 20 * MINUTE + rand() * 90 * MINUTE : to - 90 * MINUTE + rand() * 70 * MINUTE;
     const azimuth = compass(rand);
     const station = i === 7;
+    // One in four is a probable satellite (the rules': a steady light at a steady speed where a satellite can be in the sunlight, no orbit to name it).
+    const probable = !station && i % 4 === 3;
     entries.push(make(rand, {
-      label: i % 63 === 62 ? 'satelliteFlare' : 'satellite', by: 'orbit', detail: station ? 'ISS (ZARYA)' : satelliteName(rand), start: Math.round(start), duration: station ? 95 : 35 + rand() * 70,
+      label: i % 63 === 62 ? 'satelliteFlare' : probable ? 'probableSatellite' : 'satellite', by: probable ? 'rule' : 'orbit',
+      detail: station ? 'ISS (ZARYA)' : probable ? 'Probable satellite: a steady light at a steady speed (no orbit check yet)' : satelliteName(rand),
+      start: Math.round(start), duration: station ? 95 : 35 + rand() * 70,
       azimuth, elevation: 18 + rand() * 55, azimuthEnd: azimuth + (rand() < 0.5 ? -1 : 1) * (20 + rand() * 50), elevationEnd: 15 + rand() * 55, speed: round(0.3 + rand() * 0.6), size: 0.03, brightness: station ? 400 : 70,
       hasStill: still(0.65),
     }));
@@ -321,13 +333,15 @@ function nightEntries(name, camera, { busy = false } = {}) {
   entries.push(make(rand, {
     label: 'unexplained', start: local(3, 12, 8), duration: 4.2, azimuth: 312, elevation: 8, azimuthEnd: 330, elevationEnd: 14, shape: 'curved', speed: 3.1, size: 0.3, brightness: 900, blinks: true, blinkRate: 1,
     speedVsPlanes: 6.1, unusual: ['faster', 'larger'], candidate: true, alerted: true, hasStill: true, points: 12,
+    priority: 'high', reasons: ['Fast across the sky (about 6× a plane at that height)', 'Looks larger than planes here'],
     ai: { kind: 'unknown', sentence: 'A small bright light moving quickly low on the horizon; it doesn’t look like a plane.', model: 'claude-haiku-5-5', at: local(3, 12, 40) },
   }));
   for (const [hours, minutes, azimuth, elevation, duration, extra] of [
     [1, 5, 20, 24, 9, { unusual: ['brighter'], ai: { kind: 'artifact', sentence: 'A steady point of light that brightens and fades, like a reflection in the lens.', model: 'claude-haiku-5-5', at: local(1, 6, 10) } }],
     [2, 41, 350, 31, 12, {}], [4, 30, 5, 22, 6, {}],
   ]) {
-    entries.push(make(rand, { kind: 'newLight', label: 'unexplained', start: local(hours, minutes, 14), duration, azimuth, elevation, shape: 'curved', speed: 0.02, size: 0.2, brightness: 700, candidate: true, hasStill: true, ...extra }));
+    entries.push(make(rand, { kind: 'newLight', label: 'unexplained', start: local(hours, minutes, 14), duration, azimuth, elevation, shape: 'curved', speed: 0.02, size: 0.2, brightness: 700, candidate: true, hasStill: true,
+      priority: 'medium', reasons: extra.unusual ? ['Looks brighter than planes and satellites here'] : ['Appeared and stayed on one spot for seconds'], ...extra }));
   }
   for (const [hours, minutes, azimuth, rate, duration] of [[23, 40, 300, 1.2, 5], [4, 5, 40, 2, 3]]) {
     entries.push(make(rand, {
@@ -348,9 +362,22 @@ function nightEntries(name, camera, { busy = false } = {}) {
       azimuthEnd: azimuth + (track ? (rand() - 0.5) * 30 : 0), elevationEnd: elevation + (track ? (rand() - 0.5) * 16 : 0), shape: ['straight', 'curved', 'suddenStop', 'sharpTurn'][Math.floor(rand() * 4)],
       speed: round(track ? 0.5 + rand() * 4 : 0.02), speedVsPlanes: track ? round(0.4 + rand() * 5) : null, size: round(0.05 + rand() * 0.3), brightness: Math.round(150 + rand() * 700),
       blinks: kind === 'flash' || rand() < 0.2, blinkRate: round(0.5 + rand() * 2), candidate: true, hasStill: true, points: track ? 10 : 1,
-      unusual: track && rand() < 0.3 ? ['faster'] : rand() < 0.1 ? ['brighter'] : [],
+      ...guided(track && rand() < 0.3 ? ['faster'] : rand() < 0.1 ? ['brighter'] : [], kind),
     });
   };
+  /** The guide of a made-up light nothing explains, from what is unusual about it. */
+  function guided(unusual, kind) {
+    if (unusual.includes('faster')) return { unusual, candidate: true, priority: 'high', reasons: [`Fast across the sky (about ${2 + Math.floor(rand() * 7)}× a plane at that height)`] };
+    if (unusual.includes('brighter')) return { unusual, candidate: true, priority: 'medium', reasons: ['Looks brighter than planes and satellites here'] };
+    return { unusual, candidate: false, priority: 'low', reasons: [kind === 'flash' ? 'Too short to tell what it was' : 'Nothing unusual about it'] };
+  }
+  // Three lights crossing together at 10:15 PM, the same way at the same pace: one group, high.
+  for (let i = 0; i < 3; i += 1) {
+    entries.push(make(rand, {
+      label: 'unexplained', start: local(22, 15, 5 + i * 3, 0), duration: 18, azimuth: 300 + i * 2, elevation: 30 - i * 3, azimuthEnd: 320 + i * 2, elevationEnd: 34 - i * 3,
+      speed: 1.2, size: 0.2, brightness: 600, hasStill: true, points: 10, priority: 'high', reasons: ['Several lights moving together'], together: 'swarm-2215',
+    }));
+  }
   const swarm = local(21, 0, 0, 0);
   for (let i = 0; i < 200; i += 1) entries.push(unexplained(swarm + 20_000 + rand() * (HOUR - 60_000)));
   const others = busy ? 1700 : 60;
@@ -376,8 +403,10 @@ function dayEntries(name, camera) {
       azimuthEnd: azimuth + (rand() < 0.5 ? -1 : 1) * (20 + rand() * 40), speed: round(0.8 + rand() * 1.2), size: 0.05, brightness: 60,
     }));
   }
+  // Nine birds, three of them logged before the rules (an older box) and sorted by them as the night is read.
   for (let i = 0; i < 9; i += 1) {
-    entries.push(make(rand, { label: 'bird', by: 'rule', start: Math.round(from + (0.25 + rand() * 0.65) * span), duration: round(3 + rand() * 8), azimuth: compass(rand), elevation: 10 + rand() * 45, shape: 'curved', speed: 3, size: 0.4, brightness: 50, focus: 0.6 }));
+    entries.push(make(rand, { label: 'bird', by: 'rule', start: Math.round(from + (0.25 + rand() * 0.65) * span), duration: round(3 + rand() * 8), azimuth: compass(rand), elevation: 10 + rand() * 45, shape: 'curved', speed: 3, size: 0.4, brightness: 50, focus: 0.6,
+      sortedLater: i < 3 }));
   }
   for (let i = 0; i < 6; i += 1) {
     entries.push(make(rand, { label: 'bug', by: 'rule', start: Math.round(from + (0.3 + rand() * 0.6) * span), duration: round(1 + rand() * 3), azimuth: compass(rand), elevation: 5 + rand() * 40, shape: 'sharpTurn', speed: 6, size: 1.2, brightness: 40, focus: 0.3, points: 6 }));
@@ -393,6 +422,13 @@ function dayEntries(name, camera) {
 function finish(entries, prefix, name, camera) {
   entries.sort((a, b) => a.start - b.start || a.label.localeCompare(b.label));
   entries.forEach((entry, index) => { entry.id = `${prefix}${String(index).padStart(3, '0')}-${name}`; entry.camera = camera; });
+  // A group is named after its first light, as the bridge names it.
+  const first = new Map();
+  for (const entry of entries) {
+    if (entry.together && !first.has(entry.together)) first.set(entry.together, `g-${entry.id}`);
+    entry.group = entry.together ? first.get(entry.together) : null;
+    delete entry.together;
+  }
   return entries;
 }
 
@@ -402,7 +438,8 @@ function finish(entries, prefix, name, camera) {
 function bucketOf(entry) {
   if (entry.display === 'unexplained') return 'unexplained';
   if (entry.correction === 'notSure') return 'notSure';
-  return { plane: 'planes', probablePlane: 'planes', satellite: 'satellites', satelliteFlare: 'satellites', meteor: 'meteors', bug: 'bugsAndBirds', bird: 'bugsAndBirds' }[entry.display];
+  return { plane: 'planes', probablePlane: 'planes', satellite: 'satellites', probableSatellite: 'satellites', satelliteFlare: 'satellites', meteor: 'meteors', bug: 'bugsAndBirds',
+    bird: 'bugsAndBirds' }[entry.display];
 }
 
 function countsOf(entries) {

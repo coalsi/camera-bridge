@@ -1,8 +1,9 @@
 import Foundation
 
-/// What a light that crossed the sky is called in the sky log. A plane is `probablePlane` until the camera's aim is good.
+/// What a light that crossed the sky is called in the sky log. A plane is `probablePlane` until the camera's aim is good, or when the rules
+/// (`SkyRules`) say so without a flight; a satellite is `probableSatellite` when the rules say so without an orbit.
 public enum SkyLabel: String, Codable, Sendable, CaseIterable {
-    case unexplained, plane, probablePlane, satellite, satelliteFlare, meteor, bug, bird
+    case unexplained, plane, probablePlane, satellite, probableSatellite, satelliteFlare, meteor, bug, bird
 }
 
 /// A track that an aircraft explains: which one, how it reads in the log, how well it fits (the median angular distance, in degrees: lower is

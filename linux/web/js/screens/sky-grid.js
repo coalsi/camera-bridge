@@ -7,8 +7,10 @@
 //
 // A card is the still's close-up of the light with its path drawn over it (sky-model.js closeUpRect; the whole picture for a light that
 // crossed more of the sky than a close-up holds), or a quiet picture of its kind when no still was kept; its kind as a chip in the strip's
-// colour, how long it lasted, its time, and a short line: a plane's flight, a satellite's name, an unexplained light's direction and how it
-// moved. A tap opens it (the page: the clip player, with the light's details and the corrections).
+// colour, how long it lasted, its time, and a short line: a plane's flight, a satellite's name, an unexplained light's first reason (which of
+// its group it was, for one that moved with others; logged before the guide, its direction and how it moved). An unexplained light's card has
+// its priority as a badge: High in the unexplained colour, glowing as the strip's dots do; Medium; Low quiet. A tap opens it (the page: the clip
+// player, with the light's details and the corrections).
 //
 // A correction changes a card's kind at once. A card the filters no longer show then leaves the grid: it fades, the cards after it close up,
 // its hour counts one light less (and goes with its last one), and the page keeps its place: what is at the top of the screen stays there.
@@ -19,7 +21,10 @@
 import { h, replace, svg } from '../dom.js';
 import { plural } from '../format.js';
 import { icon } from '../icons.js';
-import { SKY_TEXT, cardLine, closeUpRect, durationShort, durationText, entryBucket, hourGroups, kindWord, lastedSeconds, pathPoints, thumbGeometry, timeText } from './sky-model.js';
+import {
+  SKY_TEXT, cardLine, closeUpRect, durationShort, durationText, entryBucket, hourGroups, kindWord, lastedSeconds, pathPoints, priorityOf, priorityWord, thumbGeometry,
+  timeText,
+} from './sky-model.js';
 
 const TEXT = SKY_TEXT.log;
 /** Cards made at a time: sixty fill whole rows at 1, 2, 3, 4, 5 or 6 columns, so a batch never leaves half a row before one not made yet. */
@@ -60,7 +65,7 @@ function firstWhere(items, test) {
 
 /**
  * The grid, empty until shown.
- * -> { el, show(view, { keepPlace }), refresh(entry), leave(id), has(id), focusFor(id), reveal(id), jumpTo(ms), span(top, bottom), remeasure(), destroy() }
+ * -> { el, show(view, { keepPlace }), setGroups(groups), refresh(entry), leave(id), has(id), focusFor(id), reveal(id), jumpTo(ms), span(top, bottom), remeasure(), destroy() }
  *   thumbAddress(entry)        the address of an entry's small picture (the box cuts it around the light)
  *   stillAddress(entry)        the address of its whole picture (asked for when the small one cannot be had)
  *   picture()                  how big the night's pictures are, { width, height }, or null when the bridge did not say
@@ -77,6 +82,7 @@ export function createSkyGrid({ thumbAddress, stillAddress, picture = () => null
   scrollBy = (dy) => globalThis.window?.scrollBy?.(0, dy) } = {}) {
   const el = h('div', { class: 'sky-results' });
   let zone = '';
+  let moving = new Map();            // the lights that moved together (sky-model.js groupsOf): a card says which of its group it is
   let sections = [];                 // [{ hour, el, head, count, size, tiles, batches }]: one with hour null when the order is not by time
   let batches = [];                  // every batch, in the order shown: { entries, holder, built, section }
   const batchOf = new Map();         // a batch's holder (the block in its place) -> the batch
@@ -185,8 +191,9 @@ export function createSkyGrid({ thumbAddress, stillAddress, picture = () => null
     const word = h('span', { class: 'sky-tile-word' });
     const chip = h('span', { class: 'sky-tile-kind' }, h('span', { class: 'sky-tile-dot', 'aria-hidden': 'true' }), word);
     const yours = h('span', { class: 'sky-tile-yours', title: TEXT.yours, hidden: true }, icon('check'));
+    const badge = h('span', { class: 'sky-tile-priority', 'aria-hidden': 'true', hidden: true });
     const seconds = lastedSeconds(entry);
-    pic.append(chip, yours, h('span', { class: 'sky-tile-length', 'aria-hidden': 'true' }, durationShort(seconds)));
+    pic.append(chip, yours, badge, h('span', { class: 'sky-tile-length', 'aria-hidden': 'true' }, durationShort(seconds)));
     const line = h('span', { class: 'sky-tile-line' });
     const when = timeText(entry.start, zone, { seconds: true });
     const card = h('button', { class: 'sky-tile', type: 'button', dataset: { entry: entry.id }, onclick: () => onOpen(entry, card) },
@@ -196,13 +203,18 @@ export function createSkyGrid({ thumbAddress, stillAddress, picture = () => null
     function refresh() {
       const kind = entryBucket(entry);
       const what = kindWord(entry);
-      const text = cardLine(entry);
+      const text = cardLine(entry, moving);
+      const priority = priorityOf(entry);
       card.dataset.kind = kind;
       chip.dataset.kind = kind;
       word.textContent = what;
       line.textContent = text;
       yours.hidden = !entry.correction;
-      card.setAttribute('aria-label', [when, what, durationText(seconds), text, entry.correction ? TEXT.yours : ''].filter(Boolean).join(', '));
+      badge.hidden = !priority;
+      badge.dataset.priority = priority ?? '';
+      badge.textContent = priorityWord(priority);
+      card.setAttribute('aria-label', [when, what, priority ? `${priorityWord(priority)} priority` : '', durationText(seconds), text, entry.correction ? TEXT.yours : '']
+        .filter(Boolean).join(', '));
     }
     refresh();
     return { card, refresh };
@@ -324,13 +336,16 @@ export function createSkyGrid({ thumbAddress, stillAddress, picture = () => null
    *   zone      the box's time zone (the cards' times and the hours)
    *   byHour    under the hours they began in (an order by time), else one grid
    *   capped    hour -> its note (sky-model.js cappedByHour), at the hour's heading; notes: the same notes over the grid when there are no hours
+   *   together  the night's lights that moved together (sky-model.js groupsOf), for the cards' lines
    *   empty     what is shown when there is no entry (or none is left)
    * With `keepPlace`, what was at the top of the screen stays there (a card back in the grid after a correction, above or below it).
    */
-  function show({ entries = [], zone: inZone = '', byHour = true, capped = new Map(), notes = [], empty = null } = {}, { keepPlace = false } = {}) {
+  function show({ entries = [], zone: inZone = '', byHour = true, capped = new Map(), notes = [], together = new Map(), empty = null } = {},
+    { keepPlace = false } = {}) {
     const anchor = keepPlace ? anchorAt(viewTop()) : null;
     reset();
     zone = inZone;
+    moving = together;
     emptyEl = empty;
     if (!entries.length) {
       replace(el, empty);
@@ -565,8 +580,10 @@ export function createSkyGrid({ thumbAddress, stillAddress, picture = () => null
     reveal,
     span,
     leave,
-    /** Draws an entry's card again after a correction: its kind, chip and words. */
+    /** Draws an entry's card again after a correction: its kind, chip, priority and words. */
     refresh(entry) { cards.get(entry.id)?.refresh(); },
+    /** The lights that moved together, after a correction changed them (the cards are drawn again with `refresh`). */
+    setGroups(together) { moving = together; },
     /** Whether an entry is in the grid (its card made, or its block waiting for the person to come near), and not on its way out. */
     has(id) { return !leaving.has(id) && Boolean(batchWith(id)); },
     /** Where the focus goes back to for an entry's card (a player closed on it): the card, or the one that took its place when it left. */

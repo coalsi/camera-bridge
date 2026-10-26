@@ -48,8 +48,9 @@ extension BridgeEngine {
     /// The log of one camera's night or day. `night` is the log's name (`SkyNight.logName`: the local date of the night's sunset, a day's own
     /// date, in the bridge's time zone), nil for the latest: the night in progress or the one that ended this morning, or for the day view the day
     /// `now` is in. `view` picks what is shown of it: the night from sunset to sunrise, the day from sunrise to sunset. Times and nights are the
-    /// sun's at the place the box is. Throws `EngineError.unknownCamera`, `SkyLogError` (no place, no recordings folder, a night that is not a
-    /// date) and, while the drive cannot be read, `ArchiveUnavailable` or `ArchiveError.timedOut`.
+    /// sun's at the place the box is. The lights logged before the rules are sorted by them now (`SkySortLater`: shown as if logged so, marked
+    /// `sortedLater`; the log is not written). Throws `EngineError.unknownCamera`, `SkyLogError` (no place, no recordings folder, a night that is
+    /// not a date) and, while the drive cannot be read, `ArchiveUnavailable` or `ArchiveError.timedOut`.
     public func skyNightLog(cameraID: UUID, night: String?, view: SkyLogView) async throws -> SkyNightLog {
         try await skyNightLog(cameraID: cameraID, night: night, view: view, now: Date())
     }
@@ -66,13 +67,43 @@ extension BridgeEngine {
         let span = SkyNight.logSpan(named: name, view: view, observer: observer, zone: zone)
         let log = skyLog
         let stored = try await nvr.store.skyRead { try Self.readNight(log, camera: cameraID, night: name, folder: folder) }
-        let entries = stored.entries.filter { $0.start >= span.lowerBound && $0.start < span.upperBound }
+        let inView = stored.entries.filter { $0.start >= span.lowerBound && $0.start < span.upperBound }
         let conditions = stored.conditions.filter { $0.to > span.lowerBound && $0.from < span.upperBound }
         let capped = stored.capped.filter { $0.hour.addingTimeInterval(3_600) > span.lowerBound && $0.hour < span.upperBound }
         let status = await skyStatus(of: cameraID)
-        let picture = await skyPictureSize(of: entries, camera: cameraID, night: name, folder: folder)
+        let picture = await skyPictureSize(of: inView, camera: cameraID, night: name, folder: folder)
+        // The lights logged before the rules are sorted by them (`SkySortLater`), and then the lights that moved together are found
+        // (`SkyFormations`), as the log is read: a person's word on one counts at once. Off the main actor: a night can hold thousands.
+        let sorter = inView.contains(where: SkySortLater.needsSorting)
+            ? SkySortLater(observer: observer, camera: await skySortingCamera(cameraID, stills: picture)) : nil
+        let night = stored.entries
+        let entries = await Task.detached(priority: .userInitiated) { SkyFormations.mark(sorter?.sort(inView, night: night) ?? inView) }.value
         return SkyNightLog(camera: cameraID, night: name, view: view, from: span.lowerBound, to: span.upperBound, entries: entries, conditions: conditions,
                            counts: SkyCounts(counting: entries), aim: status.aim, learning: status.learning, capped: capped, picture: picture)
+    }
+
+    /// What the log's reader knows of a camera to sort the lights logged before the rules (`SkySortLater`): its detector's while it runs (the aim
+    /// now, the width it analyses at, the picture's size, its pace and what it learned); otherwise, or while its detector has seen no picture,
+    /// the card (its facing, tilt and lenses) over the picture's size as last seen (the camera's stream, else `stills`: the night's pictures'),
+    /// with what the camera learned (the detector's, else its `baseline.json`, else the defaults).
+    func skySortingCamera(_ cameraID: UUID, stills: SkyPictureSize?) async -> SkySortLater.Camera {
+        var running: SkySortLater.Camera?
+        if let detector = skyDetectors[cameraID] {
+            let camera = await detector.sortingCamera
+            if camera.model != nil { return camera }
+            running = camera
+        }
+        let settings = configurations.first { $0.id == cameraID }?.skyDetector ?? SkyDetectorSettings()
+        let stream = cameras.first { $0.id == cameraID }?.mainStreamInfo.flatMap { $0.width > 0 && $0.height > 0 ? SkyPictureSize(width: $0.width, height: $0.height) : nil }
+        let size = stream ?? stills
+        var baseline = running?.baseline
+        if baseline == nil {
+            let directory = SkyService.directory(of: cameraID, in: environment.dataDirectory)
+            baseline = await Task.detached(priority: .userInitiated) { SkyCameraDetector.readBaseline(in: directory) }.value
+        }
+        let model = size.map { SkyCameraDetector.card(settings, offset: .zero, width: $0.width, height: $0.height) }
+        return SkySortLater.Camera(model: model, analysisWidth: min(max(1, size?.width ?? 1), SkyStreamChoice.maximumAnalysisWidth), picture: size,
+                                   baseline: baseline ?? SkyBaseline(), picturesPerSecond: running?.picturesPerSecond ?? SkyStreamChoice.analysisRate)
     }
 
     /// How big the pictures of a night are, for the page to draw a light's path over a thumbnail of it (the thumbnail is cut where the page's close-up is,
@@ -85,9 +116,10 @@ extension BridgeEngine {
         return try? await nvr.store.skyRead { log.pictureSize(ofStills: Array(ids), camera: camera, night: night, folder: folder) }
     }
 
-    /// Records the person's word on an entry ("That was a bird") in the log of `night` and answers the entry as it reads now. The word counts
-    /// most to what the box learns; the last one of an entry wins, and "not sure" takes the doubt back. Throws `EngineError.unknownCamera` and
-    /// `SkyLogError` (`unknownNight` for a name that is not a date, `unknownEntry` for one the night's log does not hold, `noFolder`).
+    /// Records the person's word on an entry ("That was a bird") in the log of `night` and answers the entry as it reads now (one logged before the
+    /// rules sorted by them, as `skyNightLog` shows it). The word counts most to what the box learns; the last one of an entry wins, and "not sure"
+    /// takes the doubt back. Throws `EngineError.unknownCamera` and `SkyLogError` (`unknownNight` for a name that is not a date, `unknownEntry` for
+    /// one the night's log does not hold, `noFolder`).
     public func correctSkyEntry(cameraID: UUID, entryID: String, night: String, label: SkyCorrection) async throws -> SkyEntry {
         guard !isPreview else { throw SkyLogError.unavailable }
         guard configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
@@ -99,6 +131,13 @@ extension BridgeEngine {
         guard var entry = stored.entries.first(where: { $0.id == entryID }) else { throw SkyLogError.unknownEntry }
         log.recordCorrection(label, entryID: entryID, camera: cameraID, night: night, folder: folder, at: Date())
         entry.correction = label
+        if SkySortLater.needsSorting(entry), let location = settings.sky.location {
+            let observer = SkyObserver(latitude: location.latitude, longitude: location.longitude, heightMeters: location.heightMeters)
+            let picture = await skyPictureSize(of: stored.entries, camera: cameraID, night: night, folder: folder)
+            let sorter = SkySortLater(observer: observer, camera: await skySortingCamera(cameraID, stills: picture))
+            let one = entry, all = stored.entries
+            entry = await Task.detached(priority: .userInitiated) { sorter.sort([one], night: all).first ?? one }.value
+        }
         return entry
     }
 
@@ -121,7 +160,8 @@ extension BridgeEngine {
 
     /// The small picture of an entry for the Sky Watcher's grid (`GET sky/cameras/:id/entries/:eid/still?size=thumb`): the close-up of the light around its
     /// path, at most 480 pixels wide, or all of the picture, small, for a light that crossed more of the sky than a close-up holds (`SkyThumbnails`). Made when
-    /// the page first asks and kept beside the picture; the whole picture (`isThumbnail` false) when a small one cannot be made. Throws what `skyStill` throws.
+    /// the picture is written (`skyContext`'s `stillWritten`), else when the page first asks, and kept beside the picture; the whole picture (`isThumbnail`
+    /// false) when a small one cannot be made. Throws what `skyStill` throws.
     public func skyStillThumbnail(cameraID: UUID, night: String, entryID: String) async throws -> SkyStillPicture {
         guard !isPreview else { throw SkyLogError.unavailable }
         guard configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
@@ -229,12 +269,13 @@ extension BridgeEngine {
     /// What a camera's detector is told of it: its settings, the place as an observer (kept on the box), the bridge's zone, the picture's size
     /// when the camera has shown one, the recordings folder, its stills, and for the lights logged without one a picture of its recording and
     /// its logs (Ruling S31: read on the store's read queue, and the pictures made one at a time for all the cameras, off the main actor, at
-    /// utility priority).
+    /// utility priority); and, once a picture is handed to the log, its small one for the grid made then (`SkyThumbnails.prepare`: at background
+    /// priority, once the log's queue has written the picture and its line, in the thumbnails' own places after the page's requests).
     func skyContext(_ camera: CameraConfiguration) -> SkyCameraDetector.Context? {
         guard let location = settings.sky.location, location.isValid, let detectorSettings = camera.skyDetector else { return nil }
         let id = camera.id, folder = skyFolder
         let size = cameras.first { $0.id == id }?.mainStreamInfo
-        let archive = archive, store = nvr.store, log = skyLog, codecs = environment.codecs
+        let archive = archive, store = nvr.store, log = skyLog, codecs = environment.codecs, thumbnails = skyThumbnails
         let decoders = skyRecordingDecoders, oneAtATime = skyRecordingPictures
         return SkyCameraDetector.Context(cameraID: id, cameraName: camera.name, settings: detectorSettings,
                                          observer: SkyObserver(latitude: location.latitude, longitude: location.longitude, heightMeters: location.heightMeters),
@@ -251,6 +292,13 @@ extension BridgeEngine {
                                          readLog: { night in
                                              guard let folder else { return nil }
                                              return try? await store.skyRead { try Self.readNight(log, camera: id, night: night, folder: folder).entries }
+                                         },
+                                         stillWritten: { entryID, night in
+                                             guard let folder else { return }
+                                             Task.detached(priority: .background) {
+                                                 await log.flush()
+                                                 await thumbnails.prepare(camera: id, night: night, entryID: entryID, folder: folder)
+                                             }
                                          })
     }
 

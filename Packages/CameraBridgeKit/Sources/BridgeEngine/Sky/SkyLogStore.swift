@@ -22,7 +22,7 @@ import Synchronization
 /// and one for an id the file does not hold is ignored. A line that does not parse (a torn last line after a crash, a line of a later version, an
 /// oversized one) is skipped, and the next append starts on a new line; so is a line of a kind the reader does not know (a later build's), since
 /// every key it knows is absent from it, or names an entry it applies nothing to. The picture of an entry is `<night>/<id>.jpg` in the camera's
-/// folder, and the small one made from it for the page's grid (once, when the page first asks: `SkyLogStore+Thumbnails.swift`) is `<night>/<id>.thumb.jpg`
+/// folder, and the small one made from it for the page's grid (once: when the picture is written, or when the page first asks; `SkyLogStore+Thumbnails.swift`) is `<night>/<id>.thumb.jpg`
 /// beside it. The capped lines of an hour add up (a detector that restarted in the hour writes one for each part; `at` is when each was written).
 ///
 /// Writes run on one serial queue and never wait for a drive: lines (and pictures) that cannot be written wait, at most `maximumPending`
@@ -249,7 +249,8 @@ final class SkyLogStore: Sendable {
 
     /// The entry as it is kept, or nil when it cannot be: an id that is not safe in a path, or a start that is not a time. Times to the
     /// millisecond; an end that is not a time or is before the start is the start; the path without points that are not numbers, then at most 64 of
-    /// them, evenly picked, the first and the last among them; the detail, the AI's sentence, model and kind cut to length.
+    /// them, evenly picked, the first and the last among them; the detail, the AI's sentence, model and kind cut to length; at most 8 reasons, each
+    /// cut to length; and no group (the lights that moved together are found as the log is read: `SkyFormations`).
     static func bounded(_ entry: SkyEntry) -> SkyEntry? {
         guard SkyEntry.isValidID(entry.id), entry.start.timeIntervalSince1970.isFinite, abs(entry.start.timeIntervalSince1970) < 1e11 else { return nil }
         var entry = entry
@@ -265,6 +266,9 @@ final class SkyLogStore: Sendable {
         entry.detail = entry.detail.map { String($0.prefix(SkyEntry.maximumDetailLength)) }
         entry.ai = entry.ai.map(bounded)
         if let ratio = entry.speedVsPlanes, !ratio.isFinite { entry.speedVsPlanes = nil }
+        entry.reasons = entry.reasons.prefix(SkyEntry.maximumReasons).map { String($0.prefix(SkyEntry.maximumReasonLength)) }
+        // A group is found as the log is read (`SkyFormations`), never kept.
+        entry.group = nil
         return entry
     }
 

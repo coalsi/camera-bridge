@@ -363,7 +363,13 @@ final class ThumbnailCodecs: MediaCodecs {
         #expect(!overflowed.isThumbnail && overflowed.jpeg == Self.still("n-5"), "n-5 found the queue full")
         #expect(engine.skyThumbnails.waitingCount == 2 && codecs.calls.value.count == 2)
 
-        codecs.release(4)
+        // One place at a time, so that the order the gate gives the places in is the order the codecs see (two places freed at once would start
+        // their two on the concurrent queue in either order, and on a loaded machine did).
+        codecs.release(1)
+        #expect(await eventually(timeout: .seconds(30)) { codecs.calls.value.count == 3 })
+        codecs.release(1)
+        #expect(await eventually(timeout: .seconds(30)) { codecs.calls.value.count == 4 })
+        codecs.release(2)
         let all = try await [first.value, second.value, third.value, fourth.value]
         #expect(all.allSatisfy { $0.isThumbnail })
         // The two that were first are made first (in either order); then the ones that waited, in the order they came.

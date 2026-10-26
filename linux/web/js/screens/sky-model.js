@@ -123,6 +123,11 @@ export const SKY_TEXT = {
     failed: 'The sky log couldn’t be read. Try again in a moment.',
     playerFailed: 'The player couldn’t open. Try again in a moment.',
     kinds: { track: 'Moving light', newLight: 'New light', flash: 'Flash' },
+    movingTogether: 'Moving together',
+    showEveryLight: 'Show every light again',
+    showTogether: 'Show only the lights that moved together',
+    sortedLater: 'Sorted later',
+    sortedLaterWhy: 'Logged before the rules; they sorted it when this night was read.',
   },
   // The clip player (sky-player.js): the recording around one light, in a modal on the sky log.
   player: {
@@ -517,7 +522,7 @@ export function entryBucket(entry) {
   const label = entry?.display ?? entry?.label;
   switch (label) {
     case 'plane': case 'probablePlane': return entry?.correction === 'notSure' ? 'notSure' : 'planes';
-    case 'satellite': case 'satelliteFlare': return entry?.correction === 'notSure' ? 'notSure' : 'satellites';
+    case 'satellite': case 'probableSatellite': case 'satelliteFlare': return entry?.correction === 'notSure' ? 'notSure' : 'satellites';
     case 'meteor': return entry?.correction === 'notSure' ? 'notSure' : 'meteors';
     case 'bug': case 'bird': return entry?.correction === 'notSure' ? 'notSure' : 'bugsAndBirds';
     default: return 'unexplained';   // "unexplained", or a label this page does not know yet: shown, not hidden
@@ -526,6 +531,11 @@ export function entryBucket(entry) {
 
 const MEASURE_NUMBERS = ['azimuth', 'elevation', 'azimuthEnd', 'elevationEnd', 'duration', 'speed', 'acceleration', 'turnRate', 'maxTurn', 'straightness', 'sizeDegrees', 'brightness', 'focus'];
 const MAX_PATH = 256;
+/** How interesting an unexplained light is (the bridge's guide), the most first. */
+export const PRIORITIES = Object.freeze(['high', 'medium', 'low']);
+const MAX_REASONS = 8;
+/** The bridge's own words for a light that moved with others: the page says "1 of 3 moving together" instead. */
+const TOGETHER = 'Several lights moving together';
 
 /** The points of a path as { t, x, y }, from objects or [t, x, y] triples; what is not numbers is left out. */
 function readPath(path) {
@@ -571,7 +581,49 @@ export function normalizeEntry(raw) {
     ai: sentence ? { kind: typeof raw.ai.kind === 'string' ? raw.ai.kind : null, sentence, model: typeof raw.ai.model === 'string' ? raw.ai.model : null, at: toMs(raw.ai.at) } : null,
     correction: typeof raw.correction === 'string' && raw.correction ? raw.correction : null,
     watch: toMs(raw.watch) ?? start - 3000,
+    priority: PRIORITIES.includes(raw.priority) ? raw.priority : null,
+    reasons: (Array.isArray(raw.reasons) ? raw.reasons : []).filter((reason) => typeof reason === 'string' && reason.trim()).map((reason) => reason.trim()).slice(0, MAX_REASONS),
+    group: typeof raw.group === 'string' && raw.group ? raw.group : null,
+    doubtful: raw.doubtful === true,
+    // Logged before the rules, and sorted by them as the bridge read the night (its label, by, detail and the guide's fields are theirs).
+    sortedLater: raw.sortedLater === true,
   };
+}
+
+/** An unexplained light's priority ('high', 'medium', 'low'): null for an explained one (the person's word included) and one logged before the guide. */
+export function priorityOf(entry) {
+  return entryBucket(entry) === 'unexplained' && PRIORITIES.includes(entry?.priority) ? entry.priority : null;
+}
+
+/** The badge's word: "High", "Medium", "Low". */
+export function priorityWord(priority) {
+  return { high: 'High', medium: 'Medium', low: 'Low' }[priority] ?? '';
+}
+
+/** The lights that moved together, by group: Map(group -> the ids of its lights, by the time they began). Only unexplained ones count. */
+export function groupsOf(entries) {
+  const groups = new Map();
+  const list = (Array.isArray(entries) ? entries : []).filter((entry) => entry?.group && entryBucket(entry) === 'unexplained');
+  for (const entry of [...list].sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : 1))) {
+    if (!groups.has(entry.group)) groups.set(entry.group, []);
+    groups.get(entry.group).push(entry.id);
+  }
+  for (const [group, ids] of groups) if (ids.length < 2) groups.delete(group);
+  return groups;
+}
+
+/** "1 of 3 moving together": which of its group a light is; '' for one in none. */
+export function groupText(entry, groups) {
+  const ids = entry?.group ? groups?.get(entry.group) : null;
+  const at = ids ? ids.indexOf(entry.id) : -1;
+  return at >= 0 ? `${at + 1} of ${ids.length} moving together` : '';
+}
+
+/** An unexplained light's reasons as the page shows them (its group's words for its own), the most telling first; none for an explained one. */
+export function reasonsOf(entry, groups) {
+  if (entryBucket(entry) !== 'unexplained') return [];
+  const together = groupText(entry, groups);
+  return (entry?.reasons ?? []).map((reason) => (reason === TOGETHER ? together : reason)).filter(Boolean);
 }
 
 /** The counts of a list of entries, as the bridge counts them (used when it sends none): "explained" is every entry that is not unexplained. */
@@ -643,12 +695,13 @@ export function stripTicks(from, to, zone) {
  * their flares, and "Bugs & birds" both (entryBucket); an explained light the person was not sure of is under none of them. "Corrected by you"
  * is every entry the person said something about.
  */
-export const GRID_KINDS = Object.freeze([['unexplained', 'Unexplained'], ['planes', 'Planes'], ['satellites', 'Satellites'], ['meteors', 'Meteors'], ['bugs', 'Bugs & birds'], ['corrected', 'Corrected by you']]);
+export const GRID_KINDS = Object.freeze([['unexplained', 'Unexplained'], ['high', 'High priority'], ['planes', 'Planes'], ['satellites', 'Satellites'], ['meteors', 'Meteors'],
+  ['bugs', 'Bugs & birds'], ['corrected', 'Corrected by you']]);
 const KIND_NAMES = GRID_KINDS.map(([name]) => name);
 const CHIP_OF_BUCKET = { unexplained: 'unexplained', planes: 'planes', satellites: 'satellites', meteors: 'meteors', bugsAndBirds: 'bugs' };
 
 /** The grid's orders: the name the address uses, and the words in the menu. */
-export const GRID_SORTS = Object.freeze([['newest', 'Newest first'], ['oldest', 'Oldest first'], ['longest', 'Longest'], ['fastest', 'Fastest across the sky']]);
+export const GRID_SORTS = Object.freeze([['newest', 'Newest first'], ['oldest', 'Oldest first'], ['priority', 'Priority'], ['longest', 'Longest'], ['fastest', 'Fastest across the sky']]);
 const SORT_NAMES = new Set(GRID_SORTS.map(([name]) => name));
 
 /** Whether an order is by time (the grid then has its hours' headings), rather than by how long or how fast. */
@@ -659,7 +712,8 @@ export function kindChip(entry) {
   return CHIP_OF_BUCKET[entryBucket(entry)] ?? null;
 }
 
-const KIND_WORDS = { unexplained: 'Unexplained', plane: 'Plane', probablePlane: 'Probably a plane', satellite: 'Satellite', satelliteFlare: 'Satellite flare', meteor: 'Meteor', bug: 'Bug', bird: 'Bird' };
+const KIND_WORDS = { unexplained: 'Unexplained', plane: 'Plane', probablePlane: 'Probably a plane', satellite: 'Satellite', probableSatellite: 'Probable satellite',
+  satelliteFlare: 'Satellite flare', meteor: 'Meteor', bug: 'Bug', bird: 'Bird' };
 
 /** What an entry is, in a word or three, for its card: "Unexplained", "Plane", "Probably a plane", "Satellite flare", "Bird", "Not sure", … */
 export function kindWord(entry) {
@@ -670,23 +724,25 @@ export function kindWord(entry) {
 }
 
 /**
- * Whether the grid shows an entry: it is under one of the chips that are on (none on: every entry; several: any of them), and it has a still
- * when `pictures` is on.
+ * Whether the grid shows an entry: it is under one of the chips that are on (none on: every entry; several: any of them; High priority: an
+ * unexplained light the guide ranked high), it has a still when `pictures` is on, and it is one of the lights of `group` when one is named.
  */
-export function matchesFilters(entry, { kinds = [], pictures = false } = {}) {
+export function matchesFilters(entry, { kinds = [], pictures = false, group = null } = {}) {
   if (!entry || (pictures && entry.hasStill !== true)) return false;
+  if (group && (entry.group !== group || entryBucket(entry) !== 'unexplained')) return false;
   if (!kinds.length) return true;
-  return kinds.some((kind) => (kind === 'corrected' ? Boolean(entry.correction) : kindChip(entry) === kind));
+  return kinds.some((kind) => (kind === 'corrected' ? Boolean(entry.correction) : kind === 'high' ? priorityOf(entry) === 'high' : kindChip(entry) === kind));
 }
 
-/** The number on each chip, for a night: { all, unexplained, planes, satellites, meteors, bugs, corrected }. */
+/** The number on each chip, for a night: { all, unexplained, high, planes, satellites, meteors, bugs, corrected }. */
 export function chipCounts(entries) {
-  const counts = { all: 0, unexplained: 0, planes: 0, satellites: 0, meteors: 0, bugs: 0, corrected: 0 };
+  const counts = { all: 0, unexplained: 0, high: 0, planes: 0, satellites: 0, meteors: 0, bugs: 0, corrected: 0 };
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry) continue;
     counts.all += 1;
     const chip = kindChip(entry);
     if (chip) counts[chip] += 1;
+    if (priorityOf(entry) === 'high') counts.high += 1;
     if (entry.correction) counts.corrected += 1;
   }
   return counts;
@@ -700,13 +756,18 @@ export function lastedSeconds(entry) {
 }
 
 /**
- * The entries in an order (a new list): by time, oldest or newest first; the longest first; or the fastest across the sky first, by
- * `measures.speed` (degrees of sky a second), those without one last. Ties go by time.
+ * The entries in an order (a new list): by time, oldest or newest first; by priority (high, medium, low, then the lights without one, each the
+ * newest first); the longest first; or the fastest across the sky first, by `measures.speed` (degrees of sky a second), those without one last.
+ * Ties go by time.
  */
 export function sortEntries(entries, sort) {
   const list = (Array.isArray(entries) ? entries : []).filter(Boolean);
   const byTime = (a, b) => a.start - b.start || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   if (sort === 'newest') return list.sort((a, b) => byTime(b, a));
+  if (sort === 'priority') {
+    const rank = (entry) => { const at = PRIORITIES.indexOf(priorityOf(entry)); return at < 0 ? PRIORITIES.length : at; };
+    return list.sort((a, b) => rank(a) - rank(b) || byTime(b, a));
+  }
   if (sort === 'longest') return list.sort((a, b) => lastedSeconds(b) - lastedSeconds(a) || byTime(a, b));
   if (sort === 'fastest') {
     const speed = (entry) => finite(entry.measures?.speed);
@@ -720,8 +781,13 @@ export function sortEntries(entries, sort) {
   return list.sort(byTime);
 }
 
-/** The order a night opens in when the person has not chosen one: the newest first while it is still going, else the oldest first (from dusk). */
-export function defaultSort(window, now) {
+/**
+ * The order a night opens in when the person has not chosen one: inside Unexplained (or High priority) the priority, when the night's lights
+ * have one (`ranked`; a night logged before the guide has none); else the newest first while it is still going, and the oldest first (from
+ * dusk) after.
+ */
+export function defaultSort(window, now, kinds = [], ranked = true) {
+  if (ranked && Array.isArray(kinds) && kinds.length && kinds.every((kind) => kind === 'unexplained' || kind === 'high')) return 'priority';
   const from = finite(window?.from);
   const to = finite(window?.to);
   return from !== null && to !== null && from <= now && now < to ? 'newest' : 'oldest';
@@ -743,6 +809,13 @@ export function readGridQuery(query) {
   const found = query instanceof URLSearchParams ? query : new URLSearchParams(typeof query === 'string' ? query : '');
   const kinds = (found.get('kinds') ?? '').split(',').map((name) => name.trim());
   return { ...gridChoice({ kinds, sort: found.get('sort'), pictures: found.get('pictures') === '1' }), given: ['kinds', 'sort', 'pictures'].some((name) => found.has(name)) };
+}
+
+/** The lights the address narrows the grid to (`group=g-…`: those that moved together), read safely; null for none. */
+export function readGroupQuery(query) {
+  const found = query instanceof URLSearchParams ? query : new URLSearchParams(typeof query === 'string' ? query : '');
+  const group = found.get('group');
+  return group && /^g-[A-Za-z0-9_-]{1,72}$/.test(group) ? group : null;
 }
 
 /** The grid's part of the address for a choice: ['kinds=unexplained,planes', 'sort=fastest', 'pictures=1'], or [] for every kind in the night's own order. */
@@ -790,9 +863,12 @@ export function shortLine(entry, { how = true } = {}) {
   return [where, what].filter(Boolean).join(' · ');
 }
 
-/** A card's line under its time: an unexplained light's shortLine; else what the box matched it to (a flight, a satellite's name), or where it was. */
-export function cardLine(entry) {
-  if (entryBucket(entry) === 'unexplained') return shortLine(entry);
+/**
+ * A card's line under its time: an unexplained light's first reason (its group, "1 of 3 moving together", for one that moved with others), or,
+ * logged before the guide, its shortLine; else what the box matched it to (a flight, a satellite's name, the rule), or where it was.
+ */
+export function cardLine(entry, groups = null) {
+  if (entryBucket(entry) === 'unexplained') return reasonsOf(entry, groups)[0] ?? shortLine(entry);
   return entry?.detail || shortLine(entry, { how: false });
 }
 

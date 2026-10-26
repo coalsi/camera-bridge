@@ -196,9 +196,10 @@ import Testing
 
 extension SkyDetectorTests {
     /// A light of junk in the tile whose top-left corner is analysed pixel `tile` of a `width` × `height` picture: from 10 px in and 20 px down, 4
-    /// pixels a second to the right for 6 s (24 px: past the 12 a light must get from where it began, and still inside its 64-pixel tile).
+    /// pixels a second to the right for 4.8 s (19 px: past the 12 a light must get from where it began, and still inside its 64-pixel tile; and
+    /// under the 5 s a straight light needs to be a probable plane or satellite by the rules, so it stays unexplained).
     static func junk(_ tile: (x: Double, y: Double), at start: Date, width: Int = 640, height: Int = 284) -> SkyTrack {
-        straightTrack(from: (tile.x + 10, tile.y + 20), pixelsPerSecond: 4, seconds: 6, at: start, width: width, height: height)
+        straightTrack(from: (tile.x + 10, tile.y + 20), pixelsPerSecond: 4, seconds: 4.8, at: start, width: width, height: height)
     }
 
     /// Plays `count` junk lights into `tile`, one every `every` seconds from `from`, through `handle`.
@@ -361,8 +362,9 @@ extension SkyDetectorTests {
         let capture = CameraLogCapture.start(camera: id)
         defer { capture.stop() }
         await rig.detector.start()
-        // Glare along the edge: counted. A light in the middle of the lens: logged.
-        func light(x: Double, at: Date) -> SkyTrack { Self.straightTrack(from: (x, 142), pixelsPerSecond: 4, seconds: 6, at: at) }
+        // Glare along the edge: counted. A light in the middle of the lens: logged. (Slower than a bird and shorter than a plane by day, so that
+        // the rules leave it unexplained: 3 px a second, about 0.8°/s, for 4.8 s.)
+        func light(x: Double, at: Date) -> SkyTrack { Self.straightTrack(from: (x, 142), pixelsPerSecond: 3, seconds: 4.8, at: at) }
         rig.clock.set(day.addingTimeInterval(10))
         await rig.detector.handle(light(x: 10, at: day), analysisWidth: 640, analysisHeight: 284, pictureWidth: 4256)
         await rig.detector.handle(light(x: 200, at: day.addingTimeInterval(60)), analysisWidth: 640, analysisHeight: 284, pictureWidth: 4256)
@@ -455,8 +457,9 @@ extension SkyDetectorTests {
         for entry in entries {
             #expect(rig.log.still(camera: rig.camera, night: rig.night(entry.start), entryID: entry.id, folder: rig.recordings.url) != nil)
         }
-        #expect([SkyLabel.unexplained, .meteor, .bug, .bird].allSatisfy(SkyLightFilter.wantsStill), "and the rules' meteors, bugs and birds, when they come")
-        #expect(![SkyLabel.plane, .probablePlane, .satellite, .satelliteFlare].contains(where: SkyLightFilter.wantsStill))
+        #expect([SkyLabel.unexplained, .meteor, .bug, .bird].allSatisfy { SkyLightFilter.wantsStill($0, by: $0 == .unexplained ? nil : .rule) },
+                "and the rules' meteors, bugs and birds, when they come (and their probable planes and satellites: `SkyRulesPicturesTests.swift`)")
+        #expect(!SkyLightFilter.wantsStill(.plane, by: .flight) && !SkyLightFilter.wantsStill(.probablePlane, by: .flight) && !SkyLightFilter.wantsStill(.satellite, by: .orbit))
         await rig.detector.stop()
     }
 
@@ -541,7 +544,7 @@ extension SkyDetectorTests {
         let starts = await rig.logged().entries.map(\.start).sorted(by: >)
         await rig.detector.tick(at: Self.start.addingTimeInterval(1_200))
         #expect(SkyStillBackfill.perTick == 4 && rig.recordedAsked.value.count == 4)
-        #expect(rig.recordedAsked.value.map { $0.addingTimeInterval(-3) } == Array(starts.prefix(4)), "the newest first")
+        #expect(rig.recordedAsked.value.map { $0.addingTimeInterval(-2.4) } == Array(starts.prefix(4)), "the newest first, each at its middle")
         await rig.detector.tick(at: Self.start.addingTimeInterval(1_260))
         await rig.detector.tick(at: Self.start.addingTimeInterval(1_320))
         #expect(rig.recordedAsked.value.count == 10)

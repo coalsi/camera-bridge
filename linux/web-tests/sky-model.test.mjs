@@ -9,8 +9,9 @@ import { VECTORS_PATH, makeCloseUpVectors } from './support/sky-closeup-vectors.
 import {
   CLOSE_UP, GRID_KINDS, GRID_SORTS, SKY_ROUTE, SKY_TEXT, aimLines, aimText, blinkText, cappedByHour, cappedText, cardLine, chipCounts, clipAddress, closeUpRect, compassWord,
   conditionsText, countEntries, countLabel, countsAfter, dayLabel, defaultLensLayout, defaultSort, directionText, durationShort, durationText, entryBucket, gridChoice, gridQuery,
-  hourGroups, hourLabel, hourStart, isTimeSort, kindChip, kindWord, lastedSeconds, learningText, matchesFilters, normalizeEntry, pathPoints, readGridQuery, refusalOf, shapeText,
-  shiftDate, shortLine, skyWatching, sortEntries, speedText, streamText, stripDots, stripTicks, summaryText, THUMB_WIDTH, thumbGeometry, thumbRect, timeText, toMs, watchAddress,
+  groupsOf, groupText, hourGroups, hourLabel, hourStart, isTimeSort, kindChip, kindWord, lastedSeconds, learningText, matchesFilters, normalizeEntry,
+  pathPoints, priorityOf, priorityWord, readGridQuery, readGroupQuery, reasonsOf, refusalOf, shapeText, shiftDate, shortLine, skyWatching,
+  sortEntries, speedText, streamText, stripDots, stripTicks, summaryText, THUMB_WIDTH, thumbGeometry, thumbRect, timeText, toMs, watchAddress,
 } from '../web/js/screens/sky-model.js';
 
 const CHICAGO = 'America/Chicago';
@@ -293,12 +294,12 @@ function everyKind() {
 
 test('the kind chips: planes with the probable ones, satellites with their flares, bugs and birds together, and the person’s corrections', () => {
   assert.deepEqual(GRID_KINDS.map(([name, words]) => `${name}: ${words}`),
-    ['unexplained: Unexplained', 'planes: Planes', 'satellites: Satellites', 'meteors: Meteors', 'bugs: Bugs & birds', 'corrected: Corrected by you']);
+    ['unexplained: Unexplained', 'high: High priority', 'planes: Planes', 'satellites: Satellites', 'meteors: Meteors', 'bugs: Bugs & birds', 'corrected: Corrected by you']);
   const night = everyKind();
   assert.deepEqual(night.map(kindChip), ['unexplained', 'unexplained', 'planes', 'planes', 'satellites', 'satellites', 'meteors', 'bugs', 'bugs', null, 'bugs'],
     'an explained light the person was not sure of is under no kind');
-  assert.deepEqual(chipCounts(night), { all: 11, unexplained: 2, planes: 2, satellites: 2, meteors: 1, bugs: 3, corrected: 2 });
-  assert.deepEqual(chipCounts(null), { all: 0, unexplained: 0, planes: 0, satellites: 0, meteors: 0, bugs: 0, corrected: 0 });
+  assert.deepEqual(chipCounts(night), { all: 11, unexplained: 2, high: 0, planes: 2, satellites: 2, meteors: 1, bugs: 3, corrected: 2 });
+  assert.deepEqual(chipCounts(null), { all: 0, unexplained: 0, high: 0, planes: 0, satellites: 0, meteors: 0, bugs: 0, corrected: 0 });
   const ids = (filters) => night.filter((e) => matchesFilters(e, filters)).map((e) => e.id);
   assert.deepEqual(ids({}), night.map((e) => e.id), 'no chip on: every entry');
   assert.deepEqual(ids({ kinds: ['planes'] }), ['p1', 'p2']);
@@ -314,7 +315,8 @@ test('the kind chips: planes with the probable ones, satellites with their flare
 });
 
 test('the orders: by time either way, the longest, and the fastest across the sky with those of no speed last', () => {
-  assert.deepEqual(GRID_SORTS.map(([name, words]) => `${name}: ${words}`), ['newest: Newest first', 'oldest: Oldest first', 'longest: Longest', 'fastest: Fastest across the sky']);
+  assert.deepEqual(GRID_SORTS.map(([name, words]) => `${name}: ${words}`),
+    ['newest: Newest first', 'oldest: Oldest first', 'priority: Priority', 'longest: Longest', 'fastest: Fastest across the sky']);
   const list = [
     entry('a', 'plane', 30, { measures: { duration: 40, speed: 1.2 } }), entry('b', 'unexplained', 10, { measures: { duration: 4.2, speed: 6 } }),
     entry('c', 'satellite', 20, { end: 20 + 90_000, measures: { speed: 0.5 } }), entry('d', 'meteor', 40, { measures: { duration: 0.6 } }),
@@ -329,7 +331,7 @@ test('the orders: by time either way, the longest, and the fastest across the sk
   assert.deepEqual(list.map((e) => e.id), ['a', 'b', 'c', 'd', 'e'], 'the list itself is left as it was');
   assert.equal(lastedSeconds(list[2]), 90);
   assert.equal(lastedSeconds(list[1]), 4.2);
-  assert.deepEqual(['newest', 'oldest', 'longest', 'fastest', null].map(isTimeSort), [true, true, false, false, false]);
+  assert.deepEqual(['newest', 'oldest', 'priority', 'longest', 'fastest', null].map(isTimeSort), [true, true, false, false, false, false]);
   // A night opens from dusk, oldest first; while it is still going, the newest first.
   assert.equal(defaultSort({ from: 100, to: 200 }, 250), 'oldest');
   assert.equal(defaultSort({ from: 100, to: 200 }, 150), 'newest');
@@ -383,6 +385,94 @@ test('a card’s words: the kind, how long, and a line that says what the light 
   assert.equal(cardLine(entry('m', 'meteor', 1, { measures: { azimuth: 200, elevation: 40 } })), 'South, 40° up', 'nothing matched: where it was');
   assert.equal(cardLine({ ...light, detail: 'Closest flight: none within the view' }), 'Northwest, 8° up · blinks', 'an unexplained one’s detail is in the player');
   assert.deepEqual([0.4, 4.2, 4, 9.96, 12.4, 89, 95, 600, -1, null].map(durationShort), ['<1 s', '4.2 s', '4 s', '10 s', '12 s', '89 s', '2 min', '10 min', '', '']);
+});
+
+// MARK: The guide to the unexplained
+
+test('a probable satellite is a satellite: its words, its chip and its colour', () => {
+  const light = entry('ps', 'probableSatellite', 1, { by: 'rule', detail: 'Probable satellite: a steady light at a steady speed (no orbit check yet)' });
+  assert.equal(entryBucket(light), 'satellites');
+  assert.equal(kindChip(light), 'satellites');
+  assert.equal(kindWord(light), 'Probable satellite');
+  assert.equal(cardLine(light), 'Probable satellite: a steady light at a steady speed (no orbit check yet)', 'the rule says why');
+  assert.deepEqual(countEntries([light]), { unexplained: 0, planes: 0, satellites: 1, meteors: 0, bugsAndBirds: 0, notSure: 0, explained: 1 });
+  assert.equal(stripDots([light], 0, 10)[0].kind, 'satellites');
+});
+
+test('the guide is read safely: a priority, its reasons, a group and a doubt', () => {
+  const read = normalizeEntry({ id: 'u', start: 5, label: 'unexplained', priority: 'high', reasons: ['Several lights moving together', 7, '', 'Stopped suddenly'],
+    group: 'g-u', doubtful: true });
+  assert.equal(read.priority, 'high');
+  assert.deepEqual(read.reasons, ['Several lights moving together', 'Stopped suddenly'], 'only sentences are kept');
+  assert.equal(read.group, 'g-u');
+  assert.equal(read.doubtful, true);
+  const old = normalizeEntry({ id: 'o', start: 5, label: 'unexplained' });
+  assert.deepEqual([old.priority, old.reasons, old.group, old.doubtful, old.sortedLater], [null, [], null, false, false],
+    'a light logged before the guide has none (an older box does not sort it)');
+  assert.equal(normalizeEntry({ id: 's', start: 5, label: 'unexplained', priority: 'low', reasons: ['Nothing unusual about it'], sortedLater: true }).sortedLater, true,
+    'one the rules sorted as the log was read says so');
+  assert.equal(normalizeEntry({ id: 'x', start: 5, sortedLater: 'yes' }).sortedLater, false);
+  const odd = normalizeEntry({ id: 'x', start: 5, label: 'unexplained', priority: 'urgent', reasons: 'Fast', group: 12 });
+  assert.deepEqual([odd.priority, odd.reasons, odd.group], [null, [], null]);
+  assert.equal(normalizeEntry({ id: 'many', start: 5, priority: 'low', reasons: Array.from({ length: 20 }, (_, i) => `Reason ${i}`) }).reasons.length, 8);
+  // The priority is an unexplained light's: one the person said was a bird has none on screen.
+  assert.equal(priorityOf(entry('h', 'unexplained', 1, { priority: 'high' })), 'high');
+  assert.equal(priorityOf(entry('h', 'unexplained', 1, { priority: 'high', correction: 'bird', display: 'bird' })), null);
+  assert.equal(priorityOf(entry('p', 'plane', 1, { priority: 'high' })), null);
+  assert.equal(priorityOf(entry('o', 'unexplained', 1)), null);
+  assert.deepEqual(['high', 'medium', 'low', null].map(priorityWord), ['High', 'Medium', 'Low', '']);
+});
+
+/** A night with the guide: lights ranked high, medium and low, one logged before the guide, two that moved together, and a plane. */
+function ranked() {
+  return [
+    entry('l1', 'unexplained', 10, { priority: 'low', reasons: ['Too short to tell a plane from a satellite'] }),
+    entry('h1', 'unexplained', 20, { priority: 'high', reasons: ['Fast across the sky (about 6× a plane at that height)'] }),
+    entry('m1', 'unexplained', 30, { priority: 'medium', reasons: ['Long, low and steady, but not like a plane or a satellite'] }),
+    entry('g1', 'unexplained', 40, { priority: 'high', group: 'g-g1', reasons: ['Several lights moving together', 'Stopped suddenly'] }),
+    entry('g2', 'unexplained', 45, { priority: 'high', group: 'g-g1', reasons: ['Several lights moving together'] }),
+    entry('o1', 'unexplained', 50),
+    entry('p1', 'plane', 60),
+    entry('h2', 'unexplained', 70, { priority: 'high', reasons: ['Looks larger than typical planes'] }),
+  ];
+}
+
+test('High priority is a chip, and Priority an order: the high first, then the newest', () => {
+  const night = ranked();
+  assert.equal(chipCounts(night).high, 4);
+  assert.deepEqual(night.filter((e) => matchesFilters(e, { kinds: ['high'] })).map((e) => e.id), ['h1', 'g1', 'g2', 'h2']);
+  assert.deepEqual(night.filter((e) => matchesFilters(e, { kinds: ['high', 'planes'] })).map((e) => e.id), ['h1', 'g1', 'g2', 'p1', 'h2']);
+  assert.deepEqual(sortEntries(night, 'priority').map((e) => e.id), ['h2', 'g2', 'g1', 'h1', 'm1', 'l1', 'p1', 'o1'],
+    'high, medium, low, then those without one, each the newest first');
+  // Inside Unexplained (or High priority) the night opens by priority; otherwise in its own order.
+  assert.equal(defaultSort({ from: 100, to: 200 }, 250, ['unexplained']), 'priority');
+  assert.equal(defaultSort({ from: 100, to: 200 }, 150, ['high']), 'priority');
+  assert.equal(defaultSort({ from: 100, to: 200 }, 150, ['unexplained', 'high']), 'priority');
+  assert.equal(defaultSort({ from: 100, to: 200 }, 250, ['unexplained', 'planes']), 'oldest');
+  assert.equal(defaultSort({ from: 100, to: 200 }, 250, []), 'oldest');
+  assert.equal(defaultSort({ from: 100, to: 200 }, 250, ['unexplained'], false), 'oldest', 'a night logged before the guide keeps its own order');
+});
+
+test('lights that moved together: “1 of 3 moving together”, and the grid filtered to them', () => {
+  const night = [...ranked(), entry('g3', 'unexplained', 47, { priority: 'high', group: 'g-g1', reasons: ['Several lights moving together'] })];
+  const groups = groupsOf(night);
+  assert.deepEqual([...groups.entries()], [['g-g1', ['g1', 'g2', 'g3']]], 'each group’s lights by the time they began');
+  assert.equal(groupText(night.find((e) => e.id === 'g2'), groups), '2 of 3 moving together');
+  assert.equal(groupText(night.find((e) => e.id === 'h1'), groups), '');
+  assert.deepEqual(night.filter((e) => matchesFilters(e, { group: 'g-g1' })).map((e) => e.id), ['g1', 'g2', 'g3']);
+  assert.deepEqual(night.filter((e) => matchesFilters(e, { group: 'g-nothing' })).map((e) => e.id), []);
+  // The reasons as the page shows them: the group's words for its own.
+  assert.deepEqual(reasonsOf(night.find((e) => e.id === 'g1'), groups), ['1 of 3 moving together', 'Stopped suddenly']);
+  assert.deepEqual(reasonsOf(night.find((e) => e.id === 'o1'), groups), []);
+  // The card's line: an unexplained light's first reason (its group for one that moved with others); a light logged before the guide, where it
+  // was and how.
+  assert.equal(cardLine(night.find((e) => e.id === 'h1'), groups), 'Fast across the sky (about 6× a plane at that height)');
+  assert.equal(cardLine(night.find((e) => e.id === 'g3'), groups), '3 of 3 moving together');
+  assert.equal(cardLine(night.find((e) => e.id === 'o1'), groups), 'North, 45° up · straight');
+  // The group in the address, read safely.
+  assert.equal(readGroupQuery('night=2026-10-24&group=g-1a175f26b6f-ba44f836'), 'g-1a175f26b6f-ba44f836');
+  assert.equal(readGroupQuery('group=../../x'), null);
+  assert.equal(readGroupQuery(''), null);
 });
 
 test('entries are counted as the bridge counts them', () => {

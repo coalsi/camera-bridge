@@ -164,30 +164,38 @@ GET    /api/v1/sky/cameras/{id}/night?date=yyyy-MM-dd&view=night|day     the Sky
                                       milliseconds. An entry: {id, camera, kind (track | newLight | flash), start, end, path[{t (s from its start),
                                       x, y (0 to 1 of the camera's original picture)}] (at most 64), measures{azimuth, elevation, azimuthEnd,
                                       elevationEnd, duration, speed, acceleration, turnRate, maxTurn, straightness, shape (straight | curved | suddenStop |
-                                      sharpTurn), sizeDegrees, brightness, blinks, blinkRate|null, focus} (on the sky, in degrees and ratios, never a real
-                                      size or speed), label (unexplained | plane | probablePlane | satellite | satelliteFlare | meteor | bug | bird),
+                                      sharpTurn), sizeDegrees, brightness, blinks, blinkRate|null, focus, strobePeriod|null (s), strobeStrength|null,
+                                      seenShare|null, wobble|null (degrees off a smooth path), turns|null} (on the sky, in degrees and ratios, never a real
+                                      size or speed; the last five since 2026-10-26, null in an entry logged before them), label (unexplained | plane |
+                                      probablePlane | satellite | probableSatellite | satelliteFlare | meteor | bug | bird),
                                       display (what the log shows: a person's correction wins, "notSure" shows label), by|null (flight | orbit | rule |
                                       model | ai | person), detail|null ("TEST123 · 35,000 ft"), unusual[] (faster | larger | brighter | suddenStop |
-                                      sharpTurn), speedVsPlanes|null (a ratio), candidate, alerted, hasStill, ai|null {kind, sentence, model, at},
+                                      sharpTurn), speedVsPlanes|null (a ratio), candidate, alerted, hasStill, priority|null (high | medium | low: the
+                                      guide to the unexplained; null for the rest), reasons[] (short phrases for the person,
+                                      the most telling first), doubtful (the rules doubt it was a light at all), group|null (the lights that moved together
+                                      share it: "g-" and the first one's id, set as the log is read), sortedLater (since 2026-10-26: logged before the rules
+                                      and sorted by them as the log is read; its label, by, detail and the guide's keys are theirs, and the log is not
+                                      written), ai|null {kind, sentence, model, at},
                                       correction|null (plane | bird | bug | satellite | meteor | notSure), watch (the recordings' moment to open: start
                                       minus 3 s)}. conditions[]: {from, to, state (clear | cloudy | notVisible | unknown), cloudCover|null}. counts:
                                       {unexplained, planes, satellites, meteors, bugsAndBirds, notSure, explained}, counted by what the log shows (a person's
                                       word wins; a light the box explained and the person was not sure of is notSure; explained = all but unexplained). aim:
                                       {quality (rough | good | precise), planes, stars, residualPixels|null, updated|null, lenses[{quality, planes, stars,
                                       residualPixels|null}], note|null}; learning: {ready, planes, satellites, planesNeeded, satellitesNeeded}. capped[]:
-                                      {hour (the clock hour's start), count}: the hours of the view in which more lights that nothing explains were
-                                      followed than the 60 a camera logs an hour, and how many more (the page's "4 PM: 212 more lights weren’t
-                                      logged"). picture|null: {width, height}, how big the night's pictures are in pixels (from the newest light with one
-                                      that can be read; null when none can), which the page needs to draw a light's path over a thumbnail of it. 400 with the
-                                      field date or view; 404 for a camera the bridge does not have; 409 no_location ("Set where the box is first.") or
+                                      {hour (the clock hour's start), count}: the hours of the view in which more lights were followed than the 200 a
+                                      camera logs an hour (lights that no flight explains and that the rules leave unexplained or call a meteor, a bug or
+                                      a bird; never their probable planes and satellites), and how many more (the page's "4 PM: 212 more lights weren’t logged"). picture|null: {width, height}, how
+                                      big the night's pictures are in pixels (from the newest light with one that can be read; null when none can), which
+                                      the page needs to draw a light's path over a thumbnail of it. 400 with the field date or view; 404 for a camera the
+                                      bridge does not have; 409 no_location ("Set where the box is first.") or
                                       no_folder ("Choose a recordings folder first: the sky log is kept with the recordings."); 503 archive_unavailable
                                       (Retry-After) while the recordings' drive is away, 504 drive_slow while it does not answer
 GET    /api/v1/sky/cameras/{id}/entries/{eid}/still?night=yyyy-MM-dd[&size=thumb|full]    the picture kept with an entry: image/jpeg (private, one hour); 404
                                       when it has none; 400 with the field night. size=thumb (the grid's cards) is a small one, at most 480 pixels wide: the
                                       close-up of the light around its path (the rectangle the page draws the path in: 16:9, the path's box with half its
                                       size more on every side, at least 160 x 90, inside the picture), or all of the picture, small, for a light that
-                                      crossed more of the sky than a close-up holds. It is made the first time it is asked for, once, and kept beside the
-                                      picture (<night>/<id>.thumb.jpg, mode 0600, counted in the camera's pictures and gone with the night; made again
+                                      crossed more of the sky than a close-up holds. It is made once, when the picture is written (or the first time it is
+                                      asked for, when it could not be made then), and kept beside the picture (<night>/<id>.thumb.jpg, mode 0600, counted in the camera's pictures and gone with the night; made again
                                       when the picture is written again), at low priority and at most two at a time. When it cannot be made the answer
                                       is the whole picture, 200 all the same, for a minute only (private, max-age=60). size=full and no size are the whole
                                       picture; any other size is 400 with the field size

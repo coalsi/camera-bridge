@@ -60,8 +60,12 @@ public struct SkyAIAnswer: Codable, Sendable, Equatable {
 
 /// One light in the sky log. Times are the box's clock; the path is in the original picture; the measures are on the sky, in degrees and
 /// ratios, never in real units. `label` is what the box decided and `by` what decided it; `correction` is the person's word, which wins on
-/// screen (`SkyDisplay.label`) and counts most to the box's learning. `candidate`: logged while the camera is still learning its sky, so it
-/// alerted nothing. `hasStill`: a picture of it was kept (`SkyLogStore.writeStill`).
+/// screen (`SkyDisplay.label`) and counts most to the box's learning. `candidate`: unexplained and unusual (`unusual` not empty: Task 11), so it
+/// may alert once the camera has learned its sky. `hasStill`: a picture of it was kept (`SkyLogStore.writeStill`). An unexplained light has
+/// `priority` and `reasons` (`SkyGuide`: how interesting it is and why, in short phrases for the page); `doubtful` when the rules doubt it is a
+/// light at all (`SkyRules.doubt`), and `group` (set when the log is read, `SkyFormations`) names the lights it moved together with.
+/// `sortedLater`: logged before the rules, and sorted by them as the log was read (`SkySortLater`): its label, `by`, `detail` and the guide's
+/// fields are the rules' now, not the log's. Neither it nor `group` is ever kept.
 public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
     /// Letters, digits, `-` and `_`, 1 to 64 of them (`isValidID`): it names the entry's picture, so it must be safe in a path.
     public var id: String
@@ -84,13 +88,23 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
     public var hasStill: Bool
     public var ai: SkyAIAnswer?
     public var correction: SkyCorrection?
+    public var priority: SkyPriority?
+    public var reasons: [String]
+    public var doubtful: Bool
+    public var group: String?
+    /// Set as the log is read (`SkySortLater`), never written or read back (it is not one of the coding keys).
+    public var sortedLater: Bool
 
     public static let maximumDetailLength = 200
     public static let maximumIDLength = 64
+    /// An entry keeps at most this many reasons, each at most this long.
+    static let maximumReasons = 8
+    static let maximumReasonLength = 160
 
     public init(id: String, camera: UUID, kind: SkyEntryKind, start: Date, end: Date, path: [SkyPathPoint], measures: SkyMeasures, label: SkyLabel,
                 by: SkyLabelSource? = nil, detail: String? = nil, unusual: [SkyUnusualReason] = [], speedVsPlanes: Double? = nil, candidate: Bool = false,
-                alerted: Bool = false, hasStill: Bool = false, ai: SkyAIAnswer? = nil, correction: SkyCorrection? = nil) {
+                alerted: Bool = false, hasStill: Bool = false, ai: SkyAIAnswer? = nil, correction: SkyCorrection? = nil, priority: SkyPriority? = nil,
+                reasons: [String] = [], doubtful: Bool = false, group: String? = nil, sortedLater: Bool = false) {
         self.id = id
         self.camera = camera
         self.kind = kind
@@ -108,6 +122,11 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
         self.hasStill = hasStill
         self.ai = ai
         self.correction = correction
+        self.priority = priority
+        self.reasons = reasons
+        self.doubtful = doubtful
+        self.group = group
+        self.sortedLater = sortedLater
     }
 
     /// Whether `text` can be an entry's id: 1 to 64 ASCII letters, digits, `-` and `_`.
@@ -120,6 +139,7 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, camera, kind, start, end, path, measures, label, by, detail, unusual, speedVsPlanes, candidate, alerted, hasStill, ai, correction
+        case priority, reasons, doubtful, group
     }
 
     /// An entry written without the fields a later build added (or with a value it cannot read) reads with their defaults; the entry's own
@@ -143,6 +163,11 @@ public struct SkyEntry: Codable, Sendable, Equatable, Identifiable {
         hasStill = (try? container.decodeIfPresent(Bool.self, forKey: .hasStill)) ?? false
         ai = (try? container.decodeIfPresent(SkyAIAnswer.self, forKey: .ai)) ?? nil
         correction = (try? container.decodeIfPresent(SkyCorrection.self, forKey: .correction)) ?? nil
+        priority = (try? container.decodeIfPresent(SkyPriority.self, forKey: .priority)) ?? nil
+        reasons = ((try? container.decodeIfPresent([String].self, forKey: .reasons)) ?? nil) ?? []
+        doubtful = (try? container.decodeIfPresent(Bool.self, forKey: .doubtful)) ?? false
+        group = (try? container.decodeIfPresent(String.self, forKey: .group)) ?? nil
+        sortedLater = false
     }
 }
 
@@ -203,7 +228,7 @@ public struct SkyCounts: Codable, Sendable, Equatable {
         self.explained = explained
     }
 
-    /// The counts of `entries`: planes (including probable ones), satellites (and their flares), meteors, bugs and birds, the explained ones the
+    /// The counts of `entries`: planes and satellites (including probable ones, and satellites' flares), meteors, bugs and birds, the explained ones the
     /// person was not sure of, and the unexplained; `explained` is the sum of all but the last.
     public init(counting entries: [SkyEntry]) {
         self.init()
@@ -212,7 +237,7 @@ public struct SkyCounts: Codable, Sendable, Equatable {
             case (.unexplained, _): unexplained += 1
             case (_, true): notSure += 1
             case (.plane, _), (.probablePlane, _): planes += 1
-            case (.satellite, _), (.satelliteFlare, _): satellites += 1
+            case (.satellite, _), (.probableSatellite, _), (.satelliteFlare, _): satellites += 1
             case (.meteor, _): meteors += 1
             case (.bug, _), (.bird, _): bugsAndBirds += 1
             }

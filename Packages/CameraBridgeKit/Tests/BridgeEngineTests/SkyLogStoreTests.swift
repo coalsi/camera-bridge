@@ -714,8 +714,15 @@ import Testing
         }
     }
 
-    static func entry(_ id: String, _ day: Int, _ hour: Int, label: SkyLabel = .unexplained, hasStill: Bool = false) -> SkyEntry {
-        SkyLogStoreTests.entry(id, SkyLogStoreTests.local(day, hour), label: label, hasStill: hasStill)
+    /// An entry as the box logs one now: an unexplained light has the guide's priority and reason. `guided: false`: as a build before the rules
+    /// logged it (it is sorted by them as the log is read: `SkySortLaterTests`).
+    static func entry(_ id: String, _ day: Int, _ hour: Int, label: SkyLabel = .unexplained, hasStill: Bool = false, guided: Bool = true) -> SkyEntry {
+        var entry = SkyLogStoreTests.entry(id, SkyLogStoreTests.local(day, hour), label: label, hasStill: hasStill)
+        if label == .unexplained && guided {
+            entry.priority = .low
+            entry.reasons = ["Too short to tell a plane from a satellite"]
+        }
+        return entry
     }
 
     @MainActor @Test func theNightLogAnswersByViewWithCountsAndTheCamerasState() async throws {
@@ -753,6 +760,49 @@ import Testing
         // A night with nothing in it is an empty log, with its hours.
         let empty = try await rig.night("2026-10-20", .night)
         #expect(empty.entries.isEmpty && empty.counts == SkyCounts() && empty.from < empty.to)
+    }
+
+    @MainActor @Test func theGuideIsKeptAndLightsThatMovedTogetherAreGroupedAsTheLogIsRead() async throws {
+        let rig = try await Rig()
+        // Two unexplained lights the guide ranked, crossing together at 10 PM; a probable satellite; a light logged before the guide.
+        func ranked(_ id: String, _ seconds: Double, from: SkyDirection) -> SkyEntry {
+            var entry = Self.entry(id, 24, 22)
+            entry.start = entry.start.addingTimeInterval(seconds)
+            entry.end = entry.start.addingTimeInterval(20)
+            entry.measures.azimuth = from.azimuth
+            entry.measures.elevation = from.elevation
+            entry.measures.azimuthEnd = from.azimuth + 14
+            entry.measures.elevationEnd = from.elevation
+            entry.measures.speed = 0.6
+            entry.measures.duration = 20
+            entry.priority = .low
+            entry.reasons = ["Nothing unusual about it"]
+            entry.group = "never kept"
+            return entry
+        }
+        await rig.file(ranked("f-1", 0, from: SkyDirection(azimuth: 300, elevation: 30)))
+        await rig.file(ranked("f-2", 3, from: SkyDirection(azimuth: 300, elevation: 34)))
+        var doubted = ranked("f-3", 5, from: SkyDirection(azimuth: 300, elevation: 26))
+        doubted.doubtful = true
+        doubted.reasons = ["A ragged path: noise, most likely"]
+        await rig.file(doubted)
+        await rig.file(Self.entry("f-4", 24, 23, label: .probableSatellite))
+        await rig.file(Self.entry("f-5", 25, 1, guided: false))
+        let file = SkyLogStore.nightFile(folder: rig.recordings.url, camera: rig.cameraID, night: "2026-10-24")
+        #expect(try !SkyLogStoreTests.lines(file).contains { $0.contains("never kept") }, "a group is found as the log is read, never kept")
+        let log = try await rig.night("2026-10-24", .night)
+        let byID = Dictionary(uniqueKeysWithValues: log.entries.map { ($0.id, $0) })
+        #expect(byID["f-1"]?.group == "g-f-1" && byID["f-2"]?.group == "g-f-1" && byID["f-3"]?.group == nil)
+        #expect(byID["f-1"]?.priority == .high && byID["f-1"]?.reasons == ["Several lights moving together", "Nothing unusual about it"])
+        #expect(byID["f-3"]?.doubtful == true && byID["f-3"]?.priority == .low && byID["f-3"]?.reasons == ["A ragged path: noise, most likely"])
+        #expect(byID["f-5"]?.priority == .low && byID["f-5"]?.reasons == ["Too short to tell a plane from a satellite"] && byID["f-5"]?.sortedLater == true,
+                "a light logged before the guide is sorted by the rules as the log is read")
+        #expect(byID["f-1"]?.sortedLater == false, "one the guide ranked is as it was logged")
+        #expect(log.counts.satellites == 1, "a probable satellite is a satellite")
+        // The person says one was a bird: the other is alone again.
+        _ = try await rig.engine.correctSkyEntry(cameraID: rig.cameraID, entryID: "f-2", night: "2026-10-24", label: .bird)
+        let corrected = try await rig.night("2026-10-24", .night)
+        #expect(corrected.entries.allSatisfy { $0.group == nil })
     }
 
     @MainActor @Test func theCountsFollowTheDisplayedLabelAndNotSureIsItsOwnGroup() async throws {

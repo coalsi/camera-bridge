@@ -189,7 +189,9 @@ extension SkyDetectorTests {
         }
         let entries = await rig.logged().entries
         #expect(entries.map { $0.start.timeIntervalSince(Self.start) } == [60, 180], "the two that go are logged; the crawlers are not")
-        #expect(entries.allSatisfy { $0.label == .unexplained && $0.hasStill } && rig.stillsAsked.value.count == 2, "no picture is asked for a skipped light")
+        // (Both are steady straight lights at night: probable satellites or planes by the rules, which have their pictures since 2026-10-26.)
+        #expect(entries.allSatisfy { $0.by == .rule && SkyLightFilter.wantsStill($0.label, by: $0.by) && $0.hasStill } && rig.stillsAsked.value.count == 2,
+                "no picture is asked for a skipped light: \(entries.map(\.label))")
 
         func slowLines() -> [String] { capture.lines.filter { $0.contains("slow light") } }
         await rig.detector.tick(at: Self.start.addingTimeInterval(1_800))
@@ -403,7 +405,7 @@ extension SkyDetectorTests {
             let track = Self.track(along: climbing, at: at, seenBy: model, using: &random)
             rig.clock.set(at.addingTimeInterval(10))
             let entry = await rig.detector.classify(track, measures: TrackMeasurer.measure(track, model: model, analysisWidth: 1920, pictureWidth: 1920))
-            #expect(entry.label == .unexplained)
+            #expect(entry.by != .flight, "no plane explains it")
             await rig.detector.tick(at: at.addingTimeInterval(8))
             let status = await rig.detector.status
             #expect(status.aim.quality == .good && status.aim.note == nil && startedAgain().isEmpty, "not before two hours: \(index)")
@@ -444,7 +446,7 @@ extension SkyDetectorTests {
             await rig.flights.add(pass.reports)
             rig.clock.set(at.addingTimeInterval(16))
             let entry = await rig.detector.classify(pass.track, measures: TrackMeasurer.measure(pass.track, model: model, analysisWidth: 1920, pictureWidth: 1920))
-            #expect(entry.label == .unexplained, "the card is 30° off: no match")
+            #expect(entry.by != .flight, "the card is 30° off: no match")
             await rig.detector.tick(at: at.addingTimeInterval(8))
         }
         let later = first.addingTimeInterval(7_260)

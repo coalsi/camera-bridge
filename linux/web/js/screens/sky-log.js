@@ -2,14 +2,17 @@
 // unexplained, 2,387 explained"), the sky's conditions and what the box is still learning; then a dock that stays at the top of the window while
 // the grid scrolls under it: the night as a strip from sunset to sunrise (a dot for each light, the unexplained larger and glowing; a tap on a
 // time brings that hour into view, and a band shows which part of the night is on the screen), and the filters: a chip for each kind with its
-// count (several at once; All clears them), "With picture", and the order (newest or oldest first, the longest, the fastest across the sky).
+// count (several at once; All clears them), "High priority", "With picture", and the order (newest or oldest first, by priority, the longest,
+// the fastest across the sky; inside Unexplained the night opens by priority).
 // The grid (sky-grid.js) holds a card for each light, under the hours they began in, made as they come near the screen; a note at an hour in
 // which the box followed more lights than it logs. A card opens the clip player on this page (sky-player.js, loaded on demand): the recording
 // around the light, with the light's details beside it, the one-tap correction ("That was a…": the card, the counts, the summary and the strip
 // follow at once, and a card the filters no longer show fades out of the grid while the page keeps its place) and the way to the Monitor.
 // Past nights and days, a camera picker, and the aim and the stream as status.
 // The filters and the order are in the address (#/sky/<camera>?night=…&view=…&kinds=…&sort=…&pictures=1), so a reload or Back keeps them, and
-// in this browser's memory, so the page opens as it was left.
+// in this browser's memory, so the page opens as it was left. The unexplained come with the bridge's guide: a priority (a badge on the card) and
+// the reasons for it (the first on the card, every one in the player); lights that moved together say which of them each was ("1 of 3 moving
+// together"), and in the player a tap on that shows only them (group=… in the address, and a chip that takes it away).
 // Sky Watcher is a plugin: while it is off the page says so, with the way to Plugins; while it is on, a Setup panel (where the box is, the flight
 // feed, the AI's limit: sky-setup.js) sits at the top, and with no camera watching the sky yet the page says where to turn it on.
 // Nothing here claims a real size, distance or speed: a light's speed is only ever "faster across the sky than planes at that height".
@@ -23,9 +26,9 @@ import { createSkyGrid } from './sky-grid.js';
 import { createSkySetupPanel } from './sky-setup.js';
 import {
   BUCKETS, CORRECTIONS, GRID_KINDS, GRID_SORTS, SKY_ROUTE, SKY_TEXT, aimLines, blinkText, cappedByHour, cappedText, chipCounts, clipAddress, conditionsText, correctionText,
-  countEntries, countLabel, countsAfter, dayLabel, defaultLensLayout, defaultSort, directionText, durationText, entryBucket, gridChoice, gridQuery, isTimeSort, kindWord,
-  learningText, matchesFilters, normalizeEntry, readGridQuery, shapeText, shiftDate, skyWatching, sortEntries, speedText, streamText, stripDots, stripTicks, summaryText,
-  timeText, toMs, watchAddress,
+  countEntries, countLabel, countsAfter, dayLabel, defaultLensLayout, defaultSort, directionText, durationText, entryBucket, gridChoice, gridQuery, groupText, groupsOf,
+  isTimeSort, kindWord, learningText, matchesFilters, normalizeEntry, priorityOf, priorityWord, readGridQuery, readGroupQuery, reasonsOf, shapeText, shiftDate, skyWatching,
+  sortEntries, speedText, streamText, stripDots, stripTicks, summaryText, timeText, toMs, watchAddress,
 } from './sky-model.js';
 
 export { SKY_ROUTE };
@@ -43,8 +46,8 @@ const STRIP = { tall: 64, short: 40, narrow: 560, lane: 18, shortLane: 16, padX:
 
 const OWN_LABEL = { plane: 'plane', bird: 'bird', bug: 'bug', satellite: 'satellite', meteor: 'meteor' };
 /** A kind chip's colour key (sky.css .sky-key--…). */
-const KEY_OF_CHIP = { unexplained: 'unexplained', planes: 'planes', satellites: 'satellites', meteors: 'meteors', bugs: 'bugsAndBirds' };
-const SORT_SHORT = { newest: 'Newest', oldest: 'Oldest', longest: 'Longest', fastest: 'Fastest' };
+const KEY_OF_CHIP = { unexplained: 'unexplained', high: 'unexplained', planes: 'planes', satellites: 'satellites', meteors: 'meteors', bugs: 'bugsAndBirds' };
+const SORT_SHORT = { newest: 'Newest', oldest: 'Oldest', priority: 'Priority', longest: 'Longest', fastest: 'Fastest' };
 const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 const clamp01 = (value) => Math.min(1, Math.max(0, value));
 const count = (n) => n.toLocaleString('en-US');
@@ -113,11 +116,12 @@ function readNight(answer, asked) {
   };
 }
 
-/** The page's address parts: night=yyyy-MM-dd, view=night|day, entry=<id>, and the grid's kinds, sort and pictures. */
+/** The page's address parts: night=yyyy-MM-dd, view=night|day, entry=<id>, the grid's kinds, sort and pictures, and group=<lights that moved together>. */
 function readQuery(query) {
   const found = new URLSearchParams(typeof query === 'string' ? query : '');
   const night = found.get('night');
-  return { night: night && shiftDate(night, 0) ? night : null, view: found.get('view') === 'day' ? 'day' : 'night', entry: found.get('entry') || null, grid: readGridQuery(found) };
+  return { night: night && shiftDate(night, 0) ? night : null, view: found.get('view') === 'day' ? 'day' : 'night', entry: found.get('entry') || null, grid: readGridQuery(found),
+    group: readGroupQuery(found) };
 }
 
 /** The filters and the order this browser chose last (localStorage; a private window or blocked site data keeps nothing, and the page still works). */
@@ -173,6 +177,8 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
   let view = wanted.view;
   let target = wanted.entry;     // the entry the address names, until it has been shown
   let choice = gridChoice(wanted.grid.given ? wanted.grid : remember.read());   // the filters and the order (sort null: the night's own)
+  let group = wanted.group;      // the lights that moved together the grid is narrowed to (null: none); the address keeps it, this browser does not
+  let together = new Map();      // the night's lights that moved together (groupsOf)
   let log = null;                // the night as read
   let phase = pluginIsOn ? 'loading' : 'off';   // 'loading' | 'ready' | 'failed' | 'none' (no camera watches) | 'removed' | 'off' (the plugin is off)
   let failure = '';
@@ -222,21 +228,27 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     const number = h('span', { class: 'sky-filter-count' });
     counts.set(kind, number);
     const mark = kind === 'all' ? null : kind === 'corrected' ? icon('check') : h('span', { class: `sky-key sky-key--${KEY_OF_CHIP[kind]}`, 'aria-hidden': 'true' });
-    return h('button', { class: 'sky-filter', type: 'button', dataset: { kind }, 'aria-pressed': 'false', onclick: () => (kind === 'all' ? choose({ ...choice, kinds: [] }) : toggleKind(kind)) },
+    const all = () => { group = null; choose({ ...choice, kinds: [] }); };
+    return h('button', { class: 'sky-filter', type: 'button', dataset: { kind }, 'aria-pressed': 'false', onclick: () => (kind === 'all' ? all() : toggleKind(kind)) },
       mark, h('span', { class: 'sky-filter-word' }, word), number);
   }
   const allButton = filterButton('all', TEXT.all);
   const kindButtons = new Map(GRID_KINDS.map(([kind, word]) => [kind, filterButton(kind, word)]));
+  // The lights that moved together, when the grid is narrowed to them: a chip that takes it away.
+  const groupCount = h('span', { class: 'sky-filter-count' });
+  const groupButton = h('button', { class: 'sky-filter sky-filter--group', type: 'button', dataset: { kind: 'group' }, 'aria-pressed': 'true', hidden: true,
+    title: TEXT.showEveryLight, onclick: () => { group = null; choose(choice); } },
+  h('span', { class: 'sky-key sky-key--unexplained', 'aria-hidden': 'true' }), h('span', { class: 'sky-filter-word' }, TEXT.movingTogether), groupCount, icon('x'));
   const picturesInput = h('input', { type: 'checkbox', role: 'switch', onchange: () => choose({ ...choice, pictures: picturesInput.checked }) });
   const picturesSwitch = h('label', { class: 'sky-pictures' }, h('span', { class: 'switch' }, picturesInput), h('span', { class: 'sky-pictures-word' }, TEXT.withPicture));
   // The night's own order is kept as none chosen, so that another night opens in its own (the newest first while it is still going).
   const sortSelect = h('select', { class: 'sky-sort-select', 'aria-label': TEXT.sort,
-    onchange: () => choose({ ...choice, sort: log && sortSelect.value === defaultSort(log, clock()) ? null : sortSelect.value }) },
+    onchange: () => choose({ ...choice, sort: log && sortSelect.value === ownSort() ? null : sortSelect.value }) },
   GRID_SORTS.map(([value, words]) => h('option', { value }, words)));
   const sortLong = h('span', { class: 'sky-sort-long' });
   const sortShort = h('span', { class: 'sky-sort-short' });
   const sortBox = h('label', { class: 'sky-sort' }, icon('sort'), h('span', { class: 'sky-sort-face', 'aria-hidden': 'true' }, sortLong, sortShort), sortSelect);
-  const chipRow = h('div', { class: 'sky-chip-row', role: 'group', 'aria-label': TEXT.show }, allButton, [...kindButtons.values()]);
+  const chipRow = h('div', { class: 'sky-chip-row', role: 'group', 'aria-label': TEXT.show }, allButton, [...kindButtons.values()], groupButton);
   const filters = h('div', { class: 'sky-filters' }, chipRow, h('div', { class: 'sky-tools' }, picturesSwitch, sortBox));
   const dock = h('div', { class: 'sky-dock' }, stripBox, filters);
 
@@ -302,6 +314,7 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     if (night !== null && night !== latest[view]) params.push(`night=${night}`);
     if (view === 'day') params.push('view=day');
     params.push(...gridQuery(choice));
+    if (group) params.push(`group=${group}`);
     return `sky/${current}${params.length ? `?${params.join('&')}` : ''}`;
   }
 
@@ -371,6 +384,8 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
       const [answer] = await Promise.all([load(asked), zoneAsk]);
       if (destroyed || mine !== ticket) return;
       log = readNight(answer, asked);
+      together = groupsOf(log.entries);
+      if (group && !together.has(group)) group = null;   // another night's group (or one no longer there): every light
       skew = log.serverTime !== null ? log.serverTime - now() : 0;
       if (asked.night === null) latest[log.view] = log.night;
       phase = 'ready';
@@ -407,8 +422,15 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
 
   // MARK: The filters and the order
 
-  /** The order shown: the person's, else the night's own (the newest first while it is still going, the oldest first after). */
-  const sortNow = () => choice.sort ?? (log ? defaultSort(log, clock()) : 'oldest');
+  /**
+   * The order a night opens in with these filters: by priority inside Unexplained (or High priority); else the night's own (the newest first
+   * while it is still going, the oldest first after); the lights that moved together by time.
+   */
+  const ownSort = () => (group ? 'oldest' : log ? defaultSort(log, clock(), choice.kinds, log.entries.some((entry) => priorityOf(entry) !== null)) : 'oldest');
+  /** The order shown: the person's, else the filters' own. */
+  const sortNow = () => choice.sort ?? ownSort();
+  /** What the grid is narrowed to: the chips, With picture and the lights that moved together. */
+  const narrowing = () => ({ ...choice, group });
 
   function drawFilters() {
     if (!log) return;
@@ -418,8 +440,10 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
       const button = kind === 'all' ? allButton : kindButtons.get(kind);
       button.dataset.empty = String(numbers[kind] === 0);
     }
-    allButton.setAttribute('aria-pressed', String(choice.kinds.length === 0));
+    allButton.setAttribute('aria-pressed', String(choice.kinds.length === 0 && !group));
     for (const [kind, button] of kindButtons) button.setAttribute('aria-pressed', String(choice.kinds.includes(kind)));
+    groupButton.hidden = !group;
+    groupCount.textContent = group ? count(together.get(group)?.length ?? 0) : '';
     picturesInput.checked = choice.pictures;
     const sort = sortNow();
     sortSelect.value = sort;
@@ -434,7 +458,7 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     const onlyUnexplained = choice.kinds.length === 1 && choice.kinds[0] === 'unexplained' && !choice.pictures;
     const sentence = onlyUnexplained ? TEXT.nothingUnexplained : choice.pictures && !choice.kinds.length ? TEXT.noPictures : TEXT.noMatch;
     return h('div', { class: 'sky-no-match' }, h('p', null, sentence),
-      h('button', { class: 'btn', type: 'button', onclick: () => choose({ ...choice, kinds: [], pictures: false }) }, TEXT.clearFilters));
+      h('button', { class: 'btn', type: 'button', onclick: () => { group = null; choose({ ...choice, kinds: [], pictures: false }); } }, TEXT.clearFilters));
   }
 
   /** The grid of what the filters show, in the order chosen; with `keepPlace`, what is at the top of the screen stays there. */
@@ -442,9 +466,9 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     if (!log) return;
     const sort = sortNow();
     const byHour = isTimeSort(sort);
-    const shown = sortEntries(log.entries.filter((entry) => matchesFilters(entry, choice)), sort);
-    grid.show({ entries: shown, zone: zoneName, byHour, capped: cappedByHour(log.capped, zoneName), notes: byHour ? [] : cappedText(log.capped, zoneName), empty: emptyState() },
-      { keepPlace });
+    const shown = sortEntries(log.entries.filter((entry) => matchesFilters(entry, narrowing())), sort);
+    grid.show({ entries: shown, zone: zoneName, byHour, capped: cappedByHour(log.capped, zoneName), notes: byHour ? [] : cappedText(log.capped, zoneName), together,
+      empty: emptyState() }, { keepPlace });
   }
 
   const dockBottom = () => dock.getBoundingClientRect().bottom || 0;
@@ -470,7 +494,16 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
   }
 
   function toggleKind(kind) {
+    group = null;
     choose({ ...choice, kinds: choice.kinds.includes(kind) ? choice.kinds.filter((name) => name !== kind) : [...choice.kinds, kind] });
+  }
+
+  /** Only the lights of `named` (they moved together), from the player: it closes, and every kind and picture is shown, in their own order. */
+  function showGroup(named) {
+    if (!named || !together.has(named)) return;
+    player?.close?.();
+    group = named;
+    choose({ ...choice, kinds: [], pictures: false });
   }
 
   /** The strip's tap on a time: that hour in view, in the night's own order when another order had the grid without hours. */
@@ -572,10 +605,10 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
   /** What the filters leave out is faint on the strip (its halo hidden); the rest as drawn. */
   function fadeStrip() {
     if (!log) return;
-    const filtered = choice.kinds.length > 0 || choice.pictures;
+    const filtered = choice.kinds.length > 0 || choice.pictures || Boolean(group);
     for (const entry of log.entries) {
       const drawn = stripDotsOf.get(entry.id);
-      const out = filtered && !matchesFilters(entry, choice);
+      const out = filtered && !matchesFilters(entry, narrowing());
       if (!drawn || drawn.out === out) continue;   // only the dots that change are touched
       drawn.out = out;
       drawn.circle.setAttribute('class', `sky-dot sky-dot--${drawn.kind}${out ? ' is-out' : ''}`);
@@ -684,7 +717,10 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     ].filter(Boolean);
   }
 
-  /** The light's details for the player: what it is (a chip in its kind's colour), what the box matched it to, the facts, the AI's sentence, the correction and the clip. */
+  /**
+   * The light's details for the player: what it is (a chip in its kind's colour, and a quiet "Sorted later" for a light logged before the rules that they
+   * sorted as the bridge read the night), what the box matched it to, the facts, the AI's sentence, the correction and the clip.
+   */
   function detailsFor(entry) {
     const key = h('span', { class: 'sky-key', 'aria-hidden': 'true' });
     const word = h('span');
@@ -697,13 +733,32 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     });
     const correction = correctionBlock(entry);
     const el = h('div', { class: 'sky-details' },
-      h('div', { class: 'sky-details-kind' }, chip),
+      h('div', { class: 'sky-details-kind' }, chip,
+        entry.sortedLater ? h('span', { class: 'small sky-sorted-later', title: TEXT.sortedLaterWhy }, TEXT.sortedLater) : null),
       entry.detail ? h('p', { class: 'sky-detail' }, entry.detail) : null,
+      reasonsBlock(entry),
       h('ul', { class: 'sky-facts' }, facts(entry).map((line) => h('li', null, line))),
       entry.ai ? h('p', { class: 'sky-ai' }, h('span', { class: 'sky-ai-label' }, TEXT.ai), ' ', entry.ai.sentence) : null,
       correction.el,
       h('div', { class: 'sky-details-actions' }, h('a', { class: 'btn small', href: clipAddress(current, entry, zoneName), download: true }, icon('download'), TEXT.download)));
     return { el, stop() { stopChip(); correction.stop(); } };
+  }
+
+  /**
+   * Why an unexplained light ranks where it does: its priority and every reason; for one that moved with others, which of them it was, as a
+   * button that shows only them. Nothing for an explained light, or one logged before the guide.
+   */
+  function reasonsBlock(entry) {
+    const priority = priorityOf(entry);
+    const reasons = reasonsOf(entry, together);
+    if (!priority || !reasons.length) return null;
+    const ours = groupText(entry, together);
+    const item = (reason) => h('li', null, reason === ours && entry.group
+      ? h('button', { class: 'btn small sky-group-show', type: 'button', title: TEXT.showTogether, onclick: () => showGroup(entry.group) }, reason)
+      : reason);
+    return h('div', { class: 'sky-reasons', dataset: { priority } },
+      h('p', { class: 'sky-reasons-head' }, h('span', { class: 'sky-reasons-badge', dataset: { priority } }, `${priorityWord(priority)} priority`)),
+      h('ul', { class: 'sky-reasons-list' }, reasons.map(item)));
   }
 
   // MARK: Corrections
@@ -765,11 +820,20 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     entry.correction = same ? back.correction ?? value : value;
     entry.display = same ? back.display : OWN_LABEL[value] ?? entry.label;
     log.counts = countsAfter(log.counts, before, entry) ?? log.counts;
+    // A light the person named is no longer one of the lights that moved together: the others' cards say so (the bridge regroups them on the
+    // next read).
+    const members = entry.group ? together.get(entry.group) ?? [] : [];
+    together = groupsOf(log.entries);
+    grid.setGroups(together);
     drawSummary();
     drawFilters();
     drawStrip();
     grid.refresh(entry);
-    if (!matchesFilters(entry, choice)) grid.leave(entry.id);
+    for (const id of members) {
+      const member = log.entries.find((candidate) => candidate.id === id);
+      if (member && member !== entry) grid.refresh(member);
+    }
+    if (!matchesFilters(entry, narrowing())) grid.leave(entry.id);
     else if (!grid.has(entry.id)) drawGrid({ keepPlace: true });
     for (const refresh of [...(refreshers.get(entry.id) ?? [])]) refresh();
   }
@@ -831,7 +895,8 @@ export function createSkyLogPage({ cameraID = null, query = '', load = loadNight
     if (!named) return;
     const entry = log.entries.find((candidate) => candidate.id === named);
     if (!entry) return;
-    if (!matchesFilters(entry, choice)) {
+    if (!matchesFilters(entry, narrowing())) {
+      group = null;
       choice = gridChoice({ ...choice, kinds: [], pictures: false });
       remember.write(choice);
       writeOut();

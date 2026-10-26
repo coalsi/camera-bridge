@@ -33,6 +33,18 @@ public struct SkyMeasures: Codable, Sendable, Equatable {
     public var blinks: Bool
     public var blinkRate: Double?
     public var focus: Double
+    /// A regular flash like a plane's strobe (the overnight prototype's measure): the period (s) of the first clear repeat of its brightness
+    /// between 0.6 and 1.6 s, nil when there is none; and how strong it is (0…1; 0 when there is none). Both nil when the light was followed
+    /// for fewer than 20 pictures. The pictures it was missing from count as dark.
+    public var strobePeriod: Double?
+    public var strobeStrength: Double?
+    /// The share of its pictures it was seen in (1: a steady light; a plane's strobe seen only when it flashes, far less).
+    public var seenShare: Double?
+    /// How far its positions stray from a smooth path (degrees, the root mean square from quadratic fits over time, 30 s at a time): a light's
+    /// track keeps within a tenth of a degree or two, a chain of noise does not.
+    public var wobble: Double?
+    /// How many times its path turned by 45° or more (between the chords the turn rate is measured on).
+    public var turns: Int?
 }
 
 /// Measures tracks on the sky: each sample's direction comes through the camera model, by its own lens (or, when a sample outside the
@@ -63,6 +75,15 @@ public struct SkyMeasures: Codable, Sendable, Equatable {
 /// - a dip is a run of low pictures, so one long dimming is one dip; the rate is the dips' frequency, from the first dip to the last;
 /// - the brightness is in the original picture's pixels (the flux of the analysed picture × (pictureWidth / analysisWidth)²), so it does
 ///   not change with the stream analysed.
+///
+/// **The overnight prototype's measures** (ported for `SkyRules`):
+/// - the strobe: the brightness of each of its pictures from the first to the last (a picture it was missing from is dark), less its running
+///   median over 11 pictures (the edges repeated) and its mean; the first lag between 0.6 and 1.6 s whose autocorrelation is over 0.25, a peak
+///   among its neighbours, and at least 0.3 over the autocorrelation at half that lag (a real period has a dip there), gives the period and its
+///   strength. The 2 s pulse of a faint light at the camera's keyframes is outside the range on purpose. At least 20 pictures;
+/// - the wobble: the directions on the plane touching the sky at the track's middle, a quadratic over time fitted on each axis 30 s at a time,
+///   the root mean square of what is left (degrees);
+/// - the turns: the turns of 45° or more between the turn rate's chords (at least 20 pixels each).
 enum TrackMeasurer {
     // MARK: Pinned values
 
@@ -79,6 +100,18 @@ enum TrackMeasurer {
     static let blinkDips = 3
     static let stationarySpeed = 0.05
     static let stationaryFor: TimeInterval = 2
+    /// The prototype's strobe: the periods looked at (s), the pictures it needs, its running median, how strong a repeat must be and how far
+    /// over the half lag's.
+    static let strobePeriods: ClosedRange<Double> = 0.6...1.6
+    static let strobePictures = 20
+    static let strobeMedianPictures = 11
+    static let strobeLongestLag: TimeInterval = 3.4
+    static let strobeFloor = 0.25
+    static let strobeDip = 0.3
+    /// The wobble's fits: at most this long each.
+    static let wobbleWindow: TimeInterval = 30
+    /// A turn counts from this many degrees.
+    static let turnDegrees = 45.0
 
     // MARK: Builder's values
 
@@ -109,20 +142,16 @@ enum TrackMeasurer {
         let brightness = median(samples.map(\.flux).filter(\.isFinite)) * scale * scale
         let focus = median(samples.map(\.sharpness).filter(\.isFinite))
         let blinking = blinks(samples, misses: track.misses)
+        let pictures = Self.pictures(samples, misses: track.misses)
+        let flashing = strobe(pictures)
+        let seenShare = pictures.isEmpty ? nil : Double(samples.count) / Double(pictures.count)
 
-        // The samples the model places in the sky, each through the lens it was seen in: the samples' own, unless one outside the seam band
-        // disagrees with the model's split (the picture was analysed without the model, which knows only one lens), and then the split's.
-        let trusted = !samples.contains { $0.point.x.isFinite && model.lens(at: $0.point) != $0.lens && !model.isInSeamBand($0.point) }
-        let points: [Point] = samples.compactMap { sample in
-            guard sample.point.x.isFinite, sample.point.y.isFinite,
-                  let direction = model.direction(at: sample.point, lens: trusted ? sample.lens : model.lens(at: sample.point)),
-                  direction.azimuth.isFinite, direction.elevation.isFinite else { return nil }
-            return Point(time: sample.time, unit: SkyMath.unitVector(direction), sample: sample)
-        }
+        let points = Self.points(samples, model: model)
         guard let first = points.first, let last = points.last else {
             return SkyMeasures(azimuth: 0, elevation: 0, azimuthEnd: 0, elevationEnd: 0, duration: 0, speed: 0, acceleration: 0, turnRate: 0,
                                maxTurn: 0, straightness: 1, shape: .straight, sizeDegrees: 0, brightness: finite(brightness), blinks: blinking.blinks,
-                               blinkRate: blinking.rate, focus: finite(focus))
+                               blinkRate: blinking.rate, focus: finite(focus), strobePeriod: flashing?.period, strobeStrength: flashing?.strength,
+                               seenShare: seenShare)
         }
         let duration = last.time - first.time
         let middle = points[points.count / 2]
@@ -148,20 +177,7 @@ enum TrackMeasurer {
         let straightness = path > 0 ? min(1, chord / path) : 1
 
         // The turn rate: the turns between chords of at least 20 pixels.
-        var headings = [0]
-        for index in 1..<points.count where angle(points[headings[headings.count - 1]].unit, points[index].unit) >= headingPixels * pixel {
-            headings.append(index)
-        }
-        // Each turn is between the chords on either side of a node, so the turns cover the path from the first chord's middle to the
-        // last one's: that is what they are per degree of.
-        var turning = 0.0, covered = 0.0
-        if headings.count >= 3 {
-            let chords = (1..<headings.count).map { angle(points[headings[$0 - 1]].unit, points[headings[$0]].unit) }
-            covered = chords.reduce(0, +) - (chords[0] + chords[chords.count - 1]) / 2
-            for k in 1..<(headings.count - 1) {
-                turning += turn(points[headings[k - 1]].unit, points[headings[k]].unit, points[headings[k + 1]].unit) ?? 0
-            }
-        }
+        let (turning, covered, turns) = Self.turning(points, pixel: pixel)
         let turnRate = covered > 0 ? turning / covered : 0
 
         // The largest turn within a second: between the chords from a second before each sample and to a second after it (their middles a
@@ -197,10 +213,43 @@ enum TrackMeasurer {
             return 2 * (Double(max(0, sample.area)) / Double.pi).squareRoot() * (local.isFinite ? local : 0)
         }
         let start = SkyMath.direction(of: first.unit), end = SkyMath.direction(of: last.unit)
+        let wobble = wobbleDegrees(points)
         return SkyMeasures(azimuth: start.azimuth, elevation: start.elevation, azimuthEnd: end.azimuth, elevationEnd: end.elevation,
                            duration: finite(duration), speed: finite(speed), acceleration: finite(slope(speeds)), turnRate: finite(turnRate),
                            maxTurn: finite(maxTurn), straightness: finite(straightness), shape: shape, sizeDegrees: finite(median(sizes)),
-                           brightness: finite(brightness), blinks: blinking.blinks, blinkRate: blinking.rate, focus: finite(focus))
+                           brightness: finite(brightness), blinks: blinking.blinks, blinkRate: blinking.rate, focus: finite(focus),
+                           strobePeriod: flashing?.period, strobeStrength: flashing?.strength, seenShare: seenShare,
+                           wobble: finite(wobble), turns: turns)
+    }
+
+    /// What a logged light's path gives again (`SkySortLater`: an entry logged before these measures keeps its path, not them).
+    struct PathMeasures: Sendable, Equatable {
+        var wobble: Double
+        var turns: Int
+        var strobePeriod: Double? = nil
+        var strobeStrength: Double? = nil
+        var seenShare: Double? = nil
+    }
+
+    /// The wobble and the turns of `track`'s points through `model` (an analysis `analysisWidth` wide), placed and counted as `measure` does,
+    /// and, when `pictures` (its samples are every picture it was seen in, its misses every one it was not), from them (each sample at the
+    /// brightness it was given, each miss dark) the strobe and the share of them it was seen in: the cheap part of `measure`, for a path read back
+    /// from the log. Nil when the model places none of it.
+    static func pathMeasures(_ track: SkyTrack, model: SkyCameraModel, analysisWidth: Int, pictures: Bool) -> PathMeasures? {
+        let samples = track.samples.filter { $0.time.isFinite }.sorted { $0.time < $1.time }
+        let points = Self.points(samples, model: model)
+        guard !points.isEmpty else { return nil }
+        var pixel = model.degreesPerPixel(at: points[points.count / 2].sample.point, pictureWidth: max(1, analysisWidth))
+        if !(pixel.isFinite && pixel > 0) { pixel = 0 }
+        var measured = PathMeasures(wobble: finite(wobbleDegrees(points)), turns: turning(points, pixel: pixel).turns)
+        if pictures {
+            let all = Self.pictures(samples, misses: track.misses)
+            let flashing = strobe(all)
+            measured.strobePeriod = flashing?.period
+            measured.strobeStrength = flashing?.strength
+            measured.seenShare = all.isEmpty ? nil : Double(samples.count) / Double(all.count)
+        }
+        return measured
     }
 
     // MARK: Pieces
@@ -209,6 +258,40 @@ enum TrackMeasurer {
         var time: Double
         var unit: SIMD3<Double>
         var sample: SkyTrackSample
+    }
+
+    /// The samples the model places in the sky, each through the lens it was seen in: the samples' own, unless one outside the seam band
+    /// disagrees with the model's split (the picture was analysed without the model, which knows only one lens), and then the split's.
+    private static func points(_ samples: [SkyTrackSample], model: SkyCameraModel) -> [Point] {
+        let trusted = !samples.contains { $0.point.x.isFinite && model.lens(at: $0.point) != $0.lens && !model.isInSeamBand($0.point) }
+        return samples.compactMap { sample in
+            guard sample.point.x.isFinite, sample.point.y.isFinite,
+                  let direction = model.direction(at: sample.point, lens: trusted ? sample.lens : model.lens(at: sample.point)),
+                  direction.azimuth.isFinite, direction.elevation.isFinite else { return nil }
+            return Point(time: sample.time, unit: SkyMath.unitVector(direction), sample: sample)
+        }
+    }
+
+    /// The turns between the chords of at least `headingPixels` (`pixel` degrees each) along `points`: all of their heading changes, the path
+    /// they cover (each turn is between the chords on either side of a node, so the turns cover the path from the first chord's middle to the
+    /// last one's: that is what they are per degree of), and how many were of `turnDegrees` or more.
+    private static func turning(_ points: [Point], pixel: Double) -> (turning: Double, covered: Double, turns: Int) {
+        guard !points.isEmpty else { return (0, 0, 0) }
+        var headings = [0]
+        for index in 1..<points.count where angle(points[headings[headings.count - 1]].unit, points[index].unit) >= headingPixels * pixel {
+            headings.append(index)
+        }
+        var turning = 0.0, covered = 0.0, turns = 0
+        if headings.count >= 3 {
+            let chords = (1..<headings.count).map { angle(points[headings[$0 - 1]].unit, points[headings[$0]].unit) }
+            covered = chords.reduce(0, +) - (chords[0] + chords[chords.count - 1]) / 2
+            for k in 1..<(headings.count - 1) {
+                let change = turn(points[headings[k - 1]].unit, points[headings[k]].unit, points[headings[k + 1]].unit) ?? 0
+                turning += change
+                if change >= turnDegrees { turns += 1 }
+            }
+        }
+        return (turning, covered, turns)
     }
 
     /// The angle between two unit vectors (degrees).
@@ -303,6 +386,127 @@ enum TrackMeasurer {
         }
         guard starts.count >= blinkDips, let firstDip = starts.first, let lastDip = starts.last, lastDip > firstDip else { return (false, nil) }
         return (true, Double(starts.count - 1) / (lastDip - firstDip))
+    }
+
+    /// The pictures of a track from its first sample to its last, in time order: each sample's flux, and a miss (`SkyTrack.misses`) as dark.
+    private static func pictures(_ samples: [SkyTrackSample], misses: [TimeInterval]) -> [(time: Double, flux: Double)] {
+        guard let first = samples.first?.time, let last = samples.last?.time else { return [] }
+        return (samples.map { (time: $0.time, flux: $0.flux.isFinite ? $0.flux : 0) }
+            + misses.filter { $0 > first && $0 < last && $0.isFinite }.map { (time: $0, flux: 0.0) }).sorted { $0.time < $1.time }
+    }
+
+    /// The prototype's strobe of a light's pictures (see the type's notes): nil with fewer than `strobePictures`; else the period and strength
+    /// of the first clear repeat between 0.6 and 1.6 s, or a strength of 0 and no period when there is none.
+    static func strobe(_ pictures: [(time: Double, flux: Double)]) -> (period: Double?, strength: Double)? {
+        let n = pictures.count
+        guard n >= strobePictures, let first = pictures.first?.time, let last = pictures.last?.time, last > first else { return nil }
+        let interval = (last - first) / Double(n - 1)
+        let flux = pictures.map(\.flux)
+        let reach = strobeMedianPictures / 2
+        // One window, sorted in place for each picture (not a new array each time: this runs for every light).
+        var window = [Double](repeating: 0, count: 2 * reach + 1)
+        var residual = [Double](repeating: 0, count: n)
+        for index in 0..<n {
+            for offset in 0..<window.count { window[offset] = flux[min(n - 1, max(0, index - reach + offset))] }
+            window.sort()
+            residual[index] = flux[index] - window[reach]
+        }
+        let mean = residual.reduce(0, +) / Double(n)
+        residual = residual.map { $0 - mean }
+        let power = residual.reduce(0) { $0 + $1 * $1 }
+        guard power > 0 else { return (nil, 0) }
+        let lags = min(Int((strobeLongestLag / interval).rounded(.toNearestOrEven)), n / 2)
+        guard lags > 2 else { return (nil, 0) }
+        var correlation = [0.0]
+        for lag in 1..<lags {
+            var sum = 0.0
+            for index in 0..<(n - lag) { sum += residual[index] * residual[index + lag] }
+            correlation.append(sum / power * Double(n) / Double(n - lag))
+        }
+        let lowest = max(2, Int((strobePeriods.lowerBound / interval).rounded(.toNearestOrEven)))
+        let highest = min(Int((strobePeriods.upperBound / interval).rounded(.toNearestOrEven)), correlation.count - 2)
+        guard lowest <= highest else { return (nil, 0) }
+        for lag in lowest...highest {
+            let value = correlation[lag]
+            guard value > strobeFloor, value >= correlation[lag - 1], value >= correlation[lag + 1] else { continue }
+            let half = max(1, Int((Double(lag) / 2).rounded(.toNearestOrEven)))
+            if correlation[half] < value - strobeDip { return (Double(lag) * interval, value) }
+        }
+        return (nil, 0)
+    }
+
+    /// How far the points stray from a smooth path (degrees): on the plane touching the sky at their middle, a quadratic over time fitted on
+    /// each axis, `wobbleWindow` at a time (a line for a window of four points; none for fewer), the root mean square of what is left.
+    private static func wobbleDegrees(_ points: [Point]) -> Double {
+        let sum = points.reduce(SIMD3<Double>(repeating: 0)) { $0 + $1.unit }
+        let length = SkyMath.length(sum)
+        guard length > 0, points.count >= 4, let start = points.first?.time else { return 0 }
+        let centre = sum / length
+        let helper = abs(centre.z) < 0.9 ? SIMD3(0.0, 0, 1) : SIMD3(1.0, 0, 0)
+        let across = SkyMath.cross(centre, helper) / SkyMath.length(SkyMath.cross(centre, helper))
+        let along = SkyMath.cross(centre, across)
+        var squares = 0.0, counted = 0
+        var from = start
+        while let last = points.last?.time, from <= last {
+            let window = points.filter { $0.time >= from && $0.time < from + wobbleWindow }
+            from += wobbleWindow
+            guard window.count >= 4 else { continue }
+            let times = window.map(\.time)
+            for axis in [across, along] {
+                let values = window.map { SkyMath.dot($0.unit, axis) * SkyMath.degrees }
+                squares += residualSquares(times, values, degree: window.count >= 5 ? 2 : 1)
+            }
+            counted += window.count
+        }
+        return counted > 0 ? (squares / Double(counted)).squareRoot() : 0
+    }
+
+    /// The sum of the squared residuals of a least-squares polynomial of `degree` (1 or 2) of `values` over `times`.
+    private static func residualSquares(_ times: [Double], _ values: [Double], degree: Int) -> Double {
+        let n = Double(times.count)
+        let middle = times.reduce(0, +) / n
+        let span = max(1e-9, (times.map { abs($0 - middle) }.max() ?? 1))
+        let x = times.map { ($0 - middle) / span }
+        // The normal equations of 1, x and x² (or 1 and x), solved by Gaussian elimination. Their sums are added up point by point in scalars, each
+        // as the matrix's own entry would be (x² as x·x, x³ as x·x², x⁴ as x²·x²): it runs for every light, and a matrix of arrays added to
+        // point by point was most of the measuring.
+        let size = degree + 1
+        var s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0, r0 = 0.0, r1 = 0.0, r2 = 0.0
+        for (xi, yi) in zip(x, values) {
+            let square = xi * xi
+            s0 += 1
+            s1 += xi
+            s2 += square
+            r0 += yi
+            r1 += xi * yi
+            if size > 2 {
+                s3 += xi * square
+                s4 += square * square
+                r2 += square * yi
+            }
+        }
+        var matrix = size > 2 ? [[s0, s1, s2, r0], [s1, s2, s3, r1], [s2, s3, s4, r2]] : [[s0, s1, r0], [s1, s2, r1]]
+        for pivot in 0..<size {
+            guard let best = (pivot..<size).max(by: { abs(matrix[$0][pivot]) < abs(matrix[$1][pivot]) }), abs(matrix[best][pivot]) > 1e-12 else {
+                return degree > 1 ? residualSquares(times, values, degree: degree - 1) : 0
+            }
+            matrix.swapAt(pivot, best)
+            for row in 0..<size where row != pivot {
+                let factor = matrix[row][pivot] / matrix[pivot][pivot]
+                for column in pivot...size { matrix[row][column] -= factor * matrix[pivot][column] }
+            }
+        }
+        let coefficients = (0..<size).map { matrix[$0][size] / matrix[$0][$0] }
+        var squares = 0.0
+        for (xi, yi) in zip(x, values) {
+            var fitted = 0.0, power = 1.0
+            for coefficient in coefficients {
+                fitted += coefficient * power
+                power *= xi
+            }
+            squares += (yi - fitted) * (yi - fitted)
+        }
+        return squares
     }
 
     /// The least-squares slope of `values` over time, each weighted by the time it covers; 0 with fewer than two.

@@ -118,7 +118,7 @@ const tileOf = (root, id) => tiles(root).find((card) => card.dataset.entry === i
 const hours = (root) => byClass(root, 'sky-hour-head').map((head) => shown(head).replace(/\s+/g, ' ').trim());
 /** A chip of the filters: [its words, its count, pressed]. */
 const chip = (root, kind) => all(root, (node) => node.classList?.contains('sky-filter') && node.dataset.kind === kind)[0];
-const chipText = (root) => byClass(root, 'sky-filter').map((node) => `${shown(node).replace(/\s+/g, ' ').trim()}${node.getAttribute('aria-pressed') === 'true' ? ' *' : ''}`);
+const chipText = (root) => byClass(root, 'sky-filter').filter(visible).map((node) => `${shown(node).replace(/\s+/g, ' ').trim()}${node.getAttribute('aria-pressed') === 'true' ? ' *' : ''}`);
 const sortMenu = (root) => byClass(root, 'sky-sort-select')[0];
 const picturesBox = (root) => all(byClass(root, 'sky-pictures')[0], (node) => node.localName === 'input')[0];
 const pick = async (select, value) => { select.value = value; select.dispatchEvent({ type: 'change', target: select }); await settle(); };
@@ -233,7 +233,7 @@ test('the log is a grid of cards under the hours of the night, with the summary,
   assert.ok(byClass(el, 'sky-dock')[0].contains(byClass(el, 'sky-strip')[0]) && byClass(el, 'sky-dock')[0].contains(byClass(el, 'sky-filters')[0]));
 
   // The counts are the chips: All and each kind with its number, and the person's corrections.
-  assert.deepEqual(chipText(el), ['All 12 *', 'Unexplained 1', 'Planes 3', 'Satellites 5', 'Meteors 1', 'Bugs & birds 2', 'Corrected by you 0']);
+  assert.deepEqual(chipText(el), ['All 12 *', 'Unexplained 1', 'High priority 0', 'Planes 3', 'Satellites 5', 'Meteors 1', 'Bugs & birds 2', 'Corrected by you 0']);
 
   // A finished night reads from dusk: the hours in order, each with its lights.
   assert.deepEqual(hours(el), ['7 PM 5 lights', '8 PM 1 light', '9 PM 1 light', '10 PM 2 lights', '11 PM 1 light', '1 AM 1 light', '3 AM 1 light']);
@@ -593,7 +593,7 @@ test('a correction from the player changes the card, the chips, the summary and 
   assert.equal(byClass(card, 'sky-tile-yours')[0].hidden, false, 'marked as the person’s');
   assert.match(card.getAttribute('aria-label'), /Bird.*You said what this was/);
   // The counts: the chips and the summary.
-  assert.deepEqual(chipText(el), ['All 12 *', 'Unexplained 0', 'Planes 3', 'Satellites 5', 'Meteors 1', 'Bugs & birds 3', 'Corrected by you 1']);
+  assert.deepEqual(chipText(el), ['All 12 *', 'Unexplained 0', 'High priority 0', 'Planes 3', 'Satellites 5', 'Meteors 1', 'Bugs & birds 3', 'Corrected by you 1']);
   assert.ok(byClass(el, 'sky-summary')[0] === summary, 'the same summary, drawn again in place');
   assert.match(shown(summary), /Last night: 0 unexplained, 12 explained/, 'one less to look at');
   assert.equal(byClass(el, 'sky-dot').filter((dot) => dot.className.includes('sky-dot--unexplained')).length, 0, 'and its dot is not unexplained any more');
@@ -623,7 +623,7 @@ test('a correction the filters no longer show: the card takes its new kind, fade
   // At once: the card's new kind and colour, the chips' counts, the summary, and the fade.
   assert.equal(card.dataset.kind, 'planes', 'its colour');
   assert.equal(byClass(card, 'sky-tile-word')[0].textContent, 'Plane', 'its chip');
-  assert.deepEqual(chipText(el), ['All 12', 'Unexplained 0 *', 'Planes 4', 'Satellites 5', 'Meteors 1 *', 'Bugs & birds 2', 'Corrected by you 1']);
+  assert.deepEqual(chipText(el), ['All 12', 'Unexplained 0 *', 'High priority 0', 'Planes 4', 'Satellites 5', 'Meteors 1 *', 'Bugs & birds 2', 'Corrected by you 1']);
   assert.match(shown(byClass(el, 'sky-summary')[0]), /0 unexplained, 12 explained/);
   assert.equal(card.dataset.leaving, 'true', 'fading out');
   assert.equal(card.getAttribute('aria-hidden'), 'true', 'and out of reach while it fades');
@@ -1124,7 +1124,7 @@ test('kind chips: several at once, each with its count; Corrected by you; All cl
   const entries = [...entriesOfANight(), raw('c1', 'plane', chicago(0, 20), { correction: 'notSure', detail: 'XYZ1 · 30,000 ft' }), raw('c2', 'unexplained', chicago(4, 2), { correction: 'bird', display: 'bird' })];
   const { page, el, calls } = pageWith({ log: night({ entries, counts: undefined }) });
   await settle();
-  assert.deepEqual(chipText(el), ['All 14 *', 'Unexplained 1', 'Planes 3', 'Satellites 5', 'Meteors 1', 'Bugs & birds 3', 'Corrected by you 2']);
+  assert.deepEqual(chipText(el), ['All 14 *', 'Unexplained 1', 'High priority 0', 'Planes 3', 'Satellites 5', 'Meteors 1', 'Bugs & birds 3', 'Corrected by you 2']);
   chip(el, 'planes').click();
   await settle();
   assert.deepEqual(tiles(el).map((card) => card.dataset.entry), ['p1', 'p2', 'p3'], 'planes, the probable one with them');
@@ -1132,7 +1132,8 @@ test('kind chips: several at once, each with its count; Corrected by you; All cl
   chip(el, 'satellites').click();
   await settle();
   assert.deepEqual(tiles(el).map((card) => card.dataset.entry), ['s0', 's1', 's2', 's3', 's4', 'p1', 'p2', 'p3'], 'several at once: any of them');
-  assert.deepEqual(chipText(el), ['All 14', 'Unexplained 1', 'Planes 3 *', 'Satellites 5 *', 'Meteors 1', 'Bugs & birds 3', 'Corrected by you 2'], 'the counts are the night’s');
+  assert.deepEqual(chipText(el), ['All 14', 'Unexplained 1', 'High priority 0', 'Planes 3 *', 'Satellites 5 *', 'Meteors 1', 'Bugs & birds 3', 'Corrected by you 2'],
+    'the counts are the night’s');
   assert.equal(calls.addresses.at(-1), `sky/${SKY}?kinds=planes,satellites`);
   chip(el, 'planes').click();
   await settle();
@@ -1150,6 +1151,150 @@ test('kind chips: several at once, each with its count; Corrected by you; All cl
   await settle();
   assert.deepEqual(tiles(el).map((card) => card.dataset.entry), ['b1', 'g1', 'c1', 'c2'], 'bugs and birds with the corrected ones');
   page.destroy();
+});
+
+// MARK: The guide to the unexplained
+
+/** A night with the guide: unexplained lights ranked high, medium and low, three that moved together, one logged before the guide, a probable
+ * satellite and a plane. */
+function guidedNight() {
+  const why = (priority, reasons, extra = {}) => ({ priority, reasons, ...extra });
+  const entries = [
+    raw('l1', 'unexplained', chicago(20, 0, 24), why('low', ['Too short to tell a plane from a satellite'])),
+    raw('h1', 'unexplained', chicago(21, 0, 24), why('high', ['Fast across the sky (about 6× a plane at that height)', 'Looks larger than typical planes'])),
+    raw('m1', 'unexplained', chicago(22, 0, 24), why('medium', ['Long, low and steady, but not like a plane or a satellite'])),
+    raw('g1', 'unexplained', chicago(23, 0, 24), why('high', ['Several lights moving together', 'Stopped suddenly'], { group: 'g-g1' })),
+    raw('g2', 'unexplained', chicago(23, 0, 24) + 4000, why('high', ['Several lights moving together'], { group: 'g-g1' })),
+    raw('g3', 'unexplained', chicago(23, 0, 24) + 9000, why('high', ['Several lights moving together'], { group: 'g-g1' })),
+    raw('o1', 'unexplained', chicago(0, 30)),
+    raw('ps', 'probableSatellite', chicago(19, 0, 24), { by: 'rule', detail: 'Probable satellite: a steady light at a steady speed (no orbit check yet)' }),
+    raw('p1', 'plane', chicago(1, 0), { by: 'flight', detail: 'TEST123 · 35,000 ft' }),
+  ];
+  return night({ entries, counts: undefined });
+}
+
+test('an unexplained card shows its priority, High glowing in the unexplained colour, and its first reason; an explained one shows none', async () => {
+  const { page, el } = pageWith({ log: guidedNight() });
+  await settle();
+  const badge = (id) => byClass(tileOf(el, id), 'sky-tile-priority')[0];
+  const line = (id) => byClass(tileOf(el, id), 'sky-tile-line')[0].textContent;
+  assert.deepEqual(['h1', 'm1', 'l1'].map((id) => [badge(id).dataset.priority, badge(id).textContent, badge(id).hidden]),
+    [['high', 'High', false], ['medium', 'Medium', false], ['low', 'Low', false]]);
+  assert.equal(line('h1'), 'Fast across the sky (about 6× a plane at that height)', 'its first reason');
+  assert.equal(line('g2'), '2 of 3 moving together', 'a light that moved with others: which of them');
+  assert.equal(tileOf(el, 'h1').getAttribute('aria-label'), '9:00:00 PM, Unexplained, High priority, 4.2 seconds, Fast across the sky (about 6× a plane at that height)');
+  assert.ok(badge('o1').hidden && badge('p1').hidden && badge('ps').hidden, 'a light logged before the guide, and an explained one: no badge');
+  assert.equal(line('o1'), 'Northwest, 8° up · straight', 'logged before the guide: where it was and how');
+  assert.equal(byClass(tileOf(el, 'ps'), 'sky-tile-word')[0].textContent, 'Probable satellite');
+  assert.equal(tileOf(el, 'ps').dataset.kind, 'satellites', 'in the satellites’ colour');
+  // The badge's colours (sky.css): High in the unexplained colour, glowing as the strip's dots do; Medium plain; Low quiet.
+  const css = readFileSync(new URL('../web/sky.css', import.meta.url), 'utf8');
+  assert.match(css, /\.sky-tile-priority\[data-priority="high"\][^}]*var\(--sky-unexplained\)[^}]*box-shadow/);
+  assert.match(css, /\.sky-tile-priority\[data-priority="low"\]/);
+  // A correction to a bird takes its badge away; a correction back to not sure brings it back.
+  page.destroy();
+});
+
+test('High priority is a chip and Priority an order; inside Unexplained the night opens by priority, then the newest', async () => {
+  const { page, el, calls } = pageWith({ log: guidedNight() });
+  await settle();
+  const ids = () => tiles(el).map((card) => card.dataset.entry);
+  assert.deepEqual(chipText(el).slice(0, 3), ['All 9 *', 'Unexplained 7', 'High priority 4']);
+  chip(el, 'high').click();
+  await settle();
+  assert.deepEqual(ids(), ['g3', 'g2', 'g1', 'h1'], 'the high ones, by priority then the newest first');
+  assert.equal(sortMenu(el).value, 'priority');
+  assert.equal(calls.addresses.at(-1), `sky/${SKY}?kinds=high`, 'the order is the filter’s own: not written');
+  chip(el, 'high').click();
+  await settle();
+  chip(el, 'unexplained').click();
+  await settle();
+  assert.deepEqual(ids(), ['g3', 'g2', 'g1', 'h1', 'm1', 'l1', 'o1'], 'high, medium, low, then a light logged before the guide');
+  assert.equal(byClass(el, 'sky-hour-head').length, 0, 'one grid, with no hours');
+  await pick(sortMenu(el), 'oldest');
+  assert.deepEqual(ids(), ['l1', 'h1', 'm1', 'g1', 'g2', 'g3', 'o1'], 'an order chosen wins');
+  assert.equal(calls.addresses.at(-1), `sky/${SKY}?kinds=unexplained&sort=oldest`);
+  await pick(sortMenu(el), 'priority');
+  assert.equal(calls.addresses.at(-1), `sky/${SKY}?kinds=unexplained`, 'back to the filter’s own order: none chosen');
+  // With every kind, Priority is an order like the others.
+  chip(el, 'all').click();
+  await settle();
+  await pick(sortMenu(el), 'priority');
+  assert.deepEqual(ids(), ['g3', 'g2', 'g1', 'h1', 'm1', 'l1', 'p1', 'o1', 'ps']);
+  assert.equal(calls.addresses.at(-1), `sky/${SKY}?sort=priority`);
+  page.destroy();
+});
+
+test('a light the rules sorted later says so in the player, quietly, and nowhere else', async () => {
+  const player = playerSpy();
+  const sorted = raw('o2', 'probableSatellite', chicago(19, 30, 24), {
+    by: 'rule', detail: 'Probable satellite: a steady light at a steady speed (no orbit check yet)', sortedLater: true });
+  const ranked = raw('o3', 'unexplained', chicago(20, 30, 24), { priority: 'low', reasons: ['Too short to tell a plane from a satellite'], sortedLater: true });
+  const { page, el } = pageWith({ log: night({ entries: [...guidedNight().entries, sorted, ranked], counts: undefined }), openPlayer: player.open });
+  await settle();
+  assert.equal(byClass(el, 'sky-sorted-later').length, 0, 'not on the cards');
+  assert.equal(byClass(tileOf(el, 'o2'), 'sky-tile-word')[0].textContent, 'Probable satellite', 'the card shows what the rules say, as if logged so');
+  tileOf(el, 'o2').click();
+  await settle();
+  const hint = byClass(player.opened[0].details, 'sky-sorted-later');
+  assert.equal(hint.length, 1);
+  assert.equal(hint[0].textContent, 'Sorted later');
+  assert.match(hint[0].getAttribute('title'), /Logged before the rules/);
+  assert.ok(hint[0].className.includes('small'), 'tiny');
+  player.opened[0].onClose();
+  await settle();
+  tileOf(el, 'o3').click();
+  await settle();
+  assert.equal(byClass(player.opened[1].details, 'sky-sorted-later').length, 1, 'an unexplained one too');
+  player.opened[1].onClose();
+  await settle();
+  tileOf(el, 'h1').click();
+  await settle();
+  assert.equal(byClass(player.opened[2].details, 'sky-sorted-later').length, 0, 'one the box logged with the rules says nothing of it');
+  page.destroy();
+});
+
+test('the player lists every reason; a light that moved with others shows which of them it was, and a tap shows only them', async () => {
+  const player = playerSpy();
+  const { page, el, calls } = pageWith({ log: guidedNight(), openPlayer: player.open });
+  await settle();
+  tileOf(el, 'h1').click();
+  await settle();
+  const details = player.opened[0].details;
+  const reasons = byClass(details, 'sky-reasons')[0];
+  assert.match(shown(reasons), /High priority/);
+  assert.deepEqual(tag(reasons, 'li').map((item) => item.textContent), ['Fast across the sky (about 6× a plane at that height)', 'Looks larger than typical planes']);
+  player.opened[0].onClose();
+  await settle();
+  tileOf(el, 'g1').click();
+  await settle();
+  const groupDetails = player.opened[1].details;
+  assert.deepEqual(tag(byClass(groupDetails, 'sky-reasons')[0], 'li').map((item) => shown(item).trim()), ['1 of 3 moving together', 'Stopped suddenly']);
+  const together = byClass(groupDetails, 'sky-group-show')[0];
+  assert.equal(together.localName, 'button');
+  assert.equal(together.textContent, '1 of 3 moving together');
+  together.click();
+  await settle();
+  assert.equal(player.closed, 1, 'the player closes');
+  assert.deepEqual(tiles(el).map((card) => card.dataset.entry), ['g1', 'g2', 'g3'], 'only the lights that moved together');
+  assert.equal(calls.addresses.at(-1), `sky/${SKY}?group=g-g1`);
+  const groupChip = chip(el, 'group');
+  assert.ok(visible(groupChip) && groupChip.getAttribute('aria-pressed') === 'true');
+  assert.match(shown(groupChip), /Moving together 3/);
+  groupChip.click();
+  await settle();
+  assert.equal(tiles(el).length, 9, 'its chip takes it away again');
+  assert.ok(!visible(chip(el, 'group')));
+  assert.equal(calls.addresses.at(-1), `sky/${SKY}`);
+  page.destroy();
+  // Opened from an address with the group in it: only them.
+  const again = pageWith({ log: guidedNight(), query: 'group=g-g1' });
+  await settle();
+  assert.deepEqual(tiles(again.el).map((card) => card.dataset.entry), ['g1', 'g2', 'g3']);
+  chip(again.el, 'all').click();
+  await settle();
+  assert.equal(tiles(again.el).length, 9, 'All clears it too');
+  again.page.destroy();
 });
 
 test('With picture shows only the lights with a still', async () => {
@@ -1180,7 +1325,8 @@ test('each order: the newest or the oldest first under their hours, and the long
   await settle();
   const ids = () => tiles(el).map((card) => card.dataset.entry);
   assert.equal(sortMenu(el).value, 'oldest', 'a finished night reads from dusk');
-  assert.deepEqual(all(sortMenu(el), (node) => node.localName === 'option').map((node) => node.textContent), ['Newest first', 'Oldest first', 'Longest', 'Fastest across the sky']);
+  assert.deepEqual(all(sortMenu(el), (node) => node.localName === 'option').map((node) => node.textContent),
+    ['Newest first', 'Oldest first', 'Priority', 'Longest', 'Fastest across the sky']);
   assert.deepEqual(ids(), ['c', 'a', 'e', 'd', 'b']);
   await pick(sortMenu(el), 'newest');
   assert.deepEqual(ids(), ['b', 'd', 'e', 'a', 'c']);

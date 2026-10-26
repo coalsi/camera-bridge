@@ -8,11 +8,14 @@ import Synchronization
 /// answers a picture at most `width` pixels wide instead: the close-up of the light (`SkyCloseUp`, the rectangle the page draws its path in), or all of
 /// the picture, small, for a light that crossed more of the sky than a close-up holds.
 ///
-/// A thumbnail is made once, the first time the page asks, and kept beside the picture (`SkyLogStore.storeThumbnail`); from then on it is read from
-/// there. It is made from the picture it is kept for (a picture written again makes it go), at low priority and off the request: on a thread of its own
-/// under `nice`, at most `concurrent` at a time however many ask, in the order they came (the cards of the first screen are asked for first), and a request
-/// that waits holds nothing: the picture is read, and the light's path looked up, only when its turn comes. When more than `maximumWaiting` are waiting,
-/// one that finds the queue full is answered with the whole picture at once rather than left to pile up.
+/// A thumbnail is made once and kept beside the picture (`SkyLogStore.storeThumbnail`); from then on it is read from there. It is made as soon as its
+/// picture is written (`prepare`: the detector's live pictures and the ones made later from the recording, since 2026-10-26: the grid's first views
+/// were slow), or the first time the page asks for one that has none. It is made from the picture it is kept for (a picture written again makes it go),
+/// at low priority and off the request: on a thread of its own under `nice`, at most `concurrent` at a time however many ask, the page's requests in the
+/// order they came (the cards of the first screen are asked for first) and the ones made ahead after them, and a request that waits holds nothing: the
+/// picture is read, and the light's path looked up, only when its turn comes. When more than `maximumWaiting` of the page's are waiting, one that finds
+/// the queue full is answered with the whole picture at once rather than left to pile up; one made ahead that finds `maximumWaiting` waiting in all is
+/// left for the page's first view.
 ///
 /// A drive that is close to pausing the recording gets no new thumbnails (`hasRoom`), as it gets no new pictures: the whole picture is answered, which is on it already.
 ///
@@ -94,12 +97,27 @@ final class SkyThumbnails: Sendable {
         }
     }
 
-    /// Makes and keeps the thumbnail, when its turn comes; nil when it could not be made (and why is remembered, unless the picture was only gone or replaced),
-    /// or when so many wait that this one was left out.
-    private func make(stamp: SkyStillStamp, key: String, camera: UUID, night: String, entryID: String, folder: URL) async -> Data? {
+    /// Makes the entry's thumbnail ahead of the page, as its first view would (its picture was just written: by the detector, live, or later from the
+    /// recording), at background priority and after the page's waiting requests (`SkyThumbnailGate.run(background:)`). Nothing when one is kept already,
+    /// when the entry has no picture, while the drive has no room, when it failed lately, when the drive does not answer or when the queue is full: the
+    /// page's first view makes it then. Never throws.
+    func prepare(camera: UUID, night: String, entryID: String, folder: URL) async {
+        let log = log
+        guard let found = try? await store.skyRead({ () throws -> SkyThumbnailLookup in
+            guard SkyLogStore.folderExists(folder) else { throw ArchiveUnavailable.folderMissing }
+            return log.thumbnailLookup(camera: camera, night: night, entryID: entryID, folder: folder)
+        }), case .still(let stamp) = found else { return }
+        let key = "\(camera.uuidString)/\(night)/\(entryID)"
+        guard !hasFailedLately(key), hasRoom() else { return }
+        _ = await make(stamp: stamp, key: key, camera: camera, night: night, entryID: entryID, folder: folder, background: true)
+    }
+
+    /// Makes and keeps the thumbnail, when its turn comes (`background`: after the page's requests); nil when it could not be made (and why is remembered,
+    /// unless the picture was only gone or replaced), or when so many wait that this one was left out.
+    private func make(stamp: SkyStillStamp, key: String, camera: UUID, night: String, entryID: String, folder: URL, background: Bool = false) async -> Data? {
         let (log, codecs) = (log, codecs)
         do {
-            return try await gate.run { () async throws -> Data in
+            return try await gate.run(background: background) { () async throws -> Data in
                 try await self.offload {
                     // Another request for the same picture may have made it while this one waited for its place.
                     let current = log.thumbnailLookup(camera: camera, night: night, entryID: entryID, folder: folder)
@@ -166,9 +184,11 @@ final class SkyThumbnails: Sendable {
     }
 }
 
-/// At most `places` pieces of work at a time, in the order they were asked for. A caller that finds no place waits (and holds nothing meanwhile). When
-/// `maximumWaiting` callers are waiting already, the next to come gives up at once (`run` answers nil) instead of joining a queue that is seconds long; a waiter
-/// whose task is cancelled leaves the queue.
+/// At most `places` pieces of work at a time, in the order they were asked for, the ones asked for in the background (`run(background: true)`: a thumbnail
+/// made ahead of the page) after all the others. A caller that finds no place waits (and holds nothing meanwhile). When `maximumWaiting` callers are waiting
+/// already (not counting the background ones), the next to come gives up at once (`run` answers nil) instead of joining a queue that is seconds long; a
+/// background one gives up when `maximumWaiting` wait in all, so that it never takes a page's place in the queue. A waiter whose task is cancelled leaves
+/// the queue.
 final class SkyThumbnailGate: Sendable {
     private enum Outcome { case granted, overflowed, cancelled }
 
@@ -181,6 +201,7 @@ final class SkyThumbnailGate: Sendable {
         var running = 0
         var nextID: UInt64 = 0
         var waiters: [Waiter] = []
+        var background: [Waiter] = []
     }
 
     private let state = Mutex(State())
@@ -192,13 +213,13 @@ final class SkyThumbnailGate: Sendable {
         self.maximumWaiting = max(0, maximumWaiting)
     }
 
-    /// Callers waiting for a place (tests).
-    var waitingCount: Int { state.withLock { $0.waiters.count } }
+    /// Callers waiting for a place, in the background too (tests).
+    var waitingCount: Int { state.withLock { $0.waiters.count + $0.background.count } }
 
-    /// Runs `body` when a place is free and gives the place back after it. nil, without running it, when the queue was full; throws `CancellationError` when
-    /// the caller's task is cancelled while it waits.
-    func run<T: Sendable>(_ body: () async throws -> T) async throws -> T? {
-        switch await enter() {
+    /// Runs `body` when a place is free and gives the place back after it (`background`: once no other caller waits). nil, without running it, when the
+    /// queue was full; throws `CancellationError` when the caller's task is cancelled while it waits.
+    func run<T: Sendable>(background: Bool = false, _ body: () async throws -> T) async throws -> T? {
+        switch await enter(background: background) {
         case .granted:
             defer { leave() }
             return try await body()
@@ -209,7 +230,7 @@ final class SkyThumbnailGate: Sendable {
         }
     }
 
-    private func enter() async -> Outcome {
+    private func enter(background: Bool) async -> Outcome {
         let id = state.withLock { state -> UInt64 in
             state.nextID &+= 1
             return state.nextID
@@ -223,29 +244,34 @@ final class SkyThumbnailGate: Sendable {
                         state.running += 1
                         return .granted
                     }
-                    if state.waiters.count >= maximumWaiting { return .overflowed }
-                    state.waiters.append(Waiter(id: id, continuation: continuation))
+                    if background {
+                        if state.waiters.count + state.background.count >= maximumWaiting { return .overflowed }
+                        state.background.append(Waiter(id: id, continuation: continuation))
+                    } else {
+                        if state.waiters.count >= maximumWaiting { return .overflowed }
+                        state.waiters.append(Waiter(id: id, continuation: continuation))
+                    }
                     return nil
                 }
                 if let outcome { continuation.resume(returning: outcome) }
             }
         } onCancel: {
             let waiter = state.withLock { state -> Waiter? in
-                guard let index = state.waiters.firstIndex(where: { $0.id == id }) else { return nil }
-                return state.waiters.remove(at: index)
+                if let index = state.waiters.firstIndex(where: { $0.id == id }) { return state.waiters.remove(at: index) }
+                if let index = state.background.firstIndex(where: { $0.id == id }) { return state.background.remove(at: index) }
+                return nil
             }
             waiter?.continuation.resume(returning: .cancelled)
         }
     }
 
-    /// The place goes to the one that has waited longest, if there is one.
+    /// The place goes to the one that has waited longest, a background one only when no other waits; or it is free again.
     private func leave() {
         let next = state.withLock { state -> Waiter? in
-            guard !state.waiters.isEmpty else {
-                state.running -= 1
-                return nil
-            }
-            return state.waiters.removeFirst()
+            if !state.waiters.isEmpty { return state.waiters.removeFirst() }
+            if !state.background.isEmpty { return state.background.removeFirst() }
+            state.running -= 1
+            return nil
         }
         next?.continuation.resume(returning: .granted)
     }
