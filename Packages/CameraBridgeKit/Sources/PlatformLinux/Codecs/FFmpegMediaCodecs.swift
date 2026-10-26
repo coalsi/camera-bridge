@@ -10,7 +10,7 @@ import MediaCore
 /// | encode H.264 | `FFmpegVideoEncoder`: raw in, FLV out; libx264 `-preset veryfast -tune zerolatency`, or `h264_vaapi` when `/dev/dri/renderD128` exists and a probe encode works |
 /// | transcode, scale, straighten, overlay | `FFmpegVideoTranscoder`: decode → rate limit → scale → `remap` (Straighten the picture) → `drawtext` → encode in one child |
 /// | audio | `FFmpegAudioTranscoder`: AAC/AAC-ELD/Opus/G.711/PCM in; Opus (`libopus`), AAC-LC (`aac`), G.711, PCM out. No AAC-ELD encoder without non-free `libfdk_aac` |
-/// | JPEG | one-shot child (`mjpeg`) from a raw picture; `resizeJPEG` and `correctJPEG` (Straighten the picture) likewise |
+/// | JPEG | one-shot child (`mjpeg`) from a raw picture; `resizeJPEG`, `croppedJPEG` (the Sky Watcher's small pictures) and `correctJPEG` (Straighten the picture) likewise |
 ///
 /// Every object owns its child processes and kills them in `invalidate()` and `deinit`. The ffmpeg program and what it supports are
 /// found on first use; without ffmpeg every `make…` throws `MediaCodecError.unsupported`.
@@ -144,6 +144,10 @@ public final class FFmpegMediaCodecs: MediaCodecs {
 
     public func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data {
         try FFmpegPictures.resize(jpeg, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality, runtime: runtime)
+    }
+
+    public func croppedJPEG(_ jpeg: Data, crop: ImageCrop?, maxWidth: Int, quality: Double) throws -> Data {
+        try FFmpegPictures.crop(jpeg, to: crop, maxWidth: maxWidth, quality: quality, runtime: runtime)
     }
 
     public func makeSyntheticSource(displayName: String, width: Int, height: Int, fps: Int, keyframeInterval: Duration,

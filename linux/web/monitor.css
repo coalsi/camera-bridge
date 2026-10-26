@@ -236,12 +236,15 @@
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
 }
 
-/* Digital zoom (js/live/zoom.js), on the camera that fills the wall: the layer covers the picture; the zoomed area is drawn on its canvas over
-   the video; the controls and the overview sit at the top left (the name is in the label at the top right). */
+/* Digital zoom (js/live/zoom.js), on the camera that fills the wall and in Sky Watcher's player: the layer covers the picture; the zoomed area
+   is drawn on its canvas over the video, a page's marks over that; the controls and the overview sit at the top left (the name is in the label
+   at the top right). Whole, a drag draws a box (crosshair); zoomed, it moves the picture (a hand). */
 .zoom-layer { position: absolute; inset: 0; z-index: 2; }
 .nvr-grid[data-solo="false"] .zoom-layer { display: none; }
 .zoom-canvas { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
 .zoom-surface { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+.zoom-layer[data-zoomed="true"] .zoom-surface { cursor: grab; }
+.zoom-layer[data-panning="true"] .zoom-surface { cursor: grabbing; }
 .zoom-box {
   position: absolute; left: var(--x); top: var(--y); width: var(--w); height: var(--h); pointer-events: none;
   border: 2px solid #e06a5a; background: rgb(224 106 90 / 0.12); box-shadow: 0 0 0 9999px rgb(0 0 0 / 0.35); border-radius: 4px;
@@ -264,7 +267,7 @@
   position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 9px 18px; border-radius: 999px; pointer-events: none;
   background: rgb(15 15 17 / 0.72); color: #e8e8ea; font-size: 1.2rem; font-weight: 600; white-space: nowrap; opacity: 0; transition: opacity 0.4s;
 }
-.zoom-layer[data-zoomed="false"] .zoom-hint[data-show="true"] { opacity: 1; }
+.zoom-hint[data-show="true"] { opacity: 1; }
 @media (hover: none) { .zoom-hint { display: none; } }
 /* While zoomed, the speaker and badges stay above the drawn picture. */
 .nvr-tile[data-zoomed="true"] .nvr-sound, .nvr-tile[data-zoomed="true"] .nvr-badges { z-index: 5; }

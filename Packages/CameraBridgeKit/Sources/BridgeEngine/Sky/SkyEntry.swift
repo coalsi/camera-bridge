@@ -265,9 +265,12 @@ public struct SkyNightLog: Sendable, Equatable {
     public var aim: SkyAimStatus
     public var learning: SkyLearning
     public var capped: [SkyCappedHour]
+    /// How big the night's pictures are (from the newest light with one that can be read), for the page to draw a path over a thumbnail of one; nil when
+    /// none can be read.
+    public var picture: SkyPictureSize?
 
     public init(camera: UUID, night: String, view: SkyLogView, from: Date, to: Date, entries: [SkyEntry], conditions: [SkyConditions], counts: SkyCounts,
-                aim: SkyAimStatus, learning: SkyLearning, capped: [SkyCappedHour] = []) {
+                aim: SkyAimStatus, learning: SkyLearning, capped: [SkyCappedHour] = [], picture: SkyPictureSize? = nil) {
         self.camera = camera
         self.night = night
         self.view = view
@@ -279,6 +282,7 @@ public struct SkyNightLog: Sendable, Equatable {
         self.aim = aim
         self.learning = learning
         self.capped = capped
+        self.picture = picture
     }
 }
 

@@ -68,6 +68,22 @@ enum SkyFixtures {
         return model
     }()
 
+    /// A dual camera stitched as one seamless panorama in its own tilted frame, as North Sky's picture is (its night sky showed it on
+    /// 2026-10-26): the housing faces `facing` and is tilted up by `tilt`, and each half is an equirectangular lens 90° across, the housing
+    /// turned 45° to its side about the housing's own up (so the halves meet all down the seam), with square pixels in angle on a 4256×1888
+    /// picture. Built here, not with `SkyCameraModel.initial`.
+    static func stitchedPanorama(facing: Double, tilt: Double) -> SkyCameraModel {
+        let radians = Double.pi / 180
+        let forward = SkyMath.unitVector(SkyDirection(azimuth: facing, elevation: tilt))
+        let up = SkyMath.unitVector(SkyDirection(azimuth: SkyMath.normalizedDegrees(facing + 180), elevation: 90 - tilt))
+        let right = SkyMath.cross(forward, up)
+        let lenses = [-45.0, 45.0].map { turn in
+            SkyCameraModel.Lens(projection: .equirectangular, up: up, forward: forward * cos(turn * radians) + right * sin(turn * radians),
+                                horizontalFOV: 90, verticalFOV: 90 * 1888 / 2128, principalPoint: PixelPoint(x: 0.5, y: 0.5), radial: [])
+        }
+        return SkyCameraModel(layout: .dual, seam: 0.5, lenses: lenses)
+    }
+
     /// Every projection, as a single lens and as the halves of a dual camera.
     static let truthModels = [truthSingle, truthEquidistant, truthCylindrical, truthEquirectangular, truthDual, truthMixedDual,
                               truthEquirectangularDual]
@@ -333,6 +349,22 @@ extension SkyFixtures {
     ]}
     """
 
+    /// A made-up `aircraft.json` in the older shape that dump1090-mutability writes (and a tar1090 that serves it): the barometric altitude is
+    /// `altitude` (feet, or "ground") and the speed `speed`, with no `alt_baro`, `alt_geom` or `gs`. The same six entries as `aircraftJSON`,
+    /// in the same order, the three usable ones at their barometric heights.
+    static let olderAircraftJSON = """
+    {"now":1792897200.4,"messages":1234567,"aircraft":[
+    {"hex":"a0b1c2","squawk":"1200","flight":"TEST123 ","lat":40.2250,"lon":-100.3000,"nucp":7,"seen_pos":0.4,"altitude":34950,"vert_rate":0,\
+    "track":90.2,"speed":449.7,"category":"A3","mlat":[],"tisb":[],"messages":812,"seen":0.1,"rssi":-17.2},
+    {"hex":"b1c2d3","flight":"TEST456 ","lat":39.65,"lon":-99.60,"nucp":7,"seen_pos":1.2,"altitude":12000,"vert_rate":-640,"track":181.4,\
+    "speed":280.5,"mlat":[],"tisb":[],"messages":300,"seen":0.9,"rssi":-22.0},
+    {"hex":"c2d3e4","lat":40.1,"lon":-100.55,"nucp":7,"seen_pos":29.9,"altitude":8000,"track":35.0,"speed":150.0,"mlat":[],"tisb":[],"seen":0.5},
+    {"hex":"d3e4f5","flight":"TEST789 ","lat":40.0003,"lon":-100.0002,"nucp":7,"seen_pos":1.0,"altitude":"ground","track":270.0,"speed":12.5},
+    {"hex":"e4f5a6","flight":"TEST321 ","lat":40.3,"lon":-99.9,"nucp":7,"seen_pos":45.0,"altitude":20000,"track":10.0,"speed":300.0},
+    {"hex":"f5a6b7","altitude":30000,"mlat":[],"tisb":[],"messages":4,"seen":2.5,"rssi":-30.1}
+    ]}
+    """
+
     /// A made-up adsb.fi (`opendata.adsb.fi/api/v2`) answer: the aircraft are under `ac`, `now` is in milliseconds. The same `TEST123` as
     /// `aircraftJSON`, at the same altitude, and one on the ground.
     static let adsbFiJSON = """
@@ -401,6 +433,16 @@ extension SkyFixtures {
             if let callsign { fields.append("\"flight\":\"\(callsign.padding(toLength: 8, withPad: " ", startingAt: 0))\"") }
             fields += ["\"alt_baro\":\(altitudeFeet - 75)", "\"alt_geom\":\(altitudeFeet)", "\"gs\":\(knots)", "\"track\":\(track)",
                        "\"lat\":\(place.latitude)", "\"lon\":\(place.longitude)", "\"seen_pos\":\(age)"]
+            return "{" + fields.joined(separator: ",") + "}"
+        }
+
+        /// The same entry as dump1090-mutability writes it (`olderAircraftJSON`'s shape): the height under `altitude`, the speed under `speed`.
+        func olderEntry(positionAt time: Date, age: Double) -> String {
+            let place = position(at: time)
+            var fields = ["\"hex\":\"\(hex)\""]
+            if let callsign { fields.append("\"flight\":\"\(callsign.padding(toLength: 8, withPad: " ", startingAt: 0))\"") }
+            fields += ["\"lat\":\(place.latitude)", "\"lon\":\(place.longitude)", "\"nucp\":7", "\"seen_pos\":\(age)", "\"altitude\":\(altitudeFeet)",
+                       "\"vert_rate\":0", "\"track\":\(track)", "\"speed\":\(knots)", "\"mlat\":[]", "\"tisb\":[]", "\"messages\":120", "\"seen\":\(age)"]
             return "{" + fields.joined(separator: ",") + "}"
         }
     }

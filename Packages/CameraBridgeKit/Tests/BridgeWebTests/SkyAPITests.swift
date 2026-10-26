@@ -259,6 +259,74 @@ import TestSupport
         #expect(await session.get(path + "?night=2026-10-24").status == 409)
     }
 
+    @Test func theStillRouteServesASmallPictureForSizeThumbAndTheWholeOneOtherwise() async throws {
+        let (backend, session, id) = try await ready()
+        let thumbnail = Data([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x74, 0x68, 0xFF, 0xD9])
+        backend.write { state in
+            state.skyStills["u-1"] = Self.jpeg
+            state.skyThumbnails["u-1"] = thumbnail
+            state.skyStills["u-2"] = Self.jpeg   // the box could not make a small one of this
+        }
+        let path = "/api/v1/sky/cameras/\(id.uuidString)/entries/"
+        let small = await session.get(path + "u-1/still?night=2026-10-24&size=thumb")
+        #expect(small.status == 200 && small.headers["Content-Type"] == "image/jpeg" && small.body == thumbnail, "\(small.status)")
+        #expect(small.headers["Cache-Control"] == "private, max-age=3600" && small.headers["X-Content-Type-Options"] == "nosniff")
+        #expect(backend.read { $0.skyCalls } == ["thumbnail:u-1:2026-10-24"], "the small picture was asked for, not the whole one")
+
+        // Without a size, and with the whole one asked for, it is the picture as it always was.
+        for query in ["", "&size=full"] {
+            let whole = await session.get(path + "u-1/still?night=2026-10-24" + query)
+            #expect(whole.status == 200 && whole.body == Self.jpeg && whole.headers["Cache-Control"] == "private, max-age=3600", "\(query)")
+        }
+        #expect(backend.read { $0.skyCalls }.suffix(2) == ["still:u-1:2026-10-24", "still:u-1:2026-10-24"])
+
+        // A small picture the box could not make is answered with the whole one, and the browser is not told to keep that for an hour.
+        let fallback = await session.get(path + "u-2/still?night=2026-10-24&size=thumb")
+        #expect(fallback.status == 200 && fallback.body == Self.jpeg && fallback.headers["Content-Type"] == "image/jpeg")
+        #expect(fallback.headers["Cache-Control"] == "private, max-age=60", "a stand-in is not kept for long: \(fallback.headers["Cache-Control"] ?? "none")")
+
+        // Nothing to show is the same refusal as for the whole picture; so are the night and the size that is not one.
+        let none = await session.get(path + "u-3/still?night=2026-10-24&size=thumb")
+        #expect(none.status == 404 && none.json["error"] as? String == "not_found")
+        for query in ["&size=thumb", "&size=full", ""] {
+            let bad = await session.get(path + "u-1/still?night=tonight" + query)
+            #expect(bad.status == 400 && bad.json["field"] as? String == "night", "\(query)")
+        }
+        for size in ["huge", "THUMB", "", "thumb,full", "480"] {
+            let bad = await session.get(path + "u-1/still?night=2026-10-24&size=\(size)")
+            #expect(bad.status == 400 && bad.json["field"] as? String == "size", "size=\(size): \(bad.status)")
+        }
+        #expect(backend.read { $0.skyCalls }.last == "thumbnail:u-3:2026-10-24", "none of the refused ones reached the box")
+        #expect(await session.get(path + "a%2Fb/still?night=2026-10-24&size=thumb").status == 404)
+        #expect(await session.get("/api/v1/sky/cameras/\(UUID().uuidString)/entries/u-1/still?night=2026-10-24&size=thumb").status == 404)
+        backend.write { $0.skyError = SkyLogError.noFolder }
+        #expect(await session.get(path + "u-1/still?night=2026-10-24&size=thumb").status == 409)
+        backend.write { $0.skyError = SkyLogError.unavailable }
+        #expect(await session.get(path + "u-1/still?night=2026-10-24&size=thumb").status == 503)
+    }
+
+    @Test func aThumbnailNeedsASessionAndIsNotAnsweredToAHEAD() async throws {
+        let (backend, session, id) = try await ready()
+        backend.write { $0.skyStills["u-1"] = Self.jpeg }
+        let path = "/api/v1/sky/cameras/\(id.uuidString)/entries/u-1/still?night=2026-10-24&size=thumb"
+        let head = await session.send("HEAD", path)
+        #expect(head.status == 405, "a HEAD asks for nothing, as for the whole picture: \(head.status)")
+        let signedOut = await session.harness.send("GET", path)
+        #expect(signedOut.status == 401, "\(signedOut.status)")
+        #expect(backend.read { $0.skyCalls }.isEmpty, "neither reached the box")
+    }
+
+    @Test func theNightSaysHowBigItsPicturesAreOrNull() async throws {
+        let (backend, session, id) = try await ready()
+        let path = "/api/v1/sky/cameras/\(id.uuidString)/night?date=2026-10-24&view=night"
+        let none = await session.get(path)
+        #expect(none.status == 200 && none.json.keys.contains("picture") && none.json["picture"] is NSNull, "always there; null while no picture can be read")
+        backend.write { $0.skyPicture = SkyPictureSize(width: 1920, height: 852) }
+        let known = await session.get(path)
+        let picture = known.object("picture")
+        #expect(picture["width"] as? Int == 1920 && picture["height"] as? Int == 852 && Set(picture.keys) == ["width", "height"], "\(picture)")
+    }
+
     // MARK: Flight feeds
 
     @Test func theFeedFinderAnswersTheFeedsItFound() async throws {

@@ -103,7 +103,7 @@ let package = Package(
         .testTarget(name: "PlatformAppleTests", dependencies: [platformApple, "BridgeSupport", "MediaCore", "TestSupport"], swiftSettings: swift6),
         .testTarget(name: "PlatformLinuxCodecsTests", dependencies: ["PlatformLinux", "BridgeSupport", "MediaCore", platformApple], swiftSettings: swift6),
         .testTarget(name: "BridgeEngineTests", dependencies: ["BridgeEngine", "CameraAdapters", "HAP", "BridgeSupport", "MediaCore", "TestSupport", platformApple, platformLinux],
-                    swiftSettings: swift6),
+                    exclude: ["Fixtures"], swiftSettings: swift6),
         .testTarget(name: "BridgeWebTests", dependencies: ["BridgeWeb", "BridgeEngine", "CameraAdapters", "RTSP", "MediaCore", "BridgeSupport", "TestSupport", crypto, platformApple],
                     swiftSettings: swift6),
         .testTarget(name: "BridgeDaemonTests", dependencies: ["BridgeDaemon", "BridgeWeb", "BridgeEngine", "CameraAdapters", "BridgeSupport", "TestSupport", platformApple],

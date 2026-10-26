@@ -41,6 +41,12 @@ public protocol MediaCodecs: Sendable {
     /// `resizeJPEG(_:maxWidth:maxHeight:)` encoding the smaller picture at `quality` (0…1); an image that already fits comes back unchanged.
     /// The default ignores `quality` (the codec service's own).
     func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data
+    /// The part of `jpeg` (a JPEG or PNG) inside `crop` (a rectangle of the picture in its own pixels; nil: all of it), made at most `maxWidth` wide
+    /// (its shape kept, never larger than the part itself) and encoded as a JPEG at `quality` (0…1): the small pictures of the Sky Watcher's grid.
+    /// A whole picture that already fits comes back unchanged. Throws `MediaCodecError.unsupported` for data that is not an image or a crop that is
+    /// not inside the picture. The default throws `MediaCodecError.unsupported` too: a codec service that cannot crop is not asked again and its
+    /// caller keeps the whole picture.
+    func croppedJPEG(_ jpeg: Data, crop: ImageCrop?, maxWidth: Int, quality: Double) throws -> Data
     func silentAACFrames(duration: Duration, sampleRate: Int, channels: Int, startPTS: MediaTime, wallClock: Date) throws -> [EncodedAudioFrame]
     /// The still Apple Home shows for a camera that is turned off: a dark picture of exactly `width` × `height` with a camera-off
     /// icon and the words "Camera off", "Turn it on in Camera Bridge" and `cameraName`, as JPEG. Throws `unsupported` where the
@@ -85,6 +91,10 @@ extension MediaCodecs {
         try resizeJPEG(jpeg, maxWidth: maxWidth, maxHeight: maxHeight)
     }
 
+    public func croppedJPEG(_ jpeg: Data, crop: ImageCrop?, maxWidth: Int, quality: Double) throws -> Data {
+        throw MediaCodecError.unsupported("these codecs cannot crop a picture")
+    }
+
     /// Decodes a keyframe with a fresh decoder and encodes JPEG (quality 0.8), keeping aspect within the bounds.
     /// Throws `MediaCodecError.unsupported` for a non-keyframe and `.noFrame` if the decoder produced no picture.
     public func jpeg(fromKeyframe frame: EncodedVideoFrame, maxWidth: Int?, maxHeight: Int?) async throws -> Data {
@@ -93,6 +103,21 @@ extension MediaCodecs {
         defer { decoder.invalidate() }
         guard let picture = try await decoder.decode(frame) else { throw MediaCodecError.noFrame }
         return try jpeg(from: picture, maxWidth: maxWidth, maxHeight: maxHeight, quality: 0.8)
+    }
+}
+
+/// A rectangle of a picture, in the picture's own pixels from its top left corner (`MediaCodecs.croppedJPEG`).
+public struct ImageCrop: Sendable, Equatable {
+    public var x: Int
+    public var y: Int
+    public var width: Int
+    public var height: Int
+
+    public init(x: Int, y: Int, width: Int, height: Int) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
     }
 }
 

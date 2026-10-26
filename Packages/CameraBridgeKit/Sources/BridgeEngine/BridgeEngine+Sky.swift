@@ -70,8 +70,19 @@ extension BridgeEngine {
         let conditions = stored.conditions.filter { $0.to > span.lowerBound && $0.from < span.upperBound }
         let capped = stored.capped.filter { $0.hour.addingTimeInterval(3_600) > span.lowerBound && $0.hour < span.upperBound }
         let status = await skyStatus(of: cameraID)
+        let picture = await skyPictureSize(of: entries, camera: cameraID, night: name, folder: folder)
         return SkyNightLog(camera: cameraID, night: name, view: view, from: span.lowerBound, to: span.upperBound, entries: entries, conditions: conditions,
-                           counts: SkyCounts(counting: entries), aim: status.aim, learning: status.learning, capped: capped)
+                           counts: SkyCounts(counting: entries), aim: status.aim, learning: status.learning, capped: capped, picture: picture)
+    }
+
+    /// How big the pictures of a night are, for the page to draw a light's path over a thumbnail of it (the thumbnail is cut where the page's close-up is,
+    /// and that depends on the picture's size): from the newest of `entries` with a picture that can be read; nil when none can (no picture, or the drive
+    /// does not answer: the page then asks for the whole pictures).
+    private func skyPictureSize(of entries: [SkyEntry], camera: UUID, night: String, folder: URL) async -> SkyPictureSize? {
+        let ids = entries.filter(\.hasStill).suffix(SkyLogStore.pictureProbeLimit).reversed().map(\.id)
+        guard !ids.isEmpty else { return nil }
+        let log = skyLog
+        return try? await nvr.store.skyRead { log.pictureSize(ofStills: Array(ids), camera: camera, night: night, folder: folder) }
     }
 
     /// Records the person's word on an entry ("That was a bird") in the log of `night` and answers the entry as it reads now. The word counts
@@ -106,6 +117,18 @@ extension BridgeEngine {
         }
         guard let jpeg else { throw SkyLogError.noStill }
         return jpeg
+    }
+
+    /// The small picture of an entry for the Sky Watcher's grid (`GET sky/cameras/:id/entries/:eid/still?size=thumb`): the close-up of the light around its
+    /// path, at most 480 pixels wide, or all of the picture, small, for a light that crossed more of the sky than a close-up holds (`SkyThumbnails`). Made when
+    /// the page first asks and kept beside the picture; the whole picture (`isThumbnail` false) when a small one cannot be made. Throws what `skyStill` throws.
+    public func skyStillThumbnail(cameraID: UUID, night: String, entryID: String) async throws -> SkyStillPicture {
+        guard !isPreview else { throw SkyLogError.unavailable }
+        guard configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+        try Self.checkNight(night)
+        guard SkyEntry.isValidID(entryID) else { throw SkyLogError.noStill }
+        guard let folder = skyFolder else { throw SkyLogError.noFolder }
+        return try await skyThumbnails.picture(camera: cameraID, night: night, entryID: entryID, folder: folder)
     }
 
     /// A night's name that is a real date ("2026-10-24"; not "2026-02-30" or "tonight").

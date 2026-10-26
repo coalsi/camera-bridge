@@ -1,12 +1,16 @@
 // Sky Watcher's words and numbers (screens/sky-model.js): direction, speed, blink, shape, the summary, the conditions line, the aim, the strip's
-// dots, the groups of the explained, the path in picture coordinates. Pure: no browser, no requests. The sentences are exact.
+// dots, the grid's kinds, filters, orders, hours and card lines (and how the address keeps them), the path in picture coordinates. Pure: no
+// browser, no requests. The sentences are exact.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { ApiError } from '../web/js/api.js';
+import { VECTORS_PATH, makeCloseUpVectors } from './support/sky-closeup-vectors.mjs';
 import {
-  CLOSE_UP, SKY_ROUTE, SKY_TEXT, aimLines, aimText, blinkText, cappedText, clipAddress, closeUpRect, compassWord, conditionsText, countEntries, countLabel, countsAfter, dayLabel,
-  defaultLensLayout, directionText, durationText, entryBucket, groupExplained, learningText, normalizeEntry, pathPoints, refusalOf, shapeText, shiftDate, skyWatching, speedText,
-  streamText, stripDots, stripTicks, summaryText, timeText, toMs, watchAddress,
+  CLOSE_UP, GRID_KINDS, GRID_SORTS, SKY_ROUTE, SKY_TEXT, aimLines, aimText, blinkText, cappedByHour, cappedText, cardLine, chipCounts, clipAddress, closeUpRect, compassWord,
+  conditionsText, countEntries, countLabel, countsAfter, dayLabel, defaultLensLayout, defaultSort, directionText, durationShort, durationText, entryBucket, gridChoice, gridQuery,
+  hourGroups, hourLabel, hourStart, isTimeSort, kindChip, kindWord, lastedSeconds, learningText, matchesFilters, normalizeEntry, pathPoints, readGridQuery, refusalOf, shapeText,
+  shiftDate, shortLine, skyWatching, sortEntries, speedText, streamText, stripDots, stripTicks, summaryText, THUMB_WIDTH, thumbGeometry, thumbRect, timeText, toMs, watchAddress,
 } from '../web/js/screens/sky-model.js';
 
 const CHICAGO = 'America/Chicago';
@@ -62,6 +66,7 @@ test('direction, speed, blink, shape and summary words are exact', () => {
   assert.equal(summaryText({ unexplained: 0, explained: 0 }, 'night'), 'Last night: 0 unexplained, 0 explained');
   assert.equal(summaryText({ unexplained: 3, explained: 40 }, 'day'), 'Today: 3 unexplained, 40 explained');
   assert.equal(summaryText({ unexplained: 3, explained: 40 }, 'night', 'Tonight so far'), 'Tonight so far: 3 unexplained, 40 explained');
+  assert.equal(summaryText({ unexplained: 1906, explained: 700 }, 'night'), 'Last night: 1,906 unexplained, 700 explained', 'a busy night’s numbers with their commas, as on the chips');
   assert.equal(summaryText({ unexplained: 2, explained: 9 }, 'night', 'Night of Sat, Oct 24'), 'Night of Sat, Oct 24: 2 unexplained, 9 explained');
   assert.equal(summaryText(null, 'night'), 'Last night: 0 unexplained, 0 explained');
 
@@ -107,6 +112,10 @@ test('an hour with more lights than the box logs reads as a note, in the box’s
   assert.deepEqual(cappedText([{ hour: 'soon', count: 3 }, { hour: chicago(18), count: 0 }, { hour: chicago(19), count: -2 }, { hour: chicago(20) }, null], CHICAGO), [],
     'what is not an hour and a count says nothing');
   assert.deepEqual(cappedText(undefined, CHICAGO), [], 'a bridge from before says nothing of it');
+  // The same notes at the grid's hour headings: by the start of the hour in the box's zone, two notes of one hour added up.
+  const byHour = cappedByHour([{ hour: chicago(21), count: 30 }, { hour: chicago(21), count: 7 }, { hour: chicago(23, 0, 24), count: 1 }, { hour: 'soon', count: 3 }], CHICAGO);
+  assert.deepEqual([...byHour], [[chicago(23, 0, 24), '1 more light wasn’t logged (busy hour)'], [chicago(21), '37 more lights weren’t logged (busy hour)']]);
+  assert.deepEqual([...cappedByHour(null, CHICAGO)], []);
 });
 
 test('conditions read as one line', () => {
@@ -262,26 +271,118 @@ test('hour marks fall on the zone’s own hours, with room at both ends', () => 
   assert.deepEqual(stripTicks(chicago(0, 0), chicago(0, 20), CHICAGO), [], 'a window under an hour has none');
 });
 
-test('the explained entries are grouped planes, satellites, meteors, bugs and birds, then not sure; the unexplained are not among them', () => {
-  const entries = [
-    entry('s2', 'satellite', 30), entry('p1', 'plane', 10), entry('u1', 'unexplained', 15), entry('b1', 'bird', 25), entry('m1', 'meteor', 20),
-    entry('p2', 'probablePlane', 12), entry('f1', 'satelliteFlare', 5), entry('g1', 'bug', 40), entry('n1', 'plane', 50, { correction: 'notSure' }),
-    entry('u2', 'unexplained', 60, { correction: 'notSure' }),
-  ];
-  const groups = groupExplained(entries);
-  assert.deepEqual(groups.map((group) => [group.label, group.title, group.entries.map((e) => e.id)]), [
-    ['planes', 'Planes', ['p1', 'p2']],
-    ['satellites', 'Satellites', ['f1', 's2']],
-    ['meteors', 'Meteors', ['m1']],
-    ['bugsAndBirds', 'Bugs and birds', ['b1', 'g1']],
-    ['notSure', 'Not sure', ['n1']],
-  ], 'in time order inside each group; an unexplained entry marked “not sure” stays among the unexplained');
-  assert.deepEqual(groupExplained([entry('only', 'meteor', 1)]).map((group) => group.label), ['meteors'], 'a group with nothing in it is left out');
-  assert.deepEqual(groupExplained([]), []);
-  assert.deepEqual(groupExplained(null), []);
+test('every entry has a kind: the bucket of its display label, a label the page does not know being unexplained', () => {
   assert.equal(entryBucket(entry('x', 'unexplained', 1)), 'unexplained');
   assert.equal(entryBucket({ display: 'somethingNew' }), 'unexplained', 'a label the page does not know is shown, not hidden');
   assert.equal(entryBucket({ label: 'plane' }), 'planes', 'the entry’s own label when there is no display');
+  assert.equal(entryBucket(entry('n', 'plane', 1, { correction: 'notSure' })), 'notSure');
+  assert.equal(entryBucket(entry('u', 'unexplained', 1, { correction: 'notSure' })), 'unexplained', 'an unexplained light the person doubted stays unexplained');
+});
+
+// MARK: The grid
+
+/** A night of every kind: what each chip holds. */
+function everyKind() {
+  return [
+    entry('u1', 'unexplained', 10, { hasStill: true }), entry('u2', 'unexplained', 20), entry('p1', 'plane', 30, { hasStill: true }), entry('p2', 'probablePlane', 40),
+    entry('s1', 'satellite', 50, { hasStill: true }), entry('s2', 'satelliteFlare', 60), entry('m1', 'meteor', 70, { hasStill: true }), entry('b1', 'bird', 80),
+    entry('g1', 'bug', 90, { hasStill: true }), entry('n1', 'plane', 100, { correction: 'notSure', display: 'plane' }),
+    entry('c1', 'unexplained', 110, { correction: 'bird', display: 'bird', hasStill: true }),
+  ];
+}
+
+test('the kind chips: planes with the probable ones, satellites with their flares, bugs and birds together, and the person’s corrections', () => {
+  assert.deepEqual(GRID_KINDS.map(([name, words]) => `${name}: ${words}`),
+    ['unexplained: Unexplained', 'planes: Planes', 'satellites: Satellites', 'meteors: Meteors', 'bugs: Bugs & birds', 'corrected: Corrected by you']);
+  const night = everyKind();
+  assert.deepEqual(night.map(kindChip), ['unexplained', 'unexplained', 'planes', 'planes', 'satellites', 'satellites', 'meteors', 'bugs', 'bugs', null, 'bugs'],
+    'an explained light the person was not sure of is under no kind');
+  assert.deepEqual(chipCounts(night), { all: 11, unexplained: 2, planes: 2, satellites: 2, meteors: 1, bugs: 3, corrected: 2 });
+  assert.deepEqual(chipCounts(null), { all: 0, unexplained: 0, planes: 0, satellites: 0, meteors: 0, bugs: 0, corrected: 0 });
+  const ids = (filters) => night.filter((e) => matchesFilters(e, filters)).map((e) => e.id);
+  assert.deepEqual(ids({}), night.map((e) => e.id), 'no chip on: every entry');
+  assert.deepEqual(ids({ kinds: ['planes'] }), ['p1', 'p2']);
+  assert.deepEqual(ids({ kinds: ['satellites'] }), ['s1', 's2']);
+  assert.deepEqual(ids({ kinds: ['bugs'] }), ['b1', 'g1', 'c1']);
+  assert.deepEqual(ids({ kinds: ['unexplained', 'meteors'] }), ['u1', 'u2', 'm1'], 'several chips: any of them');
+  assert.deepEqual(ids({ kinds: ['corrected'] }), ['n1', 'c1']);
+  assert.deepEqual(ids({ kinds: ['unexplained', 'corrected'] }), ['u1', 'u2', 'n1', 'c1']);
+  assert.deepEqual(ids({ pictures: true }), ['u1', 'p1', 's1', 'm1', 'g1', 'c1'], 'With picture: only those with a still');
+  assert.deepEqual(ids({ kinds: ['unexplained', 'planes'], pictures: true }), ['u1', 'p1']);
+  assert.equal(matchesFilters(null, {}), false);
+  assert.deepEqual(night.map(kindWord), ['Unexplained', 'Unexplained', 'Plane', 'Probably a plane', 'Satellite', 'Satellite flare', 'Meteor', 'Bird', 'Bug', 'Not sure', 'Bird']);
+});
+
+test('the orders: by time either way, the longest, and the fastest across the sky with those of no speed last', () => {
+  assert.deepEqual(GRID_SORTS.map(([name, words]) => `${name}: ${words}`), ['newest: Newest first', 'oldest: Oldest first', 'longest: Longest', 'fastest: Fastest across the sky']);
+  const list = [
+    entry('a', 'plane', 30, { measures: { duration: 40, speed: 1.2 } }), entry('b', 'unexplained', 10, { measures: { duration: 4.2, speed: 6 } }),
+    entry('c', 'satellite', 20, { end: 20 + 90_000, measures: { speed: 0.5 } }), entry('d', 'meteor', 40, { measures: { duration: 0.6 } }),
+    entry('e', 'bug', 25, { measures: { duration: 2, speed: 6 } }),
+  ];
+  const order = (sort) => sortEntries(list, sort).map((e) => e.id);
+  assert.deepEqual(order('oldest'), ['b', 'c', 'e', 'a', 'd']);
+  assert.deepEqual(order('newest'), ['d', 'a', 'e', 'c', 'b']);
+  assert.deepEqual(order('longest'), ['c', 'a', 'b', 'e', 'd'], 'how long it was followed, from its measure or its start and end');
+  assert.deepEqual(order('fastest'), ['b', 'e', 'a', 'c', 'd'], 'measures.speed, the fastest first, ties by time; none: last');
+  assert.deepEqual(order('nonsense'), ['b', 'c', 'e', 'a', 'd'], 'an order the page does not know is by time');
+  assert.deepEqual(list.map((e) => e.id), ['a', 'b', 'c', 'd', 'e'], 'the list itself is left as it was');
+  assert.equal(lastedSeconds(list[2]), 90);
+  assert.equal(lastedSeconds(list[1]), 4.2);
+  assert.deepEqual(['newest', 'oldest', 'longest', 'fastest', null].map(isTimeSort), [true, true, false, false, false]);
+  // A night opens from dusk, oldest first; while it is still going, the newest first.
+  assert.equal(defaultSort({ from: 100, to: 200 }, 250), 'oldest');
+  assert.equal(defaultSort({ from: 100, to: 200 }, 150), 'newest');
+  assert.equal(defaultSort({ from: null, to: null }, 150), 'oldest');
+});
+
+test('the filters and the order in the address and back', () => {
+  assert.deepEqual(readGridQuery('kinds=planes,unexplained,nonsense,planes&sort=fastest&pictures=1'), { kinds: ['unexplained', 'planes'], sort: 'fastest', pictures: true, given: true },
+    'kinds in the chips’ order, once each; what is not one is left out');
+  assert.deepEqual(readGridQuery('night=2026-10-24'), { kinds: [], sort: null, pictures: false, given: false }, 'nothing said: the browser’s memory decides');
+  assert.deepEqual(readGridQuery('sort=sideways&pictures=yes'), { kinds: [], sort: null, pictures: false, given: true });
+  assert.deepEqual(gridQuery({ kinds: ['corrected', 'bugs'], sort: 'longest', pictures: true }), ['kinds=bugs,corrected', 'sort=longest', 'pictures=1']);
+  assert.deepEqual(gridQuery({ kinds: [], sort: null, pictures: false }), [], 'every kind in the night’s own order says nothing');
+  assert.deepEqual(gridQuery(null), []);
+  for (const choice of [{ kinds: ['unexplained', 'meteors'], sort: 'newest', pictures: false }, { kinds: [], sort: null, pictures: true }]) {
+    assert.deepEqual(gridChoice(readGridQuery(gridQuery(choice).join('&'))), choice, 'there and back');
+  }
+  assert.deepEqual(gridChoice({ kinds: 'planes', sort: 4, pictures: 'yes' }), { kinds: [], sort: null, pictures: false }, 'a memory that is not one is nothing');
+  assert.ok(SKY_ROUTE.test('sky/0A1B2C3D-0000-4000-8000-000000000004?night=2026-10-24&kinds=unexplained,planes&sort=fastest&pictures=1'));
+});
+
+test('the grid’s hours are the box’s clock hours, in the order of the entries', () => {
+  const night = [chicago(21, 5, 24), chicago(21, 59, 24), chicago(22, 0, 24), chicago(1, 30), chicago(1, 45)].map((start, i) => entry(`e${i}`, 'plane', start + 8000));
+  const groups = hourGroups(night, CHICAGO);
+  assert.deepEqual(groups.map((group) => [group.label, group.hour, group.entries.map((e) => e.id)]), [
+    ['9 PM', chicago(21, 0, 24), ['e0', 'e1']], ['10 PM', chicago(22, 0, 24), ['e2']], ['1 AM', chicago(1), ['e3', 'e4']],
+  ]);
+  assert.deepEqual(hourGroups([...night].reverse(), CHICAGO).map((group) => group.label), ['1 AM', '10 PM', '9 PM'], 'newest first: the hours too');
+  assert.equal(hourStart(chicago(3, 12) + 8437, CHICAGO), chicago(3));
+  assert.equal(hourLabel(chicago(0, 30), CHICAGO), '12 AM');
+  assert.equal(hourLabel(Date.UTC(2026, 9, 25, 10, 45), 'Asia/Kolkata'), '4 PM', 'a zone half an hour off: its own hours');
+  assert.equal(hourStart(Date.UTC(2026, 9, 25, 10, 45), 'Asia/Kolkata'), Date.UTC(2026, 9, 25, 10, 30));
+  // The fall's repeated hour: two hours called 1 AM, each with its own start.
+  const fall = [Date.UTC(2026, 10, 1, 6, 10), Date.UTC(2026, 10, 1, 7, 10)].map((start, i) => entry(`f${i}`, 'plane', start));
+  assert.deepEqual(hourGroups(fall, CHICAGO).map((group) => group.label), ['1 AM', '1 AM']);
+  assert.deepEqual(hourGroups([], CHICAGO), []);
+});
+
+test('a card’s words: the kind, how long, and a line that says what the light was or where and how it moved', () => {
+  const light = entry('u', 'unexplained', 1, { measures: { azimuth: 312, elevation: 8.4, blinks: true, shape: 'curved', duration: 4.2 } });
+  assert.equal(shortLine(light), 'Northwest, 8° up · blinks');
+  assert.equal(shortLine({ ...light, measures: { ...light.measures, blinks: false } }), 'Northwest, 8° up · curved');
+  assert.equal(shortLine({ ...light, measures: { ...light.measures, blinks: false, shape: 'suddenStop' } }), 'Northwest, 8° up · stops suddenly');
+  assert.equal(shortLine({ ...light, kind: 'newLight', measures: { azimuth: 350, elevation: 24, blinks: false, shape: 'curved' } }), 'North, 24° up · new light', 'a light that did not move has no shape');
+  assert.equal(shortLine({ ...light, kind: 'flash', measures: { azimuth: 90, elevation: 3, blinks: true } }), 'East, 3° up · blinks');
+  assert.equal(shortLine({ ...light, measures: { blinks: false, shape: 'straight' } }), 'straight', 'no direction known');
+  assert.equal(shortLine(light, { how: false }), 'Northwest, 8° up');
+  assert.equal(cardLine(light), 'Northwest, 8° up · blinks', 'an unexplained light: where and how');
+  assert.equal(cardLine(entry('p', 'plane', 1, { detail: 'AAL123 · 35,000 ft' })), 'AAL123 · 35,000 ft', 'a plane: its flight');
+  assert.equal(cardLine(entry('s', 'satellite', 1, { detail: 'ISS (ZARYA)' })), 'ISS (ZARYA)');
+  assert.equal(cardLine(entry('m', 'meteor', 1, { measures: { azimuth: 200, elevation: 40 } })), 'South, 40° up', 'nothing matched: where it was');
+  assert.equal(cardLine({ ...light, detail: 'Closest flight: none within the view' }), 'Northwest, 8° up · blinks', 'an unexplained one’s detail is in the player');
+  assert.deepEqual([0.4, 4.2, 4, 9.96, 12.4, 89, 95, 600, -1, null].map(durationShort), ['<1 s', '4.2 s', '4 s', '10 s', '12 s', '89 s', '2 min', '10 min', '', '']);
 });
 
 test('entries are counted as the bridge counts them', () => {
@@ -370,6 +471,76 @@ test('the close-up of a still is the path’s box, padded, at least 160 × 90, 1
   // Another picture size, the same rule: the made-up still of the dev server is 400 × 177.
   const small = closeUpRect([[0, 0.5, 0.5]], 400, 177);
   assert.deepEqual(small, { x: 120, y: 43.5, width: 160, height: 90 });
+});
+
+// MARK: The thumbnail
+
+test('the thumbnail is cut where the close-up is, in whole pixels, and never outside the picture', () => {
+  assert.equal(THUMB_WIDTH, 480, 'the box makes thumbnails at most this wide');
+  // The close-up of the middle example above, { x: 768, y: 254.1, width: 384, height: 216 }, in whole pixels.
+  const middle = [[0, 0.45, 0.4], [2, 0.5, 0.42], [4, 0.55, 0.45]];
+  assert.deepEqual(thumbRect(middle, STILL_W, STILL_H), { x: 768, y: 254, width: 384, height: 216 });
+  // The same rule for the same cases: a corner, an edge, a single point, a light that crossed the sky.
+  assert.deepEqual(thumbRect([[0, 0.98, 0.97], [1, 0.995, 0.99]], STILL_W, STILL_H), { x: 1760, y: 762, width: 160, height: 90 });
+  assert.deepEqual(thumbRect([[0, 0.01, 0.5], [1, 0.03, 0.52]], STILL_W, STILL_H), { x: 0, y: 390, width: 160, height: 90 });
+  assert.deepEqual(thumbRect([[0, 0.5, 0.3]], STILL_W, STILL_H), { x: 880, y: 211, width: 160, height: 90 });
+  assert.equal(thumbRect([[0, 0.05, 0.1], [9, 0.95, 0.9]], STILL_W, STILL_H), null, 'the whole picture is its view');
+  assert.equal(thumbRect([], STILL_W, STILL_H), null);
+  assert.equal(thumbRect(middle, 0, STILL_H), null);
+  // Rounding never takes it past an edge: .5 rounds up, and the rectangle is moved in instead.
+  const odd = thumbRect([[0, 0.9999, 0.5]], 1921, 853);
+  assert.ok(odd.x + odd.width <= 1921 && odd.y + odd.height <= 853 && odd.x >= 0 && odd.y >= 0, JSON.stringify(odd));
+  assert.ok(Number.isInteger(odd.x) && Number.isInteger(odd.y) && Number.isInteger(odd.width) && Number.isInteger(odd.height));
+  // A picture the size of the dev server's, and a taller one.
+  assert.deepEqual(thumbRect([[0, 0.5, 0.5]], 400, 177), { x: 120, y: 44, width: 160, height: 90 });
+  assert.deepEqual(thumbRect([[0, 0.5, 0.5]], 1920, 1440), { x: 880, y: 675, width: 160, height: 90 });
+});
+
+test('the box’s Swift copy of the close-up rule is tested against the page’s own, case by case', () => {
+  const written = JSON.parse(readFileSync(VECTORS_PATH, 'utf8'));
+  const fresh = makeCloseUpVectors();
+  assert.ok(fresh.cases.length >= 150, 'a good many cases');
+  assert.ok(fresh.cases.some((one) => one.thumb === null) && fresh.cases.some((one) => one.thumb !== null), 'some with a close-up and some without');
+  assert.deepEqual(written, fresh, 'Packages/CameraBridgeKit/Tests/BridgeEngineTests/Fixtures/sky-closeup-vectors.json is what the page makes now: run `node linux/web-tests/support/sky-closeup-vectors.mjs` and commit it');
+  for (const one of fresh.cases) {
+    const path = one.path.map(([x, y], i) => [i, x, y]);
+    assert.deepEqual(closeUpRect(path, one.picture[0], one.picture[1]), one.closeUp);
+    assert.deepEqual(thumbRect(path, one.picture[0], one.picture[1]), one.thumb);
+  }
+});
+
+test('a card’s picture is told apart by its size: the close-up the box cut, the whole picture at some size, or neither', () => {
+  const picture = { width: STILL_W, height: STILL_H };
+  const flat = [[0, 0.45, 0.4], [2, 0.5, 0.42], [4, 0.55, 0.45]];   // its close-up is 384 × 216
+  const across = [[0, 0.05, 0.1], [9, 0.95, 0.9]];                  // none: the whole picture is its view
+  const rect = thumbRect(flat, STILL_W, STILL_H);
+
+  // The thumbnail of a close-up: 16:9, at most as wide as the close-up and the limit (384 × 216 is smaller than the limit, so it is cut as it is).
+  assert.deepEqual(thumbGeometry(flat, { width: 384, height: 216 }, picture), { mode: 'crop', rect, picture });
+  assert.deepEqual(thumbGeometry(flat, { width: 385, height: 216 }, picture), { mode: 'crop', rect, picture }, 'a pixel more or less is nothing');
+  const big = [[0, 0.2, 0.3], [5, 0.7, 0.6]];                      // a close-up wider than the limit
+  assert.deepEqual(thumbGeometry(big, { width: 480, height: 270 }, picture), { mode: 'crop', rect: thumbRect(big, STILL_W, STILL_H), picture });
+
+  // The thumbnail of a light that crossed the sky: all of the picture, 480 wide, its shape kept.
+  assert.deepEqual(thumbGeometry(across, { width: 480, height: 213 }, picture), { mode: 'whole', picture });
+  // The whole picture where a close-up was expected (a build of the box that cuts none), and the full still the box answers with when it cannot
+  // make a thumbnail: all of the picture, drawn by its own size.
+  assert.deepEqual(thumbGeometry(flat, { width: 480, height: 213 }, picture), { mode: 'whole', picture });
+  assert.deepEqual(thumbGeometry(flat, { width: 1920, height: 852 }, picture), { mode: 'whole', picture: { width: 1920, height: 852 } });
+  assert.deepEqual(thumbGeometry(across, { width: 1920, height: 852 }, picture), { mode: 'whole', picture: { width: 1920, height: 852 } });
+
+  // A big picture is the picture whatever the page thought it would be (the camera changed since the night began).
+  assert.deepEqual(thumbGeometry(flat, { width: 2560, height: 1440 }, picture), { mode: 'whole', picture: { width: 2560, height: 1440 } });
+  // Without the picture's size only a big image can be told: it is the whole picture. A small one is of no known shape.
+  assert.deepEqual(thumbGeometry(flat, { width: 1920, height: 852 }, null), { mode: 'whole', picture: { width: 1920, height: 852 } });
+  assert.equal(thumbGeometry(flat, { width: 384, height: 216 }, null), null);
+
+  // Neither: an image of another shape than the close-up and than the picture (the picture changed shape), or no size at all.
+  assert.equal(thumbGeometry(flat, { width: 300, height: 300 }, picture), null);
+  assert.equal(thumbGeometry(flat, { width: 480, height: 270 }, { width: 1920, height: 1080 }) === null, false, 'a 16:9 picture: a 16:9 image is the close-up or the whole picture');
+  assert.equal(thumbGeometry(flat, { width: 0, height: 0 }, picture), null);
+  assert.equal(thumbGeometry(flat, { width: NaN, height: 10 }, picture), null);
+  assert.equal(thumbGeometry(null, { width: 480, height: 213 }, picture)?.mode, 'whole', 'a light with no path has no close-up: the whole picture');
 });
 
 test('an entry opens its moment in the recordings three seconds early, and downloads from there', () => {

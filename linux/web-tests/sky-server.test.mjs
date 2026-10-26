@@ -11,6 +11,7 @@ import { cookieFetch } from './support/cookie-fetch.mjs';
 import { PASSWORD, startDevServer } from './support/dev-server.mjs';
 import { ensureFixtures, WEB_ROOT } from './support/fixtures.mjs';
 import { installFakeBrowser } from './support/fake-browser.mjs';
+import { thumbRect } from '../web/js/screens/sky-model.js';
 
 const fixtures = ensureFixtures();
 const opts = { skip: fixtures.skip };
@@ -242,7 +243,7 @@ test('the night route answers the log as Task 5 describes it', opts, async () =>
   await ready();
   const { status, json } = await night(BACKYARD());
   assert.equal(status, 200);
-  assert.deepEqual(Object.keys(json).sort(), ['aim', 'camera', 'capped', 'conditions', 'counts', 'entries', 'from', 'learning', 'night', 'serverTime', 'to', 'view']);
+  assert.deepEqual(Object.keys(json).sort(), ['aim', 'camera', 'capped', 'conditions', 'counts', 'entries', 'from', 'learning', 'night', 'picture', 'serverTime', 'to', 'view']);
   assert.ok(Array.isArray(json.capped) && json.capped.every((hour) => Number.isInteger(hour.hour) && Number.isInteger(hour.count) && hour.count > 0),
     'the hours with more lights than were logged: [{ hour, count }]');
   assert.equal(json.camera, BACKYARD());
@@ -251,9 +252,17 @@ test('the night route answers the log as Task 5 describes it', opts, async () =>
   assert.ok(Number.isInteger(json.from) && Number.isInteger(json.to) && json.to - json.from > 11 * 3_600_000 && json.to - json.from < 14 * 3_600_000, 'epoch ms, sunset to sunrise');
   assert.equal(new Date(json.serverTime).getHours(), 10, 'the server’s clock, which these tests set to 10 in the morning');
 
-  // A busy night: dozens of planes, hundreds of satellites, a few that nothing explains.
+  // A busy night: a hundred planes, hundreds of satellites, meteors, bugs and birds, and the lights nothing explains, most with a still.
   const { counts, entries } = json;
-  assert.ok(counts.planes >= 30 && counts.satellites >= 150 && counts.meteors >= 1 && counts.bugsAndBirds >= 3 && counts.unexplained >= 3, JSON.stringify(counts));
+  assert.ok(counts.planes >= 100 && counts.satellites >= 300 && counts.meteors >= 10 && counts.bugsAndBirds >= 50 && counts.unexplained >= 250, JSON.stringify(counts));
+  assert.ok(entries.length >= 800, `hundreds of lights: ${entries.length}`);
+  assert.ok(entries.filter((entry) => entry.hasStill).length / entries.length > 0.7, 'most with a still');
+  for (const label of ['plane', 'probablePlane', 'satellite', 'satelliteFlare', 'meteor', 'bug', 'bird']) {
+    assert.ok(entries.some((entry) => entry.label === label && entry.hasStill), `a ${label} with a still`);
+  }
+  const nine = entries.filter((entry) => entry.label === 'unexplained' && new Date(entry.start).getHours() === 21);
+  assert.equal(nine.length, 200, 'at 9 PM as many lights nothing explains as the box logs in an hour');
+  assert.deepEqual(json.capped.map((hour) => new Date(hour.hour).getHours()), [21], 'and the hour says it followed more');
   assert.equal(counts.explained, counts.planes + counts.satellites + counts.meteors + counts.bugsAndBirds + counts.notSure);
   const finished = entries.filter((entry) => entry.end <= json.serverTime);
   assert.equal(finished.length, entries.length, 'nothing that has not happened yet');
@@ -363,6 +372,75 @@ test('a still is a JPEG for an entry that has one, and 404 for the rest', opts, 
   assert.equal((await server.api.get(`sky/cameras/${BACKYARD()}/entries/${withStill.id}/still?night=${name}`, { auth: false })).status, 401);
 });
 
+/** The width and height in a JPEG's frame header (its first SOF marker), or null. */
+function jpegSize(buffer) {
+  if (buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  for (let at = 2; at + 9 < buffer.length;) {
+    if (buffer[at] !== 0xff) { at += 1; continue; }
+    const marker = buffer[at + 1];
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) return { width: buffer.readUInt16BE(at + 7), height: buffer.readUInt16BE(at + 5) };
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { at += 2; continue; }
+    at += 2 + buffer.readUInt16BE(at + 2);
+  }
+  return null;
+}
+
+test('the night says how big its pictures are, and size=thumb is the close-up of the light cut as the page cuts it', opts, async () => {
+  await ready();
+  const { entries, night: name, picture } = (await night(BACKYARD())).json;
+  assert.deepEqual(picture, { width: 400, height: 177 }, 'the made-up stills are 400 × 177');
+  const still = (entry, query = '') => server.api.get(`sky/cameras/${BACKYARD()}/entries/${entry.id}/still?night=${name}${query}`);
+  const whole = (await still(entries.find((entry) => entry.hasStill))).buffer;
+  assert.deepEqual(jpegSize(whole), picture);
+
+  // Each light with a close-up: a JPEG of exactly the rectangle the page draws its path in. One with none: all of the picture (it is small already).
+  const lights = entries.filter((entry) => entry.hasStill);
+  const sizes = new Set();
+  let cut = 0;
+  for (const light of lights.slice(0, 40)) {
+    const small = await still(light, '&size=thumb');
+    assert.equal(small.status, 200);
+    assert.equal(small.headers['content-type'], 'image/jpeg');
+    const rect = thumbRect(light.path, picture.width, picture.height);
+    const size = jpegSize(small.buffer);
+    assert.ok(size, 'a JPEG');
+    if (rect) {
+      assert.deepEqual(size, { width: rect.width, height: rect.height }, `${light.id}: the close-up ${JSON.stringify(rect)}`);
+      assert.ok(small.buffer.length < whole.length, 'smaller than the whole picture');
+      cut += 1;
+    } else {
+      assert.deepEqual(small.buffer, whole, `${light.id}: no close-up: the whole picture`);
+    }
+    sizes.add(`${size.width}x${size.height}`);
+  }
+  assert.ok(cut >= 20, `${cut} close-ups were cut`);
+  assert.ok(sizes.size > 1, 'and not all one size');
+  // The same light twice is the same picture; the whole one and size=full are as they were.
+  const again = await still(lights[0], '&size=thumb');
+  assert.deepEqual(again.buffer, (await still(lights[0], '&size=thumb')).buffer);
+  assert.deepEqual((await still(lights[0], '&size=full')).buffer, whole);
+
+  // What is not a picture of the box’s is refused as it is: no picture is 404, a size that is none is 400 with its field.
+  const without = entries.find((entry) => !entry.hasStill);
+  for (const query of ['&size=thumb', '&size=full', '']) assert.equal((await still(without, query)).status, 404, query);
+  assert.equal((await server.api.get(`sky/cameras/${BACKYARD()}/entries/${lights[0].id}/still?night=2020-01-01&size=thumb`)).status, 404);
+  for (const size of ['huge', 'THUMB', '', '480']) {
+    const bad = await still(lights[0], `&size=${size}`);
+    assert.equal(bad.status, 400, size);
+    assert.equal(bad.json.field, 'size');
+  }
+  assert.equal((await server.api.get(`sky/cameras/${BACKYARD()}/entries/${lights[0].id}/still?night=${name}&size=thumb`, { auth: false })).status, 401);
+});
+
+test('a night without a picture says nothing of their size', opts, async () => {
+  await ready();
+  // Seven days back is past the dev server's nights that have stills? Every night has them; so ask for a day with its few lights and check the key is always there.
+  const { json } = await night(BACKYARD(), '?view=day');
+  assert.ok('picture' in json, 'always there');
+  assert.ok(json.picture === null || (json.picture.width === 400 && json.picture.height === 177));
+  assert.equal(json.picture === null, !json.entries.some((entry) => entry.hasStill), 'null exactly when no light has a picture');
+});
+
 test('a correction is kept and answered with the entry; the night shows it afterwards', opts, async () => {
   await ready();
   const before = (await night(BACKYARD())).json;
@@ -405,6 +483,26 @@ test('Find a feed answers the feeds on the network, and the development switch c
   await reset();
 });
 
+test('the development switch makes the nights as busy as a box’s can be: about 2,600 lights, at most 200 unexplained an hour', opts, async () => {
+  await ready();
+  const quiet = (await night(BACKYARD())).json;
+  const answer = await server.api.dev('sky', { busy: true });
+  assert.equal(answer.status, 200);
+  const busy = (await night(BACKYARD())).json;
+  assert.ok(busy.entries.length >= 2400 && busy.entries.length <= 2800, `about 2,600: ${busy.entries.length}`);
+  assert.equal(busy.counts.unexplained + busy.counts.explained, busy.entries.length);
+  const hours = new Map();
+  for (const entry of busy.entries.filter((e) => e.label === 'unexplained')) hours.set(new Date(entry.start).getHours(), (hours.get(new Date(entry.start).getHours()) ?? 0) + 1);
+  assert.ok([...hours.values()].every((count) => count <= 200), 'never more than the box logs in an hour');
+  assert.ok(hours.size >= 12, 'in every hour of the night');
+  assert.notEqual((await server.api.dev('sky', { busy: 'very' })).status, 200, 'on or off: anything else is refused');
+  await server.api.dev('sky', { busy: false });
+  assert.deepEqual((await night(BACKYARD())).json.entries.map((entry) => entry.id), quiet.entries.map((entry) => entry.id), 'off again: the usual night');
+  await server.api.dev('sky', { busy: true });
+  await ready();
+  assert.equal((await night(BACKYARD())).json.entries.length, quiet.entries.length, 'a reset is a new box, with the usual night');
+});
+
 test('the development switch changes the aim, what the box is learning and the trouble it reports', opts, async () => {
   await ready();
   const aim = async () => (await server.api.get(`cameras/${BACKYARD()}`)).json.status.sky;
@@ -435,19 +533,39 @@ test('the page reads the dev server’s night, shows it and takes a correction',
     await loadCameras();
     await loadPlugins();
     assert.equal(pluginOn('sky'), true, 'the plugin was switched on for these tests (ready)');
-    const { renderSkyLog } = await import(pathToFileURL(join(WEB_ROOT, 'js/screens/sky-log.js')).href);
-    const page = renderSkyLog({ params: [BACKYARD(), ''], setTitle() {} });
+    const { createSkyLogPage } = await import(pathToFileURL(join(WEB_ROOT, 'js/screens/sky-log.js')).href);
+    // The page's own requests, the store's cameras and plugins; a player that keeps what it was given, and an observer that never says a card
+    // is near the screen (the first cards only).
+    const opened = [];
+    const page = createSkyLogPage({ cameraID: BACKYARD(), setup: () => null, frame: () => 0, notify: () => {},
+      createObserver: () => ({ observe() {}, unobserve() {}, disconnect() {} }),
+      openPlayer: async (options) => { opened.push(options); return { close: () => options.onClose?.() }; } });
     for (let tries = 0; tries < 100 && !/Last night|Tonight so far|Night of/.test(textOf(page.el)); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
     const text = textOf(page.el);
     assert.match(text, /Sky log · Back Yard/);
     assert.match(text, /(Last night|Tonight so far): \d+ unexplained, \d+ explained/);
-    assert.match(text, /\d+ satellites/);
-    const card = all(page.el, (node) => node.classList?.contains('sky-entry'))[0];
-    assert.ok(card, 'an unexplained entry has a card');
-    const bird = all(card, (node) => node.localName === 'button' && node.textContent === 'Bird')[0];
+    assert.match(text, /Satellites \d+/, 'the chips count the kinds');
+    const cards = all(page.el, (node) => node.classList?.contains('sky-tile'));
+    assert.ok(cards.length > 0 && cards.length <= 60, `the first cards: ${cards.length}`);
+    assert.ok(all(page.el, (node) => node.classList?.contains('sky-pending')).length > 0, 'the rest wait for the person to scroll');
+    const unexplained = all(page.el, (node) => node.classList?.contains('sky-filter') && node.dataset.kind === 'unexplained')[0];
+    unexplained.click();
+    const card = all(page.el, (node) => node.classList?.contains('sky-tile'))[0];
+    assert.equal(card.dataset.kind, 'unexplained');
+    const countOf = (kind) => Number(textOf(all(page.el, (node) => node.classList?.contains('sky-filter') && node.dataset.kind === kind)[0]).replace(/\D+/g, ''));
+    const before = { unexplained: countOf('unexplained'), bugs: countOf('bugs') };
+    card.click();
+    for (let tries = 0; tries < 100 && !opened.length; tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    const bird = all(opened[0].details, (node) => node.localName === 'button' && node.textContent === 'Bird')[0];
     bird.click();
-    for (let tries = 0; tries < 100 && !/You said: bird/.test(textOf(card)); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.match(textOf(card), /You said: bird\. Camera Bridge learns from this\./);
+    for (let tries = 0; tries < 100 && !/You said: bird/.test(textOf(opened[0].details)); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.match(textOf(opened[0].details), /You said: bird\. Camera Bridge learns from this\./);
+    assert.equal(card.dataset.kind, 'bugsAndBirds', 'the card follows');
+    assert.deepEqual([countOf('unexplained'), countOf('bugs')], [before.unexplained - 1, before.bugs + 1], 'and the chips’ counts, at once');
+    // Unexplained alone is on: the bird fades out of the grid (no refresh), the player still open on it.
+    for (let tries = 0; tries < 50 && page.el.contains(card); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(page.el.contains(card), false, 'it left the grid');
+    assert.ok(all(page.el, (node) => node.classList?.contains('sky-tile')).every((node) => node.dataset.kind === 'unexplained'), 'what is left is unexplained');
     assert.equal(store.cameras.size, 9);
     page.destroy();
   } finally {

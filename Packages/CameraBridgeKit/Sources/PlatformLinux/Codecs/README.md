@@ -87,6 +87,14 @@ fall back are unit-tested with a fake ffmpeg.
   ffmpeg …`, so every thread has it; no `nice` program: as it is), as the clip conversions do, so live video and recordings keep the box's cores.
 - `RawVideoFrame.grayThumbnail(maxWidth:)` at the picture's own size (what the sky decoder makes) copies the luma plane instead of averaging blocks of one pixel.
 
+## Pictures: the Sky Watcher's small ones
+
+`croppedJPEG(_:crop:maxWidth:quality:)` (2026-10-26) makes the small pictures of the Sky Watcher's grid. One child (`FFmpegPictures.crop`, `FFmpegArguments.cropImage`) takes the
+JPEG on stdin and writes the JPEG of the part inside `crop` on stdout: `crop=w:h:x:y:exact=1` (exact: a picture of subsampled chroma is cut at the pixel asked for, not at the
+even one before it, so that the rectangle the page draws a light's path in is the picture's), then `scale` (lanczos) to at most `maxWidth` wide with the shape kept and never up,
+`format=yuvj420p`, mjpeg at `quality` on the `-q:v` scale. It runs under `nice -n 10` (`FFmpegOneShot.run(niceness:)`): a grid of these is made while video is being recorded. A crop
+that is not inside the picture, or data that is not an image, throws before any child is run; a whole picture that already fits comes back as it was. Tests: `CroppedPictureTests`.
+
 ## Audio and HomeKit
 
 What ffmpeg can produce is read from `ffmpeg -encoders` (see `capabilitySummary()`):

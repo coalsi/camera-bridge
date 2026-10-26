@@ -148,6 +148,8 @@ public final class BridgeEngine {
     /// cameras (`skyRecordedStill`).
     @ObservationIgnored let skyRecordingDecoders: SnapshotDecoderPool
     @ObservationIgnored let skyRecordingPictures = AsyncSerialLock()
+    /// The small pictures of the Sky Watcher's grid, made when the page asks and kept beside the log's pictures (`skyStillThumbnail`).
+    @ObservationIgnored let skyThumbnails: SkyThumbnails
     /// Bumped by every operation that changes what `refreshStatus` reads (cameras, runtimes, the sensors bridge, the
     /// state): a refresh that read before it publishes nothing (the operation refreshes again).
     @ObservationIgnored private var statusGeneration = 0
@@ -185,6 +187,9 @@ public final class BridgeEngine {
                                 pollInterval: tuning.skyPollInterval)
         skyRecordingDecoders = SnapshotDecoderPool(codecs: environment.codecs, idleLifetime: EventPictures.decoderIdleLifetime,
                                                    blockingWork: SnapshotDecoderPool.offCooperativePool)
+        skyThumbnails = SkyThumbnails(store: coordinator.store, log: coordinator.store.skyLog, codecs: environment.codecs, maximumWaiting: tuning.skyThumbnailWaiting,
+                                      deadline: tuning.skyThumbnailDeadline, failureMemory: tuning.skyThumbnailFailureMemory,
+                                      hasRoom: tuning.skyThumbnailRoom ?? { SkyLightFilter.stillsHaveRoom(coordinator.storageStatus()) })
         // Settings and cameras are shown before the first start (a missing or unreadable file is handled by `start`).
         if let configuration = try? store.load() {
             storedSettings = configuration.settings
@@ -230,6 +235,7 @@ public final class BridgeEngine {
         archive = coordinator.reader
         skyService = nil
         skyRecordingDecoders = SnapshotDecoderPool(codecs: environment.codecs, idleLifetime: EventPictures.decoderIdleLifetime)
+        skyThumbnails = SkyThumbnails(store: coordinator.store, log: coordinator.store.skyLog, codecs: environment.codecs, hasRoom: { false })
         nvrStorage = snapshot.nvrStorage
         state = snapshot.state
         cameras = snapshot.cameras

@@ -78,6 +78,10 @@ final class FakeBackend: BridgeBackend {
         var skyAim = SkyAimStatus(quality: .rough, planes: 0, stars: 0, residualPixels: nil, updated: nil)
         var skyLearning = SkyLearning(ready: false, planes: 0, satellites: 0)
         var skyStills: [String: Data] = [:]
+        /// The small pictures `skyStillThumbnail` answers (an entry without one is answered with its whole picture, as the box does when it cannot make it).
+        var skyThumbnails: [String: Data] = [:]
+        /// How big the night's pictures are, as the night's log says.
+        var skyPicture: SkyPictureSize?
         /// What the sky calls throw instead of answering, when set (a place not set, a folder not chosen, a drive that is away).
         var skyError: (any Error)?
         /// Every sky call in order: "night:<camera>:<night or latest>:<view>", "correct:<entry>:<night>:<label>", "still:<entry>:<night>", "feeds".
@@ -273,7 +277,7 @@ final class FakeBackend: BridgeBackend {
             let entries = state.skyEntries.filter { $0.camera == cameraID }.sorted { ($0.start, $0.id) < ($1.start, $1.id) }
             return SkyNightLog(camera: cameraID, night: night ?? "2026-10-24", view: view, from: Self.skyFrom, to: Self.skyTo, entries: entries,
                                conditions: state.skyConditions, counts: SkyCounts(counting: entries), aim: state.skyAim, learning: state.skyLearning,
-                               capped: state.skyCapped)
+                               capped: state.skyCapped, picture: state.skyPicture)
         }
     }
 
@@ -295,6 +299,17 @@ final class FakeBackend: BridgeBackend {
             guard state.configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
             guard let jpeg = state.skyStills[entryID] else { throw SkyLogError.noStill }
             return jpeg
+        }
+    }
+
+    func skyStillThumbnail(cameraID: UUID, night: String, entryID: String) async throws -> SkyStillPicture {
+        try box.withLock { state in
+            state.skyCalls.append("thumbnail:\(entryID):\(night)")
+            if let error = state.skyError { throw error }
+            guard state.configurations.contains(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
+            if let small = state.skyThumbnails[entryID] { return SkyStillPicture(jpeg: small, isThumbnail: true) }
+            guard let jpeg = state.skyStills[entryID] else { throw SkyLogError.noStill }
+            return SkyStillPicture(jpeg: jpeg, isThumbnail: false)
         }
     }
 

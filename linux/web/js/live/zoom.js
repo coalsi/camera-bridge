@@ -1,12 +1,15 @@
-// Digital zoom on one camera's picture (the Monitor's one-camera wall): drag a box to zoom into it, wheel or pinch to zoom around the pointer,
-// drag the rectangle on the overview to move, double-click or Esc to go back to the whole picture. While zoomed, the area is drawn on a canvas
-// over the video: with WebGL, upscaled and sharpened on the computer's graphics (contrast-adaptive sharpening, after AMD FidelityFX CAS: edges
-// and small text come back without halos), else drawn plainly with the browser's best smoothing.
+// Digital zoom on one camera's picture, the one zoom of the page (the Monitor's one-camera wall, Sky Watcher's clip player): drag a box to zoom
+// into it; the wheel, a trackpad's pinch or a pinch on a touch screen zoom around the pointer; zoomed, drag the picture (or the rectangle on the
+// overview) to move it, or Shift and drag a box to zoom further; double-click, Esc, 0 or Reset go back to the whole picture. While zoomed, the
+// area is drawn on a canvas over the video: with WebGL, upscaled and sharpened on the computer's graphics (contrast-adaptive sharpening, after
+// AMD FidelityFX CAS: edges and small text come back without halos), else drawn plainly with the browser's best smoothing.
 //
-// The view is a rectangle of the video in its own normalized coordinates (0..1 across and down). It always keeps the shape of the tile, so the
-// zoomed area fills it. A camera whose picture is straightened (its page's Straighten the picture, js/live/straighten.js) is zoomed in the
+// The view is a rectangle of the picture in its own normalized coordinates (0..1 across and down). It always keeps the shape of the tile, so
+// the zoomed area fills it. A camera whose picture is straightened (its page's Straighten the picture, js/live/straighten.js) is zoomed in the
 // straightened picture: the view is a rectangle of that picture (the same size as the video's), and every point of it is sampled from the
-// video where the formula says, so a straight horizon stays straight however far in.
+// video where the formula says, so a straight horizon stays straight however far in. A page that draws over the picture (the light's path in
+// Sky Watcher's player) gives the zoom its marks: they are put over the zoomed picture, under the zoom's own controls, and the page draws them
+// in the view's coordinates (onView), so they stay on what they mark.
 import { h, replace } from '../dom.js';
 import { icon } from '../icons.js';
 import { GLSL_STRAIGHTEN, stripPlan } from './straighten.js';
@@ -15,6 +18,10 @@ const MAX_ZOOM = 12;
 const DRAG_MIN_PX = 8;          // a drag shorter than this is a click
 const WHEEL_STEP = 1.0018;      // zoom per wheel pixel (a notch of 100 px: about 1.2x)
 const STORE_KEY = 'cb.zoom.enhance';
+const HINT_WHOLE = 'Drag over an area to zoom';
+const HINT_ZOOMED = 'Drag to move · Shift-drag to zoom further';
+
+const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
 
 const VERTEX = `attribute vec2 p; varying vec2 uv; uniform vec4 view; void main() {
   uv = view.xy + (p * 0.5 + 0.5) * view.zw; gl_Position = vec4(p.x, -p.y, 0.0, 1.0); }`;
@@ -96,18 +103,19 @@ function createGLDrawer(canvas) {
   const largest = gl.getParameter(gl.MAX_TEXTURE_SIZE);
   return {
     /**
-     * Draws `view` of `video` straightened by `correction` into `rect` (canvas pixels: x, y, w, h), the rest black; false when WebGL cannot
-     * (a lost context, a picture larger than its largest texture, which it would draw black, or a picture it refuses).
+     * Draws `view` of `size.video` (a video or an image, `size.vw` × `size.vh`) straightened by `correction` into `rect` (canvas pixels: x, y,
+     * w, h), the rest black; false when WebGL cannot (a lost context, a picture larger than its largest texture, which it would draw black, or
+     * a picture it refuses).
      */
-    draw(video, view, rect, amount, correction) {
-      if (gl.isContextLost() || !(video.videoWidth <= largest && video.videoHeight <= largest)) return false;
+    draw(size, view, rect, amount, correction) {
+      if (gl.isContextLost() || !(size.vw <= largest && size.vh <= largest)) return false;
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video); } catch { return false; }
+      try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, size.video); } catch { return false; }
       gl.viewport(Math.round(rect.x), Math.round(canvas.height - rect.y - rect.h), Math.round(rect.w), Math.round(rect.h));
       gl.uniform4f(uView, view.x, view.y, view.w, view.h);
-      gl.uniform2f(uTexel, 1 / video.videoWidth, 1 / video.videoHeight);
+      gl.uniform2f(uTexel, 1 / size.vw, 1 / size.vh);
       gl.uniform1f(uAmount, amount);
       gl.uniform2f(uStraighten, Number(correction?.straighten) || 0, Number(correction?.level) || 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -159,18 +167,23 @@ function viewPieces(plan, pw, ph, vw, vh, view, rect) {
 }
 
 /**
- * Zoom over `host` (the tile's picture box). `getVideo()` gives the <video> on screen now (live or a recording); `getCorrection()` the camera's
- * picture correction now (null or off: the picture as the camera sends it), read at every picture, so a correction saved meanwhile shows at
- * once. `onActive(zoomed)` runs when the picture goes from whole to zoomed and back. -> { el, reset(), zoomed(), destroy() }
+ * Zoom over `host` (the picture's box). `getVideo()` gives the picture on screen now: a <video> (live or a recording) or an <img> (a still),
+ * null while there is none; `getCorrection()` the camera's picture correction now (null or off: the picture as the camera sends it), read at
+ * every picture, so a correction saved meanwhile shows at once. `onActive(zoomed)` runs when the picture goes from whole to zoomed and back,
+ * `onView(view)` after every change of the view. `marks`, an element of the page's the size of the host, is put over the zoomed picture and
+ * under the zoom's controls: the page draws in it what marks a place in the picture, in the view's coordinates (view(), level()).
+ * -> { el, reset(), zoomed(), view(), level(), zoomTo(x, y, level), key(event), destroy() }
  */
-export function createZoom({ host, getVideo, getCorrection = () => null, onActive = () => {} }) {
+export function createZoom({ host, getVideo, getCorrection = () => null, onActive = () => {}, onView = () => {}, marks = null }) {
   let view = { x: 0, y: 0, w: 1, h: 1 };
   let enhance = readEnhance();
   let destroyed = false;
   let frame = null;
-  let drag = null;              // { kind: 'box' | 'pan', x0, y0, x1, y1, view0 }
+  let drag = null;              // { kind: 'box' | 'pan', x0, y0, x1, y1, moved, view0 }
   const pointers = new Map();   // pointer id -> {x, y}, for a pinch
-  let pinch = null;
+  let pinch = null;             // { distance, x, y }: the two fingers' distance and midpoint at the last move
+  let gesture = null;           // Safari's trackpad pinch: { scale } at the last change
+  let stillDrawn = null;        // the still last drawn (a picture that does not move is drawn again only when something changes)
 
   let canvas = h('canvas', { class: 'zoom-canvas', hidden: true, 'aria-hidden': 'true' });
   const box = h('div', { class: 'zoom-box', hidden: true });
@@ -183,18 +196,23 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
       h('button', { class: 'zoom-btn', type: 'button', 'aria-label': 'Zoom out', onclick: (e) => { e.stopPropagation(); zoomBy(1 / 1.5); } }, '−'),
       level,
       h('button', { class: 'zoom-btn', type: 'button', 'aria-label': 'Zoom in', onclick: (e) => { e.stopPropagation(); zoomBy(1.5); } }, '+'),
-      h('button', { class: 'zoom-btn', type: 'button', onclick: (e) => { e.stopPropagation(); reset(); } }, icon('refresh'), 'Reset'),
+      h('button', { class: 'zoom-btn zoom-reset', type: 'button', title: 'The whole picture (double-click, Esc or 0)', onclick: (e) => { e.stopPropagation(); reset(); } },
+        icon('refresh'), 'Reset'),
       enhanceButton),
     minimap);
-  const hint = h('div', { class: 'zoom-hint' }, 'Drag over an area to zoom');
-  const el = h('div', { class: 'zoom-layer' }, canvas, surface, box, controls, hint);
-  // The hint shows each time the pointer comes onto the picture, for 3 s.
+  const hint = h('div', { class: 'zoom-hint' }, HINT_WHOLE);
+  const el = h('div', { class: 'zoom-layer' }, canvas, marks, surface, box, controls, hint);
+  // The hint shows for 3 s: each time the pointer comes onto the whole picture, and once as it is zoomed (how to move it). Never on a touch
+  // screen (monitor.css).
   let hintTimer = null;
-  surface.addEventListener('pointerenter', (event) => {
-    if (event.pointerType !== 'mouse') return;
+  function flashHint(text) {
+    if (hint.textContent !== text) hint.textContent = text;
     hint.dataset.show = 'true';
     clearTimeout(hintTimer);
     hintTimer = setTimeout(() => { hint.dataset.show = 'false'; }, 3000);
+  }
+  surface.addEventListener('pointerenter', (event) => {
+    if (event.pointerType === 'mouse' && !isZoomed()) flashHint(HINT_WHOLE);
   });
   host.append(el);
 
@@ -222,6 +240,7 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
     if (!gl) return;
     const old = gl;
     gl = null;
+    stillDrawn = null;
     canvas.removeEventListener('webglcontextlost', flatten);
     old.destroy();
     if (destroyed) return;
@@ -232,11 +251,15 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
   const mapPlan = keptPlan();       // the overview's
 
   const isZoomed = () => view.w < 0.999 || view.h < 0.999;
+  const sameView = (a, b) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 
+  /** The picture on screen and its own size (a video's, or an image's once it has loaded): { video, vw, vh, still }, or null while there is none. */
   function videoSize() {
     const video = getVideo();
-    if (!video || !video.videoWidth || !video.videoHeight) return null;
-    return { video, vw: video.videoWidth, vh: video.videoHeight };
+    const vw = video?.videoWidth || video?.naturalWidth || 0;
+    const vh = video?.videoHeight || video?.naturalHeight || 0;
+    if (!(vw > 0 && vh > 0)) return null;
+    return { video, vw, vh, still: !(video.videoWidth > 0) };
   }
 
   /** Where `view` lands in the host (CSS pixels): fitted, letterboxed. */
@@ -274,15 +297,21 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
   }
 
   function setView(next) {
+    if (sameView(view, next)) return;
     const was = isZoomed();
     view = next;
     const now = isZoomed();
     canvas.hidden = !now;
     controls.hidden = !now;
     el.dataset.zoomed = String(now);
-    if (now !== was) onActive(now);
+    if (now !== was) {
+      onActive(now);
+      if (now) flashHint(HINT_ZOOMED);
+      else { clearTimeout(hintTimer); hint.dataset.show = 'false'; }
+    }
     draw();
     showLevel();
+    onView({ ...view });
   }
 
   function showLevel() {
@@ -290,22 +319,53 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
     level.textContent = size ? `${zoomFactor(size).toFixed(1)}×` : '';
   }
 
-  function zoomBy(factor, px = host.clientWidth / 2, py = host.clientHeight / 2) {
+  /**
+   * Zooms by `factor` around the host point (px, py) (CSS pixels): the point of the picture under it stays there, or with (toX, toY) goes
+   * there (a pinch's fingers move as they spread). Out past the whole picture is the whole picture.
+   */
+  function zoomBy(factor, px = host.clientWidth / 2, py = host.clientHeight / 2, toX = px, toY = py) {
     const size = videoSize();
     if (!size) return;
     const at = toVideo(px, py, size);
     const w = view.w / factor;
     if (w >= 1 && factor < 1) { reset(); return; }
-    // Keep the point under the pointer where it is.
     const next = shaped(0, 0, w, size.vw, size.vh);
     const f = fitted(next, size.vw, size.vh);
-    const fx = (px - f.x) / f.w, fy = (py - f.y) / f.h;
-    next.x = Math.min(Math.max(at.x - fx * next.w, 0), 1 - next.w);
-    next.y = Math.min(Math.max(at.y - fy * next.h, 0), 1 - next.h);
+    const fx = (toX - f.x) / f.w, fy = (toY - f.y) / f.h;
+    next.x = clamp(at.x - fx * next.w, 0, 1 - next.w);
+    next.y = clamp(at.y - fy * next.h, 0, 1 - next.h);
     setView(next);
   }
 
+  /** `from` (a view) moved as the pointer moved by (dx, dy) CSS pixels: the picture follows the pointer, never past its edges. */
+  function pan(from, dx, dy) {
+    const size = videoSize();
+    if (!size) return;
+    const f = fitted(from, size.vw, size.vh);
+    setView({ ...from, x: clamp(from.x - (dx / f.w) * from.w, 0, 1 - from.w), y: clamp(from.y - (dy / f.h) * from.h, 0, 1 - from.h) });
+  }
+
+  /**
+   * The area around (x, y) (0..1 of the picture) at `times` the whole picture's size (the level the controls read), kept inside the picture.
+   * -> false while there is no picture to zoom
+   */
+  function zoomTo(x, y, times) {
+    const size = videoSize();
+    if (!size || !(times > 0)) return false;
+    const tileAspect = host.clientWidth / Math.max(1, host.clientHeight);
+    // The whole picture fits the host by its height when the host is wider than the picture: a view as wide as the host shows more across.
+    setView(shaped(x, y, Math.max(1, tileAspect / (size.vw / size.vh)) / times, size.vw, size.vh));
+    return true;
+  }
+
   function reset() { setView({ x: 0, y: 0, w: 1, h: 1 }); }
+
+  /** Esc or 0 while zoomed (not with ctrl, cmd or alt): the whole picture again. -> whether the key was the zoom's */
+  function key(event) {
+    if (!isZoomed() || event.ctrlKey || event.metaKey || event.altKey || (event.key !== 'Escape' && event.key !== '0')) return false;
+    reset();
+    return true;
+  }
 
   function setEnhance(on) {
     enhance = on;
@@ -318,18 +378,23 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
 
   // MARK: Drawing
 
-  function draw() {
+  /** Draws the zoomed area and the overview; `again` (each display frame) leaves a still that is already drawn as it is. */
+  function draw({ again = false } = {}) {
     if (destroyed || !isZoomed()) return;
     const size = videoSize();
     if (!size) return;
     const ratio = window.devicePixelRatio || 1;
     const cw = Math.max(1, Math.round(host.clientWidth * ratio)), ch = Math.max(1, Math.round(host.clientHeight * ratio));
+    const correction = getCorrection();
+    // A still does not move: drawn again only when its picture, the canvas's size or the correction changes (the view and Enhance draw at once).
+    const still = size.still ? `${size.video.currentSrc || size.video.src}|${cw}x${ch}|${Number(correction?.straighten) || 0},${Number(correction?.level) || 0}` : null;
+    if (again && still !== null && still === stillDrawn) return;
+    stillDrawn = still;
     if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
     const f = fitted(view, size.vw, size.vh);
     const rect = { x: f.x * ratio, y: f.y * ratio, w: f.w * ratio, h: f.h * ratio };
-    const correction = getCorrection();
     let drawn = false;
-    if (gl) drawn = gl.draw(size.video, view, rect, enhance ? 0.6 : 0, correction);
+    if (gl) drawn = gl.draw(size, view, rect, enhance ? 0.6 : 0, correction);
     if (!drawn) {
       // Without WebGL (or a frame WebGL refused): the browser's own scaling, through the strip plan of the picture at about the size the canvas
       // shows it (a strip of two columns is then two canvas pixels, or two of the video's when zoomed in further).
@@ -374,47 +439,57 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
   // Every display frame while zoomed (the picture under it may switch between live video and a recording).
   function loop() {
     if (destroyed) return;
-    if (isZoomed()) draw();
+    if (isZoomed()) draw({ again: true });
     frame = requestAnimationFrame(loop);
   }
 
   // MARK: Pointer
 
   const local = (event) => { const r = host.getBoundingClientRect(); return { x: event.clientX - r.left, y: event.clientY - r.top }; };
+  const panFrom = (p) => ({ kind: 'pan', x0: p.x, y0: p.y, x1: p.x, y1: p.y, moved: false, view0: view });
+  const setPanning = (on) => { if (el.dataset.panning !== String(on)) el.dataset.panning = String(on); };
 
   surface.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 && event.pointerType === 'mouse') return;
     const p = local(event);
     pointers.set(event.pointerId, p);
-    surface.setPointerCapture(event.pointerId);
+    try { surface.setPointerCapture(event.pointerId); } catch { /* a synthetic pointer has nothing to capture */ }
     if (pointers.size === 2) {
       const [a, b] = [...pointers.values()];
-      pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y), view0: view };
+      pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
       drag = null;
       box.hidden = true;
+      setPanning(false);
       return;
     }
-    drag = { kind: 'box', x0: p.x, y0: p.y, x1: p.x, y1: p.y, moved: false };
+    if (pointers.size > 2) return;
+    // Zoomed, a drag moves the picture (with Shift, a box zooms further); whole, a drag is a box.
+    drag = isZoomed() && !event.shiftKey ? panFrom(p) : { kind: 'box', x0: p.x, y0: p.y, x1: p.x, y1: p.y, moved: false };
   });
 
   surface.addEventListener('pointermove', (event) => {
     if (!pointers.has(event.pointerId)) return;
     const p = local(event);
     pointers.set(event.pointerId, p);
-    if (pinch && pointers.size === 2) {
+    if (pinch) {
+      if (pointers.size !== 2) return;
+      // The fingers' spread zooms; the point of the picture under their midpoint goes along with it.
       const [a, b] = [...pointers.values()];
       const distance = Math.hypot(a.x - b.x, a.y - b.y);
-      if (pinch.distance > 0) {
-        const factor = distance / pinch.distance;
-        pinch.distance = distance;
-        zoomBy(factor, (a.x + b.x) / 2, (a.y + b.y) / 2);
-      }
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      zoomBy(pinch.distance > 0 && distance > 0 ? distance / pinch.distance : 1, pinch.x, pinch.y, mid.x, mid.y);
+      pinch = { distance, ...mid };
       return;
     }
     if (!drag) return;
     drag.x1 = p.x; drag.y1 = p.y;
     if (Math.hypot(drag.x1 - drag.x0, drag.y1 - drag.y0) >= DRAG_MIN_PX) drag.moved = true;
     if (!drag.moved) return;
+    if (drag.kind === 'pan') {
+      setPanning(true);
+      pan(drag.view0, drag.x1 - drag.x0, drag.y1 - drag.y0);
+      return;
+    }
     box.hidden = false;
     box.style.setProperty('--x', `${Math.min(drag.x0, drag.x1)}px`);
     box.style.setProperty('--y', `${Math.min(drag.y0, drag.y1)}px`);
@@ -422,9 +497,28 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
     box.style.setProperty('--h', `${Math.abs(drag.y1 - drag.y0)}px`);
   });
 
+  /** The view a box dragged from (x0, y0) to (x1, y1) (host CSS pixels) zooms to: all of the box, in the host's shape, inside the picture. */
+  function boxView(x0, y0, x1, y1, size) {
+    const a = toVideo(Math.min(x0, x1), Math.min(y0, y1), size);
+    const b = toVideo(Math.max(x0, x1), Math.max(y0, y1), size);
+    const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+    // The box's larger side decides, so all of it is in the zoomed area.
+    const tileAspect = host.clientWidth / Math.max(1, host.clientHeight);
+    const boxW = Math.max(b.x - a.x, (b.y - a.y) * tileAspect * size.vh / size.vw);
+    return shaped(cx, cy, boxW, size.vw, size.vh);
+  }
+
   function endPointer(event) {
     pointers.delete(event.pointerId);
-    if (pinch) { if (pointers.size < 2) pinch = null; return; }
+    setPanning(false);
+    if (pinch) {
+      if (pointers.size >= 2) return;
+      pinch = null;
+      // The finger left on a zoomed picture moves it on.
+      const [rest] = pointers.values();
+      if (rest && isZoomed()) drag = panFrom(rest);
+      return;
+    }
     const d = drag;
     drag = null;
     box.hidden = true;
@@ -435,27 +529,32 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
       return;
     }
     event.stopPropagation();
+    if (d.kind === 'pan') return;           // it moved the picture as it went
     const size = videoSize();
-    if (!size) return;
-    const a = toVideo(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), size);
-    const b = toVideo(Math.max(d.x0, d.x1), Math.max(d.y0, d.y1), size);
-    const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
-    // The box's larger side decides, so all of it is in the zoomed area.
-    const tileAspect = host.clientWidth / Math.max(1, host.clientHeight);
-    const boxW = Math.max(b.x - a.x, (b.y - a.y) * tileAspect * size.vh / size.vw);
-    setView(shaped(cx, cy, boxW, size.vw, size.vh));
+    if (size) setView(boxView(d.x0, d.y0, d.x1, d.y1, size));
   }
   surface.addEventListener('pointerup', endPointer);
-  surface.addEventListener('pointercancel', (event) => { pointers.delete(event.pointerId); drag = null; pinch = null; box.hidden = true; });
+  surface.addEventListener('pointercancel', (event) => { pointers.delete(event.pointerId); drag = null; pinch = null; box.hidden = true; setPanning(false); });
   // The tile's click (go back to all cameras) only for a plain click on the whole picture.
   surface.addEventListener('click', (event) => { if (isZoomed()) event.stopPropagation(); });
   surface.addEventListener('dblclick', (event) => { event.stopPropagation(); reset(); });
+  // The wheel (and a trackpad: a pinch comes as the wheel with ctrl) zooms the picture, never the page.
   surface.addEventListener('wheel', (event) => {
     event.preventDefault();
     const p = local(event);
     const delta = event.deltaMode === 1 ? event.deltaY * 33 : event.deltaY;
     zoomBy(Math.pow(WHEEL_STEP, -delta * (event.ctrlKey ? 4 : 1)), p.x, p.y);
   }, { passive: false });
+  // Safari's trackpad pinch comes as its gesture events, and would zoom the whole page. A pinch on a touch screen is the pointers' (above).
+  surface.addEventListener('gesturestart', (event) => { event.preventDefault(); gesture = { scale: 1 }; });
+  surface.addEventListener('gesturechange', (event) => {
+    event.preventDefault();
+    if (!gesture || pointers.size > 0 || !(event.scale > 0)) return;
+    const p = local(event);
+    zoomBy(event.scale / gesture.scale, p.x, p.y);
+    gesture.scale = event.scale;
+  });
+  surface.addEventListener('gestureend', (event) => { event.preventDefault(); gesture = null; });
 
   // The overview: drag the rectangle (or click anywhere on it) to move.
   function mapMove(event) {
@@ -470,17 +569,31 @@ export function createZoom({ host, getVideo, getCorrection = () => null, onActiv
     controls.addEventListener(type, (event) => event.stopPropagation());
   }
 
-  const resize = new ResizeObserver(() => { if (isZoomed()) setView(view); });
+  // A host of a new size: the zoomed area keeps its centre and width and takes the host's new shape, drawn at the new size.
+  const resize = new ResizeObserver(() => {
+    const size = isZoomed() ? videoSize() : null;
+    if (!size) return;
+    setView(shaped(view.x + view.w / 2, view.y + view.h / 2, view.w, size.vw, size.vh));
+    draw();
+    showLevel();
+  });
   resize.observe(host);
 
   setEnhance(enhance);
   el.dataset.zoomed = 'false';
+  el.dataset.panning = 'false';
   loop();
 
   return {
     el,
     reset,
     zoomed: isZoomed,
+    /** The part of the picture on screen: { x, y, w, h }, 0..1 of the picture (the whole picture: 0, 0, 1, 1). */
+    view: () => ({ ...view }),
+    /** How many times the whole picture's size it is shown (the level the controls read): 1 for the whole picture. */
+    level: () => { const size = videoSize(); return size && isZoomed() ? zoomFactor(size) : 1; },
+    zoomTo,
+    key,
     destroy() {
       clearTimeout(hintTimer);
       destroyed = true;

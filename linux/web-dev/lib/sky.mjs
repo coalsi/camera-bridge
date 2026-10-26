@@ -10,16 +10,19 @@
 //   GET   sky/cameras/:id/night?date=yyyy-MM-dd&view=night|day   the log: { camera, night, view, from, to, serverTime, entries, conditions, counts, aim, learning,
 //                                                                 capped } (times are epoch ms; an entry carries `display` and `watch`, its optional fields are
 //                                                                 null; `capped` the hours with more lights than were logged, [{ hour, count }])
-//   GET   sky/cameras/:id/entries/:eid/still?night=…            image/jpeg, or 404
+//   GET   sky/cameras/:id/entries/:eid/still?night=…[&size=thumb] image/jpeg, or 404; size=thumb is the close-up of the light, cut as the page cuts it
+//                                                                 (the box makes it the same way: ffmpeg here, when there is one, else the whole picture)
 //   POST  sky/cameras/:id/entries/:eid/correction {night, label}  the entry, or 400 for a label that is not one
 //   POST  sky/feeds/find                                         { feeds: [url] }
 //   PATCH settings {sky: {location, flightFeedURL, aiDailyLimit}} and GET settings (its `sky`)
 //   PATCH cameras/:id {skyDetector: {enabled, facing, tilt, groundPercent, nightProfile, lensLayout}}: enabling needs the plugin, a place and a folder
-//   POST  /__dev/sky {plugin, aim, learning, problem, location, feeds, stream}   what the box reports and what it has (this computer only)
+//   POST  /__dev/sky {plugin, aim, learning, problem, location, feeds, stream, busy}   what the box reports and what it has (this computer only)
 //
 // A night runs from 6:30 PM to 7:10 AM in this computer's zone, a day from midnight to midnight; the latest night is the one that began at the
 // last 6:30 PM. One that is still going holds only what has happened. The camera "Back Yard" watches the sky when the server starts.
 
+import { spawn } from 'node:child_process';
+import { thumbRect } from '../../web/js/screens/sky-model.js';
 import { ApiError, bytes } from './http.mjs';
 
 // A made-up night sky, 400 × 177 (the shape of a stitched 4256 × 1888 view): a dark gradient, a few stars, a tree line.
@@ -86,6 +89,49 @@ const STILL = Buffer.from([
   'AooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//0vEaKKKYgooooAKKKKACiiigAooo',
   'oAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD//Z'
 ].join(''), 'base64');
+
+/** The size of STILL, which a night's `picture` says. */
+const STILL_SIZE = Object.freeze({ width: 400, height: 177 });
+/** A thumbnail is at most this wide; a made-up still is narrower, so one is never scaled. */
+const THUMB_WIDTH = 480;
+
+// MARK: Thumbnails
+
+const cutting = [];
+let cuts = 0;
+
+/**
+ * Cuts `rect` (whole pixels, inside STILL) out of STILL with ffmpeg, as the box does it (`crop=…:exact=1`): a JPEG, or null when there is no ffmpeg or it
+ * fails. At most two at a time, so a fast scroll in the page is not a storm of children either. (`FFMPEG` in the environment names the program.)
+ */
+function cut(rect) {
+  return new Promise((resolve) => {
+    cutting.push({ rect, resolve });
+    pump();
+  });
+}
+
+function pump() {
+  while (cuts < 2 && cutting.length) {
+    const { rect, resolve } = cutting.shift();
+    cuts += 1;
+    runFFmpeg(rect).then(resolve, () => resolve(null)).finally(() => { cuts -= 1; pump(); });
+  }
+}
+
+function runFFmpeg(rect) {
+  return new Promise((resolve) => {
+    const filters = `crop=${rect.width}:${rect.height}:${rect.x}:${rect.y}:exact=1,scale=out_range=pc,format=yuvj420p`;
+    const child = spawn(process.env.FFMPEG || 'ffmpeg', ['-hide_banner', '-nostdin', '-loglevel', 'error', '-f', 'image2pipe', '-i', 'pipe:0', '-vf', filters, '-frames:v', '1',
+      '-c:v', 'mjpeg', '-q:v', '4', '-f', 'mjpeg', 'pipe:1'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const chunks = [];
+    child.stdout.on('data', (chunk) => chunks.push(chunk));
+    child.on('error', () => resolve(null));   // no ffmpeg here
+    child.on('close', (code) => resolve(code === 0 && chunks.length ? Buffer.concat(chunks) : null));
+    child.stdin.on('error', () => {});
+    child.stdin.end(STILL);
+  });
+}
 
 const NAME = /^\d{4}-\d{2}-\d{2}$/;
 const SUNSET = [18, 30];
@@ -200,17 +246,23 @@ const satelliteName = (rand) => {
 };
 const compass = (rand) => (rand() < 0.5 ? 270 + rand() * 90 : rand() * 90);   // somewhere in the north half of the view
 
-/** The made-up log of a night, as Task 5's store would hold it: busy, as a real one is. */
-function nightEntries(name, camera) {
+/**
+ * The made-up log of a night, as Task 5's store would hold it: busy, as a real one is, and most lights with a still (the box makes one for nearly
+ * every light now). About 860 lights: planes and their strobes, two waves of satellites, meteors, bugs and birds, and the lights nothing explains,
+ * 200 of them (the most the box logs in an hour) at 9 PM. `busy` (POST /__dev/sky {"busy": true}) is a night of about 2,600, the most a box logs:
+ * many more lights nothing explains in every hour, at most 200 an hour.
+ */
+function nightEntries(name, camera, { busy = false } = {}) {
   const { from, to } = windowOf(name, 'night');
-  const rand = seeded(hash(`${camera}|${name}|night`));
+  const rand = seeded(hash(`${camera}|${name}|night${busy ? '|busy' : ''}`));
   const span = to - from;
   const [y, m, d] = parseName(name);
   const local = (hours, minutes = 0, seconds = 0, plus = 1) => new Date(y, m - 1, d + plus, hours, minutes, seconds).getTime();
+  const still = (share) => rand() < share;
   const entries = [];
 
   // Planes: busy in the evening and at dawn, fewer in the small hours.
-  for (let i = 0; i < 38; i += 1) {
+  for (let i = 0; i < (busy ? 170 : 120); i += 1) {
     let x;
     do { x = rand(); } while (rand() > 0.2 + 0.8 * Math.exp(-(((x - 0.18) / 0.22) ** 2)) + 0.5 * Math.exp(-(((x - 0.93) / 0.07) ** 2)));
     const duration = 25 + rand() * 60;
@@ -218,48 +270,51 @@ function nightEntries(name, camera) {
     entries.push(make(rand, {
       label: rand() < 0.15 ? 'probablePlane' : 'plane', by: 'flight', detail: flightDetail(rand), start: Math.round(from + x * (span - 100_000)), duration, azimuth,
       elevation: 12 + rand() * 50, azimuthEnd: azimuth + (rand() < 0.5 ? -1 : 1) * (15 + rand() * 40), elevationEnd: 10 + rand() * 50, speed: round(0.8 + rand() * 1.2), size: 0.05, brightness: 140,
-      blinks: rand() < 0.6, blinkRate: 1,
+      blinks: rand() < 0.6, blinkRate: 1, hasStill: still(0.7),
     }));
   }
   // Distant planes near the skyline: only their strobes show, crawling along the horizon.
-  for (let i = 0; i < 12; i += 1) {
+  for (let i = 0; i < 24; i += 1) {
     const x = 0.04 + rand() * 0.9;
     const azimuth = rand() < 0.5 ? 280 + rand() * 60 : 15 + rand() * 60;
     entries.push(make(rand, {
       kind: 'flash', label: 'probablePlane', by: 'flight', detail: flightDetail(rand, true), start: Math.round(from + x * span), duration: 20 + rand() * 25, azimuth,
       elevation: 1 + rand() * 4, azimuthEnd: azimuth + (rand() < 0.5 ? -1 : 1) * (4 + rand() * 6), speed: round(0.1 + rand() * 0.2), size: 0.03, brightness: 90, blinks: true, blinkRate: round(0.9 + rand() * 0.3),
+      hasStill: still(0.5),
     }));
   }
   // Satellites come in waves, after dusk and before dawn, while they are in sunlight and the sky is dark.
-  for (let i = 0; i < 190; i += 1) {
-    const evening = i < 95;
+  const satellites = busy ? 420 : 360;
+  for (let i = 0; i < satellites; i += 1) {
+    const evening = i < satellites / 2;
     const start = evening ? from + 20 * MINUTE + rand() * 90 * MINUTE : to - 90 * MINUTE + rand() * 70 * MINUTE;
     const azimuth = compass(rand);
     const station = i === 7;
     entries.push(make(rand, {
       label: i % 63 === 62 ? 'satelliteFlare' : 'satellite', by: 'orbit', detail: station ? 'ISS (ZARYA)' : satelliteName(rand), start: Math.round(start), duration: station ? 95 : 35 + rand() * 70,
       azimuth, elevation: 18 + rand() * 55, azimuthEnd: azimuth + (rand() < 0.5 ? -1 : 1) * (20 + rand() * 50), elevationEnd: 15 + rand() * 55, speed: round(0.3 + rand() * 0.6), size: 0.03, brightness: station ? 400 : 70,
+      hasStill: still(0.65),
     }));
   }
   // Meteors: short, straight and fast.
-  for (let i = 0; i < 4; i += 1) {
+  for (let i = 0; i < 14; i += 1) {
     const azimuth = compass(rand);
     entries.push(make(rand, {
-      label: 'meteor', by: 'rule', start: Math.round(from + (0.3 + rand() * 0.4) * span), duration: round(0.4 + rand() * 0.8), azimuth, elevation: 25 + rand() * 35, azimuthEnd: azimuth + 6 + rand() * 8,
-      elevationEnd: 10 + rand() * 20, speed: round(18 + rand() * 20), size: 0.1, brightness: 500, points: 4, hasStill: i === 0,
+      label: 'meteor', by: 'rule', start: Math.round(from + (0.15 + rand() * 0.8) * span), duration: round(0.4 + rand() * 0.8), azimuth, elevation: 25 + rand() * 35, azimuthEnd: azimuth + 6 + rand() * 8,
+      elevationEnd: 10 + rand() * 20, speed: round(18 + rand() * 20), size: 0.1, brightness: 500, points: 4, hasStill: i === 0 || still(0.8),
     }));
   }
-  // Bugs near the lens and birds at dusk and dawn.
-  for (let i = 0; i < 4; i += 1) {
+  // Bugs near the lens, more in the warm evening, and birds at dusk and dawn.
+  for (let i = 0; i < 48; i += 1) {
     entries.push(make(rand, {
-      label: 'bug', by: 'rule', start: Math.round(from + (0.1 + rand() * 0.75) * span), duration: round(1 + rand() * 3), azimuth: compass(rand), elevation: 8 + rand() * 40, shape: 'sharpTurn', speed: round(4 + rand() * 6),
-      size: 1.2, brightness: 260, focus: 0.3, points: 6,
+      label: 'bug', by: 'rule', start: Math.round(from + (rand() < 0.6 ? 0.02 + rand() * 0.3 : 0.3 + rand() * 0.65) * span), duration: round(1 + rand() * 3), azimuth: compass(rand), elevation: 8 + rand() * 40,
+      shape: 'sharpTurn', speed: round(4 + rand() * 6), size: 1.2, brightness: 260, focus: 0.3, points: 6, hasStill: still(0.75),
     }));
   }
-  for (let i = 0; i < 3; i += 1) {
+  for (let i = 0; i < 24; i += 1) {
     entries.push(make(rand, {
-      label: 'bird', by: 'rule', start: Math.round(i < 2 ? from + (0.005 + rand() * 0.04) * span : to - (0.03 + rand() * 0.03) * span), duration: round(3 + rand() * 6), azimuth: compass(rand), elevation: 10 + rand() * 30,
-      azimuthEnd: 40, shape: 'curved', speed: round(2 + rand() * 2), size: 0.4, brightness: 80, focus: 0.6,
+      label: 'bird', by: 'rule', start: Math.round(i < 16 ? from + (0.005 + rand() * 0.06) * span : to - (0.02 + rand() * 0.06) * span), duration: round(3 + rand() * 6), azimuth: compass(rand),
+      elevation: 10 + rand() * 30, azimuthEnd: 40, shape: 'curved', speed: round(2 + rand() * 2), size: 0.4, brightness: 80, focus: 0.6, hasStill: still(0.75),
     }));
   }
   // What nothing explains: a fast light low in the northwest, and brief bright lights that rise, hold and fade, and flashes on the skyline.
@@ -279,6 +334,30 @@ function nightEntries(name, camera) {
       kind: 'flash', label: 'unexplained', start: local(hours, minutes, 31, hours > 12 ? 0 : 1), duration, azimuth, elevation: 4, azimuthEnd: azimuth + 3, speed: 0.1, size: 0.05, brightness: 300,
       blinks: true, blinkRate: rate, candidate: true, hasStill: true,
     }));
+  }
+  // A swarm at 9 PM: as many lights nothing explains as the box logs in an hour (the hour's note says how many more it followed), and
+  // others through the night; a busy night has them in every hour.
+  const unexplained = (start) => {
+    const pick = rand();
+    const kind = pick < 0.45 ? 'newLight' : pick < 0.8 ? 'track' : 'flash';
+    const azimuth = compass(rand);
+    const elevation = 5 + rand() * 55;
+    const track = kind === 'track';
+    return make(rand, {
+      kind, label: 'unexplained', start: Math.round(start), duration: kind === 'flash' ? round(0.2 + rand()) : round(1 + rand() * (track ? 14 : 8)), azimuth, elevation,
+      azimuthEnd: azimuth + (track ? (rand() - 0.5) * 30 : 0), elevationEnd: elevation + (track ? (rand() - 0.5) * 16 : 0), shape: ['straight', 'curved', 'suddenStop', 'sharpTurn'][Math.floor(rand() * 4)],
+      speed: round(track ? 0.5 + rand() * 4 : 0.02), speedVsPlanes: track ? round(0.4 + rand() * 5) : null, size: round(0.05 + rand() * 0.3), brightness: Math.round(150 + rand() * 700),
+      blinks: kind === 'flash' || rand() < 0.2, blinkRate: round(0.5 + rand() * 2), candidate: true, hasStill: true, points: track ? 10 : 1,
+      unusual: track && rand() < 0.3 ? ['faster'] : rand() < 0.1 ? ['brighter'] : [],
+    });
+  };
+  const swarm = local(21, 0, 0, 0);
+  for (let i = 0; i < 200; i += 1) entries.push(unexplained(swarm + 20_000 + rand() * (HOUR - 60_000)));
+  const others = busy ? 1700 : 60;
+  for (let i = 0; i < others; i += 1) {
+    let start;
+    do { start = from + 60_000 + rand() * (span - 180_000); } while (start >= swarm && start < swarm + HOUR);
+    entries.push(unexplained(start));
   }
   return finish(entries, 'n', name, camera);
 }
@@ -352,7 +431,7 @@ function conditionsOf(name, view, now) {
   return spans.filter((span) => span.from < now).map((span) => ({ ...span, to: Math.min(span.to, now) }));
 }
 
-/** The hours in which the box followed more lights than it logs (at most 60 an hour): the latest night's 9 PM had 37 more, once it is over. */
+/** The hours in which the box followed more lights than it logs (at most 200 an hour): the latest night's 9 PM had 37 more, once it is over. */
 function cappedOf(name, view, now) {
   if (view !== 'night' || name !== latestName(now, 'night')) return [];
   const [y, m, d] = parseName(name);
@@ -386,6 +465,8 @@ export class SkyDev {
     this.problem = null;
     this.stream = 'main';
     this.feeds = ['http://192.168.77.20/tar1090/data/aircraft.json'];
+    this.busy = false;   // nights of about 2,600 lights (POST /__dev/sky {"busy": true})
+    this.thumbnails = new Map();   // a close-up's rectangle -> the promise of its JPEG
   }
 
   /** GET plugins: the one plugin this server has, with its switch. */
@@ -477,7 +558,7 @@ export class SkyDev {
     const oldest = new Date(today[0], today[1] - 1, today[2] - KEEP_NIGHTS).getTime();
     const { from } = windowOf(name, view);
     if (from < oldest || from > now) return [];
-    return view === 'day' ? dayEntries(name, camera.definition.id) : nightEntries(name, camera.definition.id);
+    return view === 'day' ? dayEntries(name, camera.definition.id) : nightEntries(name, camera.definition.id, { busy: this.busy });
   }
 
   /** The entries of a night as they stand at `now`: only what has happened, each with its correction and its `display` and `watch`. */
@@ -502,6 +583,7 @@ export class SkyDev {
     return {
       camera: camera.definition.id, night: name, view, from, to, serverTime: now, entries, conditions: conditionsOf(name, view, now), counts: countsOf(entries),
       aim: aimStatus(this.aim, now), learning: learningStatus(this.learning), capped: cappedOf(name, view, now),
+      picture: entries.some((entry) => entry.hasStill) ? { ...STILL_SIZE } : null,
     };
   }
 
@@ -512,11 +594,29 @@ export class SkyDev {
     return this.entries(camera, name, view, now).find((entry) => entry.id === id) ?? null;
   }
 
-  /** GET sky/cameras/:id/entries/:eid/still?night=…: the picture, or 404. */
-  still(camera, id, query, now) {
+  /**
+   * GET sky/cameras/:id/entries/:eid/still?night=…[&size=thumb]: the picture, or 404. With size=thumb the close-up of the light, as the box cuts it (the
+   * page’s own rule, `thumbRect`, in the picture’s pixels): a JPEG of just that part, made with ffmpeg when there is one and the whole picture when there is
+   * not (it is small already). Any other size is 400 with the field `size`.
+   */
+  async still(camera, id, query, now) {
+    const size = query.get('size');
     const found = this.find(camera, id, query.get('night') ?? '', now);
     if (!found?.hasStill) throw ApiError.notFound('There is no picture for that.');
-    return bytes(STILL, 'image/jpeg', { 'Cache-Control': 'no-store' });
+    if (size !== null && size !== 'full' && size !== 'thumb') throw ApiError.invalid('Choose thumb for a small picture, or leave size out for the whole picture.', 'size');
+    const picture = size === 'thumb' ? await this.thumbnail(found) : STILL;
+    return bytes(picture, 'image/jpeg', { 'Cache-Control': 'no-store' });
+  }
+
+  /** The small picture of an entry: its close-up cut out of STILL, or STILL itself when there is no close-up or no ffmpeg to cut it with. */
+  thumbnail(entry) {
+    const rect = thumbRect(entry.path, STILL_SIZE.width, STILL_SIZE.height);
+    if (!rect || rect.width > THUMB_WIDTH) return STILL;
+    const key = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+    if (!this.thumbnails.has(key)) {
+      this.thumbnails.set(key, cut(rect).then((jpeg) => jpeg ?? STILL));
+    }
+    return this.thumbnails.get(key);
   }
 
   /** POST sky/cameras/:id/entries/:eid/correction {night, label}: the entry as it is now. */
@@ -528,11 +628,18 @@ export class SkyDev {
     return this.find(camera, id, body.night, now);
   }
 
-  /** POST /__dev/sky: whether the plugin is on, what the box reports (aim, learning, problem, stream), where it is, and the feeds Find a feed finds. */
+  /**
+   * POST /__dev/sky: whether the plugin is on, what the box reports (aim, learning, problem, stream), where it is, the feeds Find a feed finds,
+   * and whether its nights are as busy as a box's can be (`busy`: about 2,600 lights).
+   */
   control(input) {
     if ('plugin' in input) {
       if (typeof input.plugin !== 'boolean') throw ApiError.invalid('The plugin is on or off.', 'plugin');
       this.pluginOn = input.plugin;
+    }
+    if ('busy' in input) {
+      if (typeof input.busy !== 'boolean') throw ApiError.invalid('A busy night is on or off.', 'busy');
+      this.busy = input.busy;
     }
     if ('aim' in input) {
       if (!AIMS.includes(input.aim)) throw ApiError.invalid(`The aims are ${AIMS.join(', ')}.`, 'aim');

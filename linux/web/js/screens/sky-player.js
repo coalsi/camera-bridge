@@ -2,13 +2,17 @@
 // (wider on request), so the person never leaves the log. It is the Monitor's playback, not a second player: its fetcher, catalog, clock,
 // session and cells (nvr/*), its grid controller driven for this one camera (screens/nvr-controller.js), its transport (nvr/transport.js: Play
 // and Pause, a picture at a time, the speeds, the time of day), its keys (nvr-model.js keyAction) and its scrubbing (nvr/timeline/scrub.js).
-// What is the player's own: the window (the scrubber spans it, with the light's own time marked on it; the playhead never leaves it and the end
-// pauses), the light's path over the video at the matching times, the Zoom around the light, and what it says when there is nothing to play
-// (the still instead). Closing it (X, Escape, a tap outside) stops playing and frees the stream. The picture is the camera's original one,
-// never straightened: the path is in the original picture's coordinates.
+// Its zoom is the Monitor's too (js/live/zoom.js): drag a box, scroll or pinch, drag the zoomed picture to move it, double-click, 0 or Escape
+// for the whole picture. What is the player's own: the window (the scrubber spans it, with the light's own time marked on it; the playhead never
+// leaves it and the end pauses), the light's marker (its path and a ring where it is at the matching time) over the picture, which follows the
+// zoom and can be hidden (Hide marker, M), Zoom to the light, and what it says when there is nothing to play (the still instead, which zooms
+// too). The log gives it the light's details (its kind, facts, the AI's sentence and the correction buttons): beside the picture on a wide
+// screen, under the controls on a narrow one. Closing it (X, Escape, a tap outside) stops playing and frees the stream. The picture is the
+// camera's original one, never straightened: the path is in the original picture's coordinates.
 import { get, getBytes } from '../api.js';
 import { h, replace, spinner, svg } from '../dom.js';
 import { icon } from '../icons.js';
+import { createZoom } from '../live/zoom.js';
 import { subscribe } from '../store.js';
 import { createCatalog } from '../nvr/catalog.js';
 import { createCell } from '../nvr/cell.js';
@@ -23,17 +27,36 @@ import { createTransport } from '../nvr/transport.js';
 import { createGridController } from './nvr-controller.js';
 import { GRID_LEAD_LIMIT_BYTES, budgetedCell, createKeyDispatcher, createTokenBucket, keyAction } from './nvr-model.js';
 import { SKY_TEXT, pathPoints } from './sky-model.js';
-import { SKY_KEY_MAP, WINDOW, clipWindow, clockText, marginText, pathPointAt, playerNotice, widenMargin, windowedAction, zoomAt } from './sky-player-model.js';
+import {
+  SKY_KEY_MAP, WINDOW, clipWindow, clockText, marginText, overlayViewBox, pathPointAt, playerNotice, widenMargin, windowedAction, zoomAt,
+} from './sky-player-model.js';
 
 const T = SKY_TEXT.player;
 const IDLE = Object.freeze({ kind: 'idle', next: null, message: null });
 const SHOWN = new Set(['recorded', 'coarse', 'live']);
 const ARIA_EVERY_MS = 250;      // the scrubber's position is told to assistive technology at most this often
 const END_SLACK_MS = 250;       // Play this close to the end of the window starts it again
+const MARKER_KEY = 'cb.sky.marker';
 let sequence = 0;
+let markerChoice = null;        // Hide marker or Show marker, as last pressed in this visit (kept where the browser keeps nothing too)
 
 const round2 = (value) => Math.round(value * 100) / 100;
 const percent = (fraction) => `${(Math.min(1, Math.max(0, fraction)) * 100).toFixed(3)}%`;
+
+/** Whether the light's marker shows: as the person last chose, in this visit or before in this browser; shown until they hide it. */
+function markerWanted() {
+  if (markerChoice !== null) return markerChoice;
+  try {
+    const kept = localStorage.getItem(MARKER_KEY);
+    if (kept === '0' || kept === '1') return kept === '1';
+  } catch { /* nothing kept in this browser */ }
+  return true;
+}
+
+function rememberMarker(shown) {
+  markerChoice = shown;
+  try { localStorage.setItem(MARKER_KEY, shown ? '1' : '0'); } catch { /* kept for this visit only */ }
+}
 
 /** A function every `ms` on `timers` (the real ones, or a test's): -> { stop() }. */
 function every(timers, fn, ms) {
@@ -51,17 +74,18 @@ function streamSize(camera) {
 }
 
 /**
- * Opens the player over the page. -> { el (the <dialog>), close(), window: { from, to } }
+ * Opens the player over the page. -> { el (the <dialog>), close(), setWhat(text), window: { from, to } }
  *   camera     the camera resource (store.js): its id, name, status.nvr.pause (the drive), status.mainStreamInfo (the picture's shape)
  *   entry      the log's entry (sky-model.js normalizeEntry): start, end, path, watch
  *   zone       the box's time zone: the time of day is the box's, as on the log
  *   heading    the light's time ("3:12:08 AM"); what: what it was and where ("Moving light · North Sky")
  *   still      the address of its still (offered when there is no recording to play), or null; watchHref: the Monitor's watch screen at its moment
+ *   details    the light's details from the log (an element: its facts and the correction buttons, which keep working from here), or null
  *   onClose()  after it closed (the page puts the focus back)
  *   parts      the playback's pieces, for tests: { fetcher, catalog, clock, makeCell(id, { stage, getPause }), policy, timers, playable, frame,
  *              cancelFrame, subscribeCamera }. They are the player's: it stops and destroys them when it closes.
  */
-export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', still = null, watchHref = null, onClose = () => {}, parts = {} }) {
+export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', still = null, watchHref = null, details = null, onClose = () => {}, parts = {} }) {
   const timers = parts.timers ?? realTimers;
   const frameFn = parts.frame ?? ((fn) => requestAnimationFrame(fn));
   const cancelFrameFn = parts.cancelFrame ?? ((id) => cancelAnimationFrame(id));
@@ -76,7 +100,8 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
   let presented = false;          // a recorded picture of this window has been shown
   let startedOnce = false;        // the window has been asked to play
   let blocked = null;             // what the player says instead of playing (playerNotice), or null
-  let zoomed = false;
+  let markerShown = markerWanted();
+  let pathEnds = false;           // the path has two points or more: where it began and ended are marked
   let scrubbing = false;
   let hoverX = null;
   let trackWidth = 0;
@@ -129,7 +154,7 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
   /** Where the playhead is drawn: the session's, once the window was asked to play; before that, the window's start (a new clock reads live). */
   const playheadAt = () => (startedOnce ? session.position : range.from);
 
-  // MARK: The picture: the still, the video, the light's path over them
+  // MARK: The picture: the still, the video, the zoom, the light's marker over them
 
   const stillImg = still ? h('img', { class: 'sky-player-still', src: still, alt: '', decoding: 'async' }) : null;
   const pathLine = svg('polyline', { class: 'sky-path-line', points: '', fill: 'none' });
@@ -138,33 +163,33 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
   const nowMark = svg('circle', { class: 'sky-player-now', cx: 0, cy: 0, r: 0 });
   const overlay = svg('svg', { class: 'sky-path sky-player-path', 'aria-hidden': 'true', focusable: 'false', preserveAspectRatio: 'none', viewBox: '0 0 1920 1080' },
     pathLine, startMark, endMark, nowMark);
-  // The Zoom is a CSS transform of the picture with its origin at the light; the path is drawn beside it, in the same frame, with its view
-  // box on the part of the picture that is on screen, so that its lines keep their width.
+  // The frame has the picture's own shape and is the zoom's host: the zoom draws the area it shows over the picture, with the marker (the
+  // overlay, in the picture's pixels) over that, its view box on the same area, so the ring stays on the light.
   const pictureEl = h('div', { class: 'sky-player-picture' }, stillImg, video, holdCanvas);
-  const frameEl = h('div', { class: 'sky-player-frame' }, pictureEl, overlay);
+  const frameEl = h('div', { class: 'sky-player-frame' }, pictureEl);
   const busy = h('span', { class: 'sky-player-busy', hidden: true }, spinner());
   // What the picture says (the Monitor's tile notes: a hole after part of the window, a part it cannot read), over the picture's foot; what the
   // player says instead of playing is a line of its own above the picture, so the still stays whole.
   const note = h('div', { class: 'sky-player-note', role: 'status', hidden: true });
   const notice = h('div', { class: 'sky-player-notice', role: 'status', hidden: true });
-  const stageEl = h('div', { class: 'sky-player-stage', dataset: { layer: 'still', zoom: 'false' } }, frameEl, busy, note);
+  const stageEl = h('div', { class: 'sky-player-stage', dataset: { layer: 'still', zoom: 'false', marker: String(markerShown) } }, frameEl, busy, note);
+  const zoom = createZoom({
+    host: frameEl,
+    // The picture on screen: the recording once it shows, else the still once it has loaded.
+    getVideo: () => (stageEl.dataset.layer === 'video' ? video : (stillOK ? stillImg : null)),
+    marks: overlay,
+    onActive: (on) => { stageEl.dataset.zoom = String(on); },
+    onView: () => drawMarks(),
+  });
 
   function setPicture(width, height) {
     if (!(width > 0 && height > 0)) return;
     picture = { width, height };
-    stageEl.style.setProperty('--sky-ratio', String(round2(width / height)));
+    // The frame takes the picture's exact shape: the overlay, stretched over it, then lies on the picture as drawn.
+    stageEl.style.setProperty('--sky-ratio', String(Math.round((width / height) * 1e6) / 1e6));
     drawPath();
     drawNow(playheadAt());
     drawnAt = null;
-  }
-
-  /** The part of the picture on screen: all of it, or with the Zoom `z` the part a scale about its origin leaves in the frame. In its pixels. */
-  function viewBoxFor(z) {
-    const { width, height } = picture;
-    if (!z) return `0 0 ${width} ${height}`;
-    const ox = z.x / 100;
-    const oy = z.y / 100;
-    return `${round2(width * (ox - ox / z.scale))} ${round2(height * (oy - oy / z.scale))} ${round2(width / z.scale)} ${round2(height / z.scale)}`;
   }
 
   /** The whole path, faint, with where it began and ended; the light itself is drawn where it is at the playhead (drawNow). */
@@ -172,19 +197,24 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
     const { width, height } = picture;
     const points = pathPoints(entry.path, width, height);
     const list = points ? points.split(' ').map((pair) => pair.split(',')) : [];
-    const scale = zoomed ? zoomScale() : 1;
-    const size = Math.max(width, height);
     pathLine.setAttribute('points', list.length >= 2 ? points : '');
+    pathEnds = list.length >= 2;
     for (const [mark, at] of [[startMark, list[0]], [endMark, list.at(-1)]]) {
-      mark.setAttribute('r', String(at && list.length >= 2 ? round2((size * 0.006) / scale) : 0));
       if (at) { mark.setAttribute('cx', at[0]); mark.setAttribute('cy', at[1]); }
     }
-    nowMark.setAttribute('r', String(round2((size * 0.016) / scale)));
+    drawMarks();
   }
 
-  const zoomScale = () => zoomAt(entry.path, entry.start, playheadAt(), picture)?.scale ?? 1;
+  /** The overlay on the part of the picture the zoom shows; the ring and the ends keep their size on screen however far it is zoomed in. */
+  function drawMarks() {
+    overlay.setAttribute('viewBox', overlayViewBox(zoom.view(), picture));
+    const level = zoom.level();
+    const size = Math.max(picture.width, picture.height);
+    for (const mark of [startMark, endMark]) mark.setAttribute('r', String(pathEnds ? round2((size * 0.006) / level) : 0));
+    nowMark.setAttribute('r', String(round2((size * 0.016) / level)));
+  }
 
-  /** The light where it is at `ms`, and the Zoom's origin there. */
+  /** The light where it is at `ms`. */
   function drawNow(ms) {
     const point = pathPointAt(entry.path, entry.start, ms, entry.end);
     const at = point?.at ?? 'none';            // 'before' | 'during' | 'after': drawn differently (sky.css); 'none': no path
@@ -193,12 +223,6 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
       nowMark.setAttribute('cx', String(round2(point.x * picture.width)));
       nowMark.setAttribute('cy', String(round2(point.y * picture.height)));
     }
-    const z = zoomed ? zoomAt(entry.path, entry.start, ms, picture) : null;
-    overlay.setAttribute('viewBox', viewBoxFor(z));
-    if (!z) return;
-    pictureEl.style.setProperty('--sky-zoom', String(z.scale));
-    pictureEl.style.setProperty('--sky-zoom-x', `${z.x}%`);
-    pictureEl.style.setProperty('--sky-zoom-y', `${z.y}%`);
   }
 
   for (const type of ['loadedmetadata', 'resize']) {
@@ -211,13 +235,22 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
   stillImg?.addEventListener('load', () => { if (!videoSized) setPicture(stillImg.naturalWidth, stillImg.naturalHeight); });
   stillImg?.addEventListener('error', () => { stillOK = false; stillImg.hidden = true; queueRender(); });
 
-  // MARK: The transport (the Monitor's), Zoom and the keys' help
+  // MARK: The transport (the Monitor's), Zoom to the light, Hide marker and the keys' help
 
   const transport = createTransport({ onPlay: () => togglePlay(), onStep: (direction) => step(direction), onSpeed: (rate) => controller.setSpeed(rate), keyMap: SKY_KEY_MAP });
-  const zoomButton = h('button', { class: 'btn small sky-player-zoom', type: 'button', 'aria-pressed': 'false', title: T.zoomHint, onclick: () => setZoom(!zoomed) },
-    icon('search'), h('span', { class: 'sky-player-zoom-word' }, T.zoom));
+  const zoomButton = h('button', { class: 'btn small sky-player-zoom', type: 'button', title: T.zoomHint, onclick: () => zoomToLight() },
+    icon('search'), h('span', { class: 'sky-player-word' }, T.zoom));
+  const markerButton = h('button', { class: 'btn small sky-player-marker', type: 'button', onclick: () => setMarker(!markerShown) });
   const transportRow = h('div', { class: 'nvr-transport sky-player-transport' },
-    transport.frameBackButton, transport.playButton, transport.frameForwardButton, transport.readout, transport.speedGroup, zoomButton, transport.keysHelp);
+    transport.frameBackButton, transport.playButton, transport.frameForwardButton, transport.readout, transport.speedGroup, zoomButton, markerButton,
+    transport.keysHelp);
+
+  /** The button says what a press does: Hide marker while it shows, Show marker while it is hidden. */
+  function drawMarkerButton() {
+    replace(markerButton, icon(markerShown ? 'eyeOff' : 'eye'), h('span', { class: 'sky-player-word' }, markerShown ? T.hideMarker : T.showMarker));
+    markerButton.title = markerShown ? T.hideMarkerHint : T.showMarkerHint;
+  }
+  drawMarkerButton();
 
   // MARK: The scrubber over the window, the light's own time marked on it
 
@@ -318,12 +351,15 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
 
   const titleId = `sky-player-${++sequence}`;
   const xButton = h('button', { class: 'btn small ghost sky-player-x', type: 'button', 'aria-label': T.close, title: `${T.close} (Esc)`, onclick: () => close() }, icon('x'));
-  const head = h('header', { class: 'sky-player-head' },
-    h('div', { class: 'sky-player-title', id: titleId }, h('h2', null, heading), what ? h('p', { class: 'sky-player-what' }, what) : null), xButton);
+  const whatEl = h('p', { class: 'sky-player-what', hidden: !what }, what);
+  const head = h('header', { class: 'sky-player-head' }, h('div', { class: 'sky-player-title', id: titleId }, h('h2', null, heading), whatEl), xButton);
   const watchLink = watchHref ? h('a', { class: 'btn small', href: watchHref, onclick: () => close() }, icon('film'), T.watch) : null;
   const foot = h('div', { class: 'sky-player-foot' }, watchLink, h('button', { class: 'btn small sky-player-done', type: 'button', onclick: () => close() }, T.close));
   const controls = h('div', { class: 'sky-player-controls' }, transportRow, scrub, widenRow);
-  const panel = h('div', { class: 'sky-player-panel', tabindex: '-1' }, head, notice, stageEl, controls, foot);
+  // The picture and its controls; the light's details beside them on a wide screen (sky.css), under them on a narrow one.
+  const side = details ? h('aside', { class: 'sky-player-side', 'aria-label': T.details }, details) : null;
+  const body = h('div', { class: 'sky-player-body', dataset: { side: String(Boolean(side)) } }, h('div', { class: 'sky-player-main' }, notice, stageEl, controls), side);
+  const panel = h('div', { class: 'sky-player-panel', tabindex: '-1', dataset: { side: String(Boolean(side)) } }, head, body, foot);
   const dialog = h('dialog', { class: 'sky-player', 'aria-labelledby': titleId }, panel);
 
   // MARK: What the person does
@@ -351,13 +387,23 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
     else if (action.kind === 'speed') controller.stepSpeed(action.step);
   }
 
-  function setZoom(on) {
-    zoomed = on && Boolean(zoomAt(entry.path, entry.start, playheadAt(), picture));
-    stageEl.dataset.zoom = String(zoomed);
-    zoomButton.setAttribute('aria-pressed', String(zoomed));
-    drawnAt = null;
-    drawPath();
-    drawNow(playheadAt());
+  /**
+   * Zoom to the light: the zoom's own view on where the light is at the playhead, as close as its close-up shows it (zoomAt); from there the
+   * person moves and zooms as they like. Again later: on where the light is then.
+   */
+  function zoomToLight() {
+    if (closed) return;
+    const at = zoomAt(entry.path, entry.start, playheadAt(), picture);
+    if (at) zoom.zoomTo(at.x / 100, at.y / 100, at.scale);
+  }
+
+  /** Shows or hides the light's marker (its path and the ring), and remembers it for the next light. */
+  function setMarker(shown) {
+    if (closed) return;
+    markerShown = shown;
+    rememberMarker(shown);
+    stageEl.dataset.marker = String(shown);
+    drawMarkerButton();
   }
 
   /** A wider (or the first) window: the playhead stays where it is; one that is now outside it is brought in, playing or not as it was. */
@@ -371,18 +417,25 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
     render();
   }
 
-  // The Monitor's keys, bounded by the window (sky-player-model.js windowedAction), and Escape closes. Not while typing in a field.
+  // The Monitor's keys, bounded by the window (sky-player-model.js windowedAction); M hides or shows the marker; as on the Monitor, Escape and 0
+  // give the whole picture back first while zoomed, and Escape closes after that. Not while typing in a field (Escape still closes).
   function onKey(event) {
     if (closed) return;
-    if (event.key === 'Escape') { event.preventDefault?.(); event.stopImmediatePropagation?.(); close(); return; }
+    const taken = () => { event.preventDefault?.(); event.stopImmediatePropagation?.(); };
     const target = event.target;
     const closest = (selector) => (typeof target?.closest === 'function' ? target.closest(selector) : null);
     const typing = Boolean(closest('input, select, textarea, [contenteditable=""], [contenteditable="true"]'));
+    if (!typing && zoom.key(event)) { taken(); return; }
+    if (event.key === 'Escape') { taken(); close(); return; }
+    if (!typing && (event.key === 'm' || event.key === 'M') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      taken();
+      if (!event.repeat) setMarker(!markerShown);
+      return;
+    }
     const activatable = Boolean(closest('button, a[href], summary, [role="button"], [role="switch"], [role="tab"], [role="menuitem"]'));
     const action = windowedAction(keyAction(event, { typing, activatable }), { mode: session.mode, positionMs: session.position, from: range.from, to: end() });
     if (!action || blocked || !controller.canAct()) return;
-    event.preventDefault?.();
-    event.stopImmediatePropagation?.();
+    taken();
     perform(action);
   }
 
@@ -488,6 +541,7 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
     stopSession?.();
     stopRendering?.();
     scrubber.cancel();
+    zoom.destroy();               // its drawing stops and its WebGL context is given back
     controller.destroy();
     session.destroy();            // the cell and its player: the MediaSource is let go, the video emptied
     catalog.stop();
@@ -534,6 +588,11 @@ export function openSkyPlayer({ camera, entry, zone, heading = '', what = '', st
   return {
     el: dialog,
     close,
+    /** What the light was and where, under the time (a correction made it another kind): "Bird · North Sky". */
+    setWhat(text) {
+      if (whatEl.textContent !== text) whatEl.textContent = text;
+      whatEl.hidden = !text;
+    },
     /** The window it plays now: { from, to } in epoch ms. */
     get window() { return { from: range.from, to: range.to }; },
   };

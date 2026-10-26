@@ -20,6 +20,12 @@ the per-camera `MediaHub`. Depends on BridgeSupport only (Foundation, Synchroniz
 Camera off still (2026-10-22, docs/CONTRACT_CHANGES.md): `MediaCodecs.cameraOffJPEG(cameraName:width:height:)` (a requirement with a default that throws
 `MediaCodecError.unsupported`): the dark "Camera off" picture Apple Home gets for a camera that is turned off, exactly `width` × `height`, as JPEG.
 
+The Sky Watcher's small pictures (2026-10-26, docs/CONTRACT_CHANGES.md): `MediaCodecs.croppedJPEG(_:crop:maxWidth:quality:)` (a requirement with a default that throws
+`MediaCodecError.unsupported`, so a caller keeps the whole picture) and `ImageCrop` (`x`, `y`, `width`, `height`: a rectangle of a picture in its own pixels from the top
+left). The part of a JPEG (or PNG) inside `crop`, or all of it when `crop` is nil, made at most `maxWidth` wide with its shape kept and never larger than the part itself,
+as a JPEG at `quality` (0 to 1); a whole picture that already fits comes back unchanged. A crop that is not inside the picture, or data that is not an image, throws
+`unsupported`. The ffmpeg codecs cut at the exact pixel (`crop=…:exact=1`) under `nice -n 10`; the Apple ones use ImageIO and CoreGraphics.
+
 The sky detector's decoder (2026-10-25, docs/CONTRACT_CHANGES.md): `MediaCodecs.makeSkyDecoder(format:maxOutputWidth:keepEvery:)` (a requirement with a
 default, `makeMotionDecoder`): a decoder for the sky detector, which looks at a luma picture at most `maxOutputWidth` wide a few times a second. It makes a
 picture of every `keepEvery`th frame it is given (frames 0, N, 2N, … from the first, a keyframe) and answers nil at once for the others; a codec service that can

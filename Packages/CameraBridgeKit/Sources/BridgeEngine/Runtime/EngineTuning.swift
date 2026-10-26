@@ -53,6 +53,13 @@ struct EngineTuning: Sendable {
     var skyHTTP: (any SkyHTTP)?
     /// How often the Sky Watcher asks the flight feed (`SkyService.pollInterval`; tests shorten it).
     var skyPollInterval: Duration = SkyService.pollInterval
+    /// The Sky Watcher's small pictures (`SkyThumbnails`): how long one may take, how long one that could not be made is left alone, and how many requests
+    /// may wait for a place before the oldest are answered with the whole picture (tests shorten and shrink them).
+    var skyThumbnailDeadline: Duration = SkyThumbnails.deadline
+    var skyThumbnailFailureMemory: Duration = SkyThumbnails.failureMemory
+    var skyThumbnailWaiting = SkyThumbnails.maximumWaiting
+    /// Whether the recordings drive has room for a thumbnail to be kept (nil: the real rule, `SkyLightFilter.stillsHaveRoom` of the drive’s measured space; tests say).
+    var skyThumbnailRoom: (@Sendable () -> Bool)?
     /// Replaces this machine's interface addresses where "Set up for Camera Bridge" looks for the bridge's own (tests: documentation
     /// addresses, never the machine's real LAN address).
     var interfaceAddresses: (@Sendable () -> [InterfaceAddress])?

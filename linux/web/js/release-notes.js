@@ -15,6 +15,17 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.126',
+    date: '2026-10-25',
+    title: 'Sky Watcher matches planes, a grid you scroll, and a player you can zoom',
+    items: [
+      'Planes are matched from flight feeds in the older dump1090 format (heights as “altitude”), which many Raspberry Pi receivers send; before, none of their planes could be read. If a feed answers but its planes can’t be read, the Sky Watcher page now says so.',
+      'A camera with two lenses starts its aim the way such a camera really looks, which lets the first planes match.',
+      'The sky log is a grid you scroll through: filter by kind, show only lights with a picture, sort, and tap the night strip to jump to any hour. Correcting a light moves it to its kind at once. The cards load small pictures the box makes.',
+      'The player can hide the marker, and zooms like the Monitor: drag a box, scroll to zoom, drag to move, double-click to fit. On the Monitor too, while zoomed in a drag now moves the picture and Shift-drag zooms further.',
+    ],
+  },
+  {
     version: '0.1.125',
     date: '2026-10-25',
     title: 'An archive drive for older recordings',

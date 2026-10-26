@@ -22,14 +22,17 @@ struct AircraftReport: Sendable, Equatable {
 }
 
 /// Reads the aircraft list of a flight feed: dump1090, readsb, tar1090 or PiAware `aircraft.json` (`aircraft`), or adsb.fi's answer (`ac`).
+/// Each aircraft is read in either shape a feed writes: the newer one (dump1090-fa, readsb, adsb.fi: `alt_baro`, `alt_geom`, `gs`) or the
+/// older one of dump1090-mutability, which a tar1090 may serve too (`altitude` for the barometric altitude, `speed`; no `alt_baro`, `alt_geom`
+/// or `gs`): read only in the newer shape, every aircraft of an older feed was left out, and nothing matched.
 ///
 /// A feed is somebody else's input, so nothing in it can stop the whole: the document is read with `JSONSerialization` and each field of
 /// each aircraft on its own (a number, or a plain decimal in a string), and an aircraft with anything odd in a field that it needs (a
 /// position, an age, a height) is left out alone. A body over `maximumBytes` is not read, and at most `maximumAircraft` come out.
 ///
-/// **Pinned:** the geometric altitude (`alt_geom`) else the barometric one (`alt_baro`); an aircraft on the ground (`alt_baro` "ground"), one
-/// with a position older than `maximumPositionAge` (`seen_pos`) and one with a number that is not one (NaN, out of range) are skipped; the
-/// position's time is the time of receipt less `seen_pos`.
+/// **Pinned:** the geometric altitude (`alt_geom`) else the barometric one (`alt_baro`, else the older shape's `altitude`); an aircraft on the
+/// ground (`alt_baro` or `altitude` "ground"), one with a position older than `maximumPositionAge` (`seen_pos`) and one with a number that is
+/// not one (NaN, out of range) are skipped; the position's time is the time of receipt less `seen_pos`.
 ///
 /// **The builder's choices:**
 /// - The feed's own `now` is never read. A feed host's clock can be minutes out, and `seen_pos` is relative to the moment the feed was
@@ -39,8 +42,9 @@ struct AircraftReport: Sendable, Equatable {
 ///   read, the bare words outside any string that JSON does not have are made `null` and it is read once more; the aircraft they stood in
 ///   then lack the field, and the rest are kept.
 /// - A document nested more than `maximumNesting` levels deep is not read (see `nesting(of:)`: Apple's JSON reader can crash on one).
-/// - Heights outside −2,000…100,000 ft are not an aircraft's. A speed is taken from 0 to 2,000 knots and a track from 0 to 360°, and an odd
-///   one only costs the aircraft its speed or track.
+/// - Heights outside −2,000…100,000 ft are not an aircraft's, and an odd height gives way to the next field that has one. A speed is taken
+///   from 0 to 2,000 knots (`gs`, else the older shape's `speed`) and a track from 0 to 360°, and an odd one only costs the aircraft its speed
+///   or track.
 /// - The address must be six hex digits (with a `~` for a non-ICAO one), and an aircraft is read once: the first of a hex wins. A call sign is
 ///   at most 8 letters, digits, hyphens or underscores, else the aircraft has none: what a feed says is shown on the box's pages.
 enum AircraftFeedParser {
@@ -58,6 +62,12 @@ enum AircraftFeedParser {
     /// How deep a feed's arrays and objects may nest: a feed is an object holding a list of objects, and the deepest thing in a real one
     /// (readsb's `lastPosition`) is four levels down.
     static let maximumNesting = 16
+    /// Where an aircraft's height is, the first that has one: the geometric altitude, then the barometric one in the newer shape and in the
+    /// older (dump1090-mutability's). The barometric ones say "ground" for an aircraft on the ground.
+    static let altitudeFields = ["alt_geom", "alt_baro", "altitude"]
+    static let groundFields = ["alt_baro", "altitude"]
+    /// Where its speed over the ground is, in the newer shape and the older.
+    static let speedFields = ["gs", "speed"]
 
     /// The reports of the aircraft in `data`, as `parseFeed` reads them, or none when it is not a feed.
     static func parse(_ data: Data, receivedAt: Date) -> [AircraftReport] {
@@ -67,16 +77,39 @@ enum AircraftFeedParser {
     /// The reports of the aircraft in `data` (an empty list for a feed with none in view), or nil when `data` is not a flight feed: too long,
     /// not JSON, or with no list of aircraft under `aircraft` or `ac`.
     static func parseFeed(_ data: Data, receivedAt: Date) -> [AircraftReport]? {
+        read(data, receivedAt: receivedAt)?.reports
+    }
+
+    /// What one answer of a feed held: its reports, the aircraft it listed, and how many of those were readable: a report, or left out for a
+    /// reason understood (on the ground, a position older than `maximumPositionAge`, a hex read already). The others lack a position, an age
+    /// or a height the parser reads. An answer that lists aircraft and has none readable is of a feed whose planes cannot be read (Sky Watcher
+    /// cannot use it); one that lists none is a sky with nothing in it.
+    struct Reading: Sendable, Equatable {
+        var reports: [AircraftReport]
+        var listed: Int
+        var readable: Int
+    }
+
+    /// `data` read as `parseFeed` reads it, with what it listed counted; nil when it is not a flight feed.
+    static func read(_ data: Data, receivedAt: Date) -> Reading? {
         guard let list = aircraftList(in: data) else { return nil }
         var seen = Set<String>()
-        var reports: [AircraftReport] = []
+        var reading = Reading(reports: [], listed: 0, readable: 0)
         for item in list {
-            guard reports.count < maximumAircraft else { break }
-            guard let aircraft = item as? [String: Any], let report = report(from: aircraft, receivedAt: receivedAt),
-                  seen.insert(report.hex).inserted else { continue }
-            reports.append(report)
+            guard reading.reports.count < maximumAircraft else { break }
+            reading.listed += 1
+            guard let aircraft = item as? [String: Any] else { continue }
+            switch outcome(of: aircraft, receivedAt: receivedAt) {
+            case .report(let report):
+                reading.readable += 1
+                if seen.insert(report.hex).inserted { reading.reports.append(report) }
+            case .understood:
+                reading.readable += 1
+            case .unreadable:
+                break
+            }
         }
-        return reports
+        return reading
     }
 
     /// Whether `data` is a flight feed, however many aircraft are in view (the feed finder's test).
@@ -172,21 +205,33 @@ enum AircraftFeedParser {
 
     // MARK: An aircraft
 
-    private static func report(from aircraft: [String: Any], receivedAt: Date) -> AircraftReport? {
+    /// What became of one aircraft of a feed.
+    private enum Outcome {
+        case report(AircraftReport)
+        /// Read, and left out for a reason understood: on the ground, or its position older than `maximumPositionAge` (or a little in the
+        /// future: a clock step past `clockStep`).
+        case understood
+        /// No address, position, age or height the parser reads.
+        case unreadable
+    }
+
+    private static func outcome(of aircraft: [String: Any], receivedAt: Date) -> Outcome {
         guard let hex = hexAddress(aircraft["hex"]),
               let latitude = number(aircraft["lat"]), (-90.0...90.0).contains(latitude),
               let longitude = number(aircraft["lon"]), (-180.0...180.0).contains(longitude),
-              let seen = number(aircraft["seen_pos"]), seen >= -clockStep, seen <= maximumPositionAge else { return nil }
-        if let barometric = aircraft["alt_baro"] as? String, barometric.trimmingCharacters(in: .whitespaces).lowercased() == "ground" { return nil }
-        guard let feet = [number(aircraft["alt_geom"]), number(aircraft["alt_baro"])].compactMap({ $0 }).first(where: altitudeLimits.contains)
-        else { return nil }
+              let seen = number(aircraft["seen_pos"]) else { return .unreadable }
+        let onTheGround = groundFields.contains { field in
+            (aircraft[field] as? String).map { $0.trimmingCharacters(in: .whitespaces).lowercased() == "ground" } ?? false
+        }
+        guard seen >= -clockStep, seen <= maximumPositionAge, !onTheGround else { return .understood }
+        guard let feet = altitudeFields.lazy.compactMap({ number(aircraft[$0]) }).first(where: altitudeLimits.contains) else { return .unreadable }
         var track = number(aircraft["track"]).flatMap { (0.0...360.0).contains($0) ? $0 : nil }
         if track == 360 { track = 0 }
-        return AircraftReport(hex: hex, callsign: callSign(aircraft["flight"]), latitude: latitude, longitude: longitude,
-                              altitudeMeters: feet * metresPerFoot, altitudeFeet: Int(feet.rounded()),
-                              positionTime: receivedAt.addingTimeInterval(-max(0, seen)),
-                              groundSpeedKnots: number(aircraft["gs"]).flatMap { (0.0...maximumSpeedKnots).contains($0) ? $0 : nil },
-                              trackDegrees: track)
+        return .report(AircraftReport(hex: hex, callsign: callSign(aircraft["flight"]), latitude: latitude, longitude: longitude,
+                                      altitudeMeters: feet * metresPerFoot, altitudeFeet: Int(feet.rounded()),
+                                      positionTime: receivedAt.addingTimeInterval(-max(0, seen)),
+                                      groundSpeedKnots: speedFields.lazy.compactMap({ number(aircraft[$0]) }).first { (0.0...maximumSpeedKnots).contains($0) },
+                                      trackDegrees: track))
     }
 
     /// Six lower-case hex digits, with a `~` before them for an address that is not an ICAO one.
@@ -246,15 +291,26 @@ enum AircraftFeedParser {
 /// bounded in time and size (`timeout`, `AircraftFeedParser.maximumBytes`). What is wrong with the feed is `problem`, in plain words with no
 /// address in them; the last good answer is `lastAnswer`.
 ///
+/// **A feed whose planes cannot be read** answers like any other, so it says so itself: once its answers have listed aircraft and none of
+/// them readable (`AircraftFeedParser.Reading`: no position, age or height the parser reads) for `unreadableAfter`, with no answer between
+/// that had one, `problem` is `unreadable` until an answer has a plane that can be read, and the journal has one line when that starts and
+/// one when it ends. An answer that lists no aircraft (a sky with nothing in it) neither starts nor ends it, and unreadable answers more than
+/// `unreadableAfter` apart are not one stretch. (A feed on which nothing could be read once went unnoticed for a day: the parser knew only
+/// the newer shape of dump1090's feed. A sky of aircraft that send no position at all, Mode S alone, for five minutes reads the same.)
+///
 /// `stop()` returns once the polling has ended: no request starts after it, one still on its way is cancelled, and an answer that arrives
 /// anyway is thrown away. A poller nobody holds any more stops by itself.
 actor FlightFeedPoller {
     /// How long one request may take.
     static let timeout: Duration = .seconds(5)
+    /// How long a feed's answers may list aircraft of which none can be read before that is its problem.
+    static let unreadableAfter: TimeInterval = 300
 
     static let notUnderstood = "The flight feed answered, but not with a list of aircraft."
     static let tooLarge = "The flight feed's answer was too large."
     static let unreachable = "The flight feed could not be reached."
+    static let unreadable = "The flight feed answers, but none of its planes can be read (no height or position). "
+        + "Check that it's dump1090, readsb, tar1090 or PiAware."
     static func answered(_ status: Int) -> String { "The flight feed answered \(status)." }
 
     private let url: URL
@@ -262,19 +318,28 @@ actor FlightFeedPoller {
     private let history: FlightHistory
     private let interval: Duration
     private let now: @Sendable () -> Date
+    private let log: Log
     private var task: Task<Void, Never>?
-    /// What is wrong with the feed now; nil when its last answer was a feed.
+    /// What is wrong with the feed now; nil when its last answer was a feed (whose planes can be read, or that has listed none for a while).
     private(set) var problem: String?
     /// When the last answer that was a feed came (the box's clock).
     private(set) var lastAnswer: Date?
+    /// The first and the latest answer of the stretch that listed aircraft none of which could be read; whether it has lasted
+    /// `unreadableAfter` (and the journal was told).
+    private var unreadableSince: Date?
+    private var lastUnreadable: Date?
+    private var unreadableFeed = false
 
-    /// `now` is the box's clock: the time an answer was received, which dates every position in it.
-    init(url: URL, http: any SkyHTTP, history: FlightHistory, interval: Duration = .seconds(1), now: @escaping @Sendable () -> Date = { Date() }) {
+    /// `now` is the box's clock: the time an answer was received, which dates every position in it. `log` is where the start and the end of
+    /// a stretch of unreadable answers are written.
+    init(url: URL, http: any SkyHTTP, history: FlightHistory, interval: Duration = .seconds(1), now: @escaping @Sendable () -> Date = { Date() },
+         log: Log = Log(category: "Sky")) {
         self.url = url
         self.http = http
         self.history = history
         self.interval = interval
         self.now = now
+        self.log = log
     }
 
     deinit {
@@ -327,12 +392,39 @@ actor FlightFeedPoller {
             problem = Self.answered(answer.status)
             return
         }
-        guard let reports = AircraftFeedParser.parseFeed(answer.body, receivedAt: received) else {
+        guard let reading = AircraftFeedParser.read(answer.body, receivedAt: received) else {
             problem = Self.notUnderstood
             return
         }
-        await history.add(reports)
-        problem = nil
+        await history.add(reading.reports)
+        note(reading, at: received)
+        problem = unreadableFeed ? Self.unreadable : nil
         lastAnswer = received
+    }
+
+    /// An answer with a plane that can be read ends a stretch of unreadable answers; one that lists aircraft and none readable starts or
+    /// continues it (one more than `unreadableAfter` after the stretch's latest starts it again); one that lists none changes nothing.
+    private func note(_ reading: AircraftFeedParser.Reading, at received: Date) {
+        if reading.readable > 0 {
+            unreadableSince = nil
+            lastUnreadable = nil
+            if unreadableFeed {
+                unreadableFeed = false
+                log.info("Sky Watcher: the flight feed's planes can be read again")
+            }
+            return
+        }
+        guard reading.listed > 0 else { return }
+        if let since = unreadableSince, let last = lastUnreadable, received >= last, received.timeIntervalSince(last) <= Self.unreadableAfter,
+           received >= since {
+            lastUnreadable = received
+        } else {
+            unreadableSince = received
+            lastUnreadable = received
+        }
+        if !unreadableFeed, let since = unreadableSince, received.timeIntervalSince(since) >= Self.unreadableAfter {
+            unreadableFeed = true
+            log.warning("Sky Watcher: the flight feed answers, but none of its planes can be read (no height or position)")
+        }
     }
 }

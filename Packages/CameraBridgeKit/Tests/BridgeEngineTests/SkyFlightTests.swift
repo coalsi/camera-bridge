@@ -1,4 +1,4 @@
-import BridgeSupport
+@testable import BridgeSupport
 import Foundation
 import TestSupport
 import Testing
@@ -363,6 +363,41 @@ import Testing
         #expect(read(#""alt_baro":30000,"gs":-3"#) != nil, "an odd speed does not cost the aircraft")
     }
 
+    @Test func anOlderDump1090FeedIsReadToo() throws {
+        // dump1090-mutability, and a tar1090 that serves it, write the barometric altitude as `altitude` and the speed as `speed`. With no
+        // `alt_baro` or `alt_geom` every aircraft of such a feed was left out, and a box on one matched no plane at all.
+        let reports = AircraftFeedParser.parse(Data(SkyFixtures.olderAircraftJSON.utf8), receivedAt: Self.received)
+        #expect(reports.map(\.hex) == ["a0b1c2", "b1c2d3", "c2d3e4"], "the one on the ground, the one 45 s old and the one with no position are left out")
+        try #require(reports.count == 3)
+        #expect(reports[0].altitudeFeet == 34_950 && abs(reports[0].altitudeMeters - 34_950 * 0.3048) < 1e-9)
+        #expect(reports[0].callsign == "TEST123" && reports[0].positionTime == Self.received.addingTimeInterval(-0.4))
+        #expect(reports[0].groundSpeedKnots == 449.7 && reports[0].trackDegrees == 90.2)
+        #expect(reports[1].altitudeFeet == 12_000 && reports[1].groundSpeedKnots == 280.5 && reports[1].trackDegrees == 181.4)
+        #expect(reports[2].altitudeFeet == 8_000 && reports[2].positionTime == Self.received.addingTimeInterval(-29.9))
+
+        // Where a feed gives both shapes, the newer fields come first: the geometric altitude, the barometric one, then `altitude`; `gs`,
+        // then `speed`.
+        func read(_ fields: String) -> AircraftReport? {
+            let text = #"{"aircraft":[{"hex":"a0b1c2","lat":40.2,"lon":-100.1,"seen_pos":1,\#(fields)}]}"#
+            return AircraftFeedParser.parse(Data(text.utf8), receivedAt: Self.received).first
+        }
+        #expect(read(#""altitude":34000,"alt_baro":34950,"alt_geom":35025"#)?.altitudeFeet == 35_025)
+        #expect(read(#""altitude":34000,"alt_baro":34950"#)?.altitudeFeet == 34_950)
+        #expect(read(#""altitude":34000,"alt_baro":"x""#)?.altitudeFeet == 34_000, "an odd newer field: the older one")
+        #expect(read(#""altitude":"34000""#)?.altitudeFeet == 34_000, "a number in a string")
+        #expect(read(#""altitude":" Ground ""#) == nil, "on the ground, whatever case, with spaces")
+        #expect(read(#""altitude":"ground","alt_geom":35025"#) == nil, "on the ground, whatever else it says")
+        #expect(read(#""altitude":100001"#) == nil && read(#""altitude":null"#) == nil && read(#""altitude":"high""#) == nil)
+        func motion(_ fields: String) -> (Double?, Double?) {
+            let report = read(#""altitude":30000,\#(fields)"#)
+            return (report?.groundSpeedKnots, report?.trackDegrees)
+        }
+        #expect(motion(#""speed":450.5,"track":90.2"#) == (450.5, 90.2))
+        #expect(motion(#""gs":440,"speed":450.5"#) == (440, nil))
+        #expect(motion(#""gs":-3,"speed":450.5"#) == (450.5, nil), "an odd ground speed: the older field")
+        #expect(motion(#""speed":5000"#) == (nil, nil))
+    }
+
     @Test func anAircraftIsReadOnceAndNamedInLowerCase() throws {
         let text = SkyFixtures.feedJSON([
             #"{"hex":"A0B1C2","flight":"first","lat":40.2,"lon":-100.1,"alt_baro":30000,"seen_pos":1}"#,
@@ -601,6 +636,143 @@ import Testing
         // What it asks: the address, a bounded wait, a bounded answer.
         let request = try #require(http.requests.value.first)
         #expect(request.url == Self.feedURL && request.maximumBytes == AircraftFeedParser.maximumBytes && request.timeout <= .seconds(10))
+    }
+
+    @Test func thePollerReadsAnOlderFeedIntoTheHistory() async throws {
+        // A feed in dump1090-mutability's shape answers like any other: the poller saw no problem with it, and its aircraft must reach the
+        // history too (they did not, and the history stayed empty).
+        let http = FakeSkyHTTP(pages: [Self.feedURL.absoluteString: (200, SkyFixtures.olderAircraftJSON)])
+        let history = FlightHistory()
+        let poller = FlightFeedPoller(url: Self.feedURL, http: http, history: history, interval: .milliseconds(10), now: { Self.received })
+        await poller.start()
+        #expect(await eventually { await history.aircraftCount == 3 })
+        await poller.stop()
+        #expect(await poller.problem == nil)
+        let all = await history.tracks(overlapping: Self.received.addingTimeInterval(-100)...Self.received.addingTimeInterval(100))
+        #expect(Set(all.keys) == ["a0b1c2", "b1c2d3", "c2d3e4"])
+    }
+
+    // MARK: A feed whose planes cannot be read
+
+    /// A made-up answer in no shape the parser knows: two aircraft with positions and ages but their heights under a key no feed writes, and
+    /// one with no position.
+    static let unknownShapeJSON = SkyFixtures.feedJSON([
+        #"{"hex":"a0b1c2","flight":"TEST123 ","lat":40.2250,"lon":-100.3000,"seen_pos":0.4,"height_ft":34950,"spd":449.7,"track":90.2}"#,
+        #"{"hex":"b1c2d3","lat":39.65,"lon":-99.60,"seen_pos":1.2,"height_ft":12000}"#,
+        #"{"hex":"c2d3e4","seen":0.5,"messages":20}"#,
+    ], now: 1_792_897_200.4)
+
+    /// Made-up aircraft that are read and left out for a reason understood: one on the ground, one last placed 45 s ago.
+    static let groundAndStaleJSON = SkyFixtures.feedJSON([
+        #"{"hex":"d3e4f5","lat":40.0003,"lon":-100.0002,"alt_baro":"ground","seen_pos":1.0}"#,
+        #"{"hex":"e4f5a6","lat":40.3,"lon":-99.9,"alt_baro":20000,"seen_pos":45.0}"#,
+    ], now: 1_792_897_200.4)
+
+    static let emptyJSON = #"{"now":1792897200.4,"messages":12,"aircraft":[]}"#
+
+    /// The journal lines of a poller, on a router of their own.
+    private final class FeedLines: LogSink {
+        let entries = Box<[LogEntry]>([])
+        func record(_ entry: LogEntry) { entries.update { $0.append(entry) } }
+        var messages: [String] { entries.value.map(\.message) }
+    }
+
+    /// A poller of `page` (whatever it holds when asked) on a clock the test moves, writing to `lines`; `at(seconds)` moves the clock and
+    /// returns once an answer has been read at that time.
+    private func feedRig(_ page: Box<String>) async -> (poller: FlightFeedPoller, history: FlightHistory, lines: FeedLines,
+                                                        at: (TimeInterval) async -> Void) {
+        let http = FakeSkyHTTP { _ in (Data(page.value.utf8), 200) }
+        let clock = Box(Self.received)
+        let router = LogRouter(), lines = FeedLines()
+        router.addSink(lines)
+        let history = FlightHistory()
+        let poller = FlightFeedPoller(url: Self.feedURL, http: http, history: history, interval: .milliseconds(5), now: { clock.value },
+                                      log: Log(category: "Sky", router: router))
+        await poller.start()
+        return (poller, history, lines, { seconds in
+            clock.set(Self.received.addingTimeInterval(seconds))
+            let asked = http.requests.value.count
+            _ = await eventually { http.requests.value.count >= asked + 2 }   // the first answer asked for after the move has been read
+        })
+    }
+
+    @Test func aFeedReadingCountsTheAircraftItCouldRead() throws {
+        // What one answer holds: the aircraft it lists, and how many of them were readable, a report or left out for a reason understood (on
+        // the ground, a position too old). The rest lack a position, an age or a height the parser reads.
+        let older = try #require(AircraftFeedParser.read(Data(SkyFixtures.olderAircraftJSON.utf8), receivedAt: Self.received))
+        #expect(older.reports.map(\.hex) == ["a0b1c2", "b1c2d3", "c2d3e4"] && older.listed == 6 && older.readable == 5,
+                "only the one with no position is not readable")
+        let newer = try #require(AircraftFeedParser.read(Data(SkyFixtures.aircraftJSON.utf8), receivedAt: Self.received))
+        #expect(newer.reports.count == 3 && newer.listed == 6 && newer.readable == 5)
+        let unknown = try #require(AircraftFeedParser.read(Data(Self.unknownShapeJSON.utf8), receivedAt: Self.received))
+        #expect(unknown.reports.isEmpty && unknown.listed == 3 && unknown.readable == 0)
+        let understood = try #require(AircraftFeedParser.read(Data(Self.groundAndStaleJSON.utf8), receivedAt: Self.received))
+        #expect(understood.reports.isEmpty && understood.listed == 2 && understood.readable == 2)
+        let empty = try #require(AircraftFeedParser.read(Data(Self.emptyJSON.utf8), receivedAt: Self.received))
+        #expect(empty.reports.isEmpty && empty.listed == 0 && empty.readable == 0)
+        #expect(AircraftFeedParser.read(Data("<html><body>It works!</body></html>".utf8), receivedAt: Self.received) == nil)
+        #expect(AircraftFeedParser.parseFeed(Data(SkyFixtures.olderAircraftJSON.utf8), receivedAt: Self.received) == older.reports)
+    }
+
+    @Test func aFeedWhosePlanesCannotBeReadSaysSoAfterFiveMinutes() async throws {
+        // The box's feed answered, as a feed, for a day while none of its aircraft could be read, and nothing said so. Once a feed's answers
+        // have listed aircraft and none of them readable for five minutes, its problem says so (the sky status shows the feed's problem), with
+        // one line in the journal when that starts and one when it ends, not one an answer.
+        let page = Box(Self.unknownShapeJSON)
+        let rig = await feedRig(page)
+        for seconds in [0.0, 120, 240, 299] { await rig.at(seconds) }
+        #expect(await rig.poller.problem == nil, "under five minutes")
+        #expect(await rig.history.aircraftCount == 0 && rig.lines.messages.isEmpty)
+        await rig.at(300)
+        #expect(await rig.poller.problem == FlightFeedPoller.unreadable)
+        #expect(FlightFeedPoller.unreadable == "The flight feed answers, but none of its planes can be read (no height or position). "
+                + "Check that it's dump1090, readsb, tar1090 or PiAware.")
+        for seconds in [301.0, 360, 600] { await rig.at(seconds) }
+        #expect(await rig.poller.problem == FlightFeedPoller.unreadable)
+        #expect(rig.lines.messages == ["Sky Watcher: the flight feed answers, but none of its planes can be read (no height or position)"],
+                "\(rig.lines.messages)")
+        // Answers that list nothing do not end it (they say nothing about the feed's shape); one with a plane it can read does.
+        page.set(Self.emptyJSON)
+        await rig.at(650)
+        #expect(await rig.poller.problem == FlightFeedPoller.unreadable)
+        page.set(SkyFixtures.olderAircraftJSON)
+        await rig.at(660)
+        #expect(await rig.poller.problem == nil)
+        await rig.at(670)
+        #expect(rig.lines.messages.count == 2 && rig.lines.messages.last == "Sky Watcher: the flight feed's planes can be read again",
+                "\(rig.lines.messages)")
+
+        // Five minutes again, counted from after the last answer that could be read.
+        page.set(Self.unknownShapeJSON)
+        await rig.at(700)
+        await rig.at(999)
+        #expect(await rig.poller.problem == nil)
+        await rig.at(1_000)
+        #expect(await rig.poller.problem == FlightFeedPoller.unreadable)
+        await rig.poller.stop()
+        #expect(rig.lines.messages.count == 3, "\(rig.lines.messages)")
+    }
+
+    @Test func noAircraftAroundIsNoProblem() async throws {
+        // An empty list is a sky with nothing in it, not a feed that cannot be read; nor are aircraft that are read and left out (on the ground,
+        // last placed long ago). However long either lasts, the feed has no problem and the journal says nothing.
+        let page = Box(Self.emptyJSON)
+        let rig = await feedRig(page)
+        for seconds in [0.0, 300, 900, 1_800] { await rig.at(seconds) }
+        #expect(await rig.poller.problem == nil)
+        page.set(Self.groundAndStaleJSON)
+        for seconds in [1_900.0, 2_400, 3_600] { await rig.at(seconds) }
+        #expect(await rig.poller.problem == nil)
+        // A stretch of unreadable answers broken by more than five minutes of empty ones is not one stretch: it starts again.
+        page.set(Self.unknownShapeJSON)
+        await rig.at(3_700)
+        page.set(Self.emptyJSON)
+        await rig.at(4_100)
+        page.set(Self.unknownShapeJSON)
+        await rig.at(4_200)
+        #expect(await rig.poller.problem == nil, "the first unreadable answer was 500 s ago, but with 400 s of empty answers after it")
+        await rig.poller.stop()
+        #expect(rig.lines.messages.isEmpty, "\(rig.lines.messages)")
     }
 
     @Test func aProblemClearsWhenTheFeedComesBack() async throws {
@@ -866,6 +1038,42 @@ import Testing
         } }
         #expect(matched(track, aim: .good, flights: late) == nil)
         #expect(matched(track, aim: .rough, flights: late) == nil)
+    }
+
+    @Test func aPlaneIsMatchedThroughAnOlderDump1090Feed() async throws {
+        // A feed in dump1090-mutability's shape, polled once a second, through the parser and the history: the made-up flight explains its
+        // track at the card's rough aim (about 8° off), as it does through a newer feed.
+        let flight = Flight()
+        let track = try makeTrack(of: flight)
+        let rough = SkyCameraModel.initial(facing: 0, tilt: 20, pictureWidth: 4256, pictureHeight: 1888)
+        let history = FlightHistory()
+        for second in -5...25 {
+            let message = Self.epoch.addingTimeInterval(Double(second)), received = message.addingTimeInterval(0.5)
+            let json = SkyFixtures.feedJSON([flight.olderEntry(positionAt: message, age: 0.5)], now: received.timeIntervalSince1970)
+            await history.add(AircraftFeedParser.parse(Data(json.utf8), receivedAt: received))
+        }
+        let first = try #require(track.samples.first?.wallClock), last = try #require(track.samples.last?.wallClock)
+        let flights = await history.tracks(overlapping: first...last)
+        #expect(flights.keys.sorted() == ["a0b1c2"])
+        let found = try #require(matched(track, model: rough, aim: .rough, flights: flights))
+        #expect(found.hex == "a0b1c2" && found.label == .probablePlane && found.detail == "TEST123 · 35,000 ft")
+        #expect(found.correspondences.count == track.samples.count, "every picture is one for the fit")
+    }
+
+    @Test func aPlaneHighUpInASteepStitchedPictureMatchesAtTheRoughAim() throws {
+        // A stitched dual camera tilted up 35°, one seamless panorama in its own frame (as North Sky's picture is), sees the made-up airliner
+        // 5 km north and 10.7 km up, about 62° high, near the top of the picture. Through the rough card made from the camera's facing and tilt
+        // it matches at the rough aim: with lenses turned about the vertical the card was more than 15° off up there (North Sky's planes at 30°
+        // to 60° were 10° to 25° off), so nothing high in the sky could match before the aim was fitted.
+        let truth = SkyFixtures.stitchedPanorama(facing: 0, tilt: 35)
+        let card = SkyCameraModel.initial(facing: 0, tilt: 35, pictureWidth: 4256, pictureHeight: 1888)
+        var high = Flight()
+        high.latitude = 40.045
+        high.longitude = -100.03
+        let track = try makeTrack(of: high, through: truth)
+        #expect(track.samples.allSatisfy { $0.point.y < 0.3 }, "high in the picture: \(track.samples.map(\.point.y).max() ?? 1)")
+        let found = try #require(matched(track, model: card, aim: .rough, flights: histories([high])))
+        #expect(found.hex == high.hex && found.label == .probablePlane && found.score < 6, "\(found.score)")
     }
 
     @Test func roughAimMatchesLooselyAndOnlyWhenUnique() throws {

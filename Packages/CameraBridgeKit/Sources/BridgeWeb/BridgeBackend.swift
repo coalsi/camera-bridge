@@ -132,6 +132,9 @@ public protocol BridgeBackend: Sendable {
     func correctSkyEntry(cameraID: UUID, entryID: String, night: String, label: SkyCorrection) async throws -> SkyEntry
     /// `BridgeEngine.skyStill(cameraID:night:entryID:)`: the JPEG of an entry. The default throws `SkyLogError.unavailable`.
     func skyStill(cameraID: UUID, night: String, entryID: String) async throws -> Data
+    /// `BridgeEngine.skyStillThumbnail(cameraID:night:entryID:)`: the small picture of an entry for the grid (`isThumbnail` false: the whole picture, because a
+    /// small one could not be made). The default is the whole picture, as `skyStill` has it.
+    func skyStillThumbnail(cameraID: UUID, night: String, entryID: String) async throws -> SkyStillPicture
     /// `BridgeEngine.findFlightFeeds()`: the flight feeds on the box's network, one per host. The default finds none.
     func findFlightFeeds() async -> [URL]
 }
@@ -313,6 +316,10 @@ public struct EngineBackend: BridgeBackend {
         try await engine.skyStill(cameraID: cameraID, night: night, entryID: entryID)
     }
 
+    public func skyStillThumbnail(cameraID: UUID, night: String, entryID: String) async throws -> SkyStillPicture {
+        try await engine.skyStillThumbnail(cameraID: cameraID, night: night, entryID: entryID)
+    }
+
     public func findFlightFeeds() async -> [URL] {
         await engine.findFlightFeeds()
     }
@@ -440,6 +447,10 @@ extension BridgeBackend {
 
     public func skyStill(cameraID: UUID, night: String, entryID: String) async throws -> Data {
         throw SkyLogError.unavailable
+    }
+
+    public func skyStillThumbnail(cameraID: UUID, night: String, entryID: String) async throws -> SkyStillPicture {
+        SkyStillPicture(jpeg: try await skyStill(cameraID: cameraID, night: night, entryID: entryID), isThumbnail: false)
     }
 
     public func findFlightFeeds() async -> [URL] { [] }

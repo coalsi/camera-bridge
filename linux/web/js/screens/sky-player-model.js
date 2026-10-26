@@ -1,6 +1,7 @@
 // The rules of Sky Watcher's clip player (sky-player.js), with no page in them: the stretch of recording it plays around a light and how it
-// widens, the time of day it reads, where the light was at a moment (the overlay's point and the Zoom's origin), the Monitor's keys bounded by
-// that stretch, and what it says when there is nothing to play. Nothing here touches the document or sends a request.
+// widens, the time of day it reads, where the light was at a moment (the overlay's point, and where Zoom to the light goes), the overlay on the
+// part of the picture the zoom shows, the Monitor's keys bounded by that stretch, and what it says when there is nothing to play. Nothing here
+// touches the document or sends a request.
 import { KEY_MAP } from './nvr-model.js';
 import { SKY_TEXT, closeUpRect } from './sky-model.js';
 
@@ -92,12 +93,12 @@ export function pathPointAt(path, startMs, ms, endMs = null) {
   return { x: round(x, 6), y: round(y, 6), at };
 }
 
-/** The close-up a still of the picture's shape would show (1920 wide, as the box keeps them), so the Zoom magnifies as much as the close-up does. */
+/** The close-up a still of the picture's shape would show (1920 wide, as the box keeps them), so the zoom magnifies as much as the close-up does. */
 const STILL_WIDTH = 1920;
 
 /**
- * The Zoom: how much it magnifies (as much as the light's close-up does, two to six times) and its origin, the light at `ms`, in per cent of
- * the picture (the CSS transform's origin, so the light stays where it is and the sky around it grows). -> { scale, x, y }, or null with no path.
+ * Zoom to the light: how much the zoom magnifies (as much as the light's close-up does, two to six times) and where, the light at `ms`, in
+ * per cent of the picture. -> { scale, x, y }, or null with no path.
  */
 export function zoomAt(path, startMs, ms, { width = 1920, height = 1080 } = {}) {
   const point = pathPointAt(path, startMs, ms);
@@ -108,14 +109,26 @@ export function zoomAt(path, startMs, ms, { width = 1920, height = 1080 } = {}) 
   return { scale: round(scale, 2), x: round(point.x * 100, 2), y: round(point.y * 100, 2) };
 }
 
+/**
+ * The overlay's view box on the part of the picture the zoom shows (its view: x, y, w, h as 0..1 of the picture; none is the whole picture),
+ * in the picture's own pixels: the overlay is stretched over the zoomed picture as the zoom's canvas is, so the path and the ring drawn in the
+ * picture's pixels stay on the light as it zooms and moves. -> 'x y width height'
+ */
+export function overlayViewBox(view, { width, height }) {
+  const v = view ?? { x: 0, y: 0, w: 1, h: 1 };
+  return [v.x * width, v.y * height, v.w * width, v.h * height].map((n) => round(n, 2)).join(' ');
+}
+
 // MARK: The keys
 
-/** The keyboard help: the Monitor's own lines (nvr-model.js KEY_MAP) for the keys a clip uses, and Esc. */
+/** The keyboard help: the Monitor's own lines (nvr-model.js KEY_MAP) for the keys a clip uses, the marker, the zoom's 0, and Esc. */
 export const SKY_KEY_MAP = Object.freeze([
   ...KEY_MAP.filter(([keys]) => keys === 'Space' || keys === '← →' || keys === 'Shift + ← →'),
   ['Alt + ← →', '10 seconds back or forward'],
   ...KEY_MAP.filter(([keys]) => keys === ', .'),
-  ['Esc', TEXT.close],
+  ['M', TEXT.markerKey],
+  ['0', TEXT.wholeKey],
+  ['Esc', TEXT.escKey],
 ]);
 
 /**

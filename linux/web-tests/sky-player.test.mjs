@@ -1,19 +1,22 @@
 // Sky Watcher's clip player (screens/sky-player.js, sky-player-model.js): a modal on the sky log that plays the camera's recording around one
-// light with the Monitor's own playback (its catalog, session, cells and grid controller, its transport, keys and scrubbing). The window from 15 s
-// before the light to 15 s after it and its widening, the light's path at the matching times, the Zoom's origin, the keys bounded by the window,
-// what it says when there is no recording to play, and, against the real session over the fake archive, that paused stays paused while scrubbing
-// and stepping, that the end of the window pauses, and that closing it frees the stream.
+// light with the Monitor's own playback (its catalog, session, cells and grid controller, its transport, keys and scrubbing) and the Monitor's
+// own zoom (js/live/zoom.js, whose gestures zoom.test.mjs checks). The window from 15 s before the light to 15 s after it and its widening, the
+// light's path at the matching times, Zoom to the light, the keys bounded by the window, what it says when there is no recording to play, and,
+// against the real session over the fake archive, that paused stays paused while scrubbing and stepping, that the end of the window pauses,
+// that closing it frees the stream, that the marker hides and shows (its button and M) and is remembered, that the marker follows the zoom,
+// and that Escape gives the whole picture back before it closes.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, describe, it, test } from 'node:test';
-import { installFakeBrowser } from './support/fake-browser.mjs';
+import { installFakeBrowser, makeStorage } from './support/fake-browser.mjs';
+import { givePicture, recordingCanvases } from './support/fake-picture.mjs';
 import { createRig } from './player-fakes/rig.mjs';
 import { FILE_A, FILE_B, ORIGIN } from './player-fakes/fake-archive.mjs';
 import { DEFAULT_POLICY } from '../web/js/nvr/planner.js';
 import { KEY_MAP } from '../web/js/screens/nvr-model.js';
 import { SKY_TEXT, normalizeEntry } from '../web/js/screens/sky-model.js';
 import {
-  SKY_KEY_MAP, WINDOW, clipWindow, clockText, marginText, pathPointAt, playerNotice, widenMargin, windowedAction, zoomAt,
+  SKY_KEY_MAP, WINDOW, clipWindow, clockText, marginText, overlayViewBox, pathPointAt, playerNotice, widenMargin, windowedAction, zoomAt,
 } from '../web/js/screens/sky-player-model.js';
 
 const CHICAGO = 'America/Chicago';
@@ -67,7 +70,14 @@ test('the overlay takes the path’s point for the time: between two points by h
   assert.equal(pathPointAt(null, start, start), null);
 });
 
-test('the Zoom magnifies around the light: its origin is the light at that moment, its scale the close-up’s', () => {
+test('the overlay’s view box is the part of the picture the zoom shows, in the picture’s own pixels', () => {
+  assert.equal(overlayViewBox({ x: 0, y: 0, w: 1, h: 1 }, { width: 1920, height: 852 }), '0 0 1920 852', 'the whole picture');
+  assert.equal(overlayViewBox(null, { width: 1920, height: 852 }), '0 0 1920 852');
+  assert.equal(overlayViewBox({ x: 0.25, y: 0.5, w: 0.25, h: 0.25 }, { width: 1920, height: 852 }), '480 426 480 213');
+  assert.equal(overlayViewBox({ x: 1 / 3, y: 0, w: 1 / 3, h: 1 / 3 }, { width: 4256, height: 1888 }), '1418.67 0 1418.67 629.33', 'to a hundredth of a pixel');
+});
+
+test('Zoom to the light goes where the light is at that moment, as close as its close-up', () => {
   const start = chicago(3, 12, 8);
   const picture = { width: 1920, height: 852 };
   // A single point: the smallest close-up is 160 px of 1920, more than six times: six.
@@ -106,12 +116,14 @@ test('the Monitor’s keys, bounded by the window: Space plays or pauses, ← �
   assert.equal(windowedAction(null, state('playing', 110_000)), null);
 });
 
-test('the keyboard help is the Monitor’s, less what a clip has no use for, and says Esc closes', () => {
+test('the keyboard help is the Monitor’s, less what a clip has no use for, with the marker and the zoom, and says Esc closes', () => {
   const monitor = new Map(KEY_MAP);
-  assert.deepEqual(SKY_KEY_MAP.map(([keys]) => keys), ['Space', '← →', 'Shift + ← →', 'Alt + ← →', ', .', 'Esc']);
+  assert.deepEqual(SKY_KEY_MAP.map(([keys]) => keys), ['Space', '← →', 'Shift + ← →', 'Alt + ← →', ', .', 'M', '0', 'Esc']);
   for (const keys of ['Space', '← →', 'Shift + ← →', ', .']) assert.equal(new Map(SKY_KEY_MAP).get(keys), monitor.get(keys), `${keys} reads as on the Monitor`);
   assert.equal(new Map(SKY_KEY_MAP).get('Alt + ← →'), '10 seconds back or forward');
-  assert.equal(new Map(SKY_KEY_MAP).get('Esc'), 'Close');
+  assert.equal(new Map(SKY_KEY_MAP).get('M'), 'Hide or show the marker');
+  assert.equal(new Map(SKY_KEY_MAP).get('0'), 'The whole picture again (double-click too)');
+  assert.equal(new Map(SKY_KEY_MAP).get('Esc'), 'Zoomed in: the whole picture again. Otherwise: close');
 });
 
 // MARK: What it says instead of playing
@@ -156,7 +168,8 @@ test('the player’s words are plain, with no straight apostrophe, and never cla
     assert.doesNotMatch(text, /\b(?:ft|feet|metres|meters|miles|km)\b/i, text);
   }
   assert.equal(T.watch, 'Watch on the Monitor');
-  assert.equal(T.zoom, 'Zoom');
+  assert.equal(T.zoom, 'Zoom to the light');
+  assert.deepEqual([T.hideMarker, T.showMarker], ['Hide marker', 'Show marker']);
   assert.deepEqual([T.widenOne, T.widenFive], ['±1 min', '±5 min']);
 });
 
@@ -195,20 +208,27 @@ let browser;
 let openSkyPlayer;
 before(async () => {
   browser = installFakeBrowser();
+  recordingCanvases(browser.document);                                   // the zoom's canvases draw in 2D (no WebGL here) and keep what they drew
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };    // the zoom's
   ({ openSkyPlayer } = await import('../web/js/screens/sky-player.js'));
 });
-after(() => browser?.restore());
+after(() => { delete globalThis.ResizeObserver; browser?.restore(); });
+
+/** The picture's box on screen: 960 × 426 at the page's top left, the shape of the recording's 1920 × 852 picture. */
+const FRAME = { width: 960, height: 426 };
 
 /**
  * The player over the rig: the real fetcher, catalog, clock, cells and session over the fake archive, the grid controller, and every timer
- * (the cells', the session's, the controller's and the player's frames) on the rig's fake clock.
+ * (the cells', the session's, the controller's and the player's frames) on the rig's fake clock. Its picture is laid out as a browser would:
+ * the frame (the zoom's host) FRAME, the video 1920 × 852 (the recording's picture, once one shows). `open` is the sky player module's
+ * openSkyPlayer (another copy of the module is another visit to the page).
  */
-async function openOver({ files = FILES(), entry = lightAt(ORIGIN + 50_000), at = camera(), still = '/api/v1/sky/cameras/x/entries/u1/still?night=2026-10-24', playable = true } = {}) {
+async function openOver({ files = FILES(), entry = lightAt(ORIGIN + 50_000), at = camera(), still = '/api/v1/sky/cameras/x/entries/u1/still?night=2026-10-24', playable = true, details = null, open = openSkyPlayer } = {}) {
   const rig = createRig({ cameras: [{ id: CAM, files }] });
   await rig.start();
   const closed = [];
-  const player = openSkyPlayer({
-    camera: at, entry, zone: CHICAGO, heading: '3:12:08 AM', what: 'Moving light · North Sky', still, watchHref: `#/camera/${CAM}/watch/${entry.watch}`,
+  const player = open({
+    camera: at, entry, zone: CHICAGO, heading: '3:12:08 AM', what: 'Moving light · North Sky', still, watchHref: `#/camera/${CAM}/watch/${entry.watch}`, details,
     onClose: () => closed.push('closed'),
     parts: {
       fetcher: rig.fetcher, catalog: rig.catalog, clock: rig.clock, makeCell: (id) => rig.makeCell(id), policy: DEFAULT_POLICY, timers: rig.timers, playable,
@@ -219,14 +239,42 @@ async function openOver({ files = FILES(), entry = lightAt(ORIGIN + 50_000), at 
   const dialog = player.el;
   const track = byClass(dialog, 'sky-scrub-track');
   track.getBoundingClientRect = () => ({ left: 0, top: 0, right: 340, bottom: 40, width: 340, height: 40, x: 0, y: 0 });
+  const frame = byClass(dialog, 'sky-player-frame');
+  Object.assign(frame, { clientWidth: FRAME.width, clientHeight: FRAME.height });
+  frame.getBoundingClientRect = () => ({ left: 0, top: 0, right: FRAME.width, bottom: FRAME.height, width: FRAME.width, height: FRAME.height, x: 0, y: 0 });
+  givePicture(all(dialog, (node) => node.localName === 'video')[0], { width: 1920, height: 852 });
   await rig.timers.advance(500);
   return { rig, player, dialog, track, closed, surface: () => rig.surface(CAM) };
 }
 const playButton = (dialog) => all(dialog, (node) => node.localName === 'button' && node.dataset?.playing !== undefined)[0];
 const readout = (dialog) => byClass(dialog, 'nvr-readout');
 const position = (track) => Number(track.getAttribute('aria-valuenow'));
-const key = (init) => document.dispatchEvent({ type: 'keydown', target: document.body, preventDefault() {}, stopImmediatePropagation() {}, ...init });
+/** A key pressed on the page; -> the event, which keeps whether the player took it. */
+const key = (init) => {
+  const event = { type: 'keydown', target: document.body, taken: false, preventDefault() { this.taken = true; }, stopImmediatePropagation() {}, ...init };
+  document.dispatchEvent(event);
+  return event;
+};
 const pointer = (track, type, clientX) => track.dispatchEvent({ type, pointerId: 1, pointerType: 'mouse', button: 0, clientX, target: track, preventDefault() {} });
+/** An event on the zoom's surface (the picture) at the frame's point (x, y), as a mouse gives it; -> the event. */
+function onPicture(dialog, type, x, y, extra = {}) {
+  const surface = byClass(dialog, 'zoom-surface');
+  const event = { type, pointerId: 1, pointerType: 'mouse', button: 0, clientX: x, clientY: y, target: surface, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...extra };
+  surface.dispatchEvent(event);
+  return event;
+}
+/** A mouse drag over the picture from `from` to `to` (frame points). */
+function dragPicture(dialog, from, to, extra = {}) {
+  onPicture(dialog, 'pointerdown', ...from, extra);
+  onPicture(dialog, 'pointermove', ...to, extra);
+  onPicture(dialog, 'pointerup', ...to, extra);
+}
+const zoomOf = (dialog) => byClass(dialog, 'sky-player-stage').dataset.zoom;
+/** `got` is `want` to within `within` (the overlay's view box is kept to a hundredth of a pixel). */
+const near = (got, want, what = '', within = 0.006) => assert.ok(Math.abs(got - want) <= within, `${what} ${got} ≈ ${want}`);
+/** The overlay's view box as numbers: [x, y, width, height] in the picture's pixels. */
+const viewBoxOf = (dialog) => byClass(dialog, 'sky-player-path').getAttribute('viewBox').split(' ').map(Number);
 
 describe('the modal', () => {
   it('opens on the page as a dialog and plays the window from 15 s before the light', async () => {
@@ -339,7 +387,7 @@ describe('the modal', () => {
     }
   });
 
-  it('draws the light’s path over the video and the light where it is at that moment; Zoom magnifies around it', async () => {
+  it('draws the light’s path over the video and the light where it is at that moment; Zoom to the light zooms the Monitor’s zoom there', async () => {
     const entry = lightAt(ORIGIN + 50_000);
     const { rig, player, dialog, track } = await openOver({ entry });
     try {
@@ -352,28 +400,219 @@ describe('the modal', () => {
       pointer(track, 'pointerup', x);
       await rig.timers.advance(1000);
       const overlay = byClass(dialog, 'sky-player-path');
-      const [width, height] = overlay.getAttribute('viewBox').split(' ').slice(2).map(Number);
-      assert.deepEqual([width, height], [1920, 852], 'in the picture’s own coordinates');
+      assert.deepEqual(viewBoxOf(dialog), [0, 0, 1920, 852], 'in the picture’s own coordinates, all of it');
       const now = byClass(overlay, 'sky-player-now');
       const point = pathPointAt(entry.path, entry.start, position(track), entry.end);
       assert.equal(Number(now.getAttribute('cx')).toFixed(1), (point.x * 1920).toFixed(1));
       assert.equal(Number(now.getAttribute('cy')).toFixed(1), (point.y * 852).toFixed(1));
       assert.equal(now.dataset.at, 'during');
       assert.ok(byClass(overlay, 'sky-path-line'), 'and the whole path, faint');
+      assert.equal(Number(now.getAttribute('r')), 30.72, 'the ring: 1.6 % of the picture');
 
-      const zoom = button(dialog, T.zoom);
-      zoom.click();
-      await rig.timers.advance(100);
-      const stage = byClass(dialog, 'sky-player-stage');
-      assert.equal(stage.dataset.zoom, 'true');
-      assert.equal(zoom.getAttribute('aria-pressed'), 'true');
-      const picture = byClass(dialog, 'sky-player-picture');
+      // Zoom to the light: the zoom's own view, centred on the light, as close as its close-up shows it.
+      const zoomButton = button(dialog, T.zoom);
+      assert.ok(byClass(dialog, 'sky-player-transport').contains(zoomButton), 'in the control bar');
+      assert.equal(zoomButton.getAttribute('aria-pressed'), null, 'a press, not a switch');
+      zoomButton.click();
+      assert.equal(zoomOf(dialog), 'true');
       const expected = zoomAt(entry.path, entry.start, position(track), { width: 1920, height: 852 });
-      assert.equal(picture.style.getPropertyValue('--sky-zoom'), String(expected.scale));
-      assert.equal(picture.style.getPropertyValue('--sky-zoom-x'), `${expected.x}%`);
-      assert.equal(picture.style.getPropertyValue('--sky-zoom-y'), `${expected.y}%`);
-      zoom.click();
-      assert.equal(stage.dataset.zoom, 'false');
+      const [vx, vy, vw, vh] = viewBoxOf(dialog);
+      near(vw, 1920 / expected.scale, 'as close as the close-up:');
+      near(vh, 852 / expected.scale, 'in the picture’s shape:');
+      near((vx + vw / 2) / 1920, point.x, 'centred on the light across', 1e-3);
+      near((vy + vh / 2) / 852, point.y, 'and down', 1e-3);
+      near(Number(now.getAttribute('r')), Math.round((30.72 / expected.scale) * 100) / 100, 'the ring keeps its size on screen');
+      assert.equal(byClass(dialog, 'zoom-level').textContent, `${expected.scale.toFixed(1)}×`, 'the zoom’s level, as on the Monitor');
+      assert.equal(visible(byClass(dialog, 'zoom-controls')), true, 'and its Reset');
+
+      // From there the person moves it: a drag of a quarter of the picture's box to the left moves the view a quarter of itself to the right.
+      dragPicture(dialog, [480, 213], [240, 213]);
+      near(viewBoxOf(dialog)[0], vx + vw / 4, 'moved');
+      assert.equal(viewBoxOf(dialog)[2], vw, 'not zoomed');
+    } finally {
+      player.close();
+    }
+  });
+
+  it('hides and shows the light’s marker with its button and with M, and remembers the choice for the next light', async () => {
+    const one = await openOver();
+    let two = null;
+    try {
+      const stage = byClass(one.dialog, 'sky-player-stage');
+      const overlay = byClass(one.dialog, 'sky-player-path');
+      assert.equal(stage.dataset.marker, 'true', 'shown at first');
+      assert.ok(byClass(overlay, 'sky-player-now') && byClass(overlay, 'sky-path-line'), 'the marker is the ring and the path');
+      const hide = button(one.dialog, T.hideMarker);
+      assert.ok(hide && byClass(one.dialog, 'sky-player-transport').contains(hide), 'Hide marker, in the control bar');
+      assert.equal(all(hide, (node) => node.localName === 'svg').length, 1, 'with its sign, as the buttons beside it');
+      assert.match(hide.title, /\(M\)$/, 'and its key');
+      hide.click();
+      assert.equal(stage.dataset.marker, 'false', 'hidden');
+      assert.equal(button(one.dialog, T.hideMarker), undefined);
+      assert.ok(button(one.dialog, T.showMarker), 'the button now says Show marker');
+      assert.equal(localStorage.getItem('cb.sky.marker'), '0', 'kept in this browser');
+      button(one.dialog, T.showMarker).click();
+      assert.equal(stage.dataset.marker, 'true', 'and shows it again');
+      assert.equal(localStorage.getItem('cb.sky.marker'), '1');
+
+      const m = key({ key: 'm' });
+      assert.equal(stage.dataset.marker, 'false', 'M hides it');
+      assert.equal(m.taken, true, 'the player’s key');
+      key({ key: 'M', shiftKey: true });
+      assert.equal(stage.dataset.marker, 'true', 'and shows it');
+      key({ key: 'm', repeat: true });
+      assert.equal(stage.dataset.marker, 'true', 'a held key does not make it flicker');
+      key({ key: 'm', metaKey: true });
+      key({ key: 'm', ctrlKey: true });
+      assert.equal(stage.dataset.marker, 'true', 'not with cmd or ctrl');
+      key({ key: 'm', target: Object.assign(document.createElement('input'), { closest: () => ({}) }) });
+      assert.equal(stage.dataset.marker, 'true', 'not while typing');
+      key({ key: 'm' });
+      assert.equal(stage.dataset.marker, 'false');
+      one.player.close();
+
+      two = await openOver();
+      assert.equal(byClass(two.dialog, 'sky-player-stage').dataset.marker, 'false', 'the next light opens with it hidden');
+      assert.ok(button(two.dialog, T.showMarker));
+      const css = readFileSync(new URL('../web/sky.css', import.meta.url), 'utf8');
+      assert.match(css, /\.sky-player-stage\[data-marker="false"\] \.sky-player-path \{ visibility: hidden; \}/, 'hidden is not drawn');
+    } finally {
+      one.player.close();
+      if (two) { button(two.dialog, T.showMarker)?.click(); two.player.close(); }
+    }
+  });
+
+  it('remembers the marker in this browser for the next visit, and for the visit where the browser keeps nothing', async () => {
+    const kept = globalThis.localStorage;
+    kept.setItem('cb.sky.marker', '0');
+    const { openSkyPlayer: nextVisit } = await import('../web/js/screens/sky-player.js?visit=next');
+    const one = await openOver({ open: nextVisit });
+    try {
+      assert.equal(byClass(one.dialog, 'sky-player-stage').dataset.marker, 'false', 'hidden, as it was left last time');
+    } finally {
+      one.player.close();
+    }
+    // A browser that keeps nothing (a private window, blocked site data): shown at first, and the choice holds for the visit.
+    globalThis.localStorage = makeStorage({ broken: true });
+    try {
+      const { openSkyPlayer: privateVisit } = await import('../web/js/screens/sky-player.js?visit=private');
+      const two = await openOver({ open: privateVisit });
+      try {
+        assert.equal(byClass(two.dialog, 'sky-player-stage').dataset.marker, 'true', 'nothing was kept');
+        button(two.dialog, T.hideMarker).click();
+        assert.equal(byClass(two.dialog, 'sky-player-stage').dataset.marker, 'false', 'and hiding it works all the same');
+      } finally {
+        two.player.close();
+      }
+      const three = await openOver({ open: privateVisit });
+      try {
+        assert.equal(byClass(three.dialog, 'sky-player-stage').dataset.marker, 'false', 'still hidden for the next light of this visit');
+      } finally {
+        three.player.close();
+      }
+    } finally {
+      globalThis.localStorage = kept;
+      kept.setItem('cb.sky.marker', '1');
+    }
+  });
+
+  it('zooms like the Monitor, on the picture alone: a box, the wheel around the pointer, a drag that moves it inside the picture; the marker follows', async () => {
+    const { rig, player, dialog } = await openOver();
+    try {
+      await rig.timers.advance(2000);
+      assert.equal(byClass(dialog, 'sky-player-stage').dataset.layer, 'video', 'the recording shows');
+      const layer = byClass(dialog, 'zoom-layer');
+      assert.ok(byClass(dialog, 'sky-player-frame').contains(layer), 'the zoom covers the picture’s box, not the page or the dialog');
+      assert.equal(layer.childNodes[1], byClass(dialog, 'sky-player-path'), 'the marker over the zoomed picture, under the zoom’s controls');
+      const now = byClass(dialog, 'sky-player-now');
+      const ring = Number(now.getAttribute('r'));
+
+      // A box a quarter of the picture across and down, a quarter in from its top left: that quarter fills the box.
+      dragPicture(dialog, [240, 106.5], [480, 213]);
+      assert.equal(zoomOf(dialog), 'true');
+      assert.deepEqual(viewBoxOf(dialog), [480, 213, 480, 213], 'the marker is drawn on the zoomed quarter, in the picture’s pixels');
+      assert.equal(Number(now.getAttribute('r')), ring / 4, 'four times in, the ring a quarter of its size in the picture: the same on screen');
+      assert.equal(byClass(dialog, 'zoom-level').textContent, '4.0×', 'the zoom’s level and Reset, as on the Monitor');
+      assert.equal(visible(byClass(dialog, 'zoom-controls')), true);
+
+      // The wheel: in around the pointer, the point of the picture under it staying where it is.
+      const [x0, y0, w0, h0] = viewBoxOf(dialog);
+      const before = { x: x0 + (720 / 960) * w0, y: y0 + (106.5 / 426) * h0 };
+      const wheel = onPicture(dialog, 'wheel', 720, 106.5, { deltaY: -100, deltaMode: 0 });
+      assert.equal(wheel.defaultPrevented, true, 'the page does not scroll');
+      const [x1, y1, w1, h1] = viewBoxOf(dialog);
+      assert.ok(w1 < w0, `in further (${w1} of ${w0})`);
+      near(x1 + (720 / 960) * w1, before.x, 'the point under the pointer stays across', 0.02);
+      near(y1 + (106.5 / 426) * h1, before.y, 'and down', 0.02);
+
+      // A drag moves it, never past the picture's edges.
+      dragPicture(dialog, [480, 213], [5480, 5213]);
+      assert.deepEqual(viewBoxOf(dialog).slice(0, 2), [0, 0], 'the picture’s top left corner, no further');
+      dragPicture(dialog, [480, 213], [-4520, -4787]);
+      const [x3, y3, w3, h3] = viewBoxOf(dialog);
+      near(x3 + w3, 1920, 'its right edge, no further', 0.011);
+      near(y3 + h3, 852, 'its foot', 0.011);
+      assert.equal(w3, w1, 'moving never zooms');
+    } finally {
+      player.close();
+    }
+  });
+
+  it('double-click and 0 show the whole picture again, the marker with it', async () => {
+    const { rig, player, dialog } = await openOver();
+    try {
+      await rig.timers.advance(2000);
+      const ring = Number(byClass(dialog, 'sky-player-now').getAttribute('r'));
+      button(dialog, T.zoom).click();
+      assert.equal(zoomOf(dialog), 'true');
+      onPicture(dialog, 'dblclick', 100, 100);
+      assert.equal(zoomOf(dialog), 'false', 'a double-click');
+      assert.deepEqual(viewBoxOf(dialog), [0, 0, 1920, 852], 'the marker on the whole picture again');
+      assert.equal(Number(byClass(dialog, 'sky-player-now').getAttribute('r')), ring);
+      button(dialog, T.zoom).click();
+      const zero = key({ key: '0' });
+      assert.equal(zoomOf(dialog), 'false', '0');
+      assert.equal(zero.taken, true, 'the player’s key');
+      assert.deepEqual(viewBoxOf(dialog), [0, 0, 1920, 852]);
+      assert.equal(key({ key: '0' }).taken, false, 'whole, 0 does nothing');
+    } finally {
+      player.close();
+    }
+  });
+
+  it('Escape gives the whole picture back first, as on the Monitor, and closes the player the second time', async () => {
+    const { rig, player, dialog, closed, surface } = await openOver();
+    try {
+      await rig.timers.advance(2000);
+      button(dialog, T.zoom).click();
+      assert.equal(zoomOf(dialog), 'true');
+      const first = key({ key: 'Escape' });
+      assert.equal(first.taken, true, 'the browser does not close the dialog itself');
+      assert.equal(zoomOf(dialog), 'false', 'the whole picture');
+      assert.equal(dialog.open, true, 'still open');
+      assert.deepEqual(closed, []);
+      assert.equal(surface().playing, true, 'and still playing');
+      key({ key: 'Escape' });
+      assert.equal(dialog.open, false, 'closed');
+      assert.deepEqual(closed, ['closed']);
+    } finally {
+      player.close();
+    }
+  });
+
+  it('zooms the still when there is no recording to play, and the marker follows it there too', async () => {
+    const { rig, player, dialog } = await openOver({ entry: lightAt(ORIGIN + 1_400_000) });
+    try {
+      await rig.timers.advance(1000);
+      assert.equal(byClass(dialog, 'sky-player-stage').dataset.layer, 'still');
+      const still = all(dialog, (node) => node.localName === 'img' && node.classList.contains('sky-player-still'))[0];
+      dragPicture(dialog, [240, 106.5], [480, 213]);
+      assert.equal(zoomOf(dialog), 'false', 'nothing to zoom before the still has come');
+      Object.assign(still, { naturalWidth: 1920, naturalHeight: 852 });
+      dragPicture(dialog, [240, 106.5], [480, 213]);
+      assert.equal(zoomOf(dialog), 'true');
+      assert.deepEqual(viewBoxOf(dialog), [480, 213, 480, 213]);
+      assert.ok(all(dialog, (node) => node.className === 'zoom-canvas')[0].getContext('2d').draws.some(([picture]) => picture === still), 'the still, zoomed');
     } finally {
       player.close();
     }
@@ -434,6 +673,42 @@ describe('the modal', () => {
     } finally {
       player.close();
     }
+  });
+
+  it('holds the light’s details from the log beside the picture and its controls (under them on a narrow window)', async () => {
+    const details = document.createElement('div');
+    details.className = 'sky-details';
+    let tapped = 0;
+    const bird = document.createElement('button');
+    bird.textContent = 'Bird';
+    bird.addEventListener('click', () => { tapped += 1; });
+    details.append(bird);
+    const { player, dialog } = await openOver({ details });
+    try {
+      const side = byClass(dialog, 'sky-player-side');
+      assert.ok(side && side.contains(details), 'the details are in the player');
+      assert.equal(side.localName, 'aside');
+      assert.equal(side.getAttribute('aria-label'), 'About this light');
+      assert.equal(byClass(dialog, 'sky-player-panel').dataset.side, 'true');
+      const body = byClass(dialog, 'sky-player-body');
+      assert.deepEqual(body.childNodes.map((node) => node.className), ['sky-player-main', 'sky-player-side'], 'after the picture and its controls');
+      const main = byClass(dialog, 'sky-player-main');
+      assert.ok(main.contains(byClass(dialog, 'sky-player-stage')) && main.contains(byClass(dialog, 'sky-player-controls')));
+      bird.click();
+      assert.equal(tapped, 1, 'its buttons work from here');
+      assert.ok(all(dialog, (node) => node.localName === 'a' && node.textContent.trim() === T.watch)[0], 'with Watch on the Monitor');
+    } finally {
+      player.close();
+    }
+    const bare = await openOver();
+    try {
+      assert.equal(byClass(bare.dialog, 'sky-player-side'), undefined, 'none given: none shown');
+      assert.equal(byClass(bare.dialog, 'sky-player-panel').dataset.side, 'false');
+    } finally {
+      bare.player.close();
+    }
+    const css = readFileSync(new URL('../web/sky.css', import.meta.url), 'utf8');
+    assert.match(css, /@media \(min-width: 1000px\) \{[^@]*\.sky-player-body\[data-side="true"\] \{ flex-direction: row;/, 'beside them on a wide window');
   });
 
   it('looks like the Monitor: its dark colours, and the Monitor’s button and transport rules', () => {

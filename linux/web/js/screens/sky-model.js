@@ -1,12 +1,15 @@
 // Sky Watcher's words and numbers, with no page in them: every sentence of the camera page's card and of the sky log, the direction, speed,
 // blink and shape of a light in plain words, the summary and the conditions line, the hours with more lights than were logged, the aim, the dots
-// of the night's strip, the groups of the explained entries, a path in picture coordinates, and the addresses. Nothing here touches the document
-// or sends a request.
+// of the night's strip, the grid's kinds, filters, sorts and hours (and how they are written in the address), a path in picture coordinates, and
+// the addresses. Nothing here touches the document or sends a request.
 //
 // One camera cannot tell how far away something is, so nothing here ever claims a real size, distance or speed: a speed is only ever "faster
 // across the sky than planes at that height".
 
-/** The sky page's address (#/sky, #/sky/<camera>, with ?night=yyyy-MM-dd&view=night|day&entry=<id>); app.js routes it, sky-log.js reads it. */
+/**
+ * The sky page's address (#/sky, #/sky/<camera>, with ?night=yyyy-MM-dd&view=night|day&entry=<id> and the grid's kinds=…&sort=…&pictures=1);
+ * app.js routes it, sky-log.js reads it.
+ */
 export const SKY_ROUTE = /^sky(?:\/([0-9A-Fa-f-]{36}))?(?:\?(.*))?$/;
 
 /** Every sentence of the card and the log that does not carry a number. The name is Sky Watcher everywhere. */
@@ -82,18 +85,22 @@ export const SKY_TEXT = {
     earlier: 'Earlier',
     later: 'Later',
     camera: 'Camera',
-    unexplained: 'Unexplained',
-    explained: 'Explained',
     nothingUnexplained: 'Nothing unexplained. Everything that crossed the sky was a plane, a satellite, a meteor, a bug or a bird.',
     nothingAtAll: 'Nothing crossed the sky in this time.',
+    noMatch: 'No lights match these filters.',
+    noPictures: 'None of these lights has a picture.',
+    clearFilters: 'Clear filters',
+    all: 'All',
+    show: 'Show',
+    withPicture: 'With picture',
+    sort: 'Sort',
+    goTo: 'Go to',
     thatWasA: 'That was a…',
-    play: 'Play',
     download: 'Download clip',
     noPicture: 'No picture kept',
-    closeUp: 'Close-up',
-    wholePicture: 'Whole picture',
     probable: 'probably a plane',
-    showMore: 'Show more',
+    yours: 'You said what this was',
+    open: 'Open the recording',
     status: 'Status',
     loading: 'Loading the sky log…',
     retry: 'Try again',
@@ -120,8 +127,16 @@ export const SKY_TEXT = {
   // The clip player (sky-player.js): the recording around one light, in a modal on the sky log.
   player: {
     close: 'Close',
-    zoom: 'Zoom',
-    zoomHint: 'Magnify around the light',
+    details: 'About this light',
+    zoom: 'Zoom to the light',
+    zoomHint: 'Zoom in on the light where it is now, then drag to move or scroll to zoom',
+    hideMarker: 'Hide marker',
+    showMarker: 'Show marker',
+    hideMarkerHint: 'Hide the ring and the path, to see the light itself (M)',
+    showMarkerHint: 'Show the ring and the path again (M)',
+    markerKey: 'Hide or show the marker',
+    wholeKey: 'The whole picture again (double-click too)',
+    escKey: 'Zoomed in: the whole picture again. Otherwise: close',
     watch: 'Watch on the Monitor',
     position: 'Where in the recording',
     light: 'The light',
@@ -230,12 +245,13 @@ export function durationText(seconds) {
 export const BUCKETS = ['unexplained', 'planes', 'satellites', 'meteors', 'bugsAndBirds', 'notSure'];
 
 /**
- * "Last night: 1 unexplained, 214 explained" (night view) or "Today: …" (day view). `when` replaces the first word for another time, such as
- * "Tonight so far" or "Night of Sat, Oct 24".
+ * "Last night: 1 unexplained, 214 explained" (night view) or "Today: …" (day view), "1,906" with its comma. `when` replaces the first word for
+ * another time, such as "Tonight so far" or "Night of Sat, Oct 24".
  */
 export function summaryText(counts, view, when = null) {
   const lead = when || (view === 'day' ? 'Today' : 'Last night');
-  return `${lead}: ${asNumber(counts?.unexplained)} unexplained, ${asNumber(counts?.explained)} explained`;
+  const number = (value) => asNumber(value).toLocaleString('en-US');
+  return `${lead}: ${number(counts?.unexplained)} unexplained, ${number(counts?.explained)} explained`;
 }
 
 /** The word beside a number in the counts row: 1 plane, 2 planes; 1 bug or bird, 2 bugs and birds. */
@@ -281,6 +297,17 @@ function hourText(p, period = true) {
   return `${p.hour}${p.minute === '00' ? '' : `:${p.minute}`}${period ? ` ${p.dayPeriod}` : ''}`;
 }
 
+/** The start of the clock hour that `ms` falls in, in `zone` (epoch ms): the grid's hours are the box's, as its strip's marks are. */
+export function hourStart(ms, zone) {
+  const p = clockParts(ms, zone);
+  return ms - (Number(p.minute) * 60 + Number(p.second)) * 1000 - (((ms % 1000) + 1000) % 1000);
+}
+
+/** An hour's heading in the grid: "9 PM", "12 AM". */
+export function hourLabel(ms, zone) {
+  return hourText(clockParts(hourStart(ms, zone), zone));
+}
+
 const DAY_NAME = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /** The UTC midnight of a night's name ("yyyy-MM-dd"), or null. */
@@ -303,20 +330,39 @@ export function shiftDate(name, days) {
   return ms === null ? null : new Date(ms + days * 86_400_000).toISOString().slice(0, 10);
 }
 
+/** The capped hours the bridge sent, read safely: [{ hour, count }] in the order of the hours, without what is not an hour and a count. */
+function cappedHours(capped) {
+  return (Array.isArray(capped) ? capped : [])
+    .map((item) => ({ hour: toMs(item?.hour), count: finite(item?.count) }))
+    .filter((item) => item.hour !== null && item.count !== null && item.count >= 1)
+    .sort((a, b) => a.hour - b.hour);
+}
+
+/** "212 more lights weren’t logged (busy hour)", "1 more light wasn’t logged (busy hour)". */
+function cappedWords(count) {
+  const whole = Math.round(count);
+  return `${whole === 1 ? '1 more light wasn’t' : `${whole.toLocaleString('en-US')} more lights weren’t`} logged (busy hour)`;
+}
+
 /**
  * The hours in which the box followed more lights than it logs (at most 200 an hour), each as a note in the box's hours: "4 PM: 212 more lights
  * weren’t logged (busy hour)", in the order of the hours. What is not an hour and a count says nothing.
  */
 export function cappedText(capped, zone) {
-  return (Array.isArray(capped) ? capped : [])
-    .map((item) => ({ hour: toMs(item?.hour), count: finite(item?.count) }))
-    .filter((item) => item.hour !== null && item.count !== null && item.count >= 1)
-    .sort((a, b) => a.hour - b.hour)
-    .map(({ hour, count }) => {
-      const whole = Math.round(count);
-      const lights = whole === 1 ? '1 more light wasn’t' : `${whole.toLocaleString('en-US')} more lights weren’t`;
-      return `${hourText(clockParts(hour, zone))}: ${lights} logged (busy hour)`;
-    });
+  return cappedHours(capped).map(({ hour, count }) => `${hourText(clockParts(hour, zone))}: ${cappedWords(count)}`);
+}
+
+/**
+ * The same notes for the grid's hour headings: the start of each clock hour in the box's zone (hourStart) -> "212 more lights weren’t logged
+ * (busy hour)". Two notes of one hour (a box that restarted in it) add up.
+ */
+export function cappedByHour(capped, zone) {
+  const counts = new Map();
+  for (const { hour, count } of cappedHours(capped)) {
+    const start = hourStart(hour, zone);
+    counts.set(start, (counts.get(start) ?? 0) + count);
+  }
+  return new Map([...counts].map(([hour, count]) => [hour, cappedWords(count)]));
 }
 
 const CONDITION_WORDS = { clear: 'clear', cloudy: 'cloudy', notVisible: 'sky not visible', unknown: 'sky conditions unknown' };
@@ -590,13 +636,174 @@ export function stripTicks(from, to, zone) {
   return ticks;
 }
 
-const GROUPS = [['planes', 'Planes'], ['satellites', 'Satellites'], ['meteors', 'Meteors'], ['bugsAndBirds', 'Bugs and birds'], ['notSure', 'Not sure']];
+// MARK: The grid: kinds, filters, sorts and hours
 
-/** The explained entries as [{ label, title, entries }]: planes, satellites, meteors, bugs and birds, then not sure; in time order; none empty. */
-export function groupExplained(entries) {
-  const list = Array.isArray(entries) ? entries.filter(Boolean) : [];
-  return GROUPS.map(([label, title]) => ({ label, title, entries: list.filter((entry) => entryBucket(entry) === label).sort((a, b) => a.start - b.start) }))
-    .filter((group) => group.entries.length > 0);
+/**
+ * The kind chips over the grid, in order: the name the address uses, and the words on the chip. Planes include the probable ones, satellites
+ * their flares, and "Bugs & birds" both (entryBucket); an explained light the person was not sure of is under none of them. "Corrected by you"
+ * is every entry the person said something about.
+ */
+export const GRID_KINDS = Object.freeze([['unexplained', 'Unexplained'], ['planes', 'Planes'], ['satellites', 'Satellites'], ['meteors', 'Meteors'], ['bugs', 'Bugs & birds'], ['corrected', 'Corrected by you']]);
+const KIND_NAMES = GRID_KINDS.map(([name]) => name);
+const CHIP_OF_BUCKET = { unexplained: 'unexplained', planes: 'planes', satellites: 'satellites', meteors: 'meteors', bugsAndBirds: 'bugs' };
+
+/** The grid's orders: the name the address uses, and the words in the menu. */
+export const GRID_SORTS = Object.freeze([['newest', 'Newest first'], ['oldest', 'Oldest first'], ['longest', 'Longest'], ['fastest', 'Fastest across the sky']]);
+const SORT_NAMES = new Set(GRID_SORTS.map(([name]) => name));
+
+/** Whether an order is by time (the grid then has its hours' headings), rather than by how long or how fast. */
+export const isTimeSort = (sort) => sort === 'newest' || sort === 'oldest';
+
+/** The kind chip an entry is under: 'unexplained', 'planes', 'satellites', 'meteors' or 'bugs'; null for an explained light the person doubted. */
+export function kindChip(entry) {
+  return CHIP_OF_BUCKET[entryBucket(entry)] ?? null;
+}
+
+const KIND_WORDS = { unexplained: 'Unexplained', plane: 'Plane', probablePlane: 'Probably a plane', satellite: 'Satellite', satelliteFlare: 'Satellite flare', meteor: 'Meteor', bug: 'Bug', bird: 'Bird' };
+
+/** What an entry is, in a word or three, for its card: "Unexplained", "Plane", "Probably a plane", "Satellite flare", "Bird", "Not sure", … */
+export function kindWord(entry) {
+  const bucket = entryBucket(entry);
+  if (bucket === 'unexplained') return KIND_WORDS.unexplained;
+  if (bucket === 'notSure') return 'Not sure';
+  return KIND_WORDS[entry?.display ?? entry?.label] ?? KIND_WORDS.unexplained;
+}
+
+/**
+ * Whether the grid shows an entry: it is under one of the chips that are on (none on: every entry; several: any of them), and it has a still
+ * when `pictures` is on.
+ */
+export function matchesFilters(entry, { kinds = [], pictures = false } = {}) {
+  if (!entry || (pictures && entry.hasStill !== true)) return false;
+  if (!kinds.length) return true;
+  return kinds.some((kind) => (kind === 'corrected' ? Boolean(entry.correction) : kindChip(entry) === kind));
+}
+
+/** The number on each chip, for a night: { all, unexplained, planes, satellites, meteors, bugs, corrected }. */
+export function chipCounts(entries) {
+  const counts = { all: 0, unexplained: 0, planes: 0, satellites: 0, meteors: 0, bugs: 0, corrected: 0 };
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry) continue;
+    counts.all += 1;
+    const chip = kindChip(entry);
+    if (chip) counts[chip] += 1;
+    if (entry.correction) counts.corrected += 1;
+  }
+  return counts;
+}
+
+/** How long a light was followed, in seconds: its own measure, else from its start to its end. */
+export function lastedSeconds(entry) {
+  const measured = finite(entry?.measures?.duration);
+  if (measured !== null && measured >= 0) return measured;
+  return Math.max(0, ((finite(entry?.end) ?? 0) - (finite(entry?.start) ?? 0)) / 1000);
+}
+
+/**
+ * The entries in an order (a new list): by time, oldest or newest first; the longest first; or the fastest across the sky first, by
+ * `measures.speed` (degrees of sky a second), those without one last. Ties go by time.
+ */
+export function sortEntries(entries, sort) {
+  const list = (Array.isArray(entries) ? entries : []).filter(Boolean);
+  const byTime = (a, b) => a.start - b.start || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  if (sort === 'newest') return list.sort((a, b) => byTime(b, a));
+  if (sort === 'longest') return list.sort((a, b) => lastedSeconds(b) - lastedSeconds(a) || byTime(a, b));
+  if (sort === 'fastest') {
+    const speed = (entry) => finite(entry.measures?.speed);
+    return list.sort((a, b) => {
+      const x = speed(a);
+      const y = speed(b);
+      if (x === null || y === null) return Number(x === null) - Number(y === null) || byTime(a, b);
+      return y - x || byTime(a, b);
+    });
+  }
+  return list.sort(byTime);
+}
+
+/** The order a night opens in when the person has not chosen one: the newest first while it is still going, else the oldest first (from dusk). */
+export function defaultSort(window, now) {
+  const from = finite(window?.from);
+  const to = finite(window?.to);
+  return from !== null && to !== null && from <= now && now < to ? 'newest' : 'oldest';
+}
+
+const orderKinds = (kinds) => KIND_NAMES.filter((name) => kinds.includes(name));
+
+/** What the filters and the order are, read safely (from the address or a browser's memory): { kinds, sort (null: not chosen), pictures }. */
+export function gridChoice(value) {
+  const kinds = Array.isArray(value?.kinds) ? orderKinds(value.kinds) : [];
+  return { kinds, sort: SORT_NAMES.has(value?.sort) ? value.sort : null, pictures: value?.pictures === true };
+}
+
+/**
+ * The grid's part of the address, `kinds=unexplained,planes&sort=fastest&pictures=1`, read: { kinds, sort, pictures, given }; `given` says
+ * whether the address said anything about them (else the browser's memory is used). What is not a kind or an order is left out.
+ */
+export function readGridQuery(query) {
+  const found = query instanceof URLSearchParams ? query : new URLSearchParams(typeof query === 'string' ? query : '');
+  const kinds = (found.get('kinds') ?? '').split(',').map((name) => name.trim());
+  return { ...gridChoice({ kinds, sort: found.get('sort'), pictures: found.get('pictures') === '1' }), given: ['kinds', 'sort', 'pictures'].some((name) => found.has(name)) };
+}
+
+/** The grid's part of the address for a choice: ['kinds=unexplained,planes', 'sort=fastest', 'pictures=1'], or [] for every kind in the night's own order. */
+export function gridQuery(choice) {
+  const { kinds, sort, pictures } = gridChoice(choice);
+  return [kinds.length ? `kinds=${kinds.join(',')}` : null, sort ? `sort=${sort}` : null, pictures ? 'pictures=1' : null].filter(Boolean);
+}
+
+/**
+ * Entries (in the order given, which is by time) in the clock hours they began in, in the box's zone: [{ hour, label, entries }] in the order the
+ * hours come. The fall's repeated hour is two hours, each with its own start.
+ */
+export function hourGroups(entries, zone) {
+  const groups = [];
+  let group = null;
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    // A clock hour is an hour long in every zone, so a light within the last one's hour is in it: the zone is asked once an hour, not once a light.
+    if (!(group && entry.start >= group.hour && entry.start < group.hour + 3_600_000)) {
+      const hour = hourStart(entry.start, zone);
+      group = groups.find((known) => known.hour === hour) ?? null;
+      if (!group) {
+        group = { hour, label: hourText(clockParts(hour, zone)), entries: [] };
+        groups.push(group);
+      }
+    }
+    group.entries.push(entry);
+  }
+  return groups;
+}
+
+const SHAPE_WORDS = { straight: 'straight', curved: 'curved', suddenStop: 'stops suddenly', sharpTurn: 'turns sharply' };
+const POINT_WORDS = { newLight: 'new light', flash: 'flash' };
+
+/**
+ * An unexplained light's line on its card: where it was, then that it blinked or the shape of its path (a light that did not move: what it was):
+ * "Northwest, 8° up · blinks", "North, 24° up · new light", "East, 30° up · stops suddenly". With `how` false, only where: "Southwest, 40° up".
+ */
+export function shortLine(entry, { how = true } = {}) {
+  const m = entry?.measures ?? {};
+  const word = compassWord(m.azimuth);
+  const up = finite(m.elevation);
+  const where = word ? `${word[0].toUpperCase()}${word.slice(1)}${up === null ? '' : `, ${Math.max(0, Math.round(up))}° up`}` : '';
+  if (!how) return where;
+  const what = m.blinks === true ? 'blinks' : entry?.kind === 'track' || !entry?.kind ? SHAPE_WORDS[m.shape] ?? '' : POINT_WORDS[entry.kind] ?? '';
+  return [where, what].filter(Boolean).join(' · ');
+}
+
+/** A card's line under its time: an unexplained light's shortLine; else what the box matched it to (a flight, a satellite's name), or where it was. */
+export function cardLine(entry) {
+  if (entryBucket(entry) === 'unexplained') return shortLine(entry);
+  return entry?.detail || shortLine(entry, { how: false });
+}
+
+/** How long a light lasted, for the corner of its card: "<1 s", "4.2 s", "12 s", "2 min". */
+export function durationShort(seconds) {
+  const value = finite(seconds);
+  if (value === null || value < 0) return '';
+  if (value < 1) return '<1 s';
+  if (value < 10) return `${Number(value.toFixed(1))} s`;
+  if (value < 90) return `${Math.round(value)} s`;
+  return `${Math.round(value / 60)} min`;
 }
 
 // MARK: The path, the links
@@ -643,6 +850,48 @@ export function closeUpRect(path, width, height, { aspect = CLOSE_UP.aspect, min
   const x = Math.min(Math.max((left + right) / 2 - w / 2, 0), width - w);
   const y = Math.min(Math.max((top + bottom) / 2 - h / 2, 0), height - h);
   return { x: Number(round2(x)), y: Number(round2(y)), width: Number(round2(w)), height: Number(round2(h)) };
+}
+
+// MARK: The thumbnail
+
+/** How wide a card's thumbnail is at most, in pixels: what the box makes for `GET …/still?size=thumb`. */
+export const THUMB_WIDTH = 480;
+
+/**
+ * The part of a still of `width` × `height` that the box cuts for a card's thumbnail: the close-up (closeUpRect) in whole pixels, moved in
+ * from an edge rather than cut by rounding. The box has the same rule in Swift (SkyCloseUp.swift, tested against this one case by case:
+ * linux/web-tests/support/sky-closeup-vectors.mjs), so the path drawn over the thumbnail lies where the light was. null when the light has no
+ * close-up (the thumbnail is then all of the picture).
+ */
+export function thumbRect(path, width, height, options) {
+  const rect = closeUpRect(path, width, height, options);
+  if (!rect) return null;
+  const w = Math.min(width, Math.max(1, Math.round(rect.width)));
+  const h = Math.min(height, Math.max(1, Math.round(rect.height)));
+  return { x: Math.min(Math.max(0, Math.round(rect.x)), width - w), y: Math.min(Math.max(0, Math.round(rect.y)), height - h), width: w, height: h };
+}
+
+/** Whether two shapes (width over height) are the same to a pixel or two. */
+const sameShape = (a, b) => Math.abs(a - b) <= 0.03 * b;
+
+/**
+ * What a card's picture is, from its size once it has arrived, when a thumbnail was asked for. `natural` is { width, height } of the image, `picture`
+ * the size of the still it was cut from ({ width, height }, or null when the night did not say) and `path` the light's. One of:
+ *   { mode: 'crop', rect, picture }   the close-up the box cut (rect: its place in the still, whole pixels): it fills the card, and the path is drawn in rect
+ *   { mode: 'whole', picture }        all of the picture, at its own size or smaller (the thumbnail of a light that crossed the sky, or the full still the
+ *                                     box answers with when it cannot make a thumbnail): `picture` is the size the path is drawn in
+ *   null                              neither (the picture changed shape since the night began, or there is no size to tell): ask for the full still
+ */
+export function thumbGeometry(path, natural, picture) {
+  const width = natural?.width;
+  const height = natural?.height;
+  if (!(width > 0 && height > 0)) return null;
+  if (width > THUMB_WIDTH) return { mode: 'whole', picture: { width, height } };   // bigger than the box makes a thumbnail: the full still, its own size is the truth
+  if (!(picture?.width > 0 && picture?.height > 0)) return null;
+  const rect = thumbRect(path, picture.width, picture.height);
+  if (rect && width <= rect.width + 1 && sameShape(width / height, rect.width / rect.height)) return { mode: 'crop', rect, picture };
+  if (sameShape(width / height, picture.width / picture.height)) return { mode: 'whole', picture };
+  return null;
 }
 
 /** The Watch screen at the entry's moment, three seconds early (the box says which millisecond). */

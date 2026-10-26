@@ -5,9 +5,11 @@ import Synchronization
 
 /// Runs ffmpeg once: input in, wait (bounded) for the end, output back. For work that is one picture or a second of audio.
 enum FFmpegOneShot {
-    static func run(runtime: FFmpegRuntime, label: String, arguments: [String], input: Data?, timeout: Duration) throws -> Data {
+    /// `niceness` (1…19): the child runs under `nice -n <niceness>`, for work that must not take the box's cores from live video and recordings.
+    static func run(runtime: FFmpegRuntime, label: String, arguments: [String], input: Data?, timeout: Duration, niceness: Int? = nil) throws -> Data {
         let executable = try runtime.requireExecutable()
-        let session = try FFmpegSession(launcher: runtime.launcher, spec: FFmpegProcessSpec(executable: executable, arguments: arguments, label: label))
+        let session = try FFmpegSession(launcher: runtime.launcher,
+                                        spec: FFmpegProcessSpec(executable: executable, arguments: arguments, label: label, niceness: niceness))
         defer { session.terminate() }
         if let input {
             do {
@@ -68,6 +70,27 @@ enum FFmpegPictures {
         guard output.count > 4, output.prefix(2) == Data([0xFF, 0xD8]) else { throw MediaCodecError.noFrame }
         return output
     }
+
+    /// The part of a JPEG (or PNG) inside `crop` (nil: all of it), at most `maxWidth` wide and never larger than the part itself, as a JPEG at
+    /// `quality` (`MediaCodecs.croppedJPEG`): the Sky Watcher's small pictures. A whole picture that already fits comes back unchanged. The child
+    /// runs under `nice -n 10`: a grid of these is made while video is being recorded.
+    static func crop(_ data: Data, to crop: ImageCrop?, maxWidth: Int, quality: Double, runtime: FFmpegRuntime) throws -> Data {
+        guard let size = imageSize(data), size.width > 0, size.height > 0 else { throw MediaCodecError.unsupported("not an image") }
+        let part = crop ?? ImageCrop(x: 0, y: 0, width: size.width, height: size.height)
+        guard part.width > 0, part.height > 0, part.x >= 0, part.y >= 0, part.x + part.width <= size.width, part.y + part.height <= size.height else {
+            throw MediaCodecError.unsupported("the crop is not inside the \(size.width)×\(size.height) picture")
+        }
+        let target = fittedSize(width: part.width, height: part.height, maxWidth: maxWidth, maxHeight: nil)
+        if crop == nil, target.width == size.width, target.height == size.height { return data }
+        let output = try FFmpegOneShot.run(runtime: runtime, label: "snapshot crop",
+                                           arguments: FFmpegArguments.cropImage(part, width: max(1, target.width), height: max(1, target.height), quality: quality),
+                                           input: data, timeout: timeout, niceness: cropNiceness)
+        guard output.count > 4, output.prefix(2) == Data([0xFF, 0xD8]) else { throw MediaCodecError.noFrame }
+        return output
+    }
+
+    /// The niceness of a crop's ffmpeg child (as the sky detector's decoders and the clip conversions run).
+    static let cropNiceness = 10
 
     /// The still for a camera that is turned off (`MediaCodecs.cameraOffJPEG`): a dark picture of exactly `width × height` with a camera
     /// drawn from boxes and, when this ffmpeg can draw text and has a font, "Camera off", "Turn it on in Camera Bridge" and the name.

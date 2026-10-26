@@ -1,4 +1,5 @@
 #if os(macOS)
+import CoreGraphics
 import CoreImage
 import CoreVideo
 import Foundation
@@ -64,6 +65,37 @@ enum JPEGSnapshot {
             throw MediaCodecError.unsupported("ImageIO has no JPEG encoder")
         }
         CGImageDestinationAddImage(destination, thumbnail, [kCGImageDestinationLossyCompressionQuality: min(max(quality, 0), 1)] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw MediaCodecError.unsupported("ImageIO could not encode a JPEG") }
+        return output as Data
+    }
+
+    /// The part of an image (JPEG or anything ImageIO reads) inside `crop` (nil: all of it), at most `maxWidth` wide and never larger than the part
+    /// itself, as a JPEG at `quality` (`MediaCodecs.croppedJPEG`): the Sky Watcher's small pictures. A whole image that already fits comes back
+    /// unchanged. Throws `MediaCodecError.unsupported` for data ImageIO cannot read and for a crop that is not inside the picture.
+    static func crop(_ data: Data, to crop: ImageCrop?, maxWidth: Int, quality: Double) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil), image.width > 0, image.height > 0
+        else { throw MediaCodecError.unsupported("not an image") }
+        let part = crop ?? ImageCrop(x: 0, y: 0, width: image.width, height: image.height)
+        guard part.width > 0, part.height > 0, part.x >= 0, part.y >= 0, part.x + part.width <= image.width, part.y + part.height <= image.height else {
+            throw MediaCodecError.unsupported("the crop is not inside the \(image.width)×\(image.height) picture")
+        }
+        let target = fittedSize(width: part.width, height: part.height, maxWidth: maxWidth, maxHeight: nil)
+        if crop == nil, target.width == image.width, target.height == image.height { return data }
+        // CGImage's pixel rectangles run from the top left, as the crop's do.
+        guard let piece = image.cropping(to: CGRect(x: part.x, y: part.y, width: part.width, height: part.height)),
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: target.width, height: target.height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { throw MediaCodecError.unsupported("CoreGraphics could not cut the picture") }
+        context.interpolationQuality = .high
+        context.draw(piece, in: CGRect(x: 0, y: 0, width: target.width, height: target.height))
+        guard let scaled = context.makeImage() else { throw MediaCodecError.unsupported("CoreGraphics could not draw the picture") }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, "public.jpeg" as CFString, 1, nil) else {
+            throw MediaCodecError.unsupported("ImageIO has no JPEG encoder")
+        }
+        CGImageDestinationAddImage(destination, scaled, [kCGImageDestinationLossyCompressionQuality: min(max(quality, 0), 1)] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw MediaCodecError.unsupported("ImageIO could not encode a JPEG") }
         return output as Data
     }

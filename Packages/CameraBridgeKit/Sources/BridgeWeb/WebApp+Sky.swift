@@ -48,7 +48,13 @@ extension WebApp {
 
     // MARK: Pictures
 
-    /// `GET /sky/cameras/:id/entries/:eid/still?night=yyyy-MM-dd`: the picture kept with an entry, `image/jpeg`; `404` when it has none.
+    static let sizeSentence = "Choose thumb for a small picture, or leave size out for the whole picture."
+
+    /// `GET /sky/cameras/:id/entries/:eid/still?night=yyyy-MM-dd&size=thumb`: the picture kept with an entry, `image/jpeg`; `404` when it has none. With
+    /// `size=thumb` (the grid's cards) a small one: the close-up of the light, at most 480 pixels wide, or all of the picture, small, for a light that crossed
+    /// more of the sky than a close-up holds; made when first asked for and kept beside the picture. When a small one cannot be made the answer is the whole
+    /// picture, `200` all the same, and the browser is not told to keep that for long. `size=full` and no size are the whole picture; any other size is `400`
+    /// with the field `size`.
     func skyStill(_ ctx: RequestContext) async throws -> HTTPResponse {
         try refuseHEAD(ctx)
         let id = try ctx.uuid("id")
@@ -56,10 +62,24 @@ extension WebApp {
         guard let night = ctx.request.queryValue("night"), ArchiveLayout.isDateDirectoryName(night) else {
             throw APIError.badRequest(Self.nightSentence, field: "night")
         }
+        let small: Bool
+        switch ctx.request.queryValue("size") {
+        case nil, "full"?: small = false
+        case "thumb"?: small = true
+        default: throw APIError.badRequest(Self.sizeSentence, field: "size")
+        }
         do {
-            let jpeg = try await backend.skyStill(cameraID: id, night: night, entryID: entryID)
+            let jpeg: Data
+            var keptLong = true   // the browser may keep it for an hour: not a whole picture standing in for a small one
+            if small {
+                let picture = try await backend.skyStillThumbnail(cameraID: id, night: night, entryID: entryID)
+                jpeg = picture.jpeg
+                keptLong = picture.isThumbnail
+            } else {
+                jpeg = try await backend.skyStill(cameraID: id, night: night, entryID: entryID)
+            }
             var response = HTTPResponse(status: 200, contentType: "image/jpeg", data: jpeg)
-            response.headers["Cache-Control"] = "private, max-age=3600"
+            response.headers["Cache-Control"] = keptLong ? "private, max-age=3600" : "private, max-age=60"
             return response
         } catch {
             throw Self.skyAPIError(error, nightField: "night")
@@ -404,6 +424,13 @@ struct SkyNightResource: Encodable {
     var aim: Aim
     var learning: Learning
     var capped: [Capped]
+    var picture: OrNull<Picture>
+
+    /// How big the night's pictures are, in pixels: what the page needs to draw a light's path over a thumbnail of one.
+    struct Picture: Encodable {
+        var width: Int
+        var height: Int
+    }
 
     init(_ log: SkyNightLog, serverTime: Date) {
         camera = log.camera.uuidString
@@ -421,6 +448,7 @@ struct SkyNightResource: Encodable {
                   note: OrNull(log.aim.note))
         learning = Learning(ready: log.learning.ready, planes: log.learning.planes, satellites: log.learning.satellites)
         capped = log.capped.map { Capped(hour: milliseconds($0.hour), count: $0.count) }
+        picture = OrNull(log.picture.map { Picture(width: $0.width, height: $0.height) })
     }
 }
 

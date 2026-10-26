@@ -104,7 +104,8 @@ frame duration; `fps` is the level fit and the transcoder's `FrameRateLimiter`.
   takes variable packet durations (2.5–120 ms, codes 0–3); G.711/LPCM out in 20 ms chunks (the tail after `flush()`
   may be shorter). Silent AAC repeats one AU.
 - JPEG: CoreImage Lanczos + JPEG; `resizeJPEG` via ImageIO thumbnails (unchanged when it fits; quality 0.8 unless one is asked); aspect kept, never
-  upscaled. Synthetic source: real-time 420v pattern (bars, box, noise, counter) → H.264, keyframe first, optional
+  upscaled; `croppedJPEG` (the Sky Watcher's small pictures) cuts the part with CoreGraphics (`CGImage.cropping`, pixels from the top left) and draws it at the size
+  asked (high interpolation) before ImageIO encodes it; the daemon's codecs on the Mac, where it runs for development. Synthetic source: real-time 420v pattern (bars, box, noise, counter) → H.264, keyframe first, optional
   440 Hz tone; `stop()` finishes the stream, and `samples()` ends the session it replaces (overlapping calls too).
   `grayThumbnail`: mean of every source pixel per block (8-bit luma via vDSP; 10-bit YCbCr; BT.601 from BGRA/ARGB),
   width ≤ `maxWidth`, aspect kept; nil for other formats or `maxWidth ≤ 0`.

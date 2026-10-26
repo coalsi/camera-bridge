@@ -22,7 +22,8 @@ import Synchronization
 /// and one for an id the file does not hold is ignored. A line that does not parse (a torn last line after a crash, a line of a later version, an
 /// oversized one) is skipped, and the next append starts on a new line; so is a line of a kind the reader does not know (a later build's), since
 /// every key it knows is absent from it, or names an entry it applies nothing to. The picture of an entry is `<night>/<id>.jpg` in the camera's
-/// folder. The capped lines of an hour add up (a detector that restarted in the hour writes one for each part; `at` is when each was written).
+/// folder, and the small one made from it for the page's grid (once, when the page first asks: `SkyLogStore+Thumbnails.swift`) is `<night>/<id>.thumb.jpg`
+/// beside it. The capped lines of an hour add up (a detector that restarted in the hour writes one for each part; `at` is when each was written).
 ///
 /// Writes run on one serial queue and never wait for a drive: lines (and pictures) that cannot be written wait, at most `maximumPending`
 /// (the oldest dropped first, never the one being written) and `maximumPendingStillBytes` of pictures; `retry()` tries again. A read sees what
@@ -119,6 +120,10 @@ final class SkyLogStore: Sendable {
     typealias Append = @Sendable (_ data: Data, _ folder: URL, _ camera: UUID, _ night: String) throws -> Void
     /// Writes an entry's picture (`SkyLogStore.writeStillFile`).
     typealias WriteStill = @Sendable (_ jpeg: Data, _ folder: URL, _ camera: UUID, _ night: String, _ id: String) throws -> Void
+
+    /// Held while a picture is moved into place (and its thumbnail removed) and while a thumbnail is checked against the picture it was made from and
+    /// moved into place, so that a thumbnail is never kept for a picture it was not made from. A few file operations at a time, never a wait for anything else.
+    static let pictureMoves = Mutex<Void>(())
 
     private let state = Mutex(State())
     private let queue = DispatchQueue(label: "CameraBridge.NVR.sky", qos: .utility)
@@ -392,13 +397,13 @@ final class SkyLogStore: Sendable {
         stillsFolder(folder: folder, camera: camera, night: night).appending(path: "\(id).\(stillExtension)", directoryHint: .notDirectory)
     }
 
-    private static func skyFolder(_ folder: URL) -> URL { folder.appending(path: directoryName, directoryHint: .isDirectory) }
+    static func skyFolder(_ folder: URL) -> URL { folder.appending(path: directoryName, directoryHint: .isDirectory) }
 
-    private static func cameraFolder(folder: URL, camera: UUID) -> URL {
+    static func cameraFolder(folder: URL, camera: UUID) -> URL {
         skyFolder(folder).appending(path: camera.uuidString, directoryHint: .isDirectory)
     }
 
-    private static func stillsFolder(folder: URL, camera: UUID, night: String) -> URL {
+    static func stillsFolder(folder: URL, camera: UUID, night: String) -> URL {
         cameraFolder(folder: folder, camera: camera).appending(path: night, directoryHint: .isDirectory)
     }
 
@@ -474,8 +479,13 @@ final class SkyLogStore: Sendable {
             throw CocoaError(.fileWriteUnknown)
         }
         do {
-            if existing == .typeRegular { try manager.removeItem(at: file) }
-            try manager.moveItem(at: temporary, to: file)
+            // Together with the thumbnail's removal and not at the same time as a thumbnail is kept (`storeThumbnail`): the thumbnail made from the picture
+            // that is replaced goes, and one that was being made from it is refused.
+            try pictureMoves.withLock { _ in
+                if existing == .typeRegular { try manager.removeItem(at: file) }
+                try manager.moveItem(at: temporary, to: file)
+                removeThumbnail(folder: folder, camera: camera, night: night, id: id)
+            }
         } catch {
             try? manager.removeItem(at: temporary)
             throw error
@@ -490,6 +500,17 @@ final class SkyLogStore: Sendable {
         return (read.entries, read.conditions)
     }
 
+    /// The lines of one camera's night that wait for the drive, in the order they were queued.
+    func waitingLines(camera: UUID, night: String, folder: URL) -> [Data] {
+        let path = ArchiveVolume.path(of: folder)
+        return state.withLock { state in
+            state.pending.compactMap { item -> Data? in
+                guard item.camera == camera, item.night == night, ArchiveVolume.path(of: item.folder) == path, case .line(let data) = item.payload else { return nil }
+                return data
+            }
+        }
+    }
+
     /// Everything one camera's night holds, in the order of its time: the lines of the file in the order written, and then the ones still waiting
     /// for the drive, each applied to its entry (the first entry line of an id wins; the last correction and the last answer win; a picture made
     /// later sets `hasStill`; a line for an id the file does not hold is ignored), the conditions and the capped hours. Blocking disk work (the
@@ -498,13 +519,7 @@ final class SkyLogStore: Sendable {
     func contents(camera: UUID, night: String, folder: URL) -> SkyLogContents {
         guard Self.isValidNight(night) else { return SkyLogContents() }
         // What waits is looked at before the file, so a line that is written meanwhile is read twice (harmless) and never not at all.
-        let path = ArchiveVolume.path(of: folder)
-        let waiting = state.withLock { state in
-            state.pending.compactMap { item -> Data? in
-                guard item.camera == camera, item.night == night, ArchiveVolume.path(of: item.folder) == path, case .line(let data) = item.payload else { return nil }
-                return data
-            }
-        }
+        let waiting = waitingLines(camera: camera, night: night, folder: folder)
         var lines: [Data] = []
         if let data = Self.readTail(Self.nightFile(folder: folder, camera: camera, night: night), folder: folder, camera: camera) {
             lines = data.split(separator: 0x0A, omittingEmptySubsequences: true).map { Data($0) }
@@ -557,10 +572,10 @@ final class SkyLogStore: Sendable {
         return try? handle.readToEnd()
     }
 
-    private static func isReal(_ directory: URL) -> Bool { ArchiveEventLog.entryType(directory) == .typeDirectory }
+    static func isReal(_ directory: URL) -> Bool { ArchiveEventLog.entryType(directory) == .typeDirectory }
 
     /// The file, or its last `maximumReadBytes` from the first whole line on; nil when it is not a regular file in real folders.
-    private static func readTail(_ file: URL, folder: URL, camera: UUID) -> Data? {
+    static func readTail(_ file: URL, folder: URL, camera: UUID) -> Data? {
         guard isReal(skyFolder(folder)), isReal(cameraFolder(folder: folder, camera: camera)),
               let attributes = CatalogLoader.attributes(file), attributes.type == .typeRegular,
               let handle = try? FileHandle(forReadingFrom: file) else { return nil }
@@ -629,6 +644,7 @@ extension SkyLogStore {
     /// pictures went and how many bytes that freed. The recordings' size rule never counts what the sky log keeps, and recording pauses on every
     /// camera when the drive is full, so the pictures keep to a limit of their own (`SkyLightFilter.stillBytesPerCamera`).
     ///
+    /// A picture's thumbnail (`<id>.thumb.jpg`, `SkyLogStore+Thumbnails.swift`) is a file of the same folder: it counts, and goes with its night.
     /// Only the regular files directly in a folder named `yyyy-MM-dd` in a camera's folder count, and only that folder goes: the night's log
     /// (`<night>.jsonl`) and the recordings are never touched, and an entry whose picture went simply has no picture any more (`skyStill` answers
     /// `noStill`). The newest night's folder is never taken, whatever the limit: it is the one pictures are being written to. No link is followed

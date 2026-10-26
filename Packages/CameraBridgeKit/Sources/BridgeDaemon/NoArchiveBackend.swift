@@ -89,5 +89,8 @@ struct NoArchiveBackend: BridgeBackend {
     func skyStill(cameraID: UUID, night: String, entryID: String) async throws -> Data {
         try await base.skyStill(cameraID: cameraID, night: night, entryID: entryID)
     }
+    func skyStillThumbnail(cameraID: UUID, night: String, entryID: String) async throws -> SkyStillPicture {
+        try await base.skyStillThumbnail(cameraID: cameraID, night: night, entryID: entryID)
+    }
     func findFlightFeeds() async -> [URL] { await base.findFlightFeeds() }
 }

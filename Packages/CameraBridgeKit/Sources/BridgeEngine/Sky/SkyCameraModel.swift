@@ -237,14 +237,13 @@ struct SkyCameraModel: Codable, Sendable, Equatable {
     // MARK: The start
 
     /// The model a camera starts with, from the card's "faces" and "tilt" and the picture's size. 2:1 and wider is a dual camera (unless
-    /// `layout` says otherwise): split 50/50, its lenses 90° across each half (180° edge to edge). Each lens is turned to its own azimuth
-    /// (`azimuth` ∓ 45°) about the vertical first, then tilted up by `tilt` about its own horizontal axis: it looks at its azimuth at the
-    /// card's tilt, unrolled, so a level skyline is level across each half however steep the card. (Turned about the tilted housing's own up
-    /// instead, each lens of a card tilted 45° was rolled 35°, its skyline running from −18° at the outer end to +18° at the seam.) A level card's
-    /// halves meet along the seam, the picture's centre facing (azimuth, 0); a tilted card's do not, since a pinhole tilted up leans its sides
-    /// towards the zenith: near the top of the seam both halves see the same sky, near its foot neither does. Narrower is a single lens 100°
-    /// across, facing (azimuth, tilt). Rectilinear, square pixels, principal points at the centres, no roll and no distortion: fitting refines
-    /// each lens's pose on its own, and chooses its projection.
+    /// `layout` says otherwise): split 50/50, its lenses 90° across each half (180° edge to edge), each the housing (facing `azimuth`, tilted
+    /// up by `tilt`) turned 45° to its side about the housing's own up, so the halves meet all down the seam and the picture's centre faces
+    /// (azimuth, tilt): the camera stitches its picture in its own frame, which tilts with it. (Turned about the vertical instead, as in beta
+    /// 0.1.125, the lenses stayed level but the halves parted near the top of the seam, and on North Sky, tilted 35°, the upper half of the
+    /// sky came out 20–30° off: its night sky's bright stars were 9–30° from that card and 3–11° from this one.) Narrower is a single lens 100°
+    /// across, facing (azimuth, tilt). Rectilinear, square pixels, principal points at the centres, no distortion: fitting refines each lens's
+    /// pose on its own, and chooses its projection.
     static func initial(facing azimuth: Double, tilt: Double, pictureWidth: Int, pictureHeight: Int, layout: LensLayout? = nil) -> SkyCameraModel {
         let width = Double(max(1, pictureWidth)), height = Double(max(1, pictureHeight))
         let facing = azimuth.isFinite ? SkyMath.normalizedDegrees(azimuth) : 0
@@ -258,9 +257,11 @@ struct SkyCameraModel: Codable, Sendable, Equatable {
         case .dual:
             let across = 90.0
             let vertical = Lens.verticalFOV(horizontalFOV: across, frameAspect: width / 2 / height)
-            let lenses = [-across / 2, across / 2].map { turn in
-                Lens(yaw: SkyMath.normalizedDegrees(facing + turn), pitch: tilt, roll: 0, horizontalFOV: across, verticalFOV: vertical,
-                     principalPoint: centre, radial: [])
+            let housing = Lens(yaw: facing, pitch: tilt, roll: 0, horizontalFOV: across, verticalFOV: vertical, principalPoint: centre, radial: []).axes
+            let lenses = [-across / 2, across / 2].map { turn -> Lens in
+                let angle = turn * SkyMath.radians
+                return Lens(up: housing.up, forward: housing.forward * cos(angle) + housing.right * sin(angle),
+                            horizontalFOV: across, verticalFOV: vertical, principalPoint: centre, radial: [])
             }
             return SkyCameraModel(layout: .dual, seam: defaultSeam, lenses: lenses)
         }

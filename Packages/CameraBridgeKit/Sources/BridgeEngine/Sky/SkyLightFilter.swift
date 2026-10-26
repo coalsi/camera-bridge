@@ -36,7 +36,7 @@ enum SkyLightFilter {
     static let brightSignificance = 6.0
     /// A camera logs at most this many lights that nothing explains in a clock hour; the rest are counted.
     static let unexplainedPerHour = 200
-    /// A camera's pictures stay under this many bytes on the recordings drive.
+    /// A camera's pictures stay under this many bytes on the recordings drive (their thumbnails, which the page's grid has made beside them, included).
     static let stillBytesPerCamera: UInt64 = 2 * 1_073_741_824
     /// A picture is taken only while the drive has its floor and at least this much more free (below the floor recording pauses). It was twice
     /// the floor (Ruling S27), which a full recorder almost never has: retention keeps it at about twice its floor free (Ruling S31).

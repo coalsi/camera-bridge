@@ -15,7 +15,7 @@ clips start with `const fixtures = ensureFixtures()` and pass `{ skip: fixtures.
 `import-all.test.mjs` imports every module of the page, `app.js` excepted, in plain Node with no browser at all: nothing may touch
 `document`, `window` or `localStorage` while it is imported. `support/fake-browser.mjs` is just enough browser to start the page (`app.js`)
 or build elements in a test (a small DOM, storage that can be broken, a refusing `fetch`); `support/dev-server.mjs` starts the dev archive server on a free port with quick timers; `support/cookie-fetch.mjs` makes
-`api.js` talk to it with a session cookie. Pure modules (planner, clock, viewport, ticks, fetcher) need none of these.
+`api.js` talk to it with a session cookie; `support/sky-closeup-vectors.mjs` makes the cases of the Sky Watcher's close-up rule that the box's Swift copy is tested against (`Packages/CameraBridgeKit/Tests/BridgeEngineTests/Fixtures/sky-closeup-vectors.json`: run it with `node` to write the file, and `sky-model.test.mjs` fails when the file is not what the page’s functions give now). Pure modules (planner, clock, viewport, ticks, fetcher) need none of these.
 
 `linux/package.json` says `"type": "module"` for everything under `linux/`, so Node reads the page's `.js` files as modules (without it
 Node 22.0 to 22.6 cannot import them, and later versions warn).

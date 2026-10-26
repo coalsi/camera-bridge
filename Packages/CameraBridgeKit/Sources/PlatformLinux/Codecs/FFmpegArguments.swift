@@ -388,6 +388,16 @@ enum FFmpegArguments {
                   "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "\(quality.map(mjpegScale) ?? 5)", "-f", "mjpeg", "pipe:1"]
     }
 
+    /// A JPEG or PNG in → the part of it inside `crop` as a JPEG out, scaled to `width × height` when that is not the part's own size, at `quality`
+    /// (0…1). The crop is exact (`exact=1`: a picture of subsampled chroma is cut at the pixel asked for, not at the even one before it), so the
+    /// page that draws a light's path over it can rely on the rectangle it asked for.
+    static func cropImage(_ crop: ImageCrop, width: Int, height: Int, quality: Double) -> [String] {
+        var filters = "crop=\(crop.width):\(crop.height):\(crop.x):\(crop.y):exact=1,"
+        if width != crop.width || height != crop.height { filters += "scale=\(width):\(height):flags=lanczos," }
+        filters += "scale=out_range=pc,format=yuvj420p"
+        return common + ["-f", "image2pipe", "-i", "pipe:0", "-vf", filters, "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "\(mjpegScale(quality))", "-f", "mjpeg", "pipe:1"]
+    }
+
     /// One dark picture of `width × height` as a JPEG on stdout: a camera (body and lens) from boxes, and with a `font` the words of the
     /// camera-off still. The texts are quoted filter values read literally (`expansion=none`), so a camera name cannot change the graph.
     static func cameraOff(width: Int, height: Int, name: String, font: String?) -> [String] {

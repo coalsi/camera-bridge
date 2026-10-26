@@ -1220,8 +1220,10 @@ clockwise, and elevation, in degrees) and `SkyLogView` (`night`, `day`), for the
   choice. What projecting needs is worked out once per lens, not per projection. Large radial terms bow the halves' seam columns in
   opposite directions, so a track crossing the seam is matched across it by direction, with an angular tolerance (about 3°). A direction projects through every lens that sees it (both near the seam, where the halves
   overlap); a pixel maps back through the lens of its half; a band of 1 % of the width around the seam is low trust, kept but not used
-  for fitting. A dual card's lenses (`initial`) are turned to facing ∓ 45° about the vertical, then tilted up by the card's tilt, never
-  rolled, so a level skyline is level across each half however steep the card (the halves then meet along the seam only at tilt 0).
+  for fitting. A dual card's lenses (`initial`) are the housing (facing, tilted up by the card's tilt) turned 45° to each side about the
+  housing's own up, so the halves meet all down the seam at any tilt: the camera stitches its picture in its own frame, which tilts with it.
+  (Beta 0.1.125 turned them about the vertical instead, which kept them level but left North Sky's upper sky 20–30° off, its bright stars
+  9–30° from that card and 3–11° from this one, so planes up there could not match at the rough aim.)
   Tests: `SkyGeometryTests`, `SkyCameraModelTests`.
 
 ## Additions beyond the contract: the sky detector's aim (2026-10-25, docs/CONTRACT_CHANGES.md)
@@ -1318,14 +1320,20 @@ live transport is the existing `AuthenticatingHTTPClient`). Public: `SkyLabel` (
 - `AircraftFeed.swift`: `AircraftFeedParser` reads a dump1090, readsb, tar1090 or PiAware `aircraft.json` (`aircraft`) or an adsb.fi answer
   (`ac`) into `AircraftReport`s (hex, call sign, place, height in metres and feet, the position's time, ground speed and track). It uses
   `JSONSerialization` and reads each field on its own (a number, or a plain decimal in a string; never a boolean, `nan` or a hex float), so
-  one odd field costs only its aircraft; a feed that writes `nan` or `inf` bare is read with those made `null`. The height is the geometric
-  altitude, else the barometric one; an aircraft on the ground, with a position older than 30 s (`seen_pos`), with a place or height that is
+  one odd field costs only its aircraft; a feed that writes `nan` or `inf` bare is read with those made `null`. Both shapes of an aircraft
+  are read: the newer (`alt_baro`, `alt_geom`, `gs`) and the older that dump1090-mutability writes and a tar1090 may serve (`altitude`,
+  `speed`; read in the newer shape only, every aircraft of such a feed was lost). The height is the geometric altitude, else the barometric
+  one; an aircraft on the ground, with a position older than 30 s (`seen_pos`), with a place or height that is
   not one, or with no `seen_pos` is left out. **The position's time is the box's receive time less `seen_pos`; the feed's own `now` is never
   read**, since a feed host's clock can be minutes out. A body over 4 MiB is not read, at most 5,000 aircraft come out, and a document nested
   more than 16 levels deep is not read (on macOS, Apple's reader overflows a 512 KB thread stack at about 480 levels of objects, which is a crash).
   `FlightFeedPoller` polls a feed once a second (each request bounded to 5 s and 4 MiB) into a `FlightHistory`; `problem` says in plain
   words what is wrong ("The flight feed answered 404.") and `lastAnswer` when the last good answer came; `stop()` returns when polling has
-  stopped, and a poller nobody holds stops by itself.
+  stopped, and a poller nobody holds stops by itself. A feed that answers but whose aircraft cannot be read says so: once its answers have
+  listed aircraft and none with a position, age and height the parser reads (`AircraftFeedParser.read` counts them) for 5 minutes,
+  `problem` is "The flight feed answers, but none of its planes can be read (no height or position). Check that it's dump1090, readsb,
+  tar1090 or PiAware." until a plane can be read again, with one journal line when that starts and one when it ends. An empty list (no
+  aircraft around) is no problem, nor are aircraft read and left out (on the ground, last placed over 30 s ago).
 - `FlightHistory.swift`: the last 15 minutes of reports of each aircraft, in time order (bounded: 10,000 aircraft, 1,200 reports each, and
   one report for a time); `tracks(overlapping:)` gives, for a time range, the reports in it and the nearest on each side.
 - `FlightFeedFinder.swift`: the "Find a feed" of Settings. It asks only the hosts in the box's own neighbour table (`NeighborTable`), private
@@ -1537,3 +1545,53 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   in `SkyClutterTests.swift` the busy spots, the Sun's guard, the hourly cap, a picture for every logged light and the pictures made later), `SkyClutterMapTests`,
   `SkySunGuardTests` and `SkyRecordedStillTests` (the recording's keyframe nearest a time, and what is gone or not yet), and `SkyServiceTests` (the feed asked only while a
   detector runs, the aim kept and removed; on macOS `SkyEngineTests`: the switch, the plugin both ways and across a pause, a cleared place or folder, a removed camera).
+
+
+## Additions beyond the contract: the Sky Watcher's small pictures (2026-10-26, docs/CONTRACT_CHANGES.md)
+
+The grid of the Sky Watcher's log puts a picture on every card, and a night can hold hundreds of lights with a still each (a JPEG up to 1920 pixels wide): a phone scrolling
+a night would download hundreds of big pictures to look at postage stamps. `GET sky/cameras/:id/entries/:eid/still?size=thumb` answers a small one instead, and
+`BridgeEngine.skyStillThumbnail(cameraID:night:entryID:)` is the engine's side of it (`Sky/SkyThumbnails.swift`, `Sky/SkyCloseUp.swift`, `Sky/SkyPicture.swift`,
+`Sky/SkyLogStore+Thumbnails.swift`). Public (and in MediaCore, `MediaCodecs.croppedJPEG(_:crop:maxWidth:quality:)` and `ImageCrop`):
+- `BridgeEngine.skyStillThumbnail(cameraID:night:entryID:)` answers a `SkyStillPicture` (`jpeg`, `isThumbnail`): the thumbnail, at most 480 pixels wide, or, when one cannot be
+  made, the whole picture (`isThumbnail` false), which is what the page then shows as it always did. It throws what `skyStill` throws (`EngineError.unknownCamera`,
+  `SkyLogError.noStill` for an entry with no picture or one that is gone, `unknownNight`, `noFolder`, `ArchiveUnavailable` and `ArchiveError.timedOut` while the drive is away or slow)
+  and never fails because a thumbnail could not be made.
+- `SkyNightLog.picture` (a `SkyPictureSize`, `width` and `height`; nil when none can be read; a default of nil in `SkyNightLog.init`): how big the night's pictures are, read from
+  the frame header of the newest light's picture that can be read (`SkyLogStore.pictureSize(ofStills:camera:night:folder:)`, at most eight tried, 128 KiB read of each). The page
+  needs it to draw a light's path over a thumbnail of it: the thumbnail is cut where the page's close-up is, and that depends on the picture's size.
+
+Internal:
+- **What is cut** (`SkyCloseUp`): the page's own close-up rule (`closeUpRect` and `thumbRect` in `linux/web/js/screens/sky-model.js`): around the light's path, its box with half its
+  size more on every side, at least 160 × 90 pixels of the still, 16:9, as big as the picture at most and inside it (moved in from an edge or a corner, never cut), in whole pixels;
+  none (the whole picture, small) for a light that crossed more of the sky than a close-up holds. It is a copy, and the page draws the path with its own, so the two must give the
+  same rectangle to the pixel: `SkyCloseUpTests` checks this one against the page's answers to hundreds of paths (`Tests/BridgeEngineTests/Fixtures/sky-closeup-vectors.json`,
+  made from the page's functions by `linux/web-tests/support/sky-closeup-vectors.mjs`, which `sky-model.test.mjs` keeps equal to them). Change one and change the other.
+- **Made once, kept beside the picture** (`SkyThumbnails`, `SkyLogStore+Thumbnails.swift`): the first request finds there is a picture and no thumbnail (`thumbnailLookup`: a stat of the
+  picture, and a kept thumbnail is read: a regular file in real folders, a JPEG, stamped with the time of the picture it was made from, so that a clock that was set back does not make
+  every thumbnail stale), and takes its turn (below). Then, on a thread of its own, it reads the picture (`readStill`, only if it is still the one that was stamped), its size
+  (`JPEGHeader`) and the entry's path from the night's file (`SkyLogStore.path(ofEntry:…)`: the id's bytes are searched for and only the lines that hold them are decoded, the lines
+  that wait for the drive included: a busy night's file is megabytes and a page asks for hundreds of thumbnails), and has the codecs cut it, at quality 0.8, at most 480 wide, never larger
+  than the part. The result is kept as `<night>/<id>.thumb.jpg` in the folder of the night's pictures (`SkyLogStore.storeThumbnail`: a 0600 temporary file given the picture's time and
+  moved into place, never through a link, no folder made, at most 512 KiB), and read from there from then on. The picture's own file is untouched. **Remade with the picture**:
+  `writeStillFile` removes the entry's thumbnail when it moves a new picture over the old one (both the detector's live pictures and the backfill write through it), and a thumbnail is
+  stored only for the picture it was made from (`SkyStillStamp`: file, size and time, checked under the same lock, `SkyLogStore.pictureMoves`, that the picture's move holds), so one made
+  while the picture was replaced is refused. A picture written later for an entry (the backfill) is the first one: nothing was kept for it.
+- **Off the request, at low priority, two at a time**: the work runs on a concurrent queue of utility priority (a thread of its own, not a cooperative one) and the ffmpeg child under
+  `nice -n 10`, at most `SkyThumbnails.concurrent` (2) at a time through `SkyThumbnailGate`, whatever is asked, in the order the requests came (the cards of the first screen are asked
+  for first). A request that waits holds nothing (not the picture, not the path); when `SkyThumbnails.maximumWaiting` (128) wait already, the next to come is answered with the whole
+  picture at once. A request that finds the thumbnail already made by another while it waited does not make it again. One that takes longer than `SkyThumbnails.deadline` (30 s) is given
+  up on (it finishes on its thread and a thumbnail it makes late is kept).
+- **Only while the drive has room**: a thumbnail is made and kept only while the recordings drive has its floor and 1 GiB more free (`SkyLightFilter.stillsHaveRoom`, as the pictures
+  are taken: Ruling S27, the Sky Watcher never pushes the recorder into pausing); otherwise the whole picture, which is on the drive already, is answered. A kept thumbnail is read whatever
+  the drive has.
+- **Never a 500 for the grid**: a thumbnail that cannot be made (no codecs that can crop, a picture or an entry the box cannot read, a codec that failed, took too long or made a
+  picture that is not what was asked for) is answered with the whole picture and nothing is kept; what went wrong is remembered for `SkyThumbnails.failureMemory` (5 minutes, at most
+  256 pictures) so that a picture that cannot be made is not tried at every request. A drive that does not answer is not the picture's fault and is not remembered.
+- **Pruning**: a thumbnail is a regular file in the night's folder of pictures, so `pruneStills` counts it in the camera's 2 GiB (`SkyLightFilter.stillBytesPerCamera`) and takes it
+  with its night, and `prune` (the events' cutoff) takes the folder whole.
+- `EngineTuning.skyThumbnailDeadline`, `skyThumbnailFailureMemory`, `skyThumbnailWaiting` and `skyThumbnailRoom` shorten, shrink and decide the limits in tests.
+- Tests: `SkyCloseUpTests` and `JPEGHeaderTests` (`SkyThumbnailGeometryTests.swift`), `SkyThumbnailStoreTests` (kept beside the picture, owner and mode, remade with the picture, never
+  through a link, counted and pruned, the entry's path, a night's picture size), `SkyThumbnailEngineTests` (cut around the light, made once, a replaced picture, the whole picture when it cannot be
+  made and its memory, no room on the drive, two at a time, in the order asked, a full queue, a codec that hangs, the night's picture size) and `SkyThumbnailRealCodecsTests` (a real still through the codecs
+  of the platform), with `CroppedPictureTests` in PlatformLinuxCodecsTests and `CroppedPictureAppleTests` in PlatformAppleTests for the codecs.

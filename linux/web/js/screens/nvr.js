@@ -622,7 +622,8 @@ export function renderNVR({ params, navigate, setTitle }) {
     if (id === null) layoutWall();           // the mosaic's wall may have changed size meanwhile
   }
 
-  // Digital zoom on the camera that fills the wall (js/live/zoom.js): drag a box, wheel or pinch; double-click or Esc for the whole picture.
+  // Digital zoom on the camera that fills the wall (js/live/zoom.js, Sky Watcher's player has the same): drag a box, wheel or pinch, drag the
+  // zoomed picture to move it; double-click, Esc or 0 for the whole picture.
   let zoom = null;
   function setZoom(id) {
     zoom?.destroy();
@@ -910,7 +911,7 @@ export function renderNVR({ params, navigate, setTitle }) {
     // A handle of the clip's red band moves its end with the arrow keys (the timeline's own handler).
     if (target?.closest('[data-clip-edge]') && event.key !== 'Escape' && event.key !== 'Enter') return;
     if (!typing && clip.key(event)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
-    if (!typing && event.key === 'Escape' && zoom?.zoomed()) { event.preventDefault(); zoom.reset(); return; }
+    if (!typing && zoom?.key(event)) { event.preventDefault(); return; }     // Esc or 0 while zoomed: the whole picture again
     if (!typing && event.key === 'Escape' && soloId !== null && !document.fullscreenElement) { event.preventDefault(); setSolo(null); return; }
     // Alt + an arrow key on a focused tile moves the tile (attachReorder), not the timeline a minute.
     if (event.altKey && event.key.startsWith('Arrow') && target?.closest('.nvr-tile') && canReorder()) return;
