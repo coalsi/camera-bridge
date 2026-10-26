@@ -310,6 +310,44 @@ extension WebApp {
         return .empty(202)
     }
 
+    func systemArchiveDrives() async throws -> HTTPResponse {
+        do {
+            return .json(try await system.archiveDrives())
+        } catch {
+            throw systemFailure(error)
+        }
+    }
+
+    func systemUseArchiveDrive(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let body = try decode(RecordingDriveRequest.self, from: ctx)
+        guard let target = body.targetID, !target.isEmpty else { throw APIError.badRequest("Choose the drive to use as the archive.", field: "targetID") }
+        let keep = body.keepData ?? false
+        let phrase = body.phrase ?? ""
+        guard keep || (!phrase.isEmpty && phrase.utf8.count <= 200) else {
+            throw APIError.badRequest("Type the sentence shown to confirm that the drive may be erased.", field: "phrase")
+        }
+        do {
+            log.notice("archive drive chosen from the web interface")
+            try await system.useArchiveDrive(targetID: target, phrase: phrase, keepData: keep)
+        } catch {
+            log.warning("choosing the archive drive failed: \(ErrorText.logDescription(error))")
+            throw systemFailure(error)
+        }
+        return .empty(202)
+    }
+
+    func systemForgetArchiveDrive(_ ctx: RequestContext) async throws -> HTTPResponse {
+        let body = try decode(Confirmation.self, from: ctx)
+        guard body.confirm == true else { throw APIError.badRequest("Confirm that the archive drive should no longer be used.", field: "confirm") }
+        do {
+            log.notice("archive drive no longer used, from the web interface")
+            try await system.forgetArchiveDrive()
+        } catch {
+            throw systemFailure(error)
+        }
+        return .empty(202)
+    }
+
     private struct SSHRequest: Decodable {
         var enabled: Bool?
         var authorizedKeys: String?

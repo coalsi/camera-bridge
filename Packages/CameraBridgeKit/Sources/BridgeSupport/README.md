@@ -48,6 +48,9 @@ Foundation (+ FoundationNetworking / os under `#if canImport`), Synchronization 
 
 ## Additions beyond the contract
 
+The archive drive (2026-10-25): `Hashes.StreamingSHA256` (package), SHA-256 over pieces, which the NVR's mover uses to check that a recording's copy on the archive
+drive is the one it came from (swift-crypto's `SHA256`, not `Sendable` on Linux: a local of one function).
+
 Offline cameras (2026-10-02, docs/CONTRACT_CHANGES.md): `CameraReachability` (one per camera: whether it answers at all. Components
 report `reportReachable()` / `reportUnreachable()`; three unreachable reports in a row start a TCP check of the camera's ports, and
 when none answers the camera is `offline`: one probe on a 2 s to 60 s backoff, `isOffline`, `waitUntilReachable()`; `Timing`,

@@ -16,6 +16,23 @@ import TestSupport
                                  spaceOf: { _ in (total: 100_000_000_000, free: 60_000_000_000) })
     }
 
+    // MARK: The archive drive
+
+    @Test func twoFoldersAreOnTheSameVolumeByDeviceNumberAndAnUnknownOneCountsAsTheSame() throws {
+        let policy = policy(devices: ["/data": 1, "/data/recordings": 1, "/data/archive": 2, "/mnt/other": 2])
+        let same = try #require(policy.isSameVolume)
+        #expect(!same(URL(fileURLWithPath: "/data/archive"), URL(fileURLWithPath: "/data/recordings")))
+        #expect(same(URL(fileURLWithPath: "/data/archive"), URL(fileURLWithPath: "/mnt/other")))
+        #expect(same(URL(fileURLWithPath: "/nowhere"), URL(fileURLWithPath: "/data/recordings")), "what cannot be measured is the safe answer")
+        #expect(policy.lowerThreadPriority != nil)
+    }
+
+    @Test func theThreadIDIsReadFromProcThreadSelf() {
+        #expect(DaemonArchivePolicy.threadID(fromThreadSelf: "1234/task/1240") == 1240)
+        #expect(DaemonArchivePolicy.threadID(fromThreadSelf: "1234") == nil && DaemonArchivePolicy.threadID(fromThreadSelf: "1234/task/x") == nil)
+        #expect(DaemonArchivePolicy.threadID(fromThreadSelf: "1234/task/0") == nil)
+    }
+
     // MARK: Numbers
 
     @Test func spaceIsBlocksTimesFragmentSizeAndFreeIsWhatAWriterMayUse() {

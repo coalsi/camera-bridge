@@ -76,6 +76,17 @@ export function stageState(input) {
       return { ...state, caption: COARSE_CAPTION };
     case 'gap': {
       const next = Number.isFinite(cell.next) ? cell.next : null;
+      if (cell.away) {
+        return {
+          ...state,
+          overlay: {
+            kind: 'gap',
+            title: 'On the archive drive (not connected)',
+            body: next === null ? 'This recording plays again when the archive drive is plugged back in.' : `This recording plays again when the archive drive is plugged back in. Next recording on this box at ${formatTime(next)}.`,
+            actions: next === null ? [action('live', 'Go live', true)] : [action('jump', 'Jump to next recording', true)],
+          },
+        };
+      }
       return {
         ...state,
         overlay: {

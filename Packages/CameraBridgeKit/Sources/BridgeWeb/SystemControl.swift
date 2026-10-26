@@ -36,6 +36,14 @@ public protocol SystemControlling: Sendable {
     func useRecordingDrive(targetID: String, phrase: String, keepData: Bool) async throws
     /// Goes back to recording on the box's own disk. The drive and what is on it are left alone.
     func forgetRecordingDrive() async throws
+    /// The archive drive (where older recordings move when the recordings drive fills, instead of being deleted) and the disks that could be it: the
+    /// recording drive's list, in the archive's view.
+    func archiveDrives() async throws -> ArchiveDriveReport
+    /// Makes the disk `targetID` names the archive drive. Without `keepData` every file on it is erased and a new file system made (`phrase` is the
+    /// sentence the person typed, "ERASE ALL DATA ON <disk name>"); with it a disk that already is a Camera Bridge archive drive is used as it is.
+    func useArchiveDrive(targetID: String, phrase: String, keepData: Bool) async throws
+    /// Stops using the archive drive. The drive and what is on it are left alone.
+    func forgetArchiveDrive() async throws
     /// How the box is on the network (wired, a Wi-Fi network, the setup hotspot), the networks it knows and the last ones it saw.
     func wifi() async -> WifiReport
     /// Looks for Wi-Fi networks in range (the radio is busy for a few seconds). Strongest first.
@@ -83,6 +91,18 @@ extension SystemControlling {
 
     public func forgetRecordingDrive() async throws {
         throw SystemError("Choosing a recording drive is only possible on Camera Bridge OS.")
+    }
+
+    public func archiveDrives() async throws -> ArchiveDriveReport {
+        throw SystemError("An archive drive is only possible on Camera Bridge OS.")
+    }
+
+    public func useArchiveDrive(targetID: String, phrase: String, keepData: Bool) async throws {
+        throw SystemError("An archive drive is only possible on Camera Bridge OS.")
+    }
+
+    public func forgetArchiveDrive() async throws {
+        throw SystemError("An archive drive is only possible on Camera Bridge OS.")
     }
 
     public func wifi() async -> WifiReport { WifiReport(state: "unavailable", message: "Wi-Fi is managed by Camera Bridge OS.") }
@@ -191,6 +211,22 @@ public struct RecordingDriveReport: Codable, Sendable, Equatable {
     public var state: String
     public var message: String
     /// The disks that could take recordings (the system's own list, with the reasons for the ones that cannot).
+    public var drives: [InstallTarget]
+
+    public init(state: String, message: String, drives: [InstallTarget]) {
+        self.state = state
+        self.message = message
+        self.drives = drives
+    }
+}
+
+/// The archive drive, as the system reports it.
+public struct ArchiveDriveReport: Codable, Sendable, Equatable {
+    /// "none" (no archive drive is chosen), "mounted" (the chosen drive is in place), "missing" (chosen, not attached), "working" (being set up) or
+    /// "failed" (the last attempt did not work; `message` says why).
+    public var state: String
+    public var message: String
+    /// The disks that could be the archive drive (the system's list, with the reasons for the ones that cannot: the recording drive is one).
     public var drives: [InstallTarget]
 
     public init(state: String, message: String, drives: [InstallTarget]) {
@@ -331,13 +367,16 @@ public struct InstallTarget: Codable, Sendable, Equatable {
     public var phrase: String?
     /// The disk already is a Camera Bridge recording drive: it can be used without erasing it (recording drives only).
     public var isRecordingDrive: Bool?
-    /// The disk is the recording drive in use now (recording drives only).
+    /// The disk is the recording drive in use now (recording drives only); in an archive drive list, the archive drive in use now.
     public var inUse: Bool?
+    /// The disk already is a Camera Bridge archive drive: it can be used as one without erasing it (archive drive lists only).
+    public var isArchiveDrive: Bool?
 
     public init(id: String, name: String, model: String? = nil, sizeBytes: Int64, note: String? = nil, eligible: Bool = true,
-                problems: [String] = [], phrase: String? = nil, isRecordingDrive: Bool? = nil, inUse: Bool? = nil) {
+                problems: [String] = [], phrase: String? = nil, isRecordingDrive: Bool? = nil, inUse: Bool? = nil, isArchiveDrive: Bool? = nil) {
         self.isRecordingDrive = isRecordingDrive
         self.inUse = inUse
+        self.isArchiveDrive = isArchiveDrive
         self.id = id
         self.name = name
         self.model = model

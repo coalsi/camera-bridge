@@ -756,6 +756,47 @@ MediaHub (per camera) ─► recorder ─► <recordings>/<camera folder>/<yyyy-
 | `ArchiveStore.swift`, `FolderCheck.swift` and the files beside them | The store: catalog, index scanner and repair, retention, volume monitor, read queue, activity |
 | `ArchiveEventLog.swift` | The cameras' events beside the recordings: the day files, reading them with what the catalog holds, their retention |
 | `ArchiveMedia.swift` | The browser's video-only view of a file (`package`) |
+| `ArchiveDrive.swift`, `ArchiveMove.swift`, `ArchiveMover+Store.swift` | The archive drive: its state, probe, marker and remembered file list; the move (copy, sync, check, put in place) and its clean-up after a crash; the store's monitor, loader and mover |
+
+## Additions beyond the contract: the archive drive (2026-10-25, docs/CONTRACT_CHANGES.md)
+
+A second drive where older recordings move when the recordings drive fills, instead of being deleted (archive-tier brief). Additive API:
+`BridgeEnvironment.archiveDriveFolder` (the host names the folder; nil keeps today's behaviour exactly), `ArchivePlatformPolicy.isSameVolume` and
+`ArchivePlatformPolicy.lowerThreadPriority` (both optional, set by the daemon), `ArchiveReading.awaySpan(camera:containing:)` (a requirement with a default
+that answers nil), `ArchiveActivity.Bin.away`, `ArchiveStorageStatus.archive`, `ArchiveStorageStatus.hardMaximumBytes` and `ArchiveDriveStatus` (`State`: `connected`,
+`notConnected`, `notAnswering`, `failing`, `refused`; `Move`; `usedBytes`, `freeBytes`, `totalBytes`, `floorBytes`, `oldest`, `newest`, `moving`, `waitingFiles`, `waitingBytes`,
+`movedFiles`, `movedBytes`). Internal: `StorageTier`, `CatalogFile.tier`, `CatalogState.archiveAway`, `ArchiveDriveState`, `ArchiveDriveMeasurement`, `ArchiveDriveIndex`,
+`ArchiveMove`, `ArchiveMoveStep`, `ArchiveMoveWorker`, `RetentionPlanner.plan(_:archive:)`, `RetentionPlanner.ArchiveInput`, `RetentionPlanner.TieredPlan`, and the store's
+`driveLoop`, `probeDrive`, `loadDrive`, `moveLoop`, `move`, `resolveDuplicate`, `removeMainCopy`, `writeDriveIndexIfDue`.
+
+- **Which folder is the archive.** Only a folder that holds the drive's marker `.camera-bridge-archive` (written by `cb-recording-drive --archive` as root, `{"uuid": …}`),
+  is not on the system volume (`isSystemVolume`) and not on the recordings drive (`isSameVolume`) is the archive drive; anything else (the folder of an unplugged drive,
+  the OS's read-only placeholder, a bare folder on the box's disk) is never written. A failed write test leaves its recordings playable but moves nothing.
+- **The catalog knows each file's drive** (`CatalogFile.tier`). A file keeps its segment, file key and fragment ids when it moves: the archive has the recordings
+  folder's own layout (`<camera directory>/camera.json`, `<camera directory>/<date>/<HH-mm-ss>.mp4` + `.cbidx`). Reads go to the drive a file is on: the archive has its own
+  read queue with the same deadline (`ArchiveConstants.readDeadline`, 4 at a time), its own handles, probe queue and control queue, so a slow USB drive holds up nothing of
+  the recordings drive. The block and table caches are shared (a move copies the bytes exactly).
+- **Retention** (`RetentionPlanner.plan(_:archive:)`, `RetentionJanitor.swift`). Given only while the archive is connected, loaded, answering and not failing; otherwise the
+  plan is `plan(_:)`, today's. Aged files are deleted on both drives (the same `nvrKeepDays`). Over `maximumBytes` the oldest files of the box move, each when the archive can
+  take it within its own maximum (its size minus twice its floor) and above its floor, after the archive let go of what is older than it; a file it cannot take is deleted as
+  today. Over `ArchiveStorageStatus.hardMaximumBytes` (size minus 1.5 floors) the oldest are deleted even with an archive, so moves that lag never pause recording.
+  The event log's size cutoff never passes the oldest recording kept on either drive. A file being written is never a candidate; neither is the one being moved.
+- **The move** (`ArchiveMove.perform`, on `ArchiveMoveWorker`'s own thread at background quality of service, `nice` 19 and the idle I/O class on the box): the box's mp4 and
+  sidecar must be what the catalog says and the archive must have room; both are copied to `<name>.moving` a chunk at a time (1 MiB, at most 32 MiB/s, waiting while someone
+  reads the archive), hashed with SHA-256 as they are read and synced; the copies are read back and compared; the sidecar takes its name, then the mp4, then the folder is
+  synced. Then, under the store's lock and only if nothing changed meanwhile, the catalog points at the archive; then the box's copy is deleted (mp4, then sidecar, kept on
+  `pendingMainRemovals` until it is gone) once the archive's copy is found whole: while the drive is away it waits (its bytes still count on the box), and a copy the drive
+  lost makes the box's copy the recording again. A move whose file changed takes its copy away again; three moves in a row that the archive failed make it "failing" for 10
+  minutes.
+- **After a crash** (`ArchiveMoveStep` names each step a test stops at): before the archive's files are read, its `.moving` files and a sidecar that took its name without its
+  mp4 are deleted (the box still has the recording); a recording found on both drives stays the box's in the catalog until the mover compared the two (sizes, sidecar bytes
+  and SHA-256 of the contents): the same, the box's copy is deleted; different, both files stay and the box's is the one shown. A sidecar the box has without its mp4 whose
+  recording is on the archive is deleted. Each crash point leaves exactly one good copy after the next start.
+- **Away and back.** A drive that goes away (no marker) leaves its files in the catalog: they count in the extent and the events' `recorded`, no lookup finds a fragment in
+  them (`fragment(startingAfter:)` skips them), `awaySpan` names the stretch and `activity` counts it as `away`, not `coverage`. Its files are remembered in
+  `<data directory>/archive-drive-index.json` (written when they changed, at most every 10 s), so a start without the drive still shows them; a start with it scans both drives.
+  Plugged back in, its files are read again and play.
+- **The Sky Watcher's log and stills (`.sky`) and the cameras' events (`.events`) never move**: they stay in the recordings folder (the mover only takes catalog files).
 
 ## Additions beyond the contract: the bridge's time zone (2026-10-14, docs/CONTRACT_CHANGES.md)
 

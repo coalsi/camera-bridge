@@ -13,6 +13,13 @@ enum ArchiveTime {
     }
 }
 
+/// Which drive a recording is on: the recordings folder (`main`: the box's own disk, or its recording drive) or the archive drive, where older
+/// recordings move when the main drive fills (archive-tier brief). A file keeps its segment, file key and fragment ids when it moves.
+enum StorageTier: String, Sendable, Equatable {
+    case main
+    case archive
+}
+
 /// One mp4 of the archive: closed (its index was read from the sidecar, or handed over by the recorder) or open (a recorder owns it and its
 /// table grows). Never holds the fragment table: that is `CatalogState.openTables` / the table cache.
 struct CatalogFile: Sendable, Equatable {
@@ -33,12 +40,14 @@ struct CatalogFile: Sendable, Equatable {
     /// Per-minute rollups of a closed file; empty while open (activity computes them from the table).
     var rollups: [CBIndexRollup]
     var isOpen: Bool
+    /// The drive it is on. Open files are always on `main`.
+    var tier: StorageTier
 
     var bytes: UInt64 { mp4Bytes + sidecarBytes }
     var hasAudio: Bool { flags & CBIndexFormat.flagHasAudio != 0 }
 
     init(camera: UUID, segment: String, startMs: Int64, endMs: Int64, initLength: UInt32, flags: UInt16, mp4Bytes: UInt64, sidecarBytes: UInt64,
-         fragmentCount: Int, rollups: [CBIndexRollup], isOpen: Bool) {
+         fragmentCount: Int, rollups: [CBIndexRollup], isOpen: Bool, tier: StorageTier = .main) {
         self.camera = camera
         self.segment = segment
         self.fileKey = ArchiveIdentity.fileKey(forSegment: segment)
@@ -51,13 +60,14 @@ struct CatalogFile: Sendable, Equatable {
         self.fragmentCount = fragmentCount
         self.rollups = rollups
         self.isOpen = isOpen
+        self.tier = tier
     }
 
     /// A closed file from its decoded index.
-    init(segment: String, index: CBIndexFile, sidecarBytes: UInt64) {
+    init(segment: String, index: CBIndexFile, sidecarBytes: UInt64, tier: StorageTier = .main) {
         self.init(camera: index.camera, segment: segment, startMs: index.startWallMs, endMs: index.endWallMs, initLength: index.initLength,
                   flags: index.flags, mp4Bytes: index.mp4Size, sidecarBytes: sidecarBytes, fragmentCount: index.fragments.count,
-                  rollups: index.rollups, isOpen: false)
+                  rollups: index.rollups, isOpen: false, tier: tier)
     }
 
     /// The end of a file whose last record is `record`, in epoch milliseconds (the arithmetic the recorder writes into the sidecar).
@@ -111,10 +121,14 @@ struct CatalogState: Sendable {
     /// The tables of open files (owned by recorders), keyed by segment.
     private(set) var openTables: [String: [CBIndexFragmentRecord]] = [:]
     private var cache = CatalogTableCache(capacity: ArchiveConstants.tableCacheFiles)
-    /// Bytes of every file in the catalog (mp4 + sidecar; open files: what is written so far).
+    /// Bytes of every file on the main drive (mp4 + sidecar; open files: what is written so far), and of every file on the archive drive.
     private(set) var usedBytes: UInt64 = 0
+    private(set) var archiveBytes: UInt64 = 0
     /// `ArchiveReading.catalogVersion`: +1 per written fragment, closed file, deletion and loaded batch.
     private(set) var version = 0
+    /// The archive drive is not connected (or not answering): its files stay in the catalog, so the timeline shows them as on the archive drive, but no
+    /// lookup finds a fragment in them.
+    private(set) var archiveAway = false
 
     init() {}
 
@@ -125,19 +139,37 @@ struct CatalogState: Sendable {
 
     mutating func bump() { version += 1 }
 
+    /// The archive drive went away or came back: lookups change, so the version moves.
+    mutating func setArchiveAway(_ away: Bool) {
+        guard away != archiveAway else { return }
+        archiveAway = away
+        version += 1
+    }
+
+    /// A file a lookup cannot read now: on the archive drive while it is away.
+    func isUnreachable(_ file: CatalogFile) -> Bool { archiveAway && file.tier == .archive }
+
+    private mutating func count(_ file: CatalogFile, _ sign: Int) {
+        if file.tier == .archive {
+            archiveBytes = sign > 0 ? archiveBytes + file.bytes : archiveBytes - min(archiveBytes, file.bytes)
+        } else {
+            usedBytes = sign > 0 ? usedBytes + file.bytes : usedBytes - min(usedBytes, file.bytes)
+        }
+    }
+
     // MARK: Changes
 
     /// Adds `file`, or replaces the file with the same segment. A closed file may bring its table (kept in the cache).
     mutating func insert(_ file: CatalogFile, table: [CBIndexFragmentRecord]? = nil) {
         var list = files[file.camera] ?? []
         if let existing = list.firstIndex(where: { $0.segment == file.segment }) {
-            usedBytes -= min(usedBytes, list[existing].bytes)
+            count(list[existing], -1)
             list.remove(at: existing)
         }
         let position = list.firstIndex { Self.precedes(file, $0) } ?? list.count
         list.insert(file, at: position)
         files[file.camera] = list
-        usedBytes += file.bytes
+        count(file, 1)
         if let table, !file.isOpen { cache.insert(table, for: file.segment) }
     }
 
@@ -147,12 +179,12 @@ struct CatalogState: Sendable {
         for (camera, added) in Dictionary(grouping: batch, by: \.camera) {
             let segments = Set(added.map(\.segment))
             var list = files[camera] ?? []
-            for file in list where segments.contains(file.segment) { usedBytes -= min(usedBytes, file.bytes) }
+            for file in list where segments.contains(file.segment) { count(file, -1) }
             list.removeAll { segments.contains($0.segment) }
             list += added
             list.sort(by: Self.precedes)
             files[camera] = list
-            usedBytes += added.reduce(0) { $0 + $1.bytes }
+            for file in added { count(file, 1) }
         }
         bump()
     }
@@ -169,11 +201,11 @@ struct CatalogState: Sendable {
         defer { files[camera] = list }
         guard let position = list.firstIndex(where: { $0.segment == segment && $0.isOpen }), openTables[segment] != nil else { return }
         openTables[segment]?.append(record)
-        usedBytes -= min(usedBytes, list[position].bytes)
+        count(list[position], -1)
         list[position].fragmentCount = openTables[segment]?.count ?? list[position].fragmentCount
         list[position].endMs = max(list[position].endMs, CatalogFile.endMs(startMs: list[position].startMs, of: record))
         list[position].mp4Bytes = max(list[position].mp4Bytes, record.offset + UInt64(record.length))
-        usedBytes += list[position].bytes
+        count(list[position], 1)
         version += 1
     }
 
@@ -190,10 +222,22 @@ struct CatalogState: Sendable {
         guard var list = files[camera], let position = list.firstIndex(where: { $0.segment == segment }) else { return nil }
         let removed = list.remove(at: position)
         files[camera] = list.isEmpty ? nil : list
-        usedBytes -= min(usedBytes, removed.bytes)
+        count(removed, -1)
         openTables[segment] = nil
         cache.remove(segment)
         return removed
+    }
+
+    /// Moves the file with this segment to `tier` (a move to the archive drive finished): the same file, the same table, another drive.
+    @discardableResult
+    mutating func setTier(_ tier: StorageTier, segment: String, camera: UUID) -> Bool {
+        guard var list = files[camera], let position = list.firstIndex(where: { $0.segment == segment }), !list[position].isOpen else { return false }
+        count(list[position], -1)
+        list[position].tier = tier
+        count(list[position], 1)
+        files[camera] = list
+        version += 1
+        return true
     }
 
     mutating func removeAll() {
@@ -201,6 +245,7 @@ struct CatalogState: Sendable {
         openTables = [:]
         cache.removeAll()
         usedBytes = 0
+        archiveBytes = 0
     }
 
     mutating func store(table: [CBIndexFragmentRecord], forSegment segment: String) {
@@ -217,19 +262,27 @@ struct CatalogState: Sendable {
         files[camera]?.first { $0.segment == segment }
     }
 
-    /// The closed files of every camera (retention candidates), and the bytes of the open ones.
+    /// The closed files of every camera on both drives, and the open ones (on the main drive).
     var closedFiles: [CatalogFile] { files.values.flatMap { $0 }.filter { !$0.isOpen } }
     var openFiles: [CatalogFile] { files.values.flatMap { $0 }.filter(\.isOpen) }
+    /// The closed files on one drive (retention candidates there).
+    func closedFiles(on tier: StorageTier) -> [CatalogFile] { files.values.flatMap { $0 }.filter { !$0.isOpen && $0.tier == tier } }
 
-    /// The newest start of any file (the clock-jump guard of the age rule).
+    /// The newest start of any file, on either drive (the clock-jump guard of the age rule).
     var newestStartMs: Int64? { files.values.compactMap { $0.last?.startMs }.max() }
 
-    /// Oldest start and newest end over every camera's files that hold at least one fragment.
-    var span: (oldest: Int64, newest: Int64)? {
+    /// The oldest start of any file, on either drive.
+    var oldestStartMs: Int64? { files.values.compactMap { $0.first?.startMs }.min() }
+
+    /// Oldest start and newest end over every camera's files on the main drive that hold at least one fragment.
+    var span: (oldest: Int64, newest: Int64)? { span(on: .main) }
+
+    /// The same for one drive.
+    func span(on tier: StorageTier) -> (oldest: Int64, newest: Int64)? {
         var oldest: Int64?
         var newest: Int64?
         for list in files.values {
-            for file in list where file.fragmentCount > 0 {
+            for file in list where file.fragmentCount > 0 && file.tier == tier {
                 oldest = min(oldest ?? file.startMs, file.startMs)
                 newest = max(newest ?? file.endMs, file.endMs)
             }
@@ -262,6 +315,27 @@ struct CatalogState: Sendable {
         return result
     }
 
+    /// The stretches of `camera`'s recordings that are on the archive drive while it is away, in milliseconds, merged (less than `gapThreshold`
+    /// between two joins them), in order, cut to `from..<to`. Empty while the archive is connected.
+    func unreachableSpans(camera: UUID, from startMs: Int64, to endMs: Int64) -> [(start: Int64, end: Int64)] {
+        guard archiveAway, let list = files[camera] else { return [] }
+        let join = Int64(ArchiveConstants.gapThreshold * 1_000)
+        var spans: [(start: Int64, end: Int64)] = []
+        for (position, file) in list.enumerated() where file.tier == .archive && file.fragmentCount > 0 && file.startMs < endMs {
+            let end = max(file.startMs, visibleEndMs(camera: camera, position: position))
+            guard end > startMs else { continue }
+            if let last = spans.last, file.startMs <= last.end + join {
+                spans[spans.count - 1].end = max(last.end, end)
+            } else {
+                spans.append((file.startMs, end))
+            }
+        }
+        return spans.compactMap { span in
+            let start = max(span.start, startMs), end = min(span.end, endMs)
+            return end > start ? (start, end) : nil
+        }
+    }
+
     /// The table of `segment` if it is in memory (an open file's, or a cached closed file's).
     mutating func table(forSegment segment: String) -> [CBIndexFragmentRecord]? {
         if let open = openTables[segment] { return open }
@@ -272,7 +346,7 @@ struct CatalogState: Sendable {
     mutating func fragment(camera: UUID, containingMicros time: Int64) -> CatalogLookup<ArchiveFragment> {
         guard let list = files[camera], let position = lastPosition(in: list, startingAtOrBeforeMicros: time) else { return .notFound }
         let file = list[position]
-        guard file.fragmentCount > 0, time < visibleEndMs(camera: camera, position: position) * 1_000 else { return .notFound }
+        guard file.fragmentCount > 0, !isUnreachable(file), time < visibleEndMs(camera: camera, position: position) * 1_000 else { return .notFound }
         guard let table = table(forSegment: file.segment) else { return .needsTable(segment: file.segment) }
         guard let index = Self.lastRecord(in: table, of: file, startingAtOrBeforeMicros: time) else { return .notFound }
         return .found(Self.fragment(of: file, table: table, index: index))
@@ -283,7 +357,7 @@ struct CatalogState: Sendable {
         guard let list = files[camera] else { return .notFound }
         var position = (lastPosition(in: list, startingAtOrBeforeMicros: time) ?? -1)
         // The file the time falls in may still have fragments after it (before the next file starts).
-        if position >= 0, list[position].fragmentCount > 0 {
+        if position >= 0, list[position].fragmentCount > 0, !isUnreachable(list[position]) {
             let file = list[position]
             guard let table = table(forSegment: file.segment) else { return .needsTable(segment: file.segment) }
             let visibleEnd = visibleEndMs(camera: camera, position: position)
@@ -295,7 +369,7 @@ struct CatalogState: Sendable {
         position += 1
         while position < list.count {
             let file = list[position]
-            if file.fragmentCount > 0, visibleEndMs(camera: camera, position: position) > file.startMs {
+            if file.fragmentCount > 0, !isUnreachable(file), visibleEndMs(camera: camera, position: position) > file.startMs {
                 guard let table = table(forSegment: file.segment) else { return .needsTable(segment: file.segment) }
                 return .found(Self.fragment(of: file, table: table, index: 0))
             }
@@ -306,7 +380,7 @@ struct CatalogState: Sendable {
 
     /// Fragment `index` of the file `fileKey` of `camera`, whatever the overlap rule says about its visibility.
     mutating func fragment(camera: UUID, fileKey: String, index: Int) -> CatalogLookup<ArchiveFragment> {
-        guard let file = file(camera: camera, fileKey: fileKey), index >= 0, index < file.fragmentCount else { return .notFound }
+        guard let file = file(camera: camera, fileKey: fileKey), !isUnreachable(file), index >= 0, index < file.fragmentCount else { return .notFound }
         guard let table = table(forSegment: file.segment) else { return .needsTable(segment: file.segment) }
         guard index < table.count else { return .notFound }
         return .found(Self.fragment(of: file, table: table, index: index))

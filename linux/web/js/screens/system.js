@@ -12,6 +12,7 @@ import { askToPowerOff, powerOff as sendPowerOff } from '../power.js';
 import { isBeta } from '../release-notes.js';
 import { secureAddressSection } from './secure-address.js';
 import { wifiCardFor } from './wifi-card.js';
+import { archiveCardFor, archivePhrase } from './archive-drive-card.js';
 
 /** An update in words: "beta build 0.1.109" while the system is in beta, "version 1.0.0" from 1.0 (`capital`: at the start of a sentence). */
 export function updateLabel(version, capital = false) {
@@ -36,6 +37,7 @@ const INSTALL_STEPS = {
 
 const POLL_MS = 3000;
 const MAX_POLLS = 800;   // about 40 minutes: an update on a slow line
+const ARCHIVE_POLL_MS = 10000;   // what the archive drive holds and moves, looked at again while the page is open
 
 export function renderSystem() {
   const root = h('div', { class: 'card-columns' });
@@ -45,6 +47,9 @@ export function renderSystem() {
   let update = null;
   let disks = null;
   let drives = null;
+  let archives = null;
+  let storage = null;
+  let archiveTimer = null;
   let wifi = null;
   let wifiNetworks = null;
   let copyData = true;
@@ -61,12 +66,27 @@ export function renderSystem() {
     try {
       [info, status] = await Promise.all([get('system'), get('status')]);
       wifi = await get('system/wifi').catch(() => null);
+      storage = await get('nvr/storage').catch(() => null);
       update = info.update || null;
     } catch (error) {
       replace(root, inlineError(error.message));
       return;
     }
-    if (!destroyed) { draw(); schedulePoll(); }
+    if (!destroyed) { draw(); schedulePoll(); watchArchive(); }
+  }
+
+  /** While the bridge has an archive drive, its numbers and what moves now are looked at again every 10 seconds. */
+  function watchArchive() {
+    clearInterval(archiveTimer);
+    if (destroyed || !storage?.archive) return;
+    archiveTimer = setInterval(async () => {
+      if (destroyed || busy) return;
+      const fresh = await get('nvr/storage').catch(() => null);
+      if (destroyed || !fresh) return;
+      const changed = JSON.stringify(fresh.archive) !== JSON.stringify(storage?.archive);
+      storage = fresh;
+      if (changed) draw();
+    }, ARCHIVE_POLL_MS);
   }
 
   /** While something long runs on the system's side, look again every few seconds (and stop when it ends, or after a while). */
@@ -307,6 +327,48 @@ export function renderSystem() {
             chosen ? h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: forgetDrive }, 'Use the box’s own disk again…') : null)]);
   }
 
+  // Archive drive ---------------------------------------------------------------------------------------------------------
+
+  async function loadArchives() {
+    await run('archives', async () => { archives = await get('system/archive-drives'); });
+  }
+
+  async function useArchive(disk, keepData) {
+    const phrase = archivePhrase(disk);
+    if (keepData) {
+      const ok = await confirmDialog({ title: `Use ${disk.name} as the archive drive?`, body: 'Its recordings stay where they are, and older ones move there when the box’s own disk fills. Recording goes on meanwhile.', confirm: 'Use as archive' });
+      if (!ok) return;
+    } else {
+      const ok = await phraseDialog({
+        title: `Erase ${disk.name} and use it as the archive drive?`, phrase, confirm: 'Erase the drive and use it as the archive',
+        body: `Everything on ${disk.name}${disk.model ? ` (${disk.model}, ${bytes(disk.sizeBytes)})` : ''} will be erased, and a new file system made for older recordings. Recording goes on meanwhile. A drive made this way is for Camera Bridge: other computers may not be able to read it without extra software.`,
+      });
+      if (!ok) return;
+    }
+    run('archive', async () => {
+      await post('system/archive-drive', { targetID: disk.id, phrase: keepData ? '' : phrase, keepData });
+      toast('Setting up the archive drive. Older recordings start moving there within a few minutes.', 'ok', 12000);
+      archives = null;
+      storage = await get('nvr/storage').catch(() => storage);
+      watchArchive();
+    });
+  }
+
+  async function forgetArchive() {
+    const ok = await confirmDialog({ title: 'Stop using the archive drive?', body: 'The drive and everything on it stay as they are, and you can use it again later. Until then the box deletes its oldest recordings when its disk fills.', confirm: 'Stop using it' });
+    if (!ok) return;
+    run('archive', async () => {
+      await post('system/archive-drive/forget', { confirm: true });
+      toast('The archive drive is no longer used. Its recordings stay on it.', 'ok', 10000);
+      archives = null;
+    });
+  }
+
+  function archiveCard() {
+    if (!info.canInstall) return null;
+    return archiveCardFor({ archives, storage, busy, load: loadArchives, use: useArchive, forget: forgetArchive });
+  }
+
   // Installing to a disk --------------------------------------------------------------------------------------------------
 
   async function loadDisks() {
@@ -385,10 +447,10 @@ export function renderSystem() {
   }
 
   function draw() {
-    replace(root, boxCard(), restartCard(), updateCard(), wifiCard(), secure.el, sshCard(), driveCard(), installCard(), resetCard());
+    replace(root, boxCard(), restartCard(), updateCard(), wifiCard(), secure.el, sshCard(), driveCard(), archiveCard(), installCard(), resetCard());
   }
 
   replace(root, h('div', { class: 'checking' }, spinner()));
   load();
-  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'System')), bannerHost, root), destroy() { destroyed = true; secure.destroy(); clearTimeout(pollTimer); bannerHost.destroy(); } };
+  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'System')), bannerHost, root), destroy() { destroyed = true; secure.destroy(); clearTimeout(pollTimer); clearInterval(archiveTimer); bannerHost.destroy(); } };
 }

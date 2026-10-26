@@ -5,6 +5,7 @@ import { confirmDialog, h, modal, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { cameraList } from '../store.js';
 import { inlineError } from '../screens/common.js';
+import { ARCHIVE_PURPOSE, describeArchive } from '../screens/archive-drive-card.js';
 import { KEEP_DAY_CHOICES, MAX_SIZE_CHOICES_GB, deleteSentence, describeLocation, describeStorage, keepLabel, sizeLabel, withCurrent } from './storage-info.js';
 
 const when = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
@@ -139,6 +140,15 @@ export function storageCard() {
   const reserved = h('p', { class: 'small muted' });
   const effective = h('p', { class: 'small muted' });
   const caption = h('p', { class: 'small muted' });
+  // The archive drive, where older recordings move when this drive fills (shown only where the bridge has one).
+  const archiveValues = Object.fromEntries(['status', 'used', 'free', 'oldest', 'moving'].map((key) => [key, h('dd')]));
+  const archiveNote = h('p', { class: 'small muted' });
+  const archiveBox = h('div', { class: 'rec-archive', hidden: true },
+    h('h3', null, 'Archive drive'), h('p', { class: 'small muted' }, ARCHIVE_PURPOSE),
+    h('dl', { class: 'kv' },
+      h('dt', null, 'State'), archiveValues.status, h('dt', null, 'Used'), archiveValues.used, h('dt', null, 'Free'), archiveValues.free,
+      h('dt', null, 'Goes back to'), archiveValues.oldest, h('dt', null, 'Moving now'), archiveValues.moving),
+    archiveNote);
   const keepSelect = h('select', { onchange: () => change({ keepDays: Number(keepSelect.value) }) });
   const sizeSelect = h('select', { onchange: () => change({ maxSizeGB: Number(sizeSelect.value) }) });
   const details = h('div', { hidden: true },
@@ -147,7 +157,7 @@ export function storageCard() {
       h('dt', null, 'Free'), values.free, h('dt', null, 'Oldest'), values.oldest, h('dt', null, 'Newest'), values.newest),
     bar, reserved, effective,
     h('div', { class: 'inline-fields' }, selectRow('nvr-keep', 'Keep for', keepSelect), selectRow('nvr-size', 'Maximum size', sizeSelect)),
-    caption);
+    caption, archiveBox);
   const chooseButton = h('button', { class: 'btn', type: 'button', onclick: async () => { if (await chooseStorage({ reason: 'settings' })) refresh(); } },
     'Choose where to record…');
   const el = h('section', { class: 'card nvr-card', id: 'recording-card', 'aria-labelledby': 'recording-heading' },
@@ -177,6 +187,14 @@ export function storageCard() {
     for (const [node, text] of [[reserved, view.reserved], [effective, view.effective], [caption, view.caption]]) {
       node.textContent = text || '';
       node.hidden = !text;
+    }
+    const archive = describeArchive(storage.archive ?? null, { when: whenText });
+    archiveBox.hidden = !archive;
+    if (archive) {
+      for (const key of Object.keys(archiveValues)) archiveValues[key].textContent = archive[key];
+      const note = [archive.connected ? null : archive.message, archive.waiting].filter(Boolean).join(' ');
+      archiveNote.textContent = note;
+      archiveNote.hidden = !note;
     }
     fillSelect(keepSelect, withCurrent(KEEP_DAY_CHOICES, storage.keepDays), storage.keepDays, keepLabel);
     fillSelect(sizeSelect, withCurrent(MAX_SIZE_CHOICES_GB, storage.maxSizeGB), storage.maxSizeGB, sizeLabel);

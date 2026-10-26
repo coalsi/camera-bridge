@@ -30,6 +30,45 @@ extension WebApp {
         var effectiveMaxBytes: UInt64
         var oldest: OrNull<Int64>
         var newest: OrNull<Int64>
+        /// The archive drive; null where the system has none.
+        var archive: OrNull<ArchiveDriveResource>
+    }
+
+    /// `ArchiveDriveStatus` for the page: the state's code, its sentence, the numbers, how far back it goes and what moves now.
+    private struct ArchiveDriveResource: Encodable {
+        var state: String
+        var message: OrNull<String>
+        var usedBytes: UInt64
+        var freeBytes: UInt64
+        var totalBytes: UInt64
+        var floorBytes: UInt64
+        var oldest: OrNull<Int64>
+        var newest: OrNull<Int64>
+        var moving: OrNull<MoveResource>
+        var waitingFiles: Int
+        var waitingBytes: UInt64
+        var movedFiles: Int
+        var movedBytes: UInt64
+    }
+
+    private struct MoveResource: Encodable {
+        var cameraID: UUID
+        var cameraName: OrNull<String>
+        var start: Int64
+        var bytes: UInt64
+        var doneBytes: UInt64
+    }
+
+    private func archiveResource(_ status: ArchiveDriveStatus, cameras: [CameraConfiguration]) -> ArchiveDriveResource {
+        let moving = status.moving.map { move in
+            MoveResource(cameraID: move.camera, cameraName: OrNull(cameras.first { $0.id == move.camera }?.name), start: Self.milliseconds(move.start),
+                         bytes: move.bytes, doneBytes: min(move.doneBytes, move.bytes))
+        }
+        return ArchiveDriveResource(state: status.state.rawValue, message: OrNull(status.message.map { Redact.string($0) }), usedBytes: status.usedBytes,
+                                    freeBytes: status.freeBytes, totalBytes: status.totalBytes, floorBytes: status.floorBytes,
+                                    oldest: OrNull(status.oldest.map(Self.milliseconds)), newest: OrNull(status.newest.map(Self.milliseconds)),
+                                    moving: OrNull(moving), waitingFiles: status.waitingFiles, waitingBytes: status.waitingBytes,
+                                    movedFiles: status.movedFiles, movedBytes: status.movedBytes)
     }
 
     private func storageResource(_ overview: BridgeOverview) -> StorageResource {
@@ -47,7 +86,8 @@ extension WebApp {
                                   maxSizeGB: [BridgeSettings.nvrMaxSizeGBRange.lowerBound, BridgeSettings.nvrMaxSizeGBRange.upperBound]),
             usedBytes: storage?.usedBytes ?? 0, freeBytes: storage?.freeBytes ?? 0, totalBytes: storage?.totalBytes ?? 0, floorBytes: storage?.floorBytes ?? 0,
             roomBytes: storage?.roomBytes ?? 0, effectiveMaxBytes: storage?.effectiveMaximumBytes(maxSizeGB: settings.nvrMaxSizeGB) ?? 0,
-            oldest: OrNull(storage?.oldest.map(Self.milliseconds)), newest: OrNull(storage?.newest.map(Self.milliseconds)))
+            oldest: OrNull(storage?.oldest.map(Self.milliseconds)), newest: OrNull(storage?.newest.map(Self.milliseconds)),
+            archive: OrNull(storage?.archive.map { archiveResource($0, cameras: overview.configurations) }))
     }
 
     func nvrStorage() async -> HTTPResponse {
@@ -115,16 +155,21 @@ extension WebApp {
     }
 
     /// What the new limits would delete, from the storage snapshot (approximate on purpose): the larger of the bytes over the size limit and the
-    /// share of the archive older than the age limit (spread evenly over the time between the oldest and the newest recording).
+    /// share of the archive older than the age limit (spread evenly over the time between the oldest and the newest recording). With an archive drive
+    /// that is connected, what is over the size limit moves there instead of being deleted, and the age limit covers what is on both drives.
     static func bytesTheLimitsWouldDelete(_ storage: ArchiveStorageStatus, keepDays: Int, maxSizeGB: Int, now: Date) -> (deletes: Bool, bytes: Double) {
-        let used = Double(storage.usedBytes)
-        let sizeExcess = max(0, used - Double(maxSizeGB) * Double(ArchiveConstants.gigabyte))
+        let archive = storage.archive
+        let moves = archive?.state == .connected
+        let used = Double(storage.usedBytes) + Double(archive?.usedBytes ?? 0)
+        let sizeExcess = moves ? 0 : max(0, Double(storage.usedBytes) - Double(maxSizeGB) * Double(ArchiveConstants.gigabyte))
         var ageDeletes = false
         var ageExcess = 0.0
-        if let oldest = storage.oldest {
+        let oldestKept = [storage.oldest, archive?.oldest].compactMap { $0 }.min()
+        let newestKept = [storage.newest, archive?.newest].compactMap { $0 }.max()
+        if let oldest = oldestKept {
             let cutoff = now.addingTimeInterval(-Double(keepDays) * 86_400)
             ageDeletes = oldest < cutoff
-            let span = storage.newest.map { $0.timeIntervalSince(oldest) } ?? 0
+            let span = newestKept.map { $0.timeIntervalSince(oldest) } ?? 0
             let share = span > 0 ? min(max(cutoff.timeIntervalSince(oldest) / span, 0), 1) : (ageDeletes ? 1 : 0)
             ageExcess = used * share
         }

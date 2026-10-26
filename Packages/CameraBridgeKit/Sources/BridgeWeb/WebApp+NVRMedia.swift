@@ -83,7 +83,11 @@ extension WebApp {
             let reason: String
             var next: Int64?
             if let extent {
-                if time < extent.oldest {
+                if let away = archive.awaySpan(camera: camera, containing: time) {
+                    // On the archive drive while it is not connected: said so, with where the next video that plays now begins.
+                    reason = "archiveAway"
+                    next = await archive.fragment(camera: camera, startingAfter: max(time, away.end.addingTimeInterval(-0.001))).map { Self.milliseconds($0.start) }
+                } else if time < extent.oldest {
                     reason = "beforeStart"
                 } else if time >= extent.newest {
                     reason = "afterEnd"

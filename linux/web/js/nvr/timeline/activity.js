@@ -58,12 +58,14 @@ function p99(values) {
  * Cameras on one waveform. `byCamera` is the `byCamera` object of GET nvr/activity. Coverage is the best of the cameras per bin.
  * One camera: its own bytes per second and its own typical level. Several cameras: each bin is the busiest camera relative to
  * its own typical level (so `typical` is 1); a camera without a typical level yet is measured against its own 99th percentile.
+ * `away` is the most of a bin any camera has on the archive drive while that drive is not connected (0 from a bridge without one).
  */
 export function combineActivity(byCamera, bins) {
   const cameras = Object.values(byCamera || {}).filter((c) => c && Array.isArray(c.level) && Array.isArray(c.coverage));
   const level = new Array(bins).fill(0);
   const coverage = new Array(bins).fill(0);
-  if (cameras.length === 0) return { level, coverage, typical: null };
+  const away = new Array(bins).fill(0);
+  if (cameras.length === 0) return { level, coverage, typical: null, away };
   const single = cameras.length === 1;
   const scales = cameras.map((c) => {
     if (single) return 1;
@@ -75,11 +77,13 @@ export function combineActivity(byCamera, bins) {
       const cover = c.coverage[i] || 0;
       if (cover > coverage[i]) coverage[i] = cover;
       if (cover > 0) level[i] = Math.max(level[i], (c.level[i] || 0) / scales[k]);
+      const gone = Array.isArray(c.away) && Number.isFinite(c.away[i]) ? c.away[i] : 0;
+      if (gone > away[i]) away[i] = gone;
     }
   });
   const allHaveTypical = cameras.every((c) => Number.isFinite(c.typical) && c.typical > 0);
   const typical = single ? (Number.isFinite(cameras[0].typical) && cameras[0].typical > 0 ? cameras[0].typical : null) : allHaveTypical ? 1 : null;
-  return { level, coverage, typical };
+  return { level, coverage, typical, away };
 }
 
 /** Levels of the bins that have footage and touch the viewport: what the p99 scale is measured over. */

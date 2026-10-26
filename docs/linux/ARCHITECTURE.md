@@ -120,11 +120,13 @@ POST   /api/v1/probe                  the same body as POST /cameras (no choices
 POST   /api/v1/integrations/unifi/cameras   {host, apiKey, ...} -> the console's cameras
 POST   /api/v1/integrations/nest/authorize  {projectID, clientID} -> {url};  .../nest/connect {projectID, clientID, clientSecret, code} -> {session, cameras}
 GET    /api/v1/sensors-bridge         same shape as pairing; POST /api/v1/sensors-bridge/reset-pairing
-GET    /api/v1/nvr/storage            where recordings go and the numbers: state, keepDays, maxSizeGB, used / free / total / floor / room bytes, effective maximum, oldest, newest
+GET    /api/v1/nvr/storage            where recordings go and the numbers: state, keepDays, maxSizeGB, used / free / total / floor / room bytes, effective maximum, oldest, newest;
+                                      archive: null, or the archive drive {state: connected|notConnected|notAnswering|failing|refused, message, used / free / total / floor bytes,
+                                      oldest, newest, moving: {cameraID, cameraName, start, bytes, doneBytes} | null, waitingFiles, waitingBytes, movedFiles, movedBytes}
 GET    /api/v1/nvr/storage/locations  the places this bridge offers (one on the box) with free space and any problem; the browser sends the id, never a path
 PATCH  /api/v1/nvr/storage            {location?, keepDays?, maxSizeGB?, confirm?}: choose the place and the limits; 409 confirm_required when it would delete recordings
 GET    /api/v1/nvr/cameras            {serverTime, catalogVersion, cameras: [{id, oldest, newest, typicalGOP}]}: what is recorded
-GET    /api/v1/nvr/activity?cameras=&from=&binMs=&bins=      the timeline's activity per camera (coverage, bytes per second, typical)
+GET    /api/v1/nvr/activity?cameras=&from=&binMs=&bins=      the timeline's activity per camera (coverage, bytes per second, typical, and away: the percent of each bin on an archive drive that is not connected)
 GET    /api/v1/nvr/events?cameras=&from=&to=&limit=          {from, to, serverTime, more, events: [{id, cameraID, kind, start, end, recorded, description}]}: the cameras' events that began in from..<to (at most 31 days, 1 to 16 cameras), newest first, at most limit (1 to 1000, default 200); more: older ones were left out (ask again with to = the oldest start). A page never splits a millisecond: the events of its oldest start are all in it or all in the next (more than limit at one moment with nothing newer: that moment whole). 503 archive_unavailable (Retry-After) while the recordings load or their folder is missing, never an empty answer. description: what an AI service said it saw at the event's start, {summary, kind (person, vehicle, animal, delivery, other, nothing), concern (routine, unusual, alarm)}, or null when none was written (the model and the time stay in the log)
 GET    /api/v1/nvr/cameras/{id}/fragments?at=ms[&ahead=n] | ?after=id[&limit=n]    which pieces to play: ids, times, sizes and the codec string
 GET    /api/v1/nvr/cameras/{id}/fragments/{fid}         one piece, video only, as fragmented MP4 (at most 16 MiB; no Range; HEAD is 405)
@@ -199,6 +201,9 @@ GET    /api/v1/system/disks           {disks: [{id, name, model, sizeBytes, note
 GET    /api/v1/system/recording-drives  {state: internal|mounted|missing|working|failed, message, drives: [{id, name, model, sizeBytes, note, eligible, problems[], phrase, isRecordingDrive, inUse}]}: the attached disks that could take recordings, and where recordings go now
 POST   /api/v1/system/recording-drive   {targetID, phrase?, keepData?}: phrase is "ERASE ALL DATA ON <disk name>" (erases and makes an ext4 file system labelled CBRECORDINGS); keepData: use a disk that already is a Camera Bridge recording drive as it is; -> 202
 POST   /api/v1/system/recording-drive/forget  {confirm: true}: back to the box's own disk, the drive left alone; -> 202
+GET    /api/v1/system/archive-drives  {state: none|mounted|missing|working|failed, message, drives: [{id, name, model, sizeBytes, note, eligible, problems[], phrase, isArchiveDrive, inUse}]}: the recording drive's list in the archive's view (the recording drive in use is never eligible); inUse: the archive drive now
+POST   /api/v1/system/archive-drive   {targetID, phrase?, keepData?}: phrase is "ERASE ALL DATA ON <disk name>" (erases and makes an ext4 file system labelled CBARCHIVE); keepData: use a disk that already is a Camera Bridge archive drive as it is; -> 202
+POST   /api/v1/system/archive-drive/forget  {confirm: true}: stop using the archive drive, the drive and its recordings left alone; -> 202
 GET    /api/v1/nvr/cameras/:id/clip-plan?from=ms&to=ms&tz=Zone  {camera, cameraName, parts: [{index, start, end, leadInMs, bytes, samples, fileName}], gaps: [{from, to, held}], soundOmitted, bytes, durationMs}: what a clip of that camera in that range would be, from the recordings' headers only
 GET    /api/v1/nvr/cameras/:id/clip?from=ms&to=ms&tz=Zone&part=1   one MP4 (chunked, `attachment`): the clip's part as planned, exactly `bytes` long, the video copied untouched
        &labels=1 and/or &straighten=1   the part re-encoded by ffmpeg and streamed as fragmented MP4 (its size not known in advance): with the camera's label burned in, and straightened by the camera's picture correction (straighten=1 is ignored while the correction is off: the copy above)
@@ -236,6 +241,9 @@ Changes to the first draft of this contract: `POST /probe` and `POST /cameras` t
 | automatic updates | `auto-update` `{"enabled": bool}` | the same |
 | disks | `install-list` `{}` | `install-candidates.json` newer than the request (30 s) |
 | install | `install-list` first (fresh), then `install-to-disk` `{"device":"/dev/<name>","phrase":"ERASE ALL DATA ON <name>","copyData":bool,"poweroff":true,"dryRun":false}` | only pickup; `install-to-disk.json` has the steps |
+| recording drives / archive drives | `drive-list` `{}` (one list for both) | `recording-drive-candidates.json` newer than the request (30 s); the state from `recording-drive.json` / `archive-drive.json` |
+| use a recording drive / an archive drive | the list first (fresh), then `drive-use` / `archive-use` `{"device":"/dev/<name>","phrase":"ERASE ALL DATA ON <name>" or "","keepData":bool}` | only pickup |
+| forget the recording drive / the archive drive | `drive-forget` / `archive-forget` `{}` | only pickup |
 | watched cameras (the engine, `setGuardedCameras`) | `guard-set` `{"cameras":[{"address":"192.168.77.21","level":"watch"}],"timeZone":"<the bridge's>"}` | the job's `ok` or `failed` (30 s) |
 | the guard's report (the engine, `guardReport`) | none: reads `guard.json` (up to 1 MiB) | nothing |
 
@@ -252,7 +260,7 @@ The daemon offers the guard to the engine where the image has `camera-bridge-dns
 ```
 camerabridged [--data-dir /var/lib/camera-bridge] [--port 80] [--static-dir|--web-root /usr/share/camera-bridge/web] [--loopback-only]
               [--allowed-host NAME] [--setup-token-file PATH] [--run-dir /run/camera-bridge] [--os-request-dir DIR] [--os-status-dir DIR]
-              [--recordings-dir DIR] [--log-level info] [--hap-base-port N] [--sensors-port N] [--dev] [--preview [scenario]] [--fake-discovery]
+              [--recordings-dir DIR] [--archive-dir DIR] [--log-level info] [--hap-base-port N] [--sensors-port N] [--dev] [--preview [scenario]] [--fake-discovery]
               [--no-demo-camera]
 ```
 
@@ -261,6 +269,35 @@ Every flag has a variable; a flag wins. The image's unit sets `CAMERABRIDGE_DATA
 ### Recordings (the NVR)
 
 The recorder, the catalog and the retention rules live in the engine (`BridgeEngine/NVR`) and are the same on the Mac and on the box; the daemon supplies what only the host knows. The folder is `recordings` inside the data directory (`/var/lib/camera-bridge/recordings`, which is `/srv/camera-bridge/recordings` on the data partition) unless `--recordings-dir` names a full path. The daemon makes the folder as the unprivileged user (0700) before the engine starts; inside the data directory it makes missing levels, anywhere else only the folder itself and only when its parent exists, so an unplugged drive cannot be re-invented on the system disk. The recorder never makes the folder or a parent of it. The web interface offers that one folder as the location `builtin` (the browser sends the id, never a path). Free space comes from `statvfs` (`f_bavail`); the data directory's device (`st_dev`) is the system volume, which keeps `max(8 GiB, 5% of the partition)` free (recording pauses below it and resumes 1 GiB above it) because settings, HomeKit keys, the journal and `cb-update`'s 4 GB share that partition; a folder on another device keeps 2 GiB. Camera folders are named by the camera's UUID, `camera.json` inside carries the name. Starting never waits for the archive: the store repairs unclosed files and loads its catalog in the background, and `READY=1` does not depend on it (`TimeoutStartSec=120`; three unblessed boots roll the OS back). The hardened unit lets the daemon write only inside `/var/lib/camera-bridge`, so a recordings folder anywhere else needs the unit changed; that comes with external drives. `--preview` has no recordings and no archive.
+
+#### The archive drive
+
+A second drive where older recordings move when the recordings drive fills, instead of being deleted (`cb-recording-drive --archive`, linux/os/README.md;
+the engine's side is BridgeEngine's README, "the archive drive"). It is separate from the recording drive, which replaces the box's own disk for every
+recording: the archive keeps the recordings folder (and the Sky Watcher's `.sky` and the events' `.events`, which never move) on the box's disk.
+
+```
+recordings drive (the box's SSD)                       archive drive (USB, /var/lib/camera-bridge/archive, label CBARCHIVE)
+  <recordings>/<camera>/<date>/<HH-mm-ss>.mp4 ──move──►  <archive>/<camera>/<date>/<HH-mm-ss>.mp4   (same names, same fragment ids)
+  <recordings>/.events, .sky   (never move)              .camera-bridge-archive   (the OS's marker: without it nothing is written there)
+```
+
+- **Choosing it.** The System page's "Archive drive" card lists the disks (`GET system/archive-drives`: the recording drive's `drive-list`, in the archive's
+  view) and makes one the archive (`POST system/archive-drive`): erased with the typed `ERASE ALL DATA ON <disk>` (one GPT partition, ext4 `CBARCHIVE`, as a
+  recording drive is made), or used as it is when it already is one. `cb-recording-drive --archive` mounts it on `/var/lib/camera-bridge/archive` (inside the
+  unit's `ReadWritePaths`; mounts there reach the running engine), writes the marker, keeps the choice in `/srv/system/archive-drive`, mounts it at boot and when
+  it is plugged in, and puts a read-only placeholder there while it is chosen but away. The engine is never restarted for it.
+- **Moving.** With the archive connected, answering and loaded, retention moves what its size rule would delete: oldest first, while the archive has room
+  within its size minus twice its floor (2 GiB) and above its floor; the archive deletes its own oldest to take newer files and keeps the same `nvrKeepDays`.
+  A move is a copy to a temporary name (SHA-256 as it is read, `fsync`), a read back that must match, the names in place, the catalog switched, then the box's
+  copy deleted once the archive's is found whole again (it waits while the drive is away); one file at a time on a thread at `nice` 19 and the idle I/O class, at most 32 MiB/s, waiting while someone watches archived video. A crash at
+  any step leaves exactly one good copy after the next start. Without a usable archive (none chosen, unplugged, not answering, failing, full) retention deletes
+  exactly as before, and recording never pauses because of it: over the box's size minus 1.5 floors the oldest are deleted even with an archive.
+- **Reading.** The catalog knows each file's drive; the playback, clips, events, their pictures and the Sky Watcher's player read archived video the same way,
+  through the archive's own read queue (the same 5 s deadline), so a slow USB drive cannot hold up the box's own reads. While the drive is away its recordings
+  stay on the timeline as "on the archive drive (not connected)" (`nvr/activity` `away`, a plan's `reason: "archiveAway"` with where video plays again; a list
+  in the data directory remembers them across a restart without the drive); plugged back in, they play again. `GET nvr/storage` has its `archive`: state,
+  used and free, how far back it goes, what moves now and what waits.
 
 ### Recordings in the browser
 

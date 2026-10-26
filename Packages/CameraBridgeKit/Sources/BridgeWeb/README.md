@@ -22,6 +22,16 @@ in `docs/linux/ARCHITECTURE.md`; the interface itself is `linux/web/`.
 
 ## Additions beyond the contract
 
+The archive drive (2026-10-25, docs/CONTRACT_CHANGES.md): `SystemControlling.archiveDrives()`, `SystemControlling.useArchiveDrive(targetID:phrase:keepData:)` and
+`SystemControlling.forgetArchiveDrive()` (extension defaults throw "An archive drive is only possible on Camera Bridge OS.", so existing conformers compile),
+`ArchiveDriveReport` (`state`: none, mounted, missing, working, failed; `message`; `drives`) and `InstallTarget.isArchiveDrive`; routes `GET system/archive-drives`,
+`POST system/archive-drive` (`{targetID, phrase?, keepData?}`, the recording drive's checks: a target, and the typed "ERASE ALL DATA ON <disk>" unless `keepData`) and
+`POST system/archive-drive/forget` (`{confirm: true}`), in `WebApp+Bridge.swift`. `GET nvr/storage` has `archive` (null where there is none; `WebApp+NVRStorage.swift`:
+state, message, used, free, total and floor bytes, oldest, newest, `moving` `{cameraID, cameraName, start, bytes, doneBytes}`, waiting and moved counts), and
+`bytesTheLimitsWouldDelete` counts nothing over the size limit while a connected archive takes it (the keep time counts both drives). `GET nvr/activity` has `away` per
+camera, the percent of each bin on an archive drive that is not connected (`ArchiveActivity.Bin.away`); a plan (`GET nvr/cameras/:id/fragments?at=`) inside such a stretch
+answers `reason: "archiveAway"` with `next` where video plays again (`ArchiveReading.awaySpan`).
+
 Camera detection (2026-10-23, docs/CONTRACT_CHANGES.md): `POST probe` answers `ownInterfaceNote` when an ONVIF camera was added through its maker's own interface ("Found Hikvision's own interface (ANNKE I91ET); using it for settings and security.", `NotSetUpText`), and a failed check of a camera with no admin password yet answers `notSetUp` `{maker, title, step, webPage, openLabel, checkAgainLabel}` (`BridgeBackend.notSetUp(endpoint:)`, asked without a login); a Reolink answering with an empty password gets the same card. The page (`screens/not-set-up.js`) shows the step with "Open the camera's web page" and "Check again".
 
 Camera search (2026-10-24, docs/CONTRACT_CHANGES.md): each camera of `POST discover` may carry `otherNetwork` `{address, title, step, checkAgainLabel}` (Hikvision's SADP found it on none of the box's networks: "Found a camera on another network (192.168.1.64)", with what to do: SADP tool or a computer on that network, turn on DHCP, then Check again; `NotSetUpText.otherNetwork`) or `notSetUp` (SADP says it has no admin password yet: the same card as the check's, its `webPage` at SADP's `HttpPort`). The Add camera page's search (`screens/add.js`, `otherNetworkCard` in `screens/not-set-up.js`) shows those cameras as cards, not as choices; Check again searches again. Tests: `DiscoveryAPITests`, `linux/web-tests/not-set-up.test.mjs`.

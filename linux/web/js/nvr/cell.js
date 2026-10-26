@@ -456,10 +456,12 @@ export function createCell({
       if (!oldest && Number.isFinite(next) && !(d.playing && clock.position() < next)) { await exactStep(d, next, true); return; }
     }
     if (plan.reason === 'empty') { setCoverage({ kind: 'gap', next: null, message: MESSAGES.empty, epoch: d.epoch, playing: false }); return; }
+    // On the archive drive, which is not connected: said so, and a playing tile goes on where the next video that plays now begins (below).
+    const away = plan.reason === 'archiveAway';
     // The clock plays on while the plan is on its way: when it has got to the next recording already, play there instead of naming a time behind it.
     const reached = d.playing && Number.isFinite(next) && next > target && clock.position() >= next;
     if (reached) { restart = { ...d, targetMs: clock.position() }; return; }
-    setCoverage({ kind: 'gap', next, epoch: d.epoch, playing: false });
+    setCoverage(away ? { kind: 'gap', next, away: true, message: MESSAGES.archiveAway, epoch: d.epoch, playing: false } : { kind: 'gap', next, epoch: d.epoch, playing: false });
   }
 
   /**

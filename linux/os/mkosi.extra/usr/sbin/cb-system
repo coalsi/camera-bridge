@@ -23,9 +23,9 @@ export CB_TAG=cb-system
 REQUESTS=$CB_RUN/requests
 JOBS=$CB_RUN/jobs
 MAX_REQUEST_BYTES=65536
-ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget wifi-scan wifi-join wifi-forget guard-set tls-obtain"
+ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget archive-use archive-forget wifi-scan wifi-join wifi-forget guard-set tls-obtain"
 # Jobs that change disks or the running system image take this lock; only one at a time.
-HEAVY_JOBS=" update-apply install-to-disk factory-reset drive-use drive-forget "
+HEAVY_JOBS=" update-apply install-to-disk factory-reset drive-use drive-forget archive-use archive-forget "
 
 SSH_DIR=$CB_SYSTEM/ssh
 KEY_RE='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+={0,3}( [^[:cntrl:]]{0,100})?$'
@@ -276,6 +276,17 @@ run_job_body() {
             fi
             ;;
         drive-forget) /usr/sbin/cb-recording-drive --forget ;;
+        # The archive drive: the same list (drive-list) and the same rules; erased with the typed sentence, or kept when it already is one.
+        archive-use)
+            device=$(jq -r '.device // ""' "$args")
+            phrase=$(jq -r '.phrase // ""' "$args")
+            if [ "$(jq -r '.keepData == true' "$args")" = "true" ]; then
+                /usr/sbin/cb-recording-drive --archive --device "$device" --keep
+            else
+                /usr/sbin/cb-recording-drive --archive --device "$device" --confirm "$phrase"
+            fi
+            ;;
+        archive-forget) /usr/sbin/cb-recording-drive --archive --forget ;;
         wifi-scan) /usr/sbin/cb-wifi --scan --json >/dev/null ;;
         wifi-join)
             # The password stays in the argument file (root-only, removed after the job); it is never logged.

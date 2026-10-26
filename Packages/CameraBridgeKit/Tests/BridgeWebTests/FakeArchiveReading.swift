@@ -140,6 +140,7 @@ final class FakeArchiveReading: ArchiveReading {
         var events: [ArchiveEvent] = []
         var eventsFailure: (any Error & Sendable)?
         var eventCalls: [(cameras: [UUID], range: Range<Date>, limit: Int)] = []
+        var away: [UUID: DateInterval] = [:]
     }
 
     private let state = Mutex(State())
@@ -160,6 +161,8 @@ final class FakeArchiveReading: ArchiveReading {
     func setReadGate(_ gate: AsyncGate?) { state.withLock { $0.readGate = gate } }
     func setActivityDelay(_ delay: Duration) { state.withLock { $0.activityDelay = delay } }
     func setActivityProvider(_ provider: (@Sendable (UUID, Range<Date>, Int) -> ArchiveActivity)?) { state.withLock { $0.activityProvider = provider } }
+    /// The camera's recordings in `span` are on an archive drive that is not connected (`awaySpan`).
+    func setAway(_ span: DateInterval?, camera: UUID) { state.withLock { $0.away[camera] = span } }
     func bumpCatalogVersion() { state.withLock { $0.version += 1 } }
     /// What `events(cameras:range:limit:)` answers from (filtered and ordered like the store), and a failure it throws instead.
     func setEvents(_ events: [ArchiveEvent]) { state.withLock { $0.events = events } }
@@ -189,6 +192,10 @@ final class FakeArchiveReading: ArchiveReading {
 
     func fragment(camera: UUID, containing time: Date) async -> ArchiveFragment? {
         state.withLock { state in all(camera, state).filter { $0.start <= time && time < $0.end }.max { $0.start < $1.start } }
+    }
+
+    func awaySpan(camera: UUID, containing time: Date) -> DateInterval? {
+        state.withLock { state in state.away[camera].flatMap { $0.start <= time && time < $0.end ? $0 : nil } }
     }
 
     func fragment(camera: UUID, startingAfter time: Date) async -> ArchiveFragment? {

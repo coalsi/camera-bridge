@@ -357,6 +357,19 @@ final class FakeSystem: SystemControlling {
 
     func forgetRecordingDrive() async throws { calls.update { $0.append("drive-forget") } }
 
+    func archiveDrives() async throws -> ArchiveDriveReport {
+        ArchiveDriveReport(state: "none", message: "No archive drive is chosen.",
+                           drives: [InstallTarget(id: "sdb", name: "sdb", model: "Expansion", sizeBytes: 4_000_000_000_000, phrase: "ERASE ALL DATA ON sdb", inUse: false,
+                                                  isArchiveDrive: true)])
+    }
+
+    func useArchiveDrive(targetID: String, phrase: String, keepData: Bool) async throws {
+        calls.update { $0.append("archive:\(targetID):\(phrase):\(keepData)") }
+        if targetID == "bad" { throw SystemError("That disk can’t be used.") }
+    }
+
+    func forgetArchiveDrive() async throws { calls.update { $0.append("archive-forget") } }
+
     func wifi() async -> WifiReport {
         WifiReport(state: hotspot.value == nil ? "online" : "hotspot", message: "", ssid: hotspot.value == nil ? "Home" : nil, hotspot: hotspot.value, saved: ["Home"],
                    lastError: hotspot.value == nil ? nil : "Couldn’t join “Home”.", hasWifi: true,

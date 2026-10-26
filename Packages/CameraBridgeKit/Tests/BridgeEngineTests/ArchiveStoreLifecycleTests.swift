@@ -21,30 +21,55 @@ final class ArchiveStoreHarness: Sendable {
     let spaceCalls = Box(0)
     let signal = ChangeSignal()
     let store: ArchiveStore
+    /// The archive drive (`archive: true`): its folder (with the drive's marker) and its free space, which the test sets apart from the box's.
+    let archiveRoot: TemporaryDirectory?
+    let archiveSpace: Box<VolumeMonitor.Space?>
+    /// What a store made by `makeStore` gets: the same folders, the same fake drives.
+    let environment: BridgeEnvironment
+    let tuning: ArchiveStoreTuning
 
     /// `spaceGate`: when set, the drive's `space` call blocks on it (a drive that hangs). `repair` (after `populate`, so that a trailing closure is still `populate`): replaces the scanner's repair of an
     /// unowned file (a test that needs a slow or failing one).
     init(total: UInt64 = 500 * ArchiveStoreHarness.gb, free: UInt64 = 400 * ArchiveStoreHarness.gb, now: Date = ArchiveStoreHarness.now, isSystemVolume: Bool = false,
          spaceGate: DispatchSemaphore? = nil, readDeadline: Duration = .seconds(5), probeInterval: Duration = .milliseconds(50), statusRefresh: Duration = .milliseconds(50), probeStallAfter: Duration = .seconds(5), retentionAtStart: Bool = false,
          deletedHandleGrace: Duration = .zero, logs: Bool = false, skyStillBytes: UInt64? = nil,
-         populate: (URL) throws -> Void = { _ in }, repair: (@Sendable (URL, URL, UUID) throws -> IndexScanOutcome)? = nil) throws {
+         archive: Bool = false, archiveTotal: UInt64 = 2_000 * ArchiveStoreHarness.gb, archiveFree: UInt64 = 1_900 * ArchiveStoreHarness.gb,
+         movePause: Duration = .milliseconds(1), moveBytesPerSecond: Int = 0,
+         populate: (URL) throws -> Void = { _ in }, populateArchive: (URL) throws -> Void = { _ in },
+         repair: (@Sendable (URL, URL, UUID) throws -> IndexScanOutcome)? = nil, moveCrash: (@Sendable (ArchiveMoveStep) -> Bool)? = nil) throws {
         root = try TemporaryDirectory()
         dataDirectory = try TemporaryDirectory()
         try populate(root.url)
+        let archiveRoot = archive ? try TemporaryDirectory() : nil
+        if let archiveRoot {
+            try ArchiveStoreHarness.writeMarker(in: archiveRoot.url)
+            try populateArchive(archiveRoot.url)
+        }
+        self.archiveRoot = archiveRoot
         let space = Box<VolumeMonitor.Space?>(VolumeMonitor.Space(total: total, free: free))
+        let archiveSpace = Box<VolumeMonitor.Space?>(VolumeMonitor.Space(total: archiveTotal, free: archiveFree))
+        self.archiveSpace = archiveSpace
         let clock = Box(now)
         let spaceCalls = self.spaceCalls
         let removed = self.removed, failRemoval = self.failRemoval
         self.space = space
         self.clock = clock
+        let archivePath = archiveRoot.map { ArchiveVolume.path(of: $0.url) }
+        @Sendable func onArchive(_ url: URL) -> Bool {
+            guard let archivePath else { return false }
+            let path = ArchiveVolume.path(of: url)
+            return path == archivePath || path.hasPrefix(archivePath + "/")
+        }
         var environment = BridgeEnvironment.inert(directory: dataDirectory.url)
         environment.archivePolicy = ArchivePlatformPolicy(
-            space: { _ in
+            space: { url in
+                if onArchive(url) { return archiveSpace.value.map { (total: $0.total, free: $0.free) } }
                 spaceCalls.update { $0 += 1 }
                 spaceGate?.wait()
                 return space.value.map { (total: $0.total, free: $0.free) }
             },
-            isSystemVolume: { _ in isSystemVolume }, systemFloor: ArchivePlatformPolicy.linuxSystemFloor, directoryNaming: .cameraID)
+            isSystemVolume: { url in onArchive(url) ? false : isSystemVolume }, systemFloor: ArchivePlatformPolicy.linuxSystemFloor, directoryNaming: .cameraID)
+        environment.archiveDriveFolder = archiveRoot?.url
         var tuning = ArchiveStoreTuning()
         tuning.now = { clock.value }
         tuning.probeInterval = probeInterval
@@ -63,6 +88,12 @@ final class ArchiveStoreHarness: Sendable {
             removed.update { $0.append(url.lastPathComponent) }
             try FileManager.default.removeItem(at: url)
         }
+        tuning.movePause = movePause
+        tuning.moveBytesPerSecond = moveBytesPerSecond
+        tuning.moveChunkBytes = 4_096
+        tuning.moveCrash = moveCrash
+        self.environment = environment
+        self.tuning = tuning
         store = ArchiveStore(environment: environment, signal: signal, tuning: tuning)
     }
 
@@ -70,6 +101,19 @@ final class ArchiveStoreHarness: Sendable {
         store.shutDown()   // its background work ends with the test, not a few probes later
         root.remove()
         dataDirectory.remove()
+        archiveRoot?.remove()
+    }
+
+    /// The archive drive's marker, as `cb-recording-drive --archive` writes it.
+    static func writeMarker(in folder: URL, uuid: String = "4d1c2b7e-0000-4000-8000-00000000a7c1") throws {
+        try Data(#"{"uuid":"\#(uuid)"}"#.utf8).write(to: folder.appending(path: ArchiveDriveMeasurement.markerName))
+    }
+
+    /// Another store over the same folders and fake drives (a restart): the test shuts it down. `moveCrash` replaces the harness's.
+    func makeStore(moveCrash: (@Sendable (ArchiveMoveStep) -> Bool)? = nil) -> ArchiveStore {
+        var tuning = tuning
+        tuning.moveCrash = moveCrash
+        return ArchiveStore(environment: environment, signal: ChangeSignal(), tuning: tuning)
     }
 
     func settings(folder: URL? = nil, keepDays: Int = 7, maxSizeGB: Int = 500) -> BridgeSettings {

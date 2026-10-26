@@ -1,5 +1,6 @@
 #!/bin/bash
-# cb-recording-drive: record to an attached drive (USB or SATA SSD / HDD, NVMe) instead of the box's own disk.
+# cb-recording-drive: record to an attached drive (USB or SATA SSD / HDD, NVMe) instead of the box's own disk, or keep older recordings on an
+# archive drive.
 #
 #   cb-recording-drive --list [--json]        the attached disks and which of them may be used, and why not
 #   cb-recording-drive --device /dev/sdb --confirm "ERASE ALL DATA ON sdb"
@@ -11,13 +12,17 @@
 #   cb-recording-drive --apply [--restart]    what the boot and the plugging in of the drive run: mount it (or, with a drive
 #                                             chosen but not plugged in, a read-only placeholder so nothing is written to the
 #                                             box's own disk by mistake); --restart then restarts the engine if that changed
+#   cb-recording-drive --archive FORM         the same forms (--list, --device ... --confirm, --device ... --keep, --forget, --apply)
+#                                             for the archive drive: label CBARCHIVE, mounted on /var/lib/camera-bridge/archive,
+#                                             chosen in /srv/system/archive-drive. Older recordings move there when the recordings
+#                                             drive fills, instead of being deleted. The engine follows it by itself: nothing restarts.
 #
 # The recorder always writes to /var/lib/camera-bridge/recordings; this puts the drive there. The choice is kept in
 # /srv/system/recording-drive (the file system's UUID) on the data partition, so it survives updates and reboots.
 # THE ERASING FORM DESTROYS EVERYTHING ON THE DISK. Rules, all enforced here: no default disk; the typed phrase; refused:
 # the disk the system runs from, a disk with a mounted file system (unless it is our own drive), swap, a holder (RAID, LVM),
-# read-only disks, anything that is not a whole disk, disks under 64 GiB, odd device names. Everything is checked again
-# right before the first write.
+# read-only disks, anything that is not a whole disk, disks under 64 GiB, odd device names, and the recording drive as the
+# archive drive (and the other way round). Everything is checked again right before the first write.
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export CB_TAG=cb-recording-drive
@@ -26,18 +31,21 @@ export CB_TAG=cb-recording-drive
 
 MIN_BYTES=$((64 * 1024 * 1024 * 1024))
 DEVICE_RE='^/dev/(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$'
-LABEL=CBRECORDINGS
-TARGET=$CB_DATA/recordings
-CONFIG=$CB_SYSTEM/recording-drive
-STATUS_NAME=recording-drive
+RECORDINGS_TARGET=$CB_DATA/recordings
+ARCHIVE_TARGET=$CB_DATA/archive
+# The archive drive's marker: the engine writes to the archive's folder only while it holds this (so never to the box's own disk).
+MARKER=.camera-bridge-archive
 
-device="" confirm="" keep=0 list=0 json=0 forget=0 apply=0 restart=0
+device="" confirm="" keep=0 list=0 json=0 forget=0 apply=0 restart=0 archive=0
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 drive_status() {
-    # drive_status STATE MESSAGE [JSON-EXTRA]: internal | mounted | missing | working | failed
-    cb_status "$STATUS_NAME" "$1" "$2" "${3:-{\}}"
+    # drive_status STATE MESSAGE [JSON-EXTRA]: recording drive: internal | mounted | missing | working | failed;
+    # archive drive: none | mounted | missing | working | failed
+    local extra='{}'
+    [ $# -lt 3 ] || extra=$3
+    cb_status "$STATUS_NAME" "$1" "$2" "$extra"
 }
 
 die() {
@@ -69,14 +77,16 @@ boot_disks() {
     done | sort -u
 }
 
-# The mount point the recorder uses is the one thing that may be mounted from the disk.
+# mounted_elsewhere DEVICE OWN_TARGET: the mount points of the disk's file systems other than the one this drive is for (the recording drive's
+# folder for a recording drive, the archive's for an archive drive). The other drive's folder counts as in use.
 mounted_elsewhere() {
-    local dev=$1
-    lsblk -nro MOUNTPOINTS "$dev" 2>/dev/null | grep -v '^$' | grep -vx "$TARGET" || true
+    local dev=$1 own=$2
+    lsblk -nro MOUNTPOINTS "$dev" 2>/dev/null | grep -v '^$' | grep -vx "$own" || true
 }
 
+# disk_problems KNAME OWN_TARGET
 disk_problems() {
-    local k=$1 dev size ro type boots held
+    local k=$1 own=$2 dev size ro type boots held
     dev=/dev/$k
     [[ $dev =~ $DEVICE_RE ]] || { echo "not a supported disk name"; return 0; }
     [ -b "$dev" ] || { echo "not a block device"; return 0; }
@@ -89,7 +99,7 @@ disk_problems() {
     boots=$(boot_disks)
     if grep -qx "$k" <<<"$boots"; then echo "this is the disk the system is running from"; fi
     [ -n "$boots" ] || echo "cannot tell which disk the system runs from"
-    held=$(mounted_elsewhere "$dev")
+    held=$(mounted_elsewhere "$dev" "$own")
     [ -z "$held" ] || echo "a file system on it is in use ($(head -1 <<<"$held"))"
     if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -q "^$dev"; then echo "it is used as swap"; fi
     if compgen -G "/sys/block/$k/holders/*" >/dev/null || compgen -G "/sys/block/$k/${k}*/holders/*" >/dev/null \
@@ -106,28 +116,39 @@ partition_of() {
     esac
 }
 
-current_uuid() { [ -r "$CONFIG" ] && tr -d '[:space:]' <"$CONFIG" || true; }
+uuid_in() { if [ -r "$1" ]; then tr -d '[:space:]' <"$1" || true; fi; }
+current_uuid() { uuid_in "$CONFIG"; }
 
+# The disks with what each mode makes of them: problems/eligible/inUse/isRecordingDrive for a recording drive (as before the archive drive
+# existed), archiveProblems/archiveEligible/archiveInUse/isArchiveDrive for an archive drive.
 list_disks() {
-    local data names k problems out="[]" entry current
-    current=$(current_uuid)
+    local data names k problems archive_problems out="[]" entry recording archiving
+    recording=$(uuid_in "$CB_SYSTEM/recording-drive")
+    archiving=$(uuid_in "$CB_SYSTEM/archive-drive")
     data=$(lsblk_json)
     names=$(jq -r '.blockdevices[] | select(.type == "disk") | .kname | select(test("^(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$"))' <<<"$data")
     for k in $names; do
-        problems=$(disk_problems "$k" | jq -R . | jq -s .)
-        entry=$(jq --arg k "$k" --argjson p "$problems" --arg label "$LABEL" --arg current "$current" '
+        problems=$(disk_problems "$k" "$RECORDINGS_TARGET" | jq -R . | jq -s .)
+        archive_problems=$(disk_problems "$k" "$ARCHIVE_TARGET" | jq -R . | jq -s .)
+        entry=$(jq --arg k "$k" --argjson p "$problems" --argjson ap "$archive_problems" --arg recording "$recording" --arg archiving "$archiving" '
             .blockdevices[] | select(.kname == $k)
+            | ([ (.children // [])[] | .uuid ]) as $uuids
             | { name: .kname, path: .path, model: (.model // ""), serial: (.serial // ""), transport: (.tran // ""),
                 removable: (.rm == true or .rm == "1" or .rm == 1), sizeBytes: (.size | tonumber? // 0),
                 partitions: [ (.children // [])[] | { name: .kname, sizeBytes: (.size | tonumber? // 0), fstype: (.fstype // ""), label: (.label // ""), partlabel: (.partlabel // "") } ],
-                isRecordingDrive: ([ (.children // [])[] | select(.label == $label and .fstype == "ext4") ] | length > 0),
-                inUse: ([ (.children // [])[] | select($current != "" and .uuid == $current) ] | length > 0),
+                isRecordingDrive: ([ (.children // [])[] | select(.label == "CBRECORDINGS" and .fstype == "ext4") ] | length > 0),
+                inUse: ($recording != "" and ($uuids | any(. == $recording))),
                 eligible: ($p | length == 0), problems: $p,
+                isArchiveDrive: ([ (.children // [])[] | select(.label == "CBARCHIVE" and .fstype == "ext4") ] | length > 0),
+                archiveInUse: ($archiving != "" and ($uuids | any(. == $archiving))),
+                archiveEligible: ($ap | length == 0), archiveProblems: $ap,
                 phrase: ("ERASE ALL DATA ON " + .kname) }' <<<"$data")
         out=$(jq --argjson e "$entry" '. + [$e]' <<<"$out")
     done
     if [ "$json" -eq 1 ]; then
         jq '{disks: .}' <<<"$out"
+    elif [ "$archive" -eq 1 ]; then
+        jq -r '.[] | "\(.path)  \(.sizeBytes / 1073741824 | floor) GiB  \(.model)  \(.transport)\(if .removable then " removable" else "" end)\n    " + (if .inUse then "NOT usable: it is the recording drive" elif .archiveEligible then "can be used" + (if .archiveInUse then " (the archive drive in use)" elif .isArchiveDrive then " (already an archive drive)" else "" end) else "NOT usable: " + (.archiveProblems | join("; ")) end)' <<<"$out"
     else
         jq -r '.[] | "\(.path)  \(.sizeBytes / 1073741824 | floor) GiB  \(.model)  \(.transport)\(if .removable then " removable" else "" end)\n    " + (if .eligible then "can be used" + (if .isRecordingDrive then " (already a recording drive)" else "" end) else "NOT usable: " + (.problems | join("; ")) end)' <<<"$out"
     fi
@@ -135,7 +156,7 @@ list_disks() {
 
 # --- mounting ---------------------------------------------------------------------------------------------------------
 
-# What is mounted on the recording folder now: nothing, a placeholder ("tmpfs") or a device path.
+# What is mounted on the drive's folder now: nothing, a placeholder or a device path.
 mounted_source() { findmnt -n -o SOURCE --mountpoint "$TARGET" 2>/dev/null | head -1 || true; }
 
 prepare_target() {
@@ -181,24 +202,76 @@ do_apply() {
     fi
 }
 
+# archive_marker UUID: the marker at the top of the mounted archive drive, written when it is missing or names another drive. The drive's root is
+# the engine's (0700); the marker is root's and only readable by it.
+archive_marker() {
+    local want
+    want=$(jq -cn --arg uuid "$1" '{uuid: $uuid}')
+    [ "$(cat "$TARGET/$MARKER" 2>/dev/null || true)" != "$want" ] || return 0
+    printf '%s\n' "$want" >"$TARGET/$MARKER.new"
+    chmod 0644 "$TARGET/$MARKER.new"
+    mv -f "$TARGET/$MARKER.new" "$TARGET/$MARKER"
+}
+
+# The archive drive's --apply: mounted when it is there, a read-only placeholder when it is chosen but not, nothing when none is chosen. The
+# engine sees each of these by itself (a folder without the marker is never written), so it is never restarted for the archive.
+apply_archive() {
+    local uuid dev before
+    before=$(mounted_source)
+    uuid=$(current_uuid)
+    if [ -z "$uuid" ]; then
+        if [ -n "$before" ]; then umount -l "$TARGET" || true; fi
+        rmdir "$TARGET" 2>/dev/null || true   # the empty folder it was mounted on; nothing else is removed
+        drive_status none "No archive drive is chosen: the oldest recordings are deleted when the box's disk fills."
+        return 0
+    fi
+    dev=$(blkid -U "$uuid" 2>/dev/null || true)
+    if [ -n "$dev" ] && [ -b "$dev" ]; then
+        if [ "$before" != "$dev" ]; then
+            while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
+            prepare_target
+            mount -t ext4 -o nodev,nosuid,noexec,noatime "$dev" "$TARGET" || die "the archive drive could not be mounted"
+        fi
+        # The engine's, whoever made the file system (a fresh one is owned by root).
+        chown camerabridge:camerabridge "$TARGET"
+        chmod 0700 "$TARGET"
+        archive_marker "$uuid" || die "the archive drive could not be marked"
+        drive_status mounted "Older recordings move to the archive drive." "$(jq -n --arg uuid "$uuid" '{uuid: $uuid}')"
+    else
+        [ "$before" != "cb-archive-drive-missing" ] || { drive_status missing "The archive drive is not attached."; return 0; }
+        while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
+        prepare_target
+        # Nothing may be written to the box's own disk meanwhile: a read-only, empty placeholder (no marker, so the engine never writes there).
+        mount -t tmpfs -o ro,size=64k,mode=0555,nodev,nosuid,noexec cb-archive-drive-missing "$TARGET"
+        drive_status missing "The archive drive is not attached."
+    fi
+}
+
+apply() { if [ "$archive" -eq 1 ]; then apply_archive; else do_apply; fi; }
+
 # --- choosing a drive -------------------------------------------------------------------------------------------------
 
 use_drive() {
-    local k part uuid problems
+    local k part uuid problems other stopped=0
     [[ $device =~ $DEVICE_RE ]] || die "that is not a disk this system can use ($device)"
     k=${device#/dev/}
     drive_status working "Looking at the disk."
-    problems=$(disk_problems "$k")
+    problems=$(disk_problems "$k" "$TARGET")
     [ -z "$problems" ] || die "that disk can't be used: $(head -1 <<<"$problems")"
+    other=$(uuid_in "$OTHER_CONFIG")
+    if [ -n "$other" ] && lsblk -nro UUID "$device" 2>/dev/null | grep -qxF "$other"; then die "that disk is the $OTHER_KIND"; fi
     if [ "$keep" -eq 1 ]; then
         part=$(lsblk -nrpo PATH,FSTYPE,LABEL "$device" | awk -v l="$LABEL" '$2 == "ext4" && $3 == l {print $1; exit}')
-        [ -n "$part" ] || die "that disk is not a Camera Bridge recording drive"
+        [ -n "$part" ] || die "that disk is not a Camera Bridge $KIND"
     else
         [ "$confirm" = "ERASE ALL DATA ON $k" ] || die "the confirmation sentence does not match"
         drive_status working "Erasing the disk and making the file system. This takes a minute or two."
-        cb_log "erasing $device for recordings"
-        # Quiet the recorder first: it has the old place open.
-        systemctl stop camerabridged.service || true
+        cb_log "erasing $device for the $KIND"
+        # Quiet the engine first when it has the disk open: the recording drive always, the archive drive when this disk is the archive in use.
+        if [ "$archive" -eq 0 ] || lsblk -nro UUID "$device" 2>/dev/null | grep -qxF "$(current_uuid)"; then
+            systemctl stop camerabridged.service || true
+            stopped=1
+        fi
         while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
         wipefs -a -f "$device" >/dev/null
         printf 'label: gpt\n,,L\n' | sfdisk --quiet --wipe always "$device" || die "the disk could not be partitioned"
@@ -215,19 +288,30 @@ use_drive() {
     printf '%s\n' "$uuid" >"$CONFIG.new"
     chmod 0644 "$CONFIG.new"
     mv -f "$CONFIG.new" "$CONFIG"
-    systemctl stop camerabridged.service || true
     restart=0
-    do_apply
-    systemctl start camerabridged.service || true
-    cb_log "recording to $part ($uuid)"
+    if [ "$archive" -eq 1 ]; then
+        apply_archive
+        [ "$stopped" -eq 0 ] || systemctl start camerabridged.service || true
+        cb_log "older recordings move to $part ($uuid)"
+    else
+        systemctl stop camerabridged.service || true
+        do_apply
+        systemctl start camerabridged.service || true
+        cb_log "recording to $part ($uuid)"
+    fi
 }
 
 forget_drive() {
     rm -f "$CONFIG"
-    systemctl stop camerabridged.service || true
     restart=0
-    do_apply
-    systemctl start camerabridged.service || true
+    if [ "$archive" -eq 1 ]; then
+        # The engine finds the folder without its marker and stops moving there; the drive and its recordings are left untouched.
+        apply_archive
+    else
+        systemctl stop camerabridged.service || true
+        do_apply
+        systemctl start camerabridged.service || true
+    fi
 }
 
 while [ $# -gt 0 ]; do
@@ -240,15 +324,24 @@ while [ $# -gt 0 ]; do
         --forget) forget=1 ;;
         --apply) apply=1 ;;
         --restart) restart=1 ;;
+        --archive) archive=1 ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; cb_die "unknown option: $1" ;;
     esac
     shift
 done
 
+if [ "$archive" -eq 1 ]; then
+    LABEL=CBARCHIVE TARGET=$ARCHIVE_TARGET CONFIG=$CB_SYSTEM/archive-drive STATUS_NAME=archive-drive KIND="archive drive"
+    OTHER_CONFIG=$CB_SYSTEM/recording-drive OTHER_KIND="recording drive"
+else
+    LABEL=CBRECORDINGS TARGET=$RECORDINGS_TARGET CONFIG=$CB_SYSTEM/recording-drive STATUS_NAME=recording-drive KIND="recording drive"
+    OTHER_CONFIG=$CB_SYSTEM/archive-drive OTHER_KIND="archive drive"
+fi
+
 [ "$(id -u)" -eq 0 ] || cb_die "run as root"
 if [ "$list" -eq 1 ]; then list_disks
-elif [ "$apply" -eq 1 ]; then do_apply
+elif [ "$apply" -eq 1 ]; then apply
 elif [ "$forget" -eq 1 ]; then forget_drive
 elif [ -n "$device" ]; then use_drive
 else usage >&2; exit 2

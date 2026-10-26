@@ -10,6 +10,7 @@
 
 export const MESSAGES = Object.freeze({
   driveMissing: 'The recordings drive isn’t connected.',
+  archiveAway: 'On the archive drive (not connected). It plays again when the drive is plugged back in.',
   unreadable: 'Can’t read this part of the recording.',
   unavailable: 'The recordings aren’t available right now.',
   busy: 'The bridge is busy. Trying again…',

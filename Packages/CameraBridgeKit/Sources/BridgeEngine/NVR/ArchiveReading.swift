@@ -25,12 +25,17 @@ public protocol ArchiveReading: Sendable {
     /// Empty when no place for recordings is chosen. Throws `ArchiveUnavailable` while the catalog loads or the folder is missing (not "no
     /// events": ask again later), `ArchiveError.timedOut` when the drive does not answer. The default has none.
     func events(cameras: [UUID], range: Range<Date>, limit: Int) async throws -> ArchiveEventPage
+    /// The stretch of `camera`'s recordings around `time` that is on the archive drive while that drive is not connected (it plays again when it is
+    /// plugged back in): what a player shows instead of a gap there. Memory only; nil anywhere else. The default has none.
+    func awaySpan(camera: UUID, containing time: Date) -> DateInterval?
 }
 
 extension ArchiveReading {
     public func events(cameras: [UUID], range: Range<Date>, limit: Int) async throws -> ArchiveEventPage {
         ArchiveEventPage(events: [], isTruncated: false)
     }
+
+    public func awaySpan(camera: UUID, containing time: Date) -> DateInterval? { nil }
 }
 
 /// One event of a camera as the archive's event log keeps it.
@@ -167,11 +172,14 @@ public struct ArchiveActivity: Sendable, Equatable {
         public var level: Double
         /// The busiest fragment's bytes per second in the bin.
         public var peak: Double
+        /// 0...1: how much of the bin is recorded on the archive drive while it is not connected (not in `coverage`: it cannot be played now).
+        public var away: Double
 
-        public init(coverage: Double, level: Double, peak: Double) {
+        public init(coverage: Double, level: Double, peak: Double, away: Double = 0) {
             self.coverage = coverage
             self.level = level
             self.peak = peak
+            self.away = away
         }
     }
 

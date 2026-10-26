@@ -27,8 +27,8 @@ final class FakeRootHelper: @unchecked Sendable {
     typealias Behavior = @Sendable (FakeRootHelper, _ name: String, _ body: Data) async -> Void
 
     static let allowed: Set<String> = ["ssh-enable", "ssh-disable", "auto-update", "update-check", "update-apply", "reboot", "poweroff", "factory-reset",
-                                       "install-list", "install-to-disk", "drive-list", "drive-use", "drive-forget", "wifi-scan", "wifi-join", "wifi-forget",
-                                       "guard-set"]
+                                       "install-list", "install-to-disk", "drive-list", "drive-use", "drive-forget", "archive-use", "archive-forget",
+                                       "wifi-scan", "wifi-join", "wifi-forget", "guard-set"]
 
     let requests: URL
     let status: URL
@@ -575,6 +575,60 @@ struct Rig {
                            ["device": "/dev/sdc", "phrase": "", "keepData": true] as NSDictionary], "exactly these values and nothing else")
         try await rig.system.forgetRecordingDrive()
         #expect(rig.helper?.names().contains("drive-forget") == true)
+    }
+
+    // MARK: The archive drive
+
+    /// A disk of the shared list with the archive's view as the script writes it.
+    private static func archiveDisk(_ name: String, recordingDrive: Bool = false, recordingInUse: Bool = false, archiveDrive: Bool = false, archiveInUse: Bool = false,
+                                    archiveProblems: [String] = []) -> [String: Any] {
+        var disk = drive(name, recordingDrive: recordingDrive)
+        disk["inUse"] = recordingInUse
+        disk["isArchiveDrive"] = archiveDrive
+        disk["archiveInUse"] = archiveInUse
+        disk["archiveEligible"] = archiveProblems.isEmpty
+        disk["archiveProblems"] = archiveProblems
+        return disk
+    }
+
+    @Test func archiveDrivesAreTheRecordingDrivesListInTheArchivesView() async throws {
+        let rig = try Rig(helper: FakeRootHelper.image(disks: [Self.archiveDisk("sdb", archiveDrive: true), Self.archiveDisk("sdc", recordingDrive: true, recordingInUse: true),
+                                                               Self.archiveDisk("sda", archiveProblems: ["this is the disk the system is running from"])]))
+        defer { rig.finish() }
+        let report = try await rig.system.archiveDrives()
+        #expect(report.state == "none", "no archive drive chosen yet")
+        #expect(report.drives.map(\.id) == ["sdb", "sdc", "sda"])
+        #expect(report.drives[0].isArchiveDrive == true && report.drives[0].eligible && report.drives[0].inUse == false)
+        #expect(!report.drives[1].eligible && report.drives[1].problems.contains("it is the recording drive"), "the recording drive in use is never the archive: \(report.drives[1].problems)")
+        #expect(!report.drives[2].eligible)
+        #expect(rig.helper?.names() == ["drive-list"], "the same list as the recording drive's")
+        // A script from before the archive drive: its list has no archive view, and the recording drive's stands in.
+        let old = try Rig(helper: FakeRootHelper.image(disks: [Self.drive("sdb"), Self.drive("sda", problems: ["this is the disk the system is running from"])]))
+        defer { old.finish() }
+        let fallback = try await old.system.archiveDrives()
+        #expect(fallback.drives.map(\.eligible) == [true, false] && fallback.drives[0].isArchiveDrive == nil)
+    }
+
+    @Test func choosingAnArchiveDriveNeedsTheSentenceAndAUsableDiskAndKeepingNeedsAnArchiveDrive() async throws {
+        let rig = try Rig(helper: FakeRootHelper.image(disks: [Self.archiveDisk("sdb", archiveDrive: true), Self.archiveDisk("sdd"),
+                                                               Self.archiveDisk("sdc", recordingDrive: true, recordingInUse: true)]))
+        defer { rig.finish() }
+        for phrase in ["", "erase all data on sdd", "ERASE ALL DATA ON sdb"] {
+            await #expect(throws: SystemError.self, "\(phrase)") { try await rig.system.useArchiveDrive(targetID: "sdd", phrase: phrase, keepData: false) }
+        }
+        for target in ["", "sdd1", "../sdd", "sdd; reboot"] {
+            await #expect(throws: SystemError.self, "\(target)") { try await rig.system.useArchiveDrive(targetID: target, phrase: "ERASE ALL DATA ON \(target)", keepData: false) }
+        }
+        await #expect(throws: SystemError.self, "the recording drive") { try await rig.system.useArchiveDrive(targetID: "sdc", phrase: "ERASE ALL DATA ON sdc", keepData: false) }
+        await #expect(throws: SystemError.self, "a disk that is no archive drive is not kept") { try await rig.system.useArchiveDrive(targetID: "sdd", phrase: "", keepData: true) }
+        #expect(rig.helper?.names().filter { $0 == "archive-use" }.isEmpty == true, "nothing destructive was ever requested")
+        try await rig.system.useArchiveDrive(targetID: "sdd", phrase: "ERASE ALL DATA ON sdd", keepData: false)
+        try await rig.system.useArchiveDrive(targetID: "sdb", phrase: "", keepData: true)
+        let bodies = try #require(rig.helper?.bodies("archive-use"))
+        #expect(bodies == [["device": "/dev/sdd", "phrase": "ERASE ALL DATA ON sdd", "keepData": false] as NSDictionary,
+                           ["device": "/dev/sdb", "phrase": "", "keepData": true] as NSDictionary], "exactly these values and nothing else")
+        try await rig.system.forgetArchiveDrive()
+        #expect(rig.helper?.names().contains("archive-forget") == true)
     }
 
     // MARK: Wi-Fi

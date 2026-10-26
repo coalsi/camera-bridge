@@ -1,0 +1,10 @@
+[Unit]
+Description=A Camera Bridge archive drive was plugged in
+Documentation=https://github.com/coalsi/camera-bridge
+After=camera-bridge-archive-drive.service
+
+[Service]
+Type=oneshot
+# Mounts the drive if it is the chosen one. The engine is not restarted: it notices the drive by itself (its marker appears in the folder).
+ExecStart=/usr/sbin/cb-recording-drive --archive --apply
+TimeoutStartSec=120

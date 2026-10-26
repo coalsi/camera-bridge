@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RULER_HEIGHT, layoutBars, paintTimeline } from '../web/js/nvr/timeline/draw.js';
+import { AWAY_LABEL, AWAY_SHORT_LABEL, RULER_HEIGHT, layoutBars, paintTimeline } from '../web/js/nvr/timeline/draw.js';
 import { waveformReference } from '../web/js/nvr/timeline/activity.js';
 import { makeTicks } from '../web/js/nvr/timeline/ticks.js';
 
@@ -73,8 +73,8 @@ test('a camera with no typical level has no dashed line and no highlighted bars'
 });
 
 test('no data, no bars', () => {
-  assert.deepEqual(layoutBars({ ...geometry, combined: null }), { bars: [], gaps: [], normal: null });
-  assert.deepEqual(layoutBars({ ...geometry, reference: 0 }), { bars: [], gaps: [], normal: null });
+  assert.deepEqual(layoutBars({ ...geometry, combined: null }), { bars: [], gaps: [], aways: [], normal: null });
+  assert.deepEqual(layoutBars({ ...geometry, reference: 0 }), { bars: [], gaps: [], aways: [], normal: null });
 });
 
 test('painting: the dashed normal line sits at half height above and below the centre, the highlight is used once', () => {
@@ -110,4 +110,23 @@ test('a disabled track is dimmed', () => {
   const { widthPx, ...withoutWidthPx } = geometry;
   paintTimeline(ctx, { ...withoutWidthPx, width: widthPx, height: 100, dpr: 1, colors: { track: '#t', span: '#s', tick: '#k', label: '#l', bar: '#bar', hot: '#hot', normal: '#n', gap: '#g' }, ticks: [], enabled: false });
   assert.equal(ctx.ops.find((o) => o[0] === 'fillRect')[2], 0.45);
+});
+
+test('a stretch on an archive drive that is not connected is its own run, not a gap, and says so where it fits', () => {
+  // Bins 3 and 4 have no footage: on the archive drive, unplugged.
+  const awayCombined = { ...combined, away: [0, 0, 0, 100, 100, 0, 0, 0, 0, 0] };
+  const layout = layoutBars({ ...geometry, combined: awayCombined });
+  assert.deepEqual(layout.gaps, [], 'not hatched as a gap');
+  assert.deepEqual(layout.aways, [{ x0: 300, x1: 500 }]);
+  assert.equal(layout.bars.length, 8, 'and no bar: nothing there plays now');
+  const words = (widthPx) => {
+    const ctx = fakeContext();
+    paintTimeline(ctx, { width: widthPx, height: 80, dpr: 1, colors: { track: 'T', span: 'S', tick: 'K', label: 'L', bar: 'B', hot: 'H', normal: 'N', gap: 'G', away: 'A' },
+      viewport, ticks: [], oldestMs: geometry.oldestMs, newestMs: NOW, plan, combined: awayCombined, reference, typical, enabled: true });
+    return { texts: ctx.ops.filter((op) => op[0] === 'fillText').map((op) => op[1]), bands: ctx.ops.filter((op) => op[0] === 'fillRect' && op[1] === 'A') };
+  };
+  assert.deepEqual(words(1200).texts, [AWAY_LABEL], 'a wide stretch has the whole sentence');
+  assert.equal(words(1200).bands.length, 1);
+  assert.deepEqual(words(600).texts, [AWAY_SHORT_LABEL], 'a narrower one a word');
+  assert.deepEqual(words(300).texts, [], 'a sliver none');
 });

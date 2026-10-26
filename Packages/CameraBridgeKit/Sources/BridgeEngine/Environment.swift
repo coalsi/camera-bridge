@@ -22,6 +22,10 @@ public struct BridgeEnvironment: Sendable {
     /// What the NVR needs from the host to find free space and to name folders (statvfs lives in BridgeDaemon only). nil on the Mac app: the
     /// engine then reads Foundation's volume attributes and names camera folders after the camera.
     public var archivePolicy: ArchivePlatformPolicy?
+    /// The archive drive's folder (archive-tier brief): where older recordings move when the recordings drive fills, instead of being deleted. Only
+    /// a folder that holds the drive's marker (`.camera-bridge-archive`, written by the OS) and is not on the box's own disk is ever written.
+    /// /var/lib/camera-bridge/archive on Camera Bridge OS; nil (the Mac app, a plain program): no archive, retention deletes as it always did.
+    public var archiveDriveFolder: URL?
     /// Development only (the daemon's hidden `--demo-keyframe-seconds`, accepted with `--dev` or `--preview`): the demo camera's main stream
     /// keys every this many seconds instead of every 2, so the smart-codec path (the keyframe note above 10 s, the coarse caption above 4 s,
     /// `typicalGOP`) runs through the real engine. nil, or a value outside 1...120, keeps 2 s.

@@ -1,5 +1,6 @@
 // What can be said about where recordings are stored: the menus' choices, sizes in words, how fast the storage fills and how long it lasts,
 // and everything the Recording card shows. Plain functions over the bridge's answers (no page needed, so they are tested on their own).
+import { sizeText } from '../format.js';
 
 export const KEEP_DAY_CHOICES = [1, 3, 7, 14, 30, 90];
 export const MAX_SIZE_CHOICES_GB = [100, 250, 500, 1000, 2000, 4000, 8000];
@@ -19,14 +20,8 @@ export function withCurrent(choices, current) {
   return [...all].sort((a, b) => a - b);
 }
 
-/** "43 GB", "2.4 TB": decimal units like the rest of the bridge, a decimal only below 10 (format.js bytes() keeps one up to 100). */
-export function sizeText(n) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let value = n;
-  let unit = 0;
-  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit += 1; }
-  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
-}
+// "43 GB", "2.4 TB" (format.js: the archive drive's card, which loads at start-up, says sizes the same way).
+export { sizeText };
 
 export const keepLabel = (days) => (days === 1 ? '1 day' : `${days} days`);
 export const sizeLabel = (gb) => (gb >= 1000 && gb % 100 === 0 ? `${gb / 1000} TB` : `${gb} GB`);
@@ -100,3 +95,4 @@ export function describeStorage(storage, cameras) {
     caption: capacityCaption(storage, dailyRate(storage, cameras)),
   };
 }
+

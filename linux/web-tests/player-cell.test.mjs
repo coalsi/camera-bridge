@@ -202,6 +202,15 @@ describe('an exact step', () => {
     assert.equal(rig.surface().presents().length, 1);
   });
 
+  it('a stretch on an archive drive that is unplugged says so and where the next recording on the box starts', async () => {
+    const { rig, cell, want, settle } = await ready();
+    rig.archive.setAway({ fromMs: ORIGIN + 120_000, toMs: ORIGIN + 140_000 });
+    want(ORIGIN + 125_000);
+    await settle();
+    assert.deepEqual([cell.coverage.kind, cell.coverage.away, cell.coverage.message, cell.coverage.next], ['gap', true, MESSAGES.archiveAway, ORIGIN + 140_000]);
+    assert.equal(rig.surface(), undefined, 'no surface was built: nothing there plays now');
+  });
+
   it('a camera with nothing recorded says so', async () => {
     const { rig, cell, want, settle } = await ready({ cameras: [{ id: 'CAM-1', files: defaultFiles() }, { id: 'CAM-2', files: [] }] });
     const other = rig.makeCell('CAM-2');

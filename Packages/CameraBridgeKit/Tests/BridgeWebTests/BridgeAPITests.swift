@@ -421,6 +421,26 @@ import TestSupport
         #expect(harness.system.calls.value.last == "drive-forget")
     }
 
+    @Test func theArchiveDriveNeedsADriveAndEitherTheSentenceOrKeepingIt() async throws {
+        let harness = try Harness()
+        let session = try await harness.signIn()
+        let report = await session.get("/api/v1/system/archive-drives")
+        #expect(report.json["state"] as? String == "none")
+        let first = try #require((report.json["drives"] as? [[String: Any]])?.first)
+        #expect(first["id"] as? String == "sdb" && first["isArchiveDrive"] as? Bool == true)
+        #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["phrase": "ERASE ALL DATA ON sdb"]).status == 400)
+        #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "sdb"]).status == 400, "erasing needs the sentence")
+        #expect(harness.system.calls.value.isEmpty)
+        #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "sdb", "phrase": "ERASE ALL DATA ON sdb"]).status == 202)
+        #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "sdb", "keepData": true]).status == 202)
+        #expect(harness.system.calls.value == ["archive:sdb:ERASE ALL DATA ON sdb:false", "archive:sdb::true"])
+        let refused = await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "bad", "phrase": "x"])
+        #expect(refused.status == 409 && refused.json["message"] as? String == "That disk can’t be used.")
+        #expect(await session.send("POST", "/api/v1/system/archive-drive/forget", json: [:]).status == 400, "letting go needs the confirmation")
+        #expect(await session.send("POST", "/api/v1/system/archive-drive/forget", json: ["confirm": true]).status == 202)
+        #expect(harness.system.calls.value.last == "archive-forget")
+    }
+
     @Test func poweringOffAndResettingNeedConfirmations() async throws {
         let harness = try Harness()
         let session = try await harness.signIn()

@@ -39,6 +39,7 @@ systemctl enable \
     camera-bridge-ssh.service \
     camera-bridge-credentials.service \
     camera-bridge-recording-drive.service \
+    camera-bridge-archive-drive.service \
     NetworkManager.service \
     camera-bridge-wifi-import.service \
     camera-bridge-wifi.service \

@@ -90,6 +90,22 @@ import Testing
         #expect(other.json["reason"] as? String == "empty", "an unknown camera looks like one with no recordings")
     }
 
+    @Test func aTimeOnAnArchiveDriveThatIsAwaySaysSoAndWhereVideoPlaysAgain() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        // From 5 s to 10 s the recordings are on the archive drive, which is unplugged (the store answers no fragment there); before and after, the box's play.
+        archive.files = [try rig.file("13-24-05", fragments: 2), try rig.file("13-24-20", offsetMs: 15_000, fragments: 2)]
+        let date = { (offset: Int64) in Date(timeIntervalSince1970: Double(rig.ms(offset)) / 1_000) }
+        archive.setAway(DateInterval(start: date(5_000), end: date(10_000)), camera: rig.camera.id)
+        let away = await plan(rig, at: 6_000)
+        #expect(away.status == 200 && away.json["found"] as? Bool == false && away.json["reason"] as? String == "archiveAway")
+        #expect(away.int("next") == rig.ms(15_000), "where the next video that plays now begins")
+        #expect(Set(away.json.keys) == ["serverTime", "found", "at", "reason", "next", "newest"])
+        let gap = await plan(rig, at: 12_000)
+        #expect(gap.json["reason"] as? String == "gap", "after the away stretch it is a gap again")
+        #expect(await plan(rig, at: 1_000).json["found"] as? Bool == true)
+    }
+
     @Test func aPartThatRetentionRemovedWhileAskingIsGone() async throws {
         let archive = FakeArchiveReading()
         let rig = try await NVRRig.make(archive: archive)

@@ -22,7 +22,8 @@ import Testing
         let answer = await rig.get("nvr/storage")
         #expect(answer.status == 200)
         #expect(Set(answer.json.keys) == ["location", "label", "state", "message", "recordingCameras", "keepDays", "maxSizeGB", "limits", "usedBytes", "freeBytes",
-                                          "totalBytes", "floorBytes", "roomBytes", "effectiveMaxBytes", "oldest", "newest"])
+                                          "totalBytes", "floorBytes", "roomBytes", "effectiveMaxBytes", "oldest", "newest", "archive"])
+        #expect(answer.json["archive"] is NSNull, "no archive drive where the system has none")
         #expect(answer.json["location"] is NSNull && answer.json["label"] is NSNull && answer.json["oldest"] is NSNull && answer.json["newest"] is NSNull)
         #expect(answer.json["state"] as? String == "noFolder")
         #expect(answer.json["message"] as? String == "Choose where to store recordings.")
@@ -47,6 +48,52 @@ import Testing
         #expect(answer.int("roomBytes") == 395_000_000_000, "used + (free - floor)")
         #expect(answer.int("effectiveMaxBytes") == 450_000_000_000, "min(500 GB, total - 2 x floor)")
         #expect(answer.int("oldest") == NVRRig.base && answer.int("newest") == NVRRig.base + 86_400_000)
+    }
+
+    @Test func theArchiveDriveIsInTheAnswerWithWhatMovesNow() async throws {
+        let rig = try await NVRRig.make()
+        let oldest = Date(timeIntervalSince1970: Double(NVRRig.base) / 1000)
+        let camera = rig.camera
+        rig.backend.write {
+            var status = storage()
+            status.archive = ArchiveDriveStatus(state: .connected, usedBytes: 900 * gigabyte, freeBytes: 2_700 * gigabyte, totalBytes: 4_000 * gigabyte,
+                                                floorBytes: 2_147_483_648, oldest: oldest, newest: oldest.addingTimeInterval(3_600),
+                                                moving: ArchiveDriveStatus.Move(camera: camera.id, start: oldest.addingTimeInterval(7_200), bytes: 450_000_000, doneBytes: 900_000_000),
+                                                waitingFiles: 3, waitingBytes: 1_350_000_000, movedFiles: 12, movedBytes: 5_400_000_000)
+            $0.nvrStorage = status
+        }
+        let answer = await rig.get("nvr/storage")
+        let archive = answer.object("archive")
+        #expect(Set(archive.keys) == ["state", "message", "usedBytes", "freeBytes", "totalBytes", "floorBytes", "oldest", "newest", "moving", "waitingFiles",
+                                      "waitingBytes", "movedFiles", "movedBytes"])
+        #expect(archive["state"] as? String == "connected" && archive["message"] is NSNull)
+        #expect((archive["usedBytes"] as? NSNumber)?.int64Value == 900_000_000_000 && (archive["oldest"] as? NSNumber)?.int64Value == NVRRig.base)
+        let moving = try #require(archive["moving"] as? [String: Any])
+        #expect(moving["cameraID"] as? String == camera.id.uuidString && moving["cameraName"] as? String == camera.name)
+        #expect((moving["start"] as? NSNumber)?.int64Value == NVRRig.base + 7_200_000)
+        #expect((moving["doneBytes"] as? NSNumber)?.int64Value == 450_000_000, "never more than the file")
+        #expect(archive["waitingFiles"] as? Int == 3 && archive["movedFiles"] as? Int == 12)
+        rig.backend.write {
+            var status = storage()
+            status.archive = ArchiveDriveStatus(state: .notConnected, message: "The archive drive isn’t connected. Its recordings play again when it is plugged back in.")
+            $0.nvrStorage = status
+        }
+        let away = await rig.get("nvr/storage").object("archive")
+        #expect(away["state"] as? String == "notConnected" && away["message"] as? String == "The archive drive isn’t connected. Its recordings play again when it is plugged back in.")
+        #expect(away["moving"] is NSNull && away["oldest"] is NSNull)
+    }
+
+    @Test func aLowerSizeLimitThatOnlyMovesToTheArchiveDeletesNothing() {
+        let now = Date(timeIntervalSince1970: 1_760_000_000)
+        var status = storage(used: 400, oldest: now.addingTimeInterval(-3 * 86_400), newest: now)
+        #expect(WebApp.bytesTheLimitsWouldDelete(status, keepDays: 7, maxSizeGB: 100, now: now).deletes, "without an archive the excess is deleted")
+        status.archive = ArchiveDriveStatus(state: .connected, usedBytes: 1_000 * gigabyte, oldest: now.addingTimeInterval(-6 * 86_400), newest: now.addingTimeInterval(-3 * 86_400))
+        let moved = WebApp.bytesTheLimitsWouldDelete(status, keepDays: 7, maxSizeGB: 100, now: now)
+        #expect(!moved.deletes && moved.bytes == 0, "with a connected archive it moves")
+        let aged = WebApp.bytesTheLimitsWouldDelete(status, keepDays: 3, maxSizeGB: 100, now: now)
+        #expect(aged.deletes && aged.bytes > 0, "a shorter keep time deletes on both drives")
+        status.archive?.state = .notConnected
+        #expect(WebApp.bytesTheLimitsWouldDelete(status, keepDays: 7, maxSizeGB: 100, now: now).deletes, "an archive that is away takes nothing")
     }
 
     @Test func aPausedRecorderAndAFolderThatIsNotInTheListAreNamed() async throws {

@@ -19,11 +19,15 @@ extension ArchiveStore {
             return state.tasks
         }
         old.forEach { $0.cancel() }
-        let tasks: [Task<Void, Never>] = [
+        var tasks: [Task<Void, Never>] = [
             Task.detached(priority: .utility) { [weak self] in await self?.bootstrap(run) },
             Task.detached(priority: .utility) { [weak self] in await self?.monitorLoop(run) },
             Task.detached(priority: .utility) { [weak self] in await self?.retentionLoop(run) },
         ]
+        if state.withLock({ $0.drive.folder != nil }) {
+            tasks.append(Task.detached(priority: .utility) { [weak self] in await self?.driveLoop(run) })
+            tasks.append(Task.detached(priority: .utility) { [weak self] in await self?.moveLoop(run) })
+        }
         let kept = state.withLock { state -> Bool in
             guard state.isCurrent(run) else { return false }
             state.tasks += tasks
@@ -62,6 +66,9 @@ extension ArchiveStore {
     func loadCatalog(_ run: ArchiveRun) async {
         guard let folder = state.withLock({ state in state.isCurrent(run) ? state.folder : nil }) else { return }
         let scan = await onControl { [self] in CatalogLoader.scan(root: folder, isCancelled: { !self.state.withLock { $0.isCurrent(run) } }) }
+        // What the archive drive held when it was last seen, for a drive that is not (yet) here: its recordings show as on the drive.
+        let dataDirectory = environment.dataDirectory
+        let index = state.withLock({ $0.drive.folder != nil && !$0.drive.loaded }) ? await onControl { ArchiveDriveIndex.read(from: dataDirectory) } : nil
         guard state.withLock({ $0.isCurrent(run) }) else { return }
         var loaded: [(file: CatalogFile, table: [CBIndexFragmentRecord]?)] = scan.files.map { ($0, nil) }
         var repaired = 0
@@ -73,19 +80,36 @@ extension ArchiveStore {
                 repaired += 1
             }
         }
-        let done = state.withLock { state -> Bool in
-            guard state.isCurrent(run) else { return false }
-            // Files a recorder has open (it started meanwhile) stay; everything else is replaced by what was read.
-            for file in state.catalog.closedFiles { state.catalog.remove(segment: file.segment, camera: file.camera) }
+        let done = state.withLock { state -> [(segment: String, camera: UUID)]? in
+            guard state.isCurrent(run) else { return nil }
+            // Files a recorder has open (it started meanwhile) stay, and so do the archive drive's; everything else is replaced by what was read.
+            for file in state.catalog.closedFiles(on: .main) { state.catalog.remove(segment: file.segment, camera: file.camera) }
             let adopted = loaded.filter { !state.owned.contains(ArchiveOpenFile(camera: $0.file.camera, segment: $0.file.segment)) }
+            // A file on both drives (a move a crash interrupted after its copy was in place): the box's copy is the one shown until the mover
+            // has compared the two.
+            for item in adopted {
+                if let existing = state.catalog.file(camera: item.file.camera, segment: item.file.segment), existing.tier == .archive {
+                    state.drive.shadowed[item.file.segment] = existing
+                }
+            }
             state.catalog.insert(batch: adopted.map(\.file))
             for item in adopted { if let table = item.table { state.catalog.store(table: table, forSegment: item.file.segment) } }
+            if let index, !state.drive.loaded, state.catalog.closedFiles(on: .archive).isEmpty {
+                let away = index.catalogFiles.filter { state.catalog.file(camera: $0.camera, segment: $0.segment) == nil }
+                if !away.isEmpty {
+                    state.catalog.insert(batch: away)
+                    state.catalog.setArchiveAway(true)
+                    state.drive.driveID = state.drive.driveID ?? index.drive
+                }
+            }
+            state.drive.loneMainSidecars = scan.loneSidecars
             state.isReady = true
             state.reloadWhenFolderReturns = false
             state.removalFailed = []
-            return true
+            return Self.takeLoneSidecars(&state)
         }
-        guard done else { return }
+        guard let lone = done else { return }
+        await removeLoneSidecars(lone)
         if repaired > 0 { log.info("Repaired \(repaired) recordings that were not closed properly") }
         if scan.unreadableDirectories > 0 { log.warning("\(scan.unreadableDirectories) folders of the recordings could not be read") }
         publishStatus(force: true)

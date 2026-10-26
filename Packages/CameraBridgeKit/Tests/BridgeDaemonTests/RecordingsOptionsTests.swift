@@ -16,6 +16,18 @@ import Testing
         #expect(development.recordingsDirectory == nil)
     }
 
+    @Test func theArchiveDrivesFolderIsTheOptionElseArchiveInsideTheDataDirectoryOnCameraBridgeOS() throws {
+        let none = try DaemonOptions.parse(arguments: [])
+        #expect(none.effectiveArchiveDirectory(dataDirectory: dataDirectory, systemAvailable: true)?.path == "/var/lib/camera-bridge/archive")
+        #expect(none.effectiveArchiveDirectory(dataDirectory: dataDirectory, systemAvailable: false) == nil, "no Camera Bridge OS underneath: no archive drive")
+        let flagged = try DaemonOptions.parse(arguments: ["--archive-dir", "/Volumes/Archive/cb"])
+        #expect(flagged.effectiveArchiveDirectory(dataDirectory: dataDirectory, systemAvailable: false)?.path == "/Volumes/Archive/cb")
+        let variable = try DaemonOptions.parse(arguments: [], environment: ["CAMERABRIDGE_ARCHIVE_DIR": "/srv/archive"])
+        #expect(variable.archiveDirectory?.path == "/srv/archive")
+        #expect(try DaemonOptions.parse(arguments: ["--preview"]).effectiveArchiveDirectory(dataDirectory: dataDirectory, systemAvailable: true) == nil)
+        #expect(throws: DaemonOptions.UsageError.self) { try DaemonOptions.parse(arguments: ["--archive-dir", "archive"]) }
+    }
+
     @Test func theFlagIsParsedInBothSpellings() throws {
         let spaced = try DaemonOptions.parse(arguments: ["--recordings-dir", "/srv/cb-recordings"])
         #expect(spaced.recordingsDirectory?.path == "/srv/cb-recordings")

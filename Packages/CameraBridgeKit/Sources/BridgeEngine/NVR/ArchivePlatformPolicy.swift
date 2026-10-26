@@ -17,6 +17,13 @@ public struct ArchivePlatformPolicy: Sendable {
     /// The free space below which recording on the system volume pauses, for a volume of `total` bytes.
     public var systemFloor: @Sendable (_ total: UInt64) -> UInt64
     public var directoryNaming: DirectoryNaming
+    /// Whether two folders are on the same volume (the daemon compares `st_dev`). The archive drive must not be on the recordings drive; nil (the Mac
+    /// app): not checked.
+    public var isSameVolume: (@Sendable (URL, URL) -> Bool)?
+    /// Lowers the priority of the calling thread to the least there is (CPU and disk), for the thread that moves recordings to the archive drive: on
+    /// the box `nice` 19 and the idle I/O class (`ionice -c3`). nil: the thread's background quality of service is all (on a Mac it also throttles
+    /// the thread's disk reads and writes).
+    public var lowerThreadPriority: (@Sendable () -> Void)?
 
     public init(space: @escaping @Sendable (URL) -> (total: UInt64, free: UInt64)?, isSystemVolume: @escaping @Sendable (URL) -> Bool,
                 systemFloor: @escaping @Sendable (_ total: UInt64) -> UInt64, directoryNaming: DirectoryNaming) {

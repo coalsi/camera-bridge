@@ -41,6 +41,8 @@ export function createArchive({ timers, cameraId = 'CAM-1', files, serverEpochAt
     return file;
   };
   const state = files.map(build);
+  /** A stretch on the archive drive while it is not connected: { fromMs, toMs } (it holds no part that plays), or null. */
+  let away = null;
 
   const idOf = (part) => `${part.file}.${part.index}`;
   const fileOf = (key) => state.find((file) => file.key === key);
@@ -80,6 +82,9 @@ export function createArchive({ timers, cameraId = 'CAM-1', files, serverEpochAt
       const partMs = state.find((file) => file.parts.length)?.partMs ?? 2000;
       return { oldest: Math.min(...parts.map((p) => p.start)), newest: Math.max(...parts.map((p) => p.end)), typicalGOP: (gop * partMs) / 1000 };
     },
+
+    /** The archive drive holding `fromMs..<toMs` is unplugged (null: plugged in again). */
+    setAway(span) { away = span; version += 1; },
 
     /** Retention: parts that ended before `ms` are gone. */
     removeBefore(ms) {
@@ -122,6 +127,7 @@ export function createArchive({ timers, cameraId = 'CAM-1', files, serverEpochAt
         const extent = archive.extent();
         const base = { serverTime: archive.serverTime(), found: false, at, next: null, newest: extent ? extent.newest : null };
         if (!extent) return { ...base, reason: 'empty' };
+        if (away && at >= away.fromMs && at < away.toMs) return { ...base, reason: 'archiveAway', next: archive.startingAfter(away.toMs - 1)?.start ?? null };
         if (at < extent.oldest) return { ...base, reason: 'beforeStart', next: extent.oldest };
         if (at >= extent.newest) return { ...base, reason: 'afterEnd' };
         return { ...base, reason: 'gap', next: archive.startingAfter(at)?.start ?? null };

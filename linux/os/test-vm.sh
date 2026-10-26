@@ -1021,6 +1021,49 @@ if selected recording-drive; then
     ssh_run 'cb-recording-drive --forget 2>&1' | tail -2 | sed 's/^/        /' || true
     [ -z "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/recordings')" ] && ok "forgetting the drive puts recording back on the box's own disk" || no "the drive is still mounted after forgetting it"
     ssh_has 'cat /run/camera-bridge/status/recording-drive.json' '"internal"' && ok "the status says internal" || no "the status does not say internal"
+
+    echo "==> archive drive: older recordings move to a second (virtual) disk"
+    stop_vm
+    qemu-img create -f raw "$work/arch.raw" 70G >/dev/null
+    fresh_vars
+    start_vm yes "$work/disk.raw" "$work/arch.raw"
+    wait_http "$boot_timeout" && wait_ssh || { no "VM with an archive disk did not come up"; dump_serial; exit 1; }
+    [ "$(ssh_run "cb-recording-drive --list --json | jq -r '.disks[] | select(.name==\"vdb\") | .archiveEligible'")" = true ] && ok "the archive form can use the second disk" || no "the second disk is not usable as the archive"
+    before=$(ssh_run 'sfdisk -d /dev/vdb 2>&1 | sha256sum' || true)
+    out=$(ssh_run 'cb-recording-drive --archive --device /dev/vdb --confirm "yes please" 2>&1' || true)
+    case $out in *"does not match"*) ok "a wrong sentence is refused for the archive" ;; *) no "a wrong archive sentence was not refused: $out" ;; esac
+    out=$(ssh_run 'cb-recording-drive --archive --device /dev/vda --confirm "ERASE ALL DATA ON vda" 2>&1' || true)
+    case $out in *"can't be used"*) ok "the boot disk cannot be the archive" ;; *) no "the boot disk was not refused as the archive: $out" ;; esac
+    [ "$(ssh_run 'sfdisk -d /dev/vdb 2>&1 | sha256sum')" = "$before" ] && ok "a refused archive choice wrote nothing" || no "a refused archive choice changed the disk!"
+    started=$(ssh_run 'systemctl show -p ExecMainStartTimestampMonotonic --value camerabridged')
+    ssh_run 'cb-recording-drive --archive --device /dev/vdb --confirm "ERASE ALL DATA ON vdb" 2>&1' | tail -2 | sed 's/^/        /' || true
+    [ "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/archive')" = /dev/vdb1 ] && ok "the archive drive is mounted on the archive's folder" || no "the archive drive is not mounted"
+    ssh_has 'cat /run/camera-bridge/status/archive-drive.json' '"mounted"' && ok "the archive status says mounted" || no "the archive status does not say mounted"
+    ssh_has 'cat /var/lib/camera-bridge/archive/.camera-bridge-archive' '"uuid"' && ok "the archive drive carries its marker" || no "the archive drive has no marker"
+    ssh_run 'runuser -u camerabridge -- sh -c "echo on-the-archive > /var/lib/camera-bridge/archive/probe && sync"' && ok "the engine's user can write to the archive" || no "the engine's user cannot write to the archive"
+    [ "$(ssh_run 'systemctl show -p ExecMainStartTimestampMonotonic --value camerabridged')" = "$started" ] && ok "the engine was not restarted for the archive" || no "the engine was restarted for the archive"
+    sleep 10
+    ssh_has 'journalctl -u camerabridged --no-pager' 'The archive drive is connected' && ok "the running engine found the archive drive by itself" || no "the engine did not notice the archive drive"
+    stop_vm
+    fresh_vars
+    start_vm yes "$work/disk.raw"
+    wait_http "$boot_timeout" && wait_ssh || { no "the box did not come up without its archive drive"; dump_serial; exit 1; }
+    [ "$(ssh_run 'findmnt -no FSTYPE /var/lib/camera-bridge/archive')" = tmpfs ] && ok "without the archive drive a read-only placeholder is in its place" || no "no placeholder where the archive drive was"
+    ssh_run 'runuser -u camerabridge -- sh -c "echo x > /var/lib/camera-bridge/archive/nope" 2>/dev/null' && no "the engine could write without the archive drive" || ok "nothing can be written to the archive's folder without the drive"
+    ssh_has 'cat /run/camera-bridge/status/archive-drive.json' '"missing"' && ok "the archive status says missing" || no "the archive status does not say missing"
+    ssh_has 'systemctl is-active camerabridged' 'active' && ok "the engine runs without its archive drive" || no "the engine is not running without its archive drive"
+    stop_vm
+    fresh_vars
+    start_vm yes "$work/disk.raw" "$work/arch.raw"
+    wait_http "$boot_timeout" && wait_ssh || { no "the box did not come up with its archive drive back"; dump_serial; exit 1; }
+    [ "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/archive')" = /dev/vdb1 ] && ok "the archive drive is back in place when plugged in again" || no "the archive drive was not mounted again"
+    [ "$(ssh_run 'cat /var/lib/camera-bridge/archive/probe')" = on-the-archive ] && ok "what was written to the archive is still there" || no "the archive's probe file is gone"
+    ssh_run 'cb-recording-drive --archive --forget 2>&1' | tail -2 | sed 's/^/        /' || true
+    [ -z "$(ssh_run 'findmnt -no SOURCE /var/lib/camera-bridge/archive')" ] && ok "forgetting the archive drive unmounts it" || no "the archive drive is still mounted after forgetting it"
+    ssh_has 'cat /run/camera-bridge/status/archive-drive.json' '"none"' && ok "the archive status says none" || no "the archive status does not say none"
+    ssh_run 'cb-recording-drive --archive --device /dev/vdb --keep 2>&1' | tail -2 | sed 's/^/        /' || true
+    [ "$(ssh_run 'cat /var/lib/camera-bridge/archive/probe')" = on-the-archive ] && ok "an archive drive is taken back as it is (--keep)" || no "--keep did not bring the archive drive back"
+    ssh_run 'cb-recording-drive --archive --forget' >/dev/null 2>&1 || true
     # The tests after this one expect the box running from its own disk alone, as before.
     stop_vm
     fresh_vars

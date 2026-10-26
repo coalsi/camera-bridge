@@ -38,6 +38,9 @@ public struct DaemonOptions: Equatable, Sendable {
     /// Where the NVR keeps recordings (`--recordings-dir`, `CAMERABRIDGE_RECORDINGS_DIR`): a full path the engine can store as its folder
     /// (`BridgeSettings.isValidNVRFolder`). nil: `recordings` inside the data directory (`effectiveRecordingsDirectory(dataDirectory:)`).
     public var recordingsDirectory: URL?
+    /// The archive drive's folder (`--archive-dir`, `CAMERABRIDGE_ARCHIVE_DIR`), a full path: where older recordings move when the recordings drive fills.
+    /// nil: `archive` inside the data directory where Camera Bridge OS is underneath, none elsewhere (`effectiveArchiveDirectory`).
+    public var archiveDirectory: URL?
     public var logLevel: LogLevel = .info
     /// Dev only: the Add Camera page finds three sample cameras (RFC 5737 addresses) instead of searching the network.
     public var fakeDiscovery = false
@@ -58,6 +61,15 @@ public struct DaemonOptions: Equatable, Sendable {
     /// /var/lib/camera-bridge/recordings, on the data partition).
     public func effectiveRecordingsDirectory(dataDirectory: URL) -> URL {
         recordingsDirectory ?? dataDirectory.appending(path: "recordings", directoryHint: .isDirectory)
+    }
+
+    /// The archive drive's folder the engine is given: `archiveDirectory`, else `archive` inside `dataDirectory` when the operating system is Camera Bridge OS
+    /// (`systemAvailable`: its request folders exist; `cb-recording-drive --archive` mounts the drive there), else none. Never for `--preview`. The engine
+    /// writes there only while the drive's marker is in it.
+    public func effectiveArchiveDirectory(dataDirectory: URL, systemAvailable: Bool) -> URL? {
+        guard preview == nil else { return nil }
+        if let archiveDirectory { return archiveDirectory }
+        return systemAvailable ? dataDirectory.appending(path: "archive", directoryHint: .isDirectory) : nil
     }
 
     public struct UsageError: Error, Equatable, CustomStringConvertible, Sendable {
@@ -86,13 +98,14 @@ public struct DaemonOptions: Equatable, Sendable {
           --os-request-dir PATH  where requests for the system's root helper are written (default: requests in the run folder)
           --os-status-dir PATH   where the system publishes its status (default: status in the run folder)
           --recordings-dir PATH  where the NVR keeps recordings, a full path (default: recordings inside the data directory)
+          --archive-dir PATH     the archive drive's folder, a full path (default on Camera Bridge OS: archive inside the data directory)
           --log-level LEVEL      debug, info, notice, warning or error (default info)
           --fake-discovery       development: the Add Camera page finds sample cameras
           --no-demo-camera       leave the demo camera out of the camera types
           --version, --help
 
         Environment (flags win): CAMERABRIDGE_DATA_DIR, CAMERABRIDGE_HTTP_PORT, CAMERABRIDGE_WEB_ROOT, CAMERABRIDGE_RUN_DIR,
-        CAMERABRIDGE_OS_REQUEST_DIR, CAMERABRIDGE_OS_STATUS_DIR (what Camera Bridge OS sets), CAMERABRIDGE_RECORDINGS_DIR (optional),
+        CAMERABRIDGE_OS_REQUEST_DIR, CAMERABRIDGE_OS_STATUS_DIR (what Camera Bridge OS sets), CAMERABRIDGE_RECORDINGS_DIR, CAMERABRIDGE_ARCHIVE_DIR (optional),
         and CAMERA_BRIDGE_DATA_DIR, _PORT, _STATIC_DIR, _LOOPBACK_ONLY, _ALLOWED_HOSTS (comma separated), _SETUP_TOKEN, _LOG_LEVEL.
 
         """
@@ -116,6 +129,7 @@ public struct DaemonOptions: Equatable, Sendable {
         if let (_, value) = variable("CAMERABRIDGE_OS_REQUEST_DIR") { options.osRequestDirectory = URL(fileURLWithPath: value, isDirectory: true) }
         if let (_, value) = variable("CAMERABRIDGE_OS_STATUS_DIR") { options.osStatusDirectory = URL(fileURLWithPath: value, isDirectory: true) }
         if let (name, value) = variable("CAMERABRIDGE_RECORDINGS_DIR") { options.recordingsDirectory = try recordingsDirectory(value, name: name) }
+        if let (name, value) = variable("CAMERABRIDGE_ARCHIVE_DIR") { options.archiveDirectory = try recordingsDirectory(value, name: name) }
         if let (_, value) = variable("CAMERABRIDGE_LOOPBACK_ONLY", "CAMERA_BRIDGE_LOOPBACK_ONLY"), ["1", "true", "yes"].contains(value.lowercased()) {
             options.webLoopbackOnly = true
         }
@@ -180,6 +194,7 @@ public struct DaemonOptions: Equatable, Sendable {
             case "--os-request-dir": options.osRequestDirectory = URL(fileURLWithPath: try value(), isDirectory: true)
             case "--os-status-dir": options.osStatusDirectory = URL(fileURLWithPath: try value(), isDirectory: true)
             case "--recordings-dir": options.recordingsDirectory = try recordingsDirectory(try value(), name: name)
+            case "--archive-dir": options.archiveDirectory = try recordingsDirectory(try value(), name: name)
             case "--log-level": options.logLevel = try level(try value(), name: name)
             case "--fake-discovery": options.fakeDiscovery = true
             case "--no-demo-camera": options.offersDemoCamera = false

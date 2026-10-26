@@ -1,0 +1,2 @@
+# A partition labelled CBARCHIVE appears: mount it as the archive drive if it is the one that was chosen (the engine is not restarted for it).
+SUBSYSTEM=="block", ACTION=="add", ENV{DEVTYPE}=="partition", ENV{ID_FS_LABEL}=="CBARCHIVE", ENV{ID_FS_TYPE}=="ext4", TAG+="systemd", ENV{SYSTEMD_WANTS}+="camera-bridge-archive-drive-plug.service"

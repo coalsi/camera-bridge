@@ -31,6 +31,8 @@ enum CatalogLoader {
     struct Scan: Sendable {
         var files: [CatalogFile] = []
         var needsRepair: [RepairCandidate] = []
+        /// Own-pattern sidecars without their mp4 (segment: camera): left behind when a deletion stopped between the two files.
+        var loneSidecars: [String: UUID] = [:]
         /// Camera directories that could not be listed (a drive that failed halfway).
         var unreadableDirectories = 0
     }
@@ -90,6 +92,11 @@ enum CatalogLoader {
             for date in dates where date.isDirectory && ArchiveLayout.isDateDirectoryName(date.name) {
                 guard let files = entries(in: date.url) else { continue }
                 let byName = Dictionary(files.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+                for sidecar in files where sidecar.isRegularFile && sidecar.name.hasSuffix("." + ArchiveConstants.indexExtension) {
+                    let base = String(sidecar.name.dropLast(ArchiveConstants.indexExtension.count + 1))
+                    guard ArchiveLayout.isOwnFileBaseName(base), byName[base + "." + ArchiveConstants.mediaExtension] == nil else { continue }
+                    scan.loneSidecars[ArchiveLayout.segment(cameraDirectory: camera.name, dateDirectory: date.name, baseName: base)] = cameraID
+                }
                 for mp4 in files where mp4.isRegularFile && mp4.name.hasSuffix(".mp4") {
                     let base = String(mp4.name.dropLast(4))
                     guard ArchiveLayout.isOwnFileBaseName(base) else { continue }

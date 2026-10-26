@@ -95,7 +95,7 @@ test('a camera without a typical level is measured against its own 99th percenti
 });
 
 test('malformed or missing answers become an empty waveform, not an exception', () => {
-  assert.deepEqual(combineActivity(undefined, 3), { level: [0, 0, 0], coverage: [0, 0, 0], typical: null });
+  assert.deepEqual(combineActivity(undefined, 3), { level: [0, 0, 0], coverage: [0, 0, 0], typical: null, away: [0, 0, 0] });
   assert.deepEqual(combineActivity({ A: null, B: { coverage: 'x' } }, 2).coverage, [0, 0]);
   assert.deepEqual(combineActivity({ A: { typical: 5, coverage: [100], level: [1] } }, 3).level, [1, 0, 0]);   // short arrays count as zero
 });
@@ -131,4 +131,15 @@ test('visible levels are the covered bins that touch the viewport', () => {
   const combined = { level: [9, 1, 2, 0, 7], coverage: [100, 100, 100, 0, 100] };
   assert.deepEqual(visibleLevels(combined, plan, { startMs: 1000, durationMs: 3000 }), [1, 2]);   // bins 1..3; bin 3 has no footage
   assert.deepEqual(visibleLevels(combined, plan, { startMs: 500, durationMs: 1000 }), [9, 1]);     // bins 0 and 1 touch [500, 1500)
+});
+
+test('what is on an archive drive that is not connected is combined apart from the coverage: the most of any camera per bin', () => {
+  const answer = {
+    A: { typical: 1000, coverage: [0, 0, 100], level: [0, 0, 1000], away: [100, 40, 0] },
+    B: { typical: 1000, coverage: [0, 50, 100], level: [0, 900, 1000], away: [20, 0, 0] },
+    C: { typical: 1000, coverage: [100, 0, 0], level: [1000, 0, 0] },                       // a bridge without an archive sends none
+  };
+  const combined = combineActivity(answer, 3);
+  assert.deepEqual(combined.away, [100, 40, 0]);
+  assert.deepEqual(combined.coverage, [100, 50, 100], 'coverage is what plays now, as before');
 });

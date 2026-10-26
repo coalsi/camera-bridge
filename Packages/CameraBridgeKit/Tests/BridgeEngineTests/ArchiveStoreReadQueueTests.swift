@@ -45,7 +45,8 @@ import Testing
         #expect(queue.load.running == 1 && queue.load.waiting == 0, "the stuck read still occupies its slot, and nothing waits behind it")
         gate.signal()
         #expect(await eventually(timeout: archiveStorePatience) { queue.load.running == 0 })
-        #expect(try await queue.run { 3 } == 3, "the queue works again once the stuck read returns")
+        // Under a full parallel test run a worker thread can take longer than the 200 ms deadline to start: the read is tried until it gets one.
+        #expect(await eventually(timeout: archiveStorePatience) { (try? await queue.run { 3 }) == 3 }, "the queue works again once the stuck read returns")
     }
 
     @Test func errorsOfTheWorkPassThrough() async {

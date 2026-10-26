@@ -48,6 +48,8 @@ public struct RequestFileSystemControl: SystemControlling {
         case driveList = "drive-list"
         case driveUse = "drive-use"
         case driveForget = "drive-forget"
+        case archiveUse = "archive-use"
+        case archiveForget = "archive-forget"
         case wifiScan = "wifi-scan"
         case wifiJoin = "wifi-join"
         case wifiForget = "wifi-forget"
@@ -58,7 +60,7 @@ public struct RequestFileSystemControl: SystemControlling {
     /// The files the system publishes.
     private enum StatusFile {
         case job(Request)
-        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, wifi, wifiNetworks, internetGuard, tls
+        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, archiveDrive, wifi, wifiNetworks, internetGuard, tls
 
         var name: String {
             switch self {
@@ -69,6 +71,7 @@ public struct RequestFileSystemControl: SystemControlling {
             case .installToDisk: "install-to-disk.json"
             case .recordingDrive: "recording-drive.json"
             case .recordingDriveCandidates: "recording-drive-candidates.json"
+            case .archiveDrive: "archive-drive.json"
             case .wifi: "wifi.json"
             case .wifiNetworks: "wifi-networks.json"
             case .internetGuard: "guard.json"
@@ -356,6 +359,11 @@ public struct RequestFileSystemControl: SystemControlling {
             var phrase: String?
             var isRecordingDrive: Bool?
             var inUse: Bool?
+            /// The archive drive's view of the disk (a script from before the archive drive has none: the recording drive's view stands in).
+            var isArchiveDrive: Bool?
+            var archiveInUse: Bool?
+            var archiveEligible: Bool?
+            var archiveProblems: [String]?
         }
 
         struct Partition: Decodable {
@@ -487,6 +495,65 @@ public struct RequestFileSystemControl: SystemControlling {
         try requireAvailable("Choosing a recording drive is only possible on Camera Bridge OS.")
         try submit(.driveForget, Empty())
         try await awaitPickup(.driveForget)
+    }
+
+    // MARK: The archive drive
+
+    /// The archive's view of a disk of the recording drive's list: the recording drive in use is never offered.
+    private static func archiveTarget(_ disk: Candidates.Disk) -> InstallTarget? {
+        var view = disk
+        view.eligible = disk.archiveEligible ?? disk.eligible
+        view.problems = disk.archiveProblems ?? disk.problems
+        if disk.inUse == true { view.problems = (view.problems ?? []) + ["it is the recording drive"] }
+        guard var target = target(view) else { return nil }
+        target.isArchiveDrive = disk.isArchiveDrive
+        target.inUse = disk.archiveInUse
+        return target
+    }
+
+    /// The same list as `recordingDrives()` (one `drive-list` request), in the archive's view, and the archive's state from `status/archive-drive.json`.
+    public func archiveDrives() async throws -> ArchiveDriveReport {
+        try requireAvailable("An archive drive is only possible on Camera Bridge OS.")
+        let since = floorToSecond(now())
+        try submit(.driveList, Empty())
+        try await awaitPickup(.driveList)
+        for _ in 0...pollCount(timing.shortJob) {
+            if let modified = modificationDate(.recordingDriveCandidates), modified >= since, let list: Candidates = read(.recordingDriveCandidates) {
+                let current: DriveFile? = read(.archiveDrive)
+                return ArchiveDriveReport(state: current?.state ?? "none", message: current?.message ?? "No archive drive is chosen.",
+                                          drives: list.disks.compactMap(Self.archiveTarget))
+            }
+            if let job: JobFile = read(.job(.driveList)), job.state == "failed", let at = job.date, at >= since {
+                throw SystemError(Self.sentence(job.message ?? "The system couldn’t look at its disks."))
+            }
+            try await Task.sleep(for: timing.pollInterval)
+            if Task.isCancelled { throw CancellationError() }
+        }
+        throw SystemError("The system took too long to look at its disks.")
+    }
+
+    public func useArchiveDrive(targetID: String, phrase: String, keepData: Bool) async throws {
+        try requireAvailable("An archive drive is only possible on Camera Bridge OS.")
+        guard Self.isDiskName(targetID) else { throw SystemError("That isn’t a disk the system knows.") }
+        let expected = "ERASE ALL DATA ON \(targetID)"
+        if !keepData, phrase != expected { throw SystemError("The sentence doesn’t match. Type it exactly: \(expected)") }
+        // The system's own list, fresh: the disk must be on it and usable. (The helper checks everything again before it writes.)
+        guard let disk = try await archiveDrives().drives.first(where: { $0.id == targetID }) else { throw SystemError("That isn’t a disk the system knows.") }
+        guard disk.eligible else { throw SystemError("That disk can’t be used: \(disk.problems.first ?? "the system refuses it").") }
+        if keepData, disk.isArchiveDrive != true { throw SystemError("That disk isn’t a Camera Bridge archive drive, so it has to be erased first.") }
+        struct Body: Encodable {
+            var device: String
+            var phrase: String
+            var keepData: Bool
+        }
+        try submit(.archiveUse, Body(device: "/dev/\(targetID)", phrase: keepData ? "" : expected, keepData: keepData))
+        try await awaitPickup(.archiveUse)
+    }
+
+    public func forgetArchiveDrive() async throws {
+        try requireAvailable("An archive drive is only possible on Camera Bridge OS.")
+        try submit(.archiveForget, Empty())
+        try await awaitPickup(.archiveForget)
     }
 
     // MARK: Wi-Fi

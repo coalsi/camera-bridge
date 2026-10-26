@@ -93,6 +93,7 @@ public final class Daemon {
         let system = RequestFileSystemControl(requestDirectory: folders.requests, statusDirectory: folders.status, product: DaemonInfo.product,
                                               version: DaemonInfo.version, build: DaemonInfo.build(environment: environment))
         var bridgeEnvironment = try Self.makeEnvironment(directory: directory, options: options)
+        bridgeEnvironment.archiveDriveFolder = options.effectiveArchiveDirectory(dataDirectory: directory, systemAvailable: system.isAvailable)
         if Self.offersInternetGuard(development: options.development, systemAvailable: system.isAvailable) {
             bridgeEnvironment = Self.withInternetGuard(bridgeEnvironment, system: system)
         }

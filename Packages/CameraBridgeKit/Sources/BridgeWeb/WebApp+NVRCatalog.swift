@@ -38,6 +38,8 @@ extension WebApp {
         var complete: Bool
         var coverage: [Int]
         var level: [Double]
+        /// Percent of each bin recorded on the archive drive while it is not connected (not in `coverage`: it cannot be played until it is back).
+        var away: [Int]
     }
 
     func nvrActivity(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -64,10 +66,12 @@ extension WebApp {
             for (id, activity) in results {
                 var coverage = activity.bins.map { Int((($0.coverage.isFinite ? min(max($0.coverage, 0), 1) : 0) * 100).rounded()) }
                 var level = activity.bins.map { $0.level.isFinite ? max(0, $0.level) : 0 }
+                var away = activity.bins.map { Int((($0.away.isFinite ? min(max($0.away, 0), 1) : 0) * 100).rounded()) }
                 coverage = Array(coverage.prefix(Int(bins))) + Array(repeating: 0, count: max(0, Int(bins) - coverage.count))
                 level = Array(level.prefix(Int(bins))) + Array(repeating: 0, count: max(0, Int(bins) - level.count))
+                away = Array(away.prefix(Int(bins))) + Array(repeating: 0, count: max(0, Int(bins) - away.count))
                 byCamera[id.uuidString] = CameraActivity(typical: OrNull(activity.typical.flatMap { $0.isFinite ? $0 : nil }), complete: activity.isComplete,
-                                                         coverage: coverage, level: level)
+                                                         coverage: coverage, level: level, away: away)
             }
             return .json(Answer(from: start, binMs: binMs, bins: bins, serverTime: Self.milliseconds(Date()), catalogVersion: archive.catalogVersion,
                                 byCamera: byCamera))

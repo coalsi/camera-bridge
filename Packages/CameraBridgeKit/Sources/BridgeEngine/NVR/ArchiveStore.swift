@@ -49,6 +49,26 @@ struct ArchiveStoreTuning: Sendable {
         try IndexScanner.repair(mp4: mp4, sidecar: sidecar, camera: camera)
     }
 
+    // The archive drive (`ArchiveDrive.swift`, `ArchiveMover+Store.swift`).
+    /// How fast a recording is copied to the archive at most, and in what pieces; the pause between two moves.
+    var moveBytesPerSecond = 32 * 1_048_576
+    var moveChunkBytes = 1_048_576
+    var movePause: Duration = .seconds(2)
+    /// The mover waits while the archive was read this recently (someone watches archived video).
+    var moveGivesWayFor: Duration = .seconds(1)
+    /// After `ArchiveDriveState.failureLimit` moves in a row failed on the archive's side, nothing moves for this long.
+    var driveFailureBackoff: TimeInterval = 600
+    /// The archive's file list in the data directory is written at most this often (and when the mover is idle).
+    var driveIndexInterval: Duration = .seconds(10)
+    /// Archive reads at a time (its own queue: a slow USB drive never holds up reads of the recordings drive).
+    var archiveReadWidth = 4
+    /// The janitor waits at most this long for the archive's own deletions of one pass (a drive that hangs never holds up the box's retention).
+    var archiveDeletionDeadline: Duration = .seconds(30)
+    /// The box's copy of a moved file that could not be deleted, or whose drive went away first, is tried again after this long.
+    var mainRemovalRetry: Duration = .seconds(60)
+    /// Tests: true stops a move after this step as if the box lost power there; the mover then stops for good.
+    var moveCrash: (@Sendable (ArchiveMoveStep) -> Bool)?
+
     init() {}
 }
 
@@ -105,6 +125,9 @@ struct ArchiveStoreState: Sendable {
     var lastKeyTicks: [String: UInt32] = [:]
     var keyIntervals: [UUID: [Double]] = [:]
 
+    /// The archive drive (nil folder: the host has none).
+    var drive = ArchiveDriveState()
+
     var status: ArchiveStorageStatus?
     var statusAt: ContinuousClock.Instant?
     var tasks: [Task<Void, Never>] = []
@@ -139,6 +162,7 @@ struct ArchiveStoreState: Sendable {
         readsStalled = false
         needsWriteTest = false
         firstProbeDone = false
+        drive.reset()
     }
 }
 
@@ -159,6 +183,17 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
     let reads: ArchiveReadQueue
     let handles = ArchiveHandleCache()
     let probes: ArchiveProbeQueue
+    /// The archive drive's own queues: reads with their deadline, open handles, probes, and listing and deletion. Nothing of the recordings drive
+    /// waits behind them.
+    let archiveReads: ArchiveReadQueue
+    let archiveHandles = ArchiveHandleCache()
+    let driveProbes = ArchiveProbeQueue()
+    let driveControl = DispatchQueue(label: "CameraBridge.NVR.archive-drive", qos: .utility)
+    /// Wakes the archive's monitor (a move failed) and the mover (retention planned moves, the drive came back).
+    let driveWake = ChangeSignal()
+    let moveWake = ChangeSignal()
+    /// The mover's own low-priority thread.
+    let mover: ArchiveMoveWorker
     /// Wakes the janitor (a file closed, a limit changed) and the volume monitor (a write failed).
     let retentionWake = ChangeSignal()
     let probeWake = ChangeSignal()
@@ -175,8 +210,11 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
         self.probes = probes
         log = tuning.log
         reads = ArchiveReadQueue(deadline: tuning.readDeadline)
+        archiveReads = ArchiveReadQueue(width: tuning.archiveReadWidth, deadline: tuning.readDeadline)
+        mover = ArchiveMoveWorker(prepare: environment.archivePolicy?.lowerThreadPriority)
         eventLog = ArchiveEventLog(log: tuning.log)
         skyLog = SkyLogStore(log: tuning.log)
+        state.withLock { $0.drive.folder = environment.archiveDriveFolder }
     }
 
     // MARK: Lifecycle (called by NVRCoordinator)
@@ -213,6 +251,7 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
         }
         tasks.forEach { $0.cancel() }
         handles.closeAll()
+        archiveHandles.closeAll()
     }
 
     /// A changed folder reloads the catalog (and bumps `writeState.generation`); changed limits run the janitor.
@@ -260,10 +299,11 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
             // A folder that has not been measured yet has no numbers to show (the status stays nil until the first probe answers).
             if state.folder != nil, state.pause == nil, state.space == nil { return false }
             let span = state.catalog.span
-            let status = ArchiveStorageStatus(folder: state.folder, pause: state.pause, usedBytes: VolumeMonitor.rounded(state.catalog.usedBytes),
+            var status = ArchiveStorageStatus(folder: state.folder, pause: state.pause, usedBytes: VolumeMonitor.rounded(state.catalog.usedBytes),
                                               freeBytes: VolumeMonitor.rounded(state.space?.free ?? 0), totalBytes: state.space?.total ?? 0,
                                               floorBytes: state.floorBytes, oldest: span.map { ArchiveTime.date(ms: $0.oldest) },
                                               newest: span.map { ArchiveTime.date(ms: $0.newest) })
+            status.archive = Self.driveStatus(state, now: tuning.now())
             state.statusAt = now
             guard status != state.status else { return false }
             state.status = status
@@ -315,27 +355,43 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
 
     /// Reads the fragment table of a closed file from its sidecar into the cache. False when it cannot (the lookup then answers a gap).
     func loadTable(camera: UUID, segment: String) async -> Bool {
-        let request = state.withLock { state -> (sidecar: URL, mp4Size: UInt64, count: Int, startMs: Int64)? in
-            guard let folder = state.folder, let file = state.catalog.file(camera: camera, segment: segment), !file.isOpen else { return nil }
-            return (Self.url(folder, segment, ArchiveConstants.indexExtension), file.mp4Bytes, file.fragmentCount, file.startMs)
+        let request = state.withLock { state -> (sidecar: URL, mp4Size: UInt64, count: Int, startMs: Int64, tier: StorageTier)? in
+            guard let file = state.catalog.file(camera: camera, segment: segment), !file.isOpen,
+                  let folder = Self.readableFolder(of: file.tier, in: state) else { return nil }
+            return (Self.url(folder, segment, ArchiveConstants.indexExtension), file.mp4Bytes, file.fragmentCount, file.startMs, file.tier)
         }
         guard let request else { return false }
         do {
-            let data = try await reads.run { try Data(contentsOf: request.sidecar) }
+            let queue = request.tier == .archive ? archiveReads : reads
+            if request.tier == .archive { noteArchiveRead() }
+            let data = try await queue.run { try Data(contentsOf: request.sidecar) }
             let index = try CBIndexFile.decode(data, mp4Size: request.mp4Size)
             guard index.fragments.count == request.count, index.startWallMs == request.startMs else { throw CBIndexError.sizeMismatch }
             state.withLock { state in
-                if state.catalog.file(camera: camera, segment: segment) != nil { state.catalog.store(table: index.fragments, forSegment: segment) }
+                if state.catalog.file(camera: camera, segment: segment)?.tier == request.tier { state.catalog.store(table: index.fragments, forSegment: segment) }
             }
             return true
         } catch is CBIndexError {
             quarantine(camera: camera, segment: segment, reason: "its index does not match the file")
         } catch let error as ArchiveError where error == .timedOut {
-            markReadsStalled()
+            if request.tier == .archive { markArchiveReadsStalled() } else { markReadsStalled() }
         } catch {
             reconcileMissing(camera: camera, segment: segment)
         }
         return false
+    }
+
+    /// The folder files of `tier` are read from now, nil when they cannot be: no recordings folder, or the archive drive away or not answering.
+    static func readableFolder(of tier: StorageTier, in state: ArchiveStoreState) -> URL? {
+        switch tier {
+        case .main: return state.folder
+        case .archive: return state.drive.connection == .connected && !state.drive.readsStalled ? state.drive.folder : nil
+        }
+    }
+
+    /// Someone read the archive just now: the mover gives way for a moment.
+    func noteArchiveRead() {
+        state.withLock { $0.drive.lastReadAt = .now }
     }
 
     // MARK: ArchiveReading: bytes
@@ -345,15 +401,30 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
             var folder: URL
             var offset: UInt64
             var length: Int
+            var tier: StorageTier
         }
         let plan = try state.withLock { state -> Plan in
             guard state.isReady else { throw ArchiveError.unreadable("The recordings are still loading.") }
-            guard !state.readsStalled else { throw ArchiveError.timedOut }
-            guard let folder = state.folder else { throw ArchiveError.fileGone }
             guard ArchiveLayout.parseSegment(fragment.segment) != nil else { throw ArchiveError.unreadable("That is not a recording of this archive.") }
             let file = state.catalog.file(camera: fragment.camera, segment: fragment.segment)
-            // A file retention just deleted can still be read through a handle that is open on it; a file nobody opened cannot.
-            guard file != nil || handles.isOpen(fragment.segment) else { throw ArchiveError.fileGone }
+            // A file retention just deleted can still be read through a handle that is open on it (on the drive it was on); a file nobody opened cannot.
+            let tier: StorageTier
+            if let file {
+                tier = file.tier
+            } else if handles.isOpen(fragment.segment) {
+                tier = .main
+            } else if archiveHandles.isOpen(fragment.segment) {
+                tier = .archive
+            } else {
+                throw ArchiveError.fileGone
+            }
+            switch tier {
+            case .main: guard !state.readsStalled else { throw ArchiveError.timedOut }
+            case .archive:
+                guard state.drive.connection == .connected else { throw ArchiveError.fileGone }   // away: a gap until it is back
+                guard !state.drive.readsStalled else { throw ArchiveError.timedOut }
+            }
+            guard let folder = tier == .main ? state.folder : state.drive.folder else { throw ArchiveError.fileGone }
             let offset: UInt64, length: Int
             switch part {
             case .initialization:
@@ -375,18 +446,21 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
             guard length > 0, length <= max(ArchiveConstants.fragmentMaximumBytes, 1_048_576), !overflow, end <= (file?.mp4Bytes ?? .max) else {
                 throw ArchiveError.unreadable("That part is not in the file.")
             }
-            return Plan(folder: folder, offset: offset, length: length)
+            return Plan(folder: folder, offset: offset, length: length, tier: tier)
         }
 
+        // The bytes of a file are the same on both drives (a move copies them exactly), so the cache does not say which drive they came from.
         let key = ArchiveBlockCache.Key(segment: fragment.segment, offset: plan.offset, length: plan.length)
         if let cached = state.withLock({ $0.blocks.data(for: key) }) { return cached }
         let url = Self.url(plan.folder, fragment.segment, ArchiveConstants.mediaExtension)
-        let handles = handles
+        let handles = plan.tier == .archive ? archiveHandles : handles
+        let queue = plan.tier == .archive ? archiveReads : reads
+        if plan.tier == .archive { noteArchiveRead() }
         let data: Data
         do {
-            data = try await reads.run { try handles.read(segment: key.segment, url: url, offset: plan.offset, count: plan.length) }
+            data = try await queue.run { try handles.read(segment: key.segment, url: url, offset: plan.offset, count: plan.length) }
         } catch let error as ArchiveError {
-            if error == .timedOut { markReadsStalled() }
+            if error == .timedOut { if plan.tier == .archive { markArchiveReadsStalled() } else { markReadsStalled() } }
             throw error
         } catch {
             let mapped = ArchiveErrors.map(error)
@@ -425,15 +499,23 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
         state.withLock { $0.readsStalled = true }
     }
 
+    /// The same for the archive drive alone: reads of the recordings drive go on.
+    func markArchiveReadsStalled() {
+        state.withLock { $0.drive.readsStalled = true }
+        driveWake.notify()
+    }
+
     /// A file whose index or bytes are not what the catalog says: out of the catalog (readers see a gap), rebuilt from the mp4 once it has been
     /// quiet. Logged once per file.
     func quarantine(camera: UUID, segment: String, reason: String) {
         let first = state.withLock { state -> Bool in
-            guard let file = state.catalog.file(camera: camera, segment: segment), !file.isOpen else { return false }
+            guard let file = state.catalog.file(camera: camera, segment: segment), !file.isOpen,
+                  state.drive.moving?.segment != segment else { return false }
             state.catalog.remove(segment: segment, camera: camera)
             state.blocks.remove(segment: segment)
             state.catalog.bump()
-            state.repairQueue[segment] = camera
+            // A file of the recordings drive is rebuilt there once it is quiet; one of the archive drive when the drive's files are read again.
+            if file.tier == .main { state.repairQueue[segment] = camera } else { state.drive.indexDirty = true }
             return state.damagedLogged.insert(segment).inserted
         }
         if first { log.warning("A recording is out of the timeline until it is repaired: \(reason)") }
@@ -441,21 +523,29 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
     }
 
     /// A read found the file gone. If the drive is there and the file is not, the file leaves the catalog; if the drive is gone, nothing changes.
+    /// The archive drive is "there" only with its marker: the folder it is mounted on stays when it is unplugged.
     func reconcileMissing(camera: UUID, segment: String) {
-        guard let folder = state.withLock({ $0.folder }) else { return }
+        guard let (folder, tier) = state.withLock({ state -> (URL, StorageTier)? in
+            guard let file = state.catalog.file(camera: camera, segment: segment), !file.isOpen else { return nil }
+            let folder = file.tier == .main ? state.folder : state.drive.folder
+            return folder.map { ($0, file.tier) }
+        }) else { return }
+        let queue = tier == .archive ? driveProbes : probes
         Task.detached { [weak self] in
             guard let self else { return }
-            let gone = await probes.run { () -> Bool in
+            let gone = await queue.run { () -> Bool in
                 var isDirectory: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: ArchiveVolume.path(of: folder), isDirectory: &isDirectory), isDirectory.boolValue else { return false }
+                if tier == .archive, ArchiveDriveMeasurement.driveID(in: folder) == nil { return false }
                 return !FileManager.default.fileExists(atPath: Self.url(folder, segment, ArchiveConstants.mediaExtension).path(percentEncoded: false))
             }
             guard gone else { return }
             state.withLock { state in
-                if let file = state.catalog.file(camera: camera, segment: segment), !file.isOpen {
+                if let file = state.catalog.file(camera: camera, segment: segment), !file.isOpen, file.tier == tier, state.drive.moving?.segment != segment {
                     state.catalog.remove(segment: segment, camera: camera)
                     state.blocks.remove(segment: segment)
                     state.catalog.bump()
+                    if tier == .archive { state.drive.indexDirty = true }
                 }
             }
         }
@@ -474,11 +564,14 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
         let count = min(binCount, 20_000)
         let binMs = Double(endMs - startMs) / Double(count)
         for _ in 0..<4 {
-            let outcome = state.withLock { state -> (intervals: [CatalogActivity.Interval], typical: Double?, missing: [String])? in
+            let outcome = state.withLock { state -> (intervals: [CatalogActivity.Interval], typical: Double?, missing: [String],
+                                                     away: [(start: Int64, end: Int64)])? in
                 guard state.isReady else { return nil }
                 var intervals: [CatalogActivity.Interval] = []
                 var missing: [String] = []
-                let visible = state.catalog.visibleFiles(camera: camera, from: startMs, to: endMs)
+                // On the archive drive while it is away: shown as such, never as recorded video that would not play.
+                let visible = state.catalog.visibleFiles(camera: camera, from: startMs, to: endMs).filter { !state.catalog.isUnreachable($0.file) }
+                let away = state.catalog.unreachableSpans(camera: camera, from: startMs, to: endMs)
                 // Bins of a minute or more come from the rollups; finer ones from the fragment tables, unless that would read more than a few.
                 let coarse = binMs >= 60_000 || visible.count > Self.maximumActivityTables
                 for (file, visibleEnd) in visible {
@@ -491,12 +584,13 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
                         missing.append(file.segment)
                     }
                 }
-                guard missing.isEmpty else { return ([], nil, missing) }
-                return (intervals, Self.typical(camera: camera, in: &state.catalog), [])
+                guard missing.isEmpty else { return ([], nil, missing, away) }
+                return (intervals, Self.typical(camera: camera, in: &state.catalog), [], away)
             }
             guard let outcome else { break }
             if outcome.missing.isEmpty {
-                let bins = CatalogActivity.bins(rangeStartMs: startMs, binMs: binMs, binCount: count, intervals: outcome.intervals)
+                var bins = CatalogActivity.bins(rangeStartMs: startMs, binMs: binMs, binCount: count, intervals: outcome.intervals)
+                Self.addAway(outcome.away, to: &bins, rangeStartMs: startMs, binMs: binMs)
                 return ArchiveActivity(start: range.lowerBound, binDuration: binMs / 1_000, bins: bins, typical: outcome.typical, isComplete: true)
             }
             for segment in outcome.missing { _ = await loadTable(camera: camera, segment: segment) }
@@ -508,6 +602,31 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
 
     /// The most fragment tables a request for bins finer than a minute reads; over a longer time it is answered from the rollups.
     static let maximumActivityTables = 12
+
+    /// The share of each bin that `spans` (milliseconds) cover, as `away`.
+    static func addAway(_ spans: [(start: Int64, end: Int64)], to bins: inout [ArchiveActivity.Bin], rangeStartMs: Int64, binMs: Double) {
+        guard !spans.isEmpty, binMs > 0 else { return }
+        for span in spans {
+            let first = max(0, Int(Double(span.start - rangeStartMs) / binMs))
+            let last = min(bins.count - 1, Int(Double(span.end - rangeStartMs - 1) / binMs))
+            guard first <= last else { continue }
+            for index in first...last {
+                let binStart = Double(rangeStartMs) + Double(index) * binMs
+                let overlap = min(Double(span.end), binStart + binMs) - max(Double(span.start), binStart)
+                if overlap > 0 { bins[index].away = min(1, bins[index].away + overlap / binMs) }
+            }
+        }
+    }
+
+    func awaySpan(camera: UUID, containing time: Date) -> DateInterval? {
+        let ms = ArchiveTime.ms(time)
+        return state.withLock { state -> DateInterval? in
+            guard state.isReady else { return nil }
+            let spans = state.catalog.unreachableSpans(camera: camera, from: Int64.min / 2, to: Int64.max / 2)
+            guard let span = spans.first(where: { $0.start <= ms && ms < $0.end }) else { return nil }
+            return DateInterval(start: ArchiveTime.date(ms: span.start), end: ArchiveTime.date(ms: span.end))
+        }
+    }
 
     /// The rollups of `file`: its sidecar's, or (while a recorder has it open) computed from its table.
     private static func rollups(of file: CatalogFile, in catalog: inout CatalogState) -> [CBIndexRollup] {
@@ -541,6 +660,10 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
 
     func recorderOpened(_ file: ArchiveOpenFile, startWallMs: Int64, initLength: UInt32, hasAudio: Bool) {
         state.withLock { state in
+            // A new file with the name of one on the archive drive (the clock went back by days): that one stays on the drive, out of the timeline.
+            if let existing = state.catalog.file(camera: file.camera, segment: file.segment), existing.tier == .archive {
+                state.drive.shadowed[file.segment] = existing
+            }
             state.owned.insert(file)
             state.catalog.open(CatalogFile(camera: file.camera, segment: file.segment, startMs: startWallMs, endMs: startWallMs, initLength: initLength,
                                            flags: hasAudio ? CBIndexFormat.flagHasAudio : 0, mp4Bytes: UInt64(initLength), sidecarBytes: 0,

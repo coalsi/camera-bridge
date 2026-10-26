@@ -15,6 +15,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.125',
+    date: '2026-10-25',
+    title: 'An archive drive for older recordings',
+    items: [
+      'Add a second drive as an archive: the box keeps recording to its own disk, and when that fills, the oldest recordings move to the archive drive instead of being deleted. When the archive fills too, its oldest recordings go.',
+      'Archived recordings play on the Monitor, in events, in saved clips and in Sky Watcher like any others. If the archive drive is unplugged, the box keeps recording and shows those hours as “on the archive drive (not connected)” until it is back.',
+      'Moves are gentle (one file at a time, at low priority) and safe: each recording is copied and checked before the box lets go of its own copy. Set it up under Settings, Recording.',
+    ],
+  },
+  {
     version: '0.1.124',
     date: '2026-10-25',
     title: 'Sky Watcher: close-ups, a player on the page, and a cleaner log',

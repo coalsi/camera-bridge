@@ -23,6 +23,7 @@ export const TEXT = {
   recordingOff: 'Recording is off for this camera',
   nothingRecorded: 'Nothing recorded yet',
   driveMissing: 'The recordings drive isn’t connected',
+  archiveAway: 'On the archive drive (not connected)',
   unreadable: 'Can’t read this part',
   unsupported: 'This browser can’t play recordings. Safari, or Chrome on a Mac, can.',
 };
@@ -178,6 +179,9 @@ function describeTile({ camera, extent, coverage, started, playable = true, live
       return { ...base, state: 'unreadable', note: { ...note(TEXT.unreadable, detail, 'error'), action: { id: 'retry', label: 'Try again' } } };
     }
     case 'gap': {
+      if (coverage.away) {
+        return { ...base, state: 'gap', note: note(TEXT.archiveAway, coverage.next ? `Plays again when the drive is back. Next recording on this box at ${formatTime(coverage.next)}` : 'Plays again when the drive is plugged back in.') };
+      }
       if (!camera.nvrEnabled) return { ...base, state: 'recordingOff', note: note(TEXT.recordingOff) };
       const title = position === null ? 'No recording here' : `No recording at ${formatTime(position)}`;
       return { ...base, state: 'gap', note: note(title, coverage.next ? `Next recording at ${formatTime(coverage.next)}` : null) };

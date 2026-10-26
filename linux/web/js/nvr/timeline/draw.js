@@ -1,27 +1,39 @@
-// Painting the timeline track on a 2D canvas: ruler, hatched gaps, the mirrored activity waveform and the dashed "normal" line.
+// Painting the timeline track on a 2D canvas: ruler, hatched gaps, stretches on an archive drive that is not connected, the mirrored activity
+// waveform and the dashed "normal" line.
 // `layoutBars` is pure (numbers in, rectangles out); `paintTimeline` only calls the 2D context, so both run under Node with a fake context.
 import { barHeight, isElevated } from './activity.js';
 import { xForTime } from './viewport.js';
 
 export const RULER_HEIGHT = 22;                  // CSS px
 const HATCH_SPACING = 6;
+/** What a stretch on the archive drive says while the drive is not connected (a shorter word when the stretch is narrow). */
+export const AWAY_LABEL = 'On the archive drive (not connected)';
+export const AWAY_SHORT_LABEL = 'Archive drive';
 
 /**
- * -> { bars: [{ x, w, half, hot, alpha }], gaps: [{ x0, x1 }], normal: fraction | null }
+ * -> { bars: [{ x, w, half, hot, alpha }], gaps: [{ x0, x1 }], aways: [{ x0, x1 }], normal: fraction | null }
  * `half` is the bar's half height as a fraction (0..1) of the half height of the waveform area. A gap is a run of bins without footage
- * between the oldest and the newest recording; before the first and after the last recording there is no gap, just empty track.
+ * between the oldest and the newest recording; before the first and after the last recording there is no gap, just empty track. An away run is
+ * a run of bins whose footage is on the archive drive while it is not connected (`combined.away`): it plays again when the drive is back.
  */
 export function layoutBars({ viewport, widthPx, plan, combined, reference, typical, oldestMs, newestMs }) {
-  const out = { bars: [], gaps: [], normal: null };
+  const out = { bars: [], gaps: [], aways: [], normal: null };
   if (!plan || !combined || !(reference > 0)) return out;
   let run = null;
+  let awayRun = null;
   for (let i = 0; i < combined.level.length; i += 1) {
     const startMs = plan.fromMs + i * plan.binMs;
     const x0 = xForTime(viewport, startMs, widthPx);
     const x1 = xForTime(viewport, startMs + plan.binMs, widthPx);
-    if (x1 < 0 || x0 > widthPx) { run = null; continue; }
+    if (x1 < 0 || x0 > widthPx) { run = null; awayRun = null; continue; }
     const coverage = combined.coverage[i];
     const inside = oldestMs !== null && newestMs !== null && startMs + plan.binMs > oldestMs && startMs < newestMs;
+    if (coverage === 0 && (combined.away?.[i] || 0) > 0) {
+      run = null;
+      if (awayRun && Math.abs(awayRun.x1 - x0) < 0.01) awayRun.x1 = x1; else { awayRun = { x0, x1 }; out.aways.push(awayRun); }
+      continue;
+    }
+    awayRun = null;
     if (coverage === 0) {
       if (inside) {
         if (run && Math.abs(run.x1 - x0) < 0.01) run.x1 = x1; else { run = { x0, x1 }; out.gaps.push(run); }
@@ -94,6 +106,28 @@ export function paintTimeline(ctx, frame) {
     for (let x = gap.x0 - areaHeight; x < gap.x1; x += HATCH_SPACING) { ctx.moveTo(x, top + areaHeight); ctx.lineTo(x + areaHeight, top); }
     ctx.stroke();
     ctx.restore();
+  }
+
+  // On the archive drive, not connected: a quiet band with its words where they fit (never a bar: nothing there plays now)
+  for (const away of layout.aways) {
+    const x0 = Math.max(0, away.x0), x1 = Math.min(width, away.x1);
+    if (x1 <= x0) continue;
+    ctx.fillStyle = colors.away || colors.span;
+    ctx.fillRect(x0, top, x1 - x0, areaHeight);
+    ctx.strokeStyle = colors.gap;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x0, top + 0.5); ctx.lineTo(x1, top + 0.5);
+    ctx.moveTo(x0, top + areaHeight - 0.5); ctx.lineTo(x1, top + areaHeight - 0.5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const label = x1 - x0 >= 230 ? AWAY_LABEL : x1 - x0 >= 90 ? AWAY_SHORT_LABEL : null;
+    if (label) {
+      ctx.fillStyle = colors.label;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, x0 + 8, mid);
+      ctx.textBaseline = 'top';
+    }
   }
 
   // Waveform, mirrored about the centre line; highlighted (brand red) bars are the ones above 1.5 x typical
