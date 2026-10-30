@@ -212,17 +212,21 @@ public struct TimestampOverlay: Sendable {
     public var settings: TimestampOverlaySettings
     public var cameraName: String
     public var clock: any OverlayClock
+    /// The zone the time is told in: the bridge's (`BridgeSettings.timeZone`), which on Camera Bridge OS is not the process's (UTC).
+    public var timeZone: TimeZone
 
-    public init(settings: TimestampOverlaySettings, cameraName: String = "", clock: any OverlayClock = PictureWallClock()) {
+    public init(settings: TimestampOverlaySettings, cameraName: String = "", clock: any OverlayClock = PictureWallClock(),
+                timeZone: TimeZone = .current) {
         self.settings = settings
         self.cameraName = cameraName
         self.clock = clock
+        self.timeZone = timeZone
     }
 
-    /// The words for a picture captured at `pictureWallClock`.
-    public func text(for pictureWallClock: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> TimestampOverlayText {
+    /// The words for a picture captured at `pictureWallClock`, in `timeZone` (the overlay's own when nil).
+    public func text(for pictureWallClock: Date, locale: Locale = .current, timeZone: TimeZone? = nil) -> TimestampOverlayText {
         TimestampOverlayText.make(at: clock.displayTime(for: pictureWallClock), settings: settings, cameraName: cameraName, locale: locale,
-                                  timeZone: timeZone)
+                                  timeZone: timeZone ?? self.timeZone)
     }
 }
 

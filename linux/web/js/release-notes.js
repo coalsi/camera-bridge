@@ -15,6 +15,14 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.129',
+    date: '2026-10-30',
+    title: 'The right time on Apple Home’s video',
+    items: [
+      'The date and time Camera Bridge draws on a camera’s picture in Apple Home now follows the time zone set in Camera Bridge. Before, the box told it in UTC after every restart, so Home’s video could be hours off while Camera Bridge’s own pages were right.',
+    ],
+  },
+  {
     version: '0.1.128',
     date: '2026-10-26',
     title: 'Sky Watcher: one object, not fifteen',

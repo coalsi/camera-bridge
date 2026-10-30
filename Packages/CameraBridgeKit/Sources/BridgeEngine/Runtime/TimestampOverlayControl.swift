@@ -1,3 +1,4 @@
+import BridgeSupport
 import Foundation
 import MediaCore
 import Synchronization
@@ -40,7 +41,8 @@ final class TimestampOverlayControl: Sendable {
         var current: TimestampOverlay? {
             let snapshot = control.state.withLock { $0 }
             guard snapshot.settings.enabled else { return nil }
-            return TimestampOverlay(settings: snapshot.settings, cameraName: snapshot.cameraName, clock: clock)
+            // The bridge's zone, not the process's: Camera Bridge OS runs in UTC (a Phoenix bridge's Home video showed 7 hours ahead).
+            return TimestampOverlay(settings: snapshot.settings, cameraName: snapshot.cameraName, clock: clock, timeZone: BridgeTime.zone)
         }
     }
 }
