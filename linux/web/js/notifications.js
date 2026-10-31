@@ -6,7 +6,8 @@ import { post } from './api.js';
 import { h, toast } from './dom.js';
 import { icon } from './icons.js';
 import { loadNVR } from './nvr/lite.js';
-import { subscribe } from './store.js';
+import { store, subscribe } from './store.js';
+import { wallMode } from './wall-mode.js';
 
 export const TOAST_MS = 6000;
 export const WARNING_MS = 10_000;
@@ -51,9 +52,41 @@ async function chooseFolder() {
   if (await nvr.chooseStorage({ reason: 'banner' })) toast('Saved. Recording starts again in a moment.', 'ok');
 }
 
+/** The id of `entry`'s notice among the bridge's notices: a log entry's `noticeID`, else its own `id` (a notice of the event stream). */
+function noticeIdOf(entry) {
+  return typeof entry.noticeID === 'string' && entry.noticeID ? entry.noticeID : entry.id;
+}
+
+/**
+ * Whether `entry`'s notice is one of the bridge's notices now (store.notices, from the event stream), not only a line of the log: the same
+ * id, and the same `key` when both say one (a log's "Settings Could Not Be Read" is not the "Settings Restored From a Backup" of now).
+ */
+export function noticeIsCurrent(entry) {
+  const id = noticeIdOf(entry);
+  const key = typeof entry.key === 'string' ? entry.key : null;
+  return store.notices.some((notice) => notice?.id === id && (key === null || typeof notice.key !== 'string' || notice.key === key));
+}
+
+/**
+ * Puts away a notice that stays until the person dismisses it (action "dismiss": POST notifications/dismiss {id}). The bridge then sends its
+ * notices without it; this page forgets it at once. A refusal is said with the bridge's sentence. Resolves whether it went.
+ */
+export async function dismissNotice(entry) {
+  const id = noticeIdOf(entry);
+  try {
+    await post('notifications/dismiss', { id });
+  } catch (error) {
+    toast(error.message, 'error');
+    return false;
+  }
+  store.notices = store.notices.filter((notice) => notice?.id !== id);
+  return true;
+}
+
 /**
  * The buttons of a notification (`entry.action`, set by the bridge), each { label, run }; an action this page does not know gets none.
- * "open-camera" opens the camera's page (the Internet guard's: at its Security card).
+ * "open-camera" opens the camera's page (the Internet guard's: at its Security card). "dismiss" puts the notice away (the damaged
+ * configuration's), only while it is one of the bridge's notices: the log's line of one already put away has no button.
  */
 export function notificationActions(entry) {
   const camera = typeof entry.cameraID === 'string' && CAMERA_ID.test(entry.cameraID) ? entry.cameraID : null;
@@ -66,6 +99,7 @@ export function notificationActions(entry) {
       return entry.kind === 'internetGuard'
         ? [{ label: 'See its Security card', run: () => openCameraSecurity(camera) }]
         : [{ label: `Open ${name}`, run: () => { location.hash = `#/camera/${camera}`; } }];
+    case 'dismiss': return noticeIsCurrent(entry) ? [{ label: 'Dismiss', run: () => dismissNotice(entry) }] : [];
     default: return [];
   }
 }
@@ -196,10 +230,12 @@ let again = false;
 
 /**
  * Asks the bridge for the notices not yet shown as a toast (it marks them shown, so no other browser shows them) and shows them, oldest
- * first so the newest is on top. A page nobody can see claims nothing.
+ * first so the newest is on top. A page nobody can see claims nothing, and neither does a wall display (wall-mode.js): those are for the
+ * owner's other devices.
  */
 export function checkNotifications() {
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return Promise.resolve();
+  if (wallMode()) return Promise.resolve();
   if (checking) { again = true; return checking; }
   checking = (async () => {
     try {

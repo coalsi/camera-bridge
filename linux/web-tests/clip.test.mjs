@@ -131,4 +131,27 @@ describe('the Straightened choice', () => {
     assert.doesNotThrow(() => box.dispatchEvent({ type: 'change', target: box }));
     clip.destroy();
   });
+
+  it('Export asks for the plans again first: a range that lost its recordings since says so in the bar and downloads nothing', async () => {
+    const { clip, exported } = await chosen([{ id: 'porch', name: 'Porch' }]);
+    let asked = 0;
+    globalThis.fetch = async () => {
+      asked += 1;
+      return { ok: false, status: 503, headers: { get: (name) => (name === 'Content-Type' ? 'application/json' : null) },
+        json: async () => ({ error: 'archive_unavailable', message: 'The recordings drive isn’t connected.' }) };
+    };
+    const urls = await exported();
+    assert.equal(asked, 1, 'the plan was asked for again');
+    assert.deepEqual(urls, [], 'no download the browser would save as an error file');
+    assert.match(clip.el.textContent, /The clip wasn’t saved\. Porch: The recordings drive isn’t connected\./);
+    assert.equal(clip.choosing(), true, 'the bar stays, to try again');
+    clip.destroy();
+  });
+
+  it('after the downloads start, the bar says the browser is downloading and to try again if one fails', async () => {
+    const { clip, exported } = await chosen([{ id: 'porch', name: 'Porch' }]);
+    assert.equal((await exported()).length, 1);
+    assert.match(clip.el.textContent, /Your browser is downloading the clip\. If the download fails, try again\./);
+    clip.destroy();
+  });
 });

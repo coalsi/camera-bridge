@@ -7,6 +7,7 @@ import { store, subscribe } from '../store.js';
 import { onPending, pending, recordingView, sentence, setRecordSound, setRecording } from './record.js';
 
 export { chooseStorage, storageCard } from './storage.js';
+export { createKeptCard as keptCard } from './kept.js';
 
 let sequence = 0;
 

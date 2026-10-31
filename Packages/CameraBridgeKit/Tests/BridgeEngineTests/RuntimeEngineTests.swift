@@ -841,6 +841,29 @@ struct EngineFixture {
         await engine.stop()
     }
 
+    /// Review finding (engine-core F4): a damaged config.json (an empty file after a power cut) took every camera away, and re-adding them
+    /// meant pairing each again in Home. The copy kept before the last change comes back, cameras and all, and the engine says so.
+    @MainActor @Test(.timeLimit(.minutes(1))) func aDamagedConfigurationComesBackFromTheCopyKeptBeforeTheLastChange() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let first = BridgeEngine(environment: .testing(directory: directory.url), tuning: .testing)
+        let porch = EngineFixture.demoCamera(name: "Porch"), yard = EngineFixture.demoCamera(name: "Yard")
+        try await first.addCamera(porch, password: nil)
+        try await first.addCamera(yard, password: nil)
+        try Data().write(to: directory.file("config.json"))   // a power cut while it was written
+
+        let relaunched = BridgeEngine(environment: .testing(directory: directory.url), tuning: .testing)
+        await relaunched.start()
+        #expect(relaunched.state == .running)
+        #expect(relaunched.configurations.map(\.id) == [porch.id], "the copy kept before the last change")
+        let recovery = try #require(relaunched.configurationRecovery)
+        #expect(recovery.restoredPrevious && recovery.setAside.lastPathComponent.hasPrefix("config.corrupt-"))
+        #expect(relaunched.recentLogs.contains { $0.level == .error && $0.message.contains("the copy kept before the last change is in use") })
+        await relaunched.stop()
+        #expect(BridgeEngine(environment: .testing(directory: directory.url), tuning: .testing).configurationRecovery == recovery,
+                "said so across launches until dismissed")
+    }
+
     /// Review finding (W4 round 4): the notice lived in memory only, and the configuration saved after the recovery
     /// loads normally, so after a relaunch (a login item launch stays in the menu bar) nothing said why every camera was
     /// gone. The notice is kept next to config.json until the person dismisses it.

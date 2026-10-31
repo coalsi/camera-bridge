@@ -144,6 +144,22 @@ export function visibleEvents(events, { cameraIds, fromMs = -Infinity, toMs = In
 }
 
 /**
+ * The event of `cameraIds` to step to from the moment `ms` (the playhead, or now while live): `direction` -1 the newest one before it, +1 the
+ * oldest one after it, or null. An event that began within `skipMs` of `ms` counts as the one being looked at (a step plays from a little before
+ * an event, PRE_ROLL_MS), so the next step goes on to another. Only events whose video can be played (isRecorded with `extentOf`) are offered.
+ */
+export function eventNear(events, { cameraIds, ms, direction, extentOf = () => null, skipMs = PRE_ROLL_MS + 1000 }) {
+  const wanted = new Set(cameraIds);
+  let best = null;
+  for (const event of events) {
+    if (!wanted.has(event.cameraId) || !isRecorded(event, extentOf(event.cameraId))) continue;
+    if (direction < 0 ? event.at >= ms - 1000 : event.at <= ms + skipMs) continue;
+    if (!best || (direction < 0 ? event.at > best.at : event.at < best.at)) best = event;
+  }
+  return best;
+}
+
+/**
  * True when the camera's recordings hold the event (or are still being written up to it): a click can play it. The archive's `recorded: false`
  * (nothing was recorded then, or retention took it) wins; otherwise the camera's recorded span decides.
  */
@@ -220,6 +236,7 @@ export function createEventArchive({ load, onChange = () => {}, now = () => Date
   let cameras = [];
   let wanted = null;          // { fromMs, toMs, following }
   let loaded = new Map();     // `${cameraID}|${id}` -> event
+  let revision = 0;           // +1 whenever `loaded` changes (the list keeps what it gathered while this stays)
   let span = null;            // { fromMs, toMs }: everything between is loaded, except below `fromMs` when `more`, and inside `gap`
   let gap = null;             // { fromMs, toMs } inside `span`: a newer part stopped short above it, so events may be missing there
   let more = false;
@@ -272,9 +289,11 @@ export function createEventArchive({ load, onChange = () => {}, now = () => Date
     const events = Array.isArray(answer?.events) ? answer.events.filter((e) => e && typeof e.id === 'string' && finite(e.start)) : [];
     if (request.part === 'all') {   // a stretch of its own: what was loaded before is outside it
       loaded = new Map();
+      revision += 1;
       room = keep;
     }
     for (const event of events) loaded.set(`${String(event.cameraID).toUpperCase()}|${event.id}`, event);
+    revision += 1;
     const cut = answer?.more === true;
     const oldest = events.length ? Math.min(...events.map((e) => e.start)) : request.fromMs;
     const reached = cut ? oldest : request.fromMs;
@@ -316,6 +335,7 @@ export function createEventArchive({ load, onChange = () => {}, now = () => Date
     if (inside.length <= room) {
       outside.sort((a, b) => distance(a) - distance(b));
       loaded = new Map([...inside, ...outside.slice(0, room - inside.length)]);
+      revision += 1;
       return;
     }
     inside.sort((a, b) => b[1].start - a[1].start);
@@ -326,6 +346,7 @@ export function createEventArchive({ load, onChange = () => {}, now = () => Date
       kept = newer.length ? newer : inside.filter(([, event]) => event.start === edge);
     }
     loaded = new Map(kept);
+    revision += 1;
     span = { fromMs: kept.reduce((low, [, event]) => Math.min(low, event.start), Infinity), toMs: span.toMs };
     if (gap) gap = gap.toMs > span.fromMs ? { fromMs: Math.max(gap.fromMs, span.fromMs), toMs: gap.toMs } : null;
     more = true;
@@ -367,6 +388,7 @@ export function createEventArchive({ load, onChange = () => {}, now = () => Date
         generation += 1;
         cameras = ids;
         loaded = new Map();
+        revision += 1;
         span = null;
         gap = null;
         more = false;
@@ -380,6 +402,8 @@ export function createEventArchive({ load, onChange = () => {}, now = () => Date
     },
     /** The loaded events (the route's shape), any order. */
     events: () => [...loaded.values()],
+    /** A number that changes whenever events() would give something else. */
+    revision: () => revision,
     /** True when the range holds older events than those loaded (the newest-first page stopped short). */
     hasOlder() {
       const want = range();

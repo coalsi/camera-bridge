@@ -111,7 +111,8 @@ public struct SkyCameraStatus: Sendable, Equatable {
 actor SkyCameraDetector: SkyFrameSink {
     /// What the detector needs to know of its camera and the box. `pictureWidth` and `pictureHeight`: the camera's picture, when known
     /// before its first picture (0: the first picture says). `folder`: the recordings folder the log is kept in. `still`: a JPEG of the
-    /// camera's own picture at a time on the camera's timeline (`SkyFrame.wallClock`'s, not the box's). `roomForStills`: whether the recordings
+    /// camera's own picture at a time on the camera's timeline (`SkyFrame.wallClock`'s, not the box's), from a keyframe at most `within`
+    /// seconds from it (nil when the camera's ring has none that near: nothing is decoded for a picture that would be thrown away). `roomForStills`: whether the recordings
     /// drive has room for a picture now (`SkyLightFilter.stillsHaveRoom`): a light is logged without one while it has not. `recordedStill`: a
     /// picture of the camera's recording at a time on the box's clock (Ruling S31), for a light logged without one; the default has none.
     /// `readLog`: the entries of one of the camera's logs, by its name, read off the actor (nil when it cannot be read now); the default reads
@@ -126,7 +127,7 @@ actor SkyCameraDetector: SkyFrameSink {
         var pictureWidth: Int
         var pictureHeight: Int
         var folder: @Sendable () -> URL?
-        var still: @Sendable (Date) async -> (jpeg: Data, at: Date)?
+        var still: @Sendable (_ around: Date, _ within: TimeInterval) async -> (jpeg: Data, at: Date)?
         var roomForStills: @Sendable () async -> Bool = { true }
         var recordedStill: @Sendable (Date) async -> SkyRecordedStill = { _ in .gone }
         var readLog: @Sendable (String) async -> [SkyEntry]? = { _ in nil }
@@ -217,6 +218,8 @@ actor SkyCameraDetector: SkyFrameSink {
     /// they belong to: the hour's line goes to that log.
     private var unexplainedLogged = SkyHourCounts()
     private var unlogged: [String: SkyHourCounts] = [:]
+    /// Of `unlogged`, the lights turned away because the queue was full (`maximumPending`): the hour's journal line says so apart.
+    private var behindLights = SkyHourCounts()
     /// The busy spots of the picture (`SkyClutterMap`, kept in `clutter.json`); nil until a track of a known analysed size ended.
     private var clutter: SkyClutterMap?
     private var clutterSaveFailureLogged = false
@@ -602,6 +605,13 @@ actor SkyCameraDetector: SkyFrameSink {
     /// What the log's reader needs of the camera to sort the lights logged before the rules (`SkySortLater`): the aim now (none before the
     /// picture's size is known), the width the pictures are analysed at, the picture's size, how many pictures a second are looked at, and what
     /// the camera learned of its sky.
+    /// The picture the live joining reads (`SkyStitch.Picture`: the analysed size and, for two lenses, the seam), for the log's reader to join
+    /// older lights the same way; nil before the first picture.
+    var stitchPicture: SkyStitch.Picture? {
+        guard let analysisWidth, let analysisHeight else { return nil }
+        return SkyStitch.Picture(width: Double(analysisWidth), height: Double(analysisHeight), seam: model.layout == .dual ? model.seam : nil)
+    }
+
     var sortingCamera: SkySortLater.Camera {
         let size = aimSize.map { SkyPictureSize(width: $0.width, height: $0.height) }
         let width = analysisWidth ?? min(max(1, size?.width ?? pictureWidth), SkyStreamChoice.maximumAnalysisWidth)
@@ -646,6 +656,12 @@ actor SkyCameraDetector: SkyFrameSink {
                     behindLogged = true
                     logger.warning("Sky Watcher for \(context.cameraName) is behind: lights it followed are not logged")
                 }
+                // Counted for the hour (when it is turned away: it ended moments ago), with the lights that were not logged, so the page's
+                // line for the hour shows it.
+                let date = now()
+                let hour = SkyLightFilter.clockHour(of: date, in: context.zone)
+                unlogged[SkyNight.logName(for: date, observer: context.observer, zone: context.zone), default: SkyHourCounts()].add(in: hour)
+                behindLights.add(in: hour)
                 return
             }
             pending += 1
@@ -657,6 +673,7 @@ actor SkyCameraDetector: SkyFrameSink {
         switch item {
         case .ended(let track, let analysisWidth, let analysisHeight, let pictureWidth, let pieces, let kind):
             pending -= 1
+            if pending == 0 { behindLogged = false }   // caught up: a later spell behind is said again
             guard !stopped else { return }   // told to stop while it waited: dropped
             await handle(track, analysisWidth: analysisWidth, analysisHeight: analysisHeight, pictureWidth: pictureWidth, pieces: pieces, kind: kind)
         case .setStart:
@@ -710,7 +727,7 @@ actor SkyCameraDetector: SkyFrameSink {
         // the picture and the line are handed to the log.
         if SkyLightFilter.wantsStill(entry.label, by: entry.by), !stopped, await context.roomForStills(), !stopped {
             let middle = SkyStillBackfill.middle(of: entry)
-            if let still = await context.still(middle.addingTimeInterval(-clockOffset)), !still.jpeg.isEmpty,
+            if let still = await context.still(middle.addingTimeInterval(-clockOffset), SkyLightFilter.stillReach(of: entry)), !still.jpeg.isEmpty,
                still.jpeg.count <= SkyLogStore.maximumStillBytes, SkyLightFilter.stillIsOf(entry, at: still.at.addingTimeInterval(clockOffset)) {
                 log.writeStill(still.jpeg, entryID: entry.id, camera: entry.camera, night: night, folder: folder)
                 entry.hasStill = true
@@ -738,12 +755,20 @@ actor SkyCameraDetector: SkyFrameSink {
             logger.info("Sky Watcher, \(name): \(lights) skipped this hour (likely glare)")
         }
         let folder = context.folder()
+        let behind = Dictionary(behindLights.drain(before: hour).map { ($0.hour, $0.count) }, uniquingKeysWith: +)
         for night in unlogged.keys.sorted() {
             guard var counts = unlogged[night] else { continue }
             for finished in counts.drain(before: hour) where finished.count > 0 {
                 log.recordCapped(SkyCappedHour(hour: finished.hour, count: finished.count), camera: context.cameraID, night: night, folder: folder, at: date)
-                let lights = finished.count == 1 ? "1 more light was not logged" : "\(finished.count) more lights were not logged"
-                logger.info("Sky Watcher, \(name): \(lights) this hour (at most \(SkyLightFilter.unexplainedPerHour) are logged an hour)")
+                let turnedAway = min(behind[finished.hour] ?? 0, finished.count), capped = finished.count - turnedAway
+                if capped > 0 {
+                    let lights = capped == 1 ? "1 more light was not logged" : "\(capped) more lights were not logged"
+                    logger.info("Sky Watcher, \(name): \(lights) this hour (at most \(SkyLightFilter.unexplainedPerHour) are logged an hour)")
+                }
+                if turnedAway > 0 {
+                    let lights = turnedAway == 1 ? "1 light was not logged" : "\(turnedAway) lights were not logged"
+                    logger.info("Sky Watcher, \(name): \(lights) this hour because the box was behind")
+                }
             }
             unlogged[night] = counts.isEmpty ? nil : counts
         }

@@ -222,6 +222,24 @@ import Testing
         #expect(stored(fixture, configuration.id)?.setupBackup == nil)
     }
 
+    /// Review Oct 31 (adapters F5): Restore went on after the camera refused the login, one failed login per step: about seven in a few
+    /// seconds, the default Hikvision threshold that locks every login (RTSP included) for 30 minutes. It stops at the first, as a run does.
+    @Test func aRestoreStopsAtTheFirstRefusedLogin() async throws {
+        let (fixture, camera, configuration) = try await fixture()
+        defer { camera.stop(); fixture.directory.remove() }
+        _ = try await fixture.engine.applyCameraSetup(cameraID: configuration.id)
+        // The password was changed on the camera since: every change is refused the login.
+        camera.refuseLoginPUT.set(Set(FakeHikvision.originals.keys))
+        let before = camera.puts.value.count
+        let restored = try await fixture.engine.restoreCameraSetup(cameraID: configuration.id)
+        let refused = restored.steps.filter { $0.status == .refused }
+        #expect(refused.count == 1 && refused.first?.detail == BridgeEngine.refusedLogin, "\(restored.steps.map { "\($0.id) \($0.status)" })")
+        let notRun = restored.steps.filter { $0.status == .notRun }
+        #expect(notRun.count == restored.steps.count - 1 && notRun.allSatisfy { $0.detail?.contains("refused the login") == true })
+        #expect(Set(camera.puts.value.dropFirst(before)).count == 1, "only the first change was tried: \(camera.puts.value.dropFirst(before))")
+        #expect(restored.canRestore, "everything is still saved to put back")
+    }
+
     /// A Hikvision step answered 403 (`lowPrivilege`) is a change the account may not make, not a refused login: the step says to use an
     /// administrator account and the steps after it still run.
     @Test func aHikvisionStepTheAccountMayNotChangeStopsNothing() async throws {

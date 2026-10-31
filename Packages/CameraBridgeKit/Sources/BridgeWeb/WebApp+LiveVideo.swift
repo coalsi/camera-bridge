@@ -61,8 +61,9 @@ extension WebApp {
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
         let backend = backend
-        return .stream(contentType: "application/octet-stream", headers: headers) { [self] response in
-            defer { releaseLiveSlot() }
+        let release = ReleaseOnce { [self] in releaseLiveSlot() }
+        var answer = HTTPResponse.stream(contentType: "application/octet-stream", headers: headers) { response in
+            defer { release() }
             let (outbox, sender) = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
             let queued = Mutex(0)
             let send: @Sendable (Data) -> Void = { data in
@@ -90,6 +91,8 @@ extension WebApp {
                 sender.finish()
             }
         }
+        answer.onDiscard = { release() }
+        return answer
     }
 
     /// One camera of a live request, until the request ends: subscribes, remuxes and sends; says when there is no picture and tries again.

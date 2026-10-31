@@ -26,20 +26,29 @@ extension ArchiveStore {
             guard state.isCurrent(run), state.isReady, let folder = state.folder, state.pause != .noFolder, state.pause != .folderMissing,
                   !state.stalled, let space = state.space, space.total > 0 else { return nil }
             let limits = ArchiveStorageStatus(totalBytes: space.total, floorBytes: state.floorBytes)
+            let archive = Self.archiveInput(state, mainLimits: limits, now: tuning.now())
+            var maximumBytes = limits.effectiveMaximumBytes(maxSizeGB: state.maxSizeGB)
+            if archive == nil, Self.awaitsArchiveLoad(&state.drive, now: .now, grace: tuning.archiveLoadGrace) {
+                maximumBytes = max(maximumBytes, limits.hardMaximumBytes)
+            }
             let moving = state.drive.moving?.segment
+            // A kept file (`KeptRecordings`) is no candidate, on either drive: it stays where it is, and its bytes count like an open file's.
+            let kept = state.kept
+            let keptMain = state.catalog.closedFiles(on: .main).filter { KeptRecordings.covers(kept, camera: $0.camera, startMs: $0.startMs, endMs: $0.endMs) }
+            let keptSegments = Set(keptMain.map(\.segment))
             let closed = state.catalog.closedFiles(on: .main)
-                .filter { !state.owned.contains(ArchiveOpenFile(camera: $0.camera, segment: $0.segment)) && !state.removalFailed.contains($0.segment) && $0.segment != moving }
+                .filter { !state.owned.contains(ArchiveOpenFile(camera: $0.camera, segment: $0.segment)) && !state.removalFailed.contains($0.segment) && $0.segment != moving
+                    && !keptSegments.contains($0.segment) }
                 .map { RetentionCandidate(camera: $0.camera, segment: $0.segment, startMs: $0.startMs, endMs: $0.endMs, bytes: $0.bytes) }
             // The file being moved is no candidate, but it is on the box until the move ends (a mover stuck on a hung drive keeps it there), and so
             // is the box's copy of a moved file until it is deleted (it waits while the drive is away): their bytes count, like an open file's, so
             // the box's limits hold whatever the mover does.
             let movingBytes = state.drive.moving.flatMap { item in state.catalog.file(camera: item.move.camera, segment: item.segment) }
                 .flatMap { $0.tier == .main && !$0.isOpen ? $0.bytes : nil } ?? 0
-            let leftBytes = state.drive.pendingMainRemovals.values.reduce(movingBytes) { $0 + $1.bytes }
+            let leftBytes = state.drive.pendingMainRemovals.values.reduce(movingBytes) { $0 + $1.bytes } + keptMain.reduce(0) { $0 + $1.bytes }
             let input = RetentionPlanner.Input(closed: closed, openBytes: state.catalog.openFiles.reduce(leftBytes) { $0 + $1.bytes },
                                                newestStartMs: state.catalog.newestStartMs, nowMs: ArchiveTime.ms(tuning.now()),
-                                               keepDays: state.keepDays, maximumBytes: limits.effectiveMaximumBytes(maxSizeGB: state.maxSizeGB))
-            let archive = Self.archiveInput(state, mainLimits: limits, now: tuning.now())
+                                               keepDays: state.keepDays, maximumBytes: maximumBytes)
             let plan = RetentionPlanner.plan(input, archive: archive)
             if archive == nil { state.drive.plannedMoves = [] }
             return (folder, archive != nil ? state.drive.folder : nil, plan, input.nowMs - Int64(input.keepDays) * 86_400_000)
@@ -55,7 +64,6 @@ extension ArchiveStore {
             if !moves.isEmpty { moveWake.notify() }
         }
         guard !plan.plan.deletions.isEmpty || !plan.plan.archiveDeletions.isEmpty else { return }
-        let tiered = plan.archiveFolder != nil
         var deleted = 0
         var sizeDeletedStart: Int64?
         for candidate in plan.plan.deletions {
@@ -92,9 +100,13 @@ extension ArchiveStore {
         if let start = sizeDeletedStart {
             state.withLock { state in
                 guard state.isCurrent(run) else { return }
-                // With an archive the two drives do not delete in one order (the box deletes over its hard limit while the archive keeps older
-                // files): the events go only up to the oldest recording that is still kept, on either drive.
-                let cutoff = tiered ? min(start, state.catalog.oldestStartMs ?? start) : start
+                // The events go only up to the oldest recording still kept, on either drive, whether or not the archive drive is usable now: the
+                // two drives do not delete in one order (the box deletes over its limit while the archive keeps older files), and an archive that
+                // is unplugged, loading or failing keeps its recordings in the catalog (shown as away). Taking only the box's deletion here once
+                // deleted the events and Sky Watcher nights of every archived day after a restart (2026-10-31). An archive drive whose files are
+                // not known at all (chosen, not read yet, no index of it) lets no events go by size until it is read.
+                if state.drive.folder != nil, !state.drive.loaded, state.catalog.closedFiles(on: .archive).isEmpty { return }
+                let cutoff = min(start, state.catalog.oldestStartMs ?? start)
                 state.eventSizeCutoffMs = max(state.eventSizeCutoffMs ?? cutoff, cutoff)
             }
         }
@@ -173,11 +185,31 @@ extension ArchiveStore {
         let drive = state.drive
         guard drive.isUsable(now: now), let space = drive.space else { return nil }
         let reserve = drive.floorBytes.multipliedReportingOverflow(by: 2).partialValue
-        let closed = state.catalog.closedFiles(on: .archive).filter { !drive.removalFailed.contains($0.segment) }
+        let files = state.catalog.closedFiles(on: .archive).filter { !drive.removalFailed.contains($0.segment) }
+        let kept = files.filter { KeptRecordings.covers(state.kept, camera: $0.camera, startMs: $0.startMs, endMs: $0.endMs) }
+        let keptSegments = Set(kept.map(\.segment))
+        let closed = files.filter { !keptSegments.contains($0.segment) }
             .map { RetentionCandidate(camera: $0.camera, segment: $0.segment, startMs: $0.startMs, endMs: $0.endMs, bytes: $0.bytes) }
-        return RetentionPlanner.ArchiveInput(closed: closed, maximumBytes: space.total > reserve ? space.total - reserve : 0, freeBytes: space.free,
-                                             floorBytes: drive.floorBytes, unmovable: drive.unmovable.union(drive.shadowed.keys),
-                                             mainHardMaximumBytes: mainLimits.hardMaximumBytes)
+        var input = RetentionPlanner.ArchiveInput(closed: closed, maximumBytes: space.total > reserve ? space.total - reserve : 0, freeBytes: space.free,
+                                                  floorBytes: drive.floorBytes, unmovable: drive.unmovable.union(drive.shadowed.keys),
+                                                  mainHardMaximumBytes: mainLimits.hardMaximumBytes)
+        input.keptBytes = kept.reduce(0) { $0 + $1.bytes }
+        return input
+    }
+
+    /// An archive drive is chosen and there (or not probed yet, at a start) but its files are still being read: for `grace` from when that began
+    /// the box deletes only over its hard limit (the half floor kept for moves that lag behind), so what is over its own limit waits to be moved
+    /// instead of being deleted. Reading a USB hard drive of thousands of recordings takes minutes after every start or replug, and deleting
+    /// meanwhile left a hole in the archived history each time. After `grace`, or once the drive is away, retention deletes as without one.
+    static func awaitsArchiveLoad(_ drive: inout ArchiveDriveState, now: ContinuousClock.Instant, grace: Duration) -> Bool {
+        let loading = drive.folder != nil && !drive.loaded && (drive.connection == .connected || drive.connection == .unknown)
+        guard loading else {
+            drive.loadAwaitedSince = nil
+            return false
+        }
+        let since = drive.loadAwaitedSince ?? now
+        drive.loadAwaitedSince = since
+        return now - since < grace
     }
 
     /// Rebuilds the index of the files a recorder abandoned (or that were found damaged) once they have been quiet for `repairQuietPeriod`.

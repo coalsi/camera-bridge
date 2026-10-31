@@ -35,13 +35,50 @@ enum ONVIFPullPoint {
     /// Shortest PullMessages timeout the loop falls back to (seconds).
     static let minimumPullSeconds = 2.0
 
-    /// Pull timeouts learned from cameras that close a PullMessages request early, by device host (seconds). Tapo's HTTP
-    /// server closes a request that takes 10 s, whatever `Timeout` says; the next subscription starts with the shorter one.
-    private static let learnedPull = Mutex<[String: Double]>([:])
+    /// Pull timeouts learned from cameras that close a PullMessages request early, by device host (seconds), with when each was learned. Tapo's
+    /// HTTP server closes a request that takes 10 s, whatever `Timeout` says; the next subscription starts with the shorter one, for a day
+    /// (`learnedPullLifetime`), after which the configured timeout is tried again.
+    private static let learnedPull = Mutex<[String: (seconds: Double, at: ContinuousClock.Instant)]>([:])
+    static let learnedPullLifetime: Duration = .seconds(24 * 3600)
 
-    static func learnedPullSeconds(host: String) -> Double? { learnedPull.withLock { $0[host] } }
+    static func learnedPullSeconds(host: String, at now: ContinuousClock.Instant = .now) -> Double? {
+        learnedPull.withLock { learned in
+            guard let entry = learned[host] else { return nil }
+            guard now - entry.at <= learnedPullLifetime else {
+                learned[host] = nil
+                return nil
+            }
+            return entry.seconds
+        }
+    }
 
+    static func learn(host: String, seconds: Double, at now: ContinuousClock.Instant = .now) {
+        learnedPull.withLock { $0[host] = (seconds, now) }
+    }
+
+    /// Forgets every learned timeout (tests).
     static func forgetLearnedPullSeconds() { learnedPull.withLock { $0.removeAll() } }
+
+    /// The pull loop's dropped requests. One drop says nothing about the camera (it restarted, the network blinked); two in a row, about the
+    /// same time into the request (within `sameDropWindow`), say the camera closes requests then, and a shorter timeout is learned.
+    struct PullDrops {
+        static let sameDropWindow = 1.0
+        private var last: Double?
+
+        /// A request the camera dropped `elapsed` s in, while `current` was asked for: the shorter timeout (s) to pull for from now on, or
+        /// nil to pull again as before.
+        mutating func dropped(after elapsed: Double, current: Double) -> Double? {
+            guard let last, abs(last - elapsed) <= Self.sameDropWindow else {
+                self.last = elapsed
+                return nil
+            }
+            self.last = nil
+            return shorterPullSeconds(droppedAfter: min(last, elapsed), current: current)
+        }
+
+        /// A request was answered: the next drop starts a new count.
+        mutating func answered() { last = nil }
+    }
 
     /// The PullMessages timeout (seconds) to use after the camera dropped the connection of a request `elapsed` seconds in,
     /// while `current` was asked for: a bit under what the camera tolerated (70 %, so its own timer never beats ours).
@@ -168,6 +205,7 @@ enum ONVIFPullPoint {
         var renewFaults = 0
         /// This subscription's property instances (a stop whose Source items differ from its start's still ends it).
         var mapping = ONVIFEventMapping()
+        var drops = PullDrops()
         while !Task.isCancelled {
             if renewSupported, renewDue(sinceRenew: ContinuousClock.now - lastRenew, lifetime: lifetime, timing: timing) {
                 do {
@@ -198,15 +236,21 @@ enum ONVIFPullPoint {
                 notifications = try await client.pullMessages(subscription, timeout: pullTimeout, messageLimit: timing.messageLimit)
             } catch let error where isDroppedRequest(error) {
                 // The camera dropped the connection while it held the request: some close one after a fixed idle time
-                // (Tapo: 10 s) however long `Timeout` is. The subscription lives on: pull again, for less.
+                // (Tapo: 10 s) however long `Timeout` is. The subscription lives on: pull again, and for less once a second drop at the
+                // same point shows it is the camera's habit.
                 let elapsed = (ContinuousClock.now - started).timeInterval
-                guard let shorter = shorterPullSeconds(droppedAfter: elapsed, current: pullSeconds) else { throw error }
+                guard shorterPullSeconds(droppedAfter: elapsed, current: pullSeconds) != nil else { throw error }
+                guard let shorter = drops.dropped(after: elapsed, current: pullSeconds) else {
+                    log.debug("the camera dropped a PullMessages request after \(String(format: "%.1f", elapsed)) s; pulling again")
+                    continue
+                }
                 pullSeconds = shorter
                 pullTimeout = "PT\(Int(shorter))S"
-                learnedPull.withLock { $0[host] = shorter }
-                log.info("the camera dropped a PullMessages request after \(String(format: "%.1f", elapsed)) s; pulling for \(Int(shorter)) s from now on")
+                learn(host: host, seconds: shorter)
+                log.info("the camera dropped two PullMessages requests after \(String(format: "%.1f", elapsed)) s; pulling for \(Int(shorter)) s from now on")
                 continue
             }
+            drops.answered()
             for notification in notifications where filter?(notification) ?? true {
                 await deliver(mapping.signals(for: notification, pulseHold: timing.pulseHold))
             }

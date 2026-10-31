@@ -147,6 +147,31 @@ test('the status line: the counts, the limit, a pause, the last problem with its
   assert.deepEqual([off.provider, off.counts, off.recordings], [null, null, null], 'with no service chosen there is nothing to count or wait for');
 });
 
+test('while the bridge waits to try the service again, the card says until when, in the bridge’s time', async () => {
+  const { setBridgeZone } = await import('../web/js/store.js');
+  const { timeOfDay } = await import('../web/js/format.js');
+  const retryAt = '2026-10-31T04:40:00Z';   // 9:40 PM on Oct 30 in Phoenix (UTC−7)
+  setBridgeZone('America/Phoenix');
+  try {
+    const waiting = settingsWith({ retryAt, lastError: 'The service could not be reached.', lastErrorAt: '2026-10-31T04:39:00Z' });
+    const view = ai.aiSettingsView(waiting);
+    assert.equal(timeOfDay(retryAt), timeOfDay(retryAt, 'America/Phoenix'), 'the bridge’s zone, whatever this computer’s is');
+    assert.match(timeOfDay(retryAt), /^(9:40\sPM|21:40)$/);
+    assert.equal(view.retry, `The service couldn’t take the last few events; trying again at ${timeOfDay(retryAt)}.`);
+    const card = ai.createAISettingsCard(waiting, fakeBridge().deps);
+    assert.deepEqual(shown(card.el, (node) => node.classList.contains('ai-retry')).map((node) => node.textContent), [view.retry]);
+    assert.ok(shownText(card.el).includes('The service could not be reached.'), 'the last problem still says why');
+
+    assert.equal(ai.aiSettingsView(settingsWith()).retry, null, 'not waiting: nothing said');
+    assert.equal(ai.aiSettingsView(settingsWith({ retryAt: null })).retry, null);
+    assert.equal(ai.aiSettingsView(settingsWith({ retryAt: 'soon' })).retry, null, 'a time that cannot be read says nothing');
+    assert.equal(ai.aiSettingsView(settingsWith({ ...OFF, retryAt })).retry, null, 'with no service chosen there is nothing to wait for');
+    assert.deepEqual(shown(ai.createAISettingsCard(settingsWith(), fakeBridge().deps).el, (node) => node.classList.contains('ai-retry')), []);
+  } finally {
+    setBridgeZone(null);
+  }
+});
+
 test('Claude saved without a key says it needs one; a service at an address may need none', () => {
   const sentence = 'Claude needs a key: events are described once it is saved.';
   assert.equal(ai.aiSettingsView(settingsWith({ keySaved: false, keyHint: null })).needsKey, sentence);

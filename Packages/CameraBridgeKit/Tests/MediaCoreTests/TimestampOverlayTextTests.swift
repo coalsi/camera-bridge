@@ -14,6 +14,26 @@ import Testing
         TimestampOverlaySettings(enabled: true, position: .topRight, showCameraName: name, showDate: date, showSeconds: seconds, use24Hour: h24, size: .medium)
     }
 
+    /// Review Oct 31 (homekit-media F4): the words were cached for one stream for the whole process, so two overlaid streams at once (one
+    /// camera's live view, another's Home recording) evicted each other on nearly every picture. Each stream keeps its own.
+    @Test func twoStreamsKeepTheirOwnWordsInTheCache() {
+        let cache = TimestampOverlayText.TextCache()
+        let porch = TimestampOverlayText.TextCache.Key(second: 7, showDate: true, showSeconds: true, use24Hour: false, showCameraName: true, cameraName: "Porch",
+                                                       locale: "en_US", timeZone: "UTC")
+        var yard = porch
+        yard.cameraName = "Yard"
+        cache.store(porch, TimestampOverlayText(name: "Porch", time: "7:00:07 PM"))
+        cache.store(yard, TimestampOverlayText(name: "Yard", time: "7:00:07 PM"))
+        #expect(cache.cached(porch)?.name == "Porch", "the other stream's words did not push these out")
+        #expect(cache.cached(yard)?.name == "Yard")
+        var later = porch
+        later.second = 8
+        #expect(cache.cached(later) == nil, "a new second is formatted again")
+        // A name that is not shown is not part of the key: two cameras with the same settings share the words.
+        #expect(TimestampOverlayText.textKey(second: 7, settings: settings(), cameraName: "Porch", locale: Self.us, timeZone: Self.utc).cameraName == "")
+        #expect(TimestampOverlayText.textKey(second: 7, settings: settings(name: true), cameraName: "Porch", locale: Self.us, timeZone: Self.utc).cameraName == "Porch")
+    }
+
     @Test func twelveHourTextHasWeekdayMonthDayAndAmPm() {
         let text = TimestampOverlayText.make(at: Self.moment, settings: settings(), cameraName: "Porch", locale: Self.us, timeZone: Self.utc)
         #expect(text == TimestampOverlayText(name: nil, date: "Fri, Oct 2", time: "7:42:15 PM"))

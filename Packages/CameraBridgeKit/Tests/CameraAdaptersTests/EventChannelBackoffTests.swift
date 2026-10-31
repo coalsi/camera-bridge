@@ -108,6 +108,26 @@ import Testing
         #expect(ONVIFPullPoint.shorterPullSeconds(droppedAfter: 10.3, current: 7) == nil)
         #expect(ONVIFPullPoint.shorterPullSeconds(droppedAfter: .nan, current: 60) == nil)
     }
+
+    /// Review Oct 31 (adapters F7): any dropped pull (a camera rebooting, a Wi-Fi blip) taught the camera a shorter timeout for the life of the
+    /// process, only ever shorter, down to 2 s: a healthy camera was then polled up to 30 times a minute. A timeout is learned from two drops in a
+    /// row at about the same point, and forgotten after a day.
+    @Test func aShorterPullIsLearnedFromTwoDropsAtTheSamePointAndForgottenAfterADay() {
+        var drops = ONVIFPullPoint.PullDrops()
+        #expect(drops.dropped(after: 10.3, current: 60) == nil, "one drop: pull again as before")
+        #expect(drops.dropped(after: 10.4, current: 60) == 7, "the second at the same point: the camera closes requests then")
+        #expect(drops.dropped(after: 25, current: 60) == nil)
+        #expect(drops.dropped(after: 41, current: 60) == nil, "two drops far apart are the network, not the camera")
+        drops.answered()
+        #expect(drops.dropped(after: 41.5, current: 60) == nil, "an answer between two drops: they are not in a row")
+
+        let host = "192.0.2.77", start = ContinuousClock.now
+        ONVIFPullPoint.learn(host: host, seconds: 7, at: start)
+        #expect(ONVIFPullPoint.learnedPullSeconds(host: host, at: start + .seconds(3600)) == 7)
+        #expect(ONVIFPullPoint.learnedPullSeconds(host: host, at: start + ONVIFPullPoint.learnedPullLifetime + .seconds(1)) == nil,
+                "a day later the full timeout is tried again")
+        ONVIFPullPoint.forgetLearnedPullSeconds()
+    }
 }
 
 /// Collects a source's events.

@@ -680,7 +680,7 @@ extension SkyNightLogEngineTests {
     /// What the fake codecs say they made of the keyframe of `seconds` after `t0`: its time at 90 kHz since 2001.
     static func picture(ofKeyframeAt seconds: Double) -> SkyRecordedStill {
         let pts = Int64((PlannerFixture.at(Int64(seconds * 1_000)).timeIntervalSinceReferenceDate * 90_000).rounded())
-        return .made(Data("JPEG pts=\(pts) q=0.8 w=nil h=nil".utf8))
+        return .made(Data("JPEG pts=\(pts) q=0.8 w=\(BridgeEngine.skyStillWidth) h=nil".utf8))
     }
 
     /// The picture's words (what the fake codecs made), or what was given instead.
@@ -700,21 +700,23 @@ extension SkyNightLogEngineTests {
         #expect(archive.reads(of: .keyframe) == [built.id(1)])
         #expect(await Self.still(9, archive: archive, codecs: codecs, decoders: decoders) == Self.picture(ofKeyframeAt: 10))
         #expect(await Self.still(1, archive: archive, codecs: codecs, decoders: decoders) == Self.picture(ofKeyframeAt: 0))
-        #expect(codecs.jpegs.value.allSatisfy { $0.hasSuffix("q=0.8 w=nil h=nil") }, "the full picture at 0.8, then made 1920 wide like a live one")
+        // Review Oct 31 (sky F3): made 1920 wide in the one encode, as a live one is (a full-size encode and a second ffmpeg run to shrink it before).
+        #expect(codecs.jpegs.value.allSatisfy { $0.hasSuffix("q=0.8 w=1920 h=nil") }, "\(codecs.jpegs.value)")
+        #expect(BridgeEngine.skyStillWidth == 1920)
         // Before the oldest recording: gone. After the newest: not yet, until it is long past (the camera does not record now): gone.
         #expect(await Self.still(-30, archive: archive, codecs: codecs, decoders: decoders) == .gone)
         #expect(await Self.still(20, archive: archive, codecs: codecs, decoders: decoders) == .later)
         #expect(await Self.still(15 + 700, archive: archive, codecs: codecs, decoders: decoders) == .gone)
-        // A gap between two files: gone. A picture that cannot be made smaller: failed.
+        // A gap between two files: gone. A picture that cannot be made: failed.
         var second = PlannerFixtureFile()
         second.name = "13-02-00"
         second.startMs = PlannerFixture.t0 + 120_000
         try archive.add(second)
         #expect(await Self.still(60, archive: archive, codecs: codecs, decoders: decoders) == .gone)
         #expect(await Self.still(121, archive: archive, codecs: codecs, decoders: decoders) == Self.picture(ofKeyframeAt: 120))
-        codecs.resizeFails.set(true)
+        codecs.jpegFails.set(true)
         #expect(await Self.still(6, archive: archive, codecs: codecs, decoders: decoders) == .failed)
-        codecs.resizeFails.set(false)
+        codecs.jpegFails.set(false)
         // While the recordings load: not yet. A file that went: gone.
         archive.setReady(false)
         #expect(await Self.still(6, archive: archive, codecs: codecs, decoders: decoders) == .later)

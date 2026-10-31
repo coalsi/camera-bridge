@@ -30,14 +30,18 @@ extension WebApp {
         Route("GET", "nvr/cameras/:id/keyframe") { app, ctx in try await app.nvrKeyframe(ctx) },
         Route("GET", "nvr/cameras/:id/clip-plan") { app, ctx in try await app.nvrClipPlan(ctx) },
         Route("GET", "nvr/cameras/:id/clip") { app, ctx in try await app.nvrClip(ctx) },
+        Route("GET", "nvr/kept") { app, _ in try await app.nvrKept() },
+        Route("POST", "nvr/kept", takesBody: true) { app, ctx in try await app.keepRecording(ctx) },
+        Route("DELETE", "nvr/kept/:kid") { app, ctx in try await app.forgetKeptRecording(ctx) },
         Route("POST", "cameras/:id/optimize", takesBody: true) { app, ctx in try await app.optimizeCamera(ctx) },
         Route("POST", "cameras/:id/optimize/undo", takesBody: true) { app, ctx in try await app.undoOptimization(ctx) },
     ]
 
     // MARK: Admission and gates
 
-    /// One more archive request for `address`, unless 8 are running in all or 6 for this address (`WebConfiguration.maximumArchiveReads`):
-    /// no queue and no wait, like `takeLiveSlot`. Every `true` is paired with `releaseArchiveSlot` in a `defer`.
+    /// One more archive request for `address`, unless 24 are running in all or 16 for this address (`WebConfiguration.maximumArchiveReads`,
+    /// `maximumArchiveReadsPerAddress`): no queue and no wait, like `takeLiveSlot`. Every `true` is paired with `releaseArchiveSlot`, in a
+    /// `defer` or, for a clip download, through a `ReleaseOnce` that `HTTPResponse.onDiscard` also calls.
     func takeArchiveSlot(address: String) -> Bool {
         archiveState.slots.withLock { slots in
             guard slots.total < configuration.maximumArchiveReads,

@@ -15,6 +15,22 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.130',
+    date: '2026-10-31',
+    title: 'A full check-up: steadier, lighter on the box, and recordings you can keep',
+    items: [
+      'The box no longer crashes and restarts every day or two. Network connections now wait through one shared watcher instead of a new one for every wait, which also frees about half a processor core.',
+      'Apple Home video from a 4K camera is decoded and scaled on the box’s graphics chip, and the other cameras are shrunk with a cheaper, sharper filter, so watching in Home takes far less of the processor.',
+      'Events and Sky Watcher nights are kept as long as their recordings. Before, they could be deleted early, and nothing is deleted for room while the archive drive is still being read after a restart.',
+      '“Keep this event” on the Events list keeps that stretch of recording from ever being deleted (together, kept recordings can take up to a quarter of the recording space).',
+      'New notices: a camera that has been offline or not recording for five minutes, and a burst of wrong passwords. Settings › Security lists the browsers signed in, and you can sign one out.',
+      'The Monitor has a Wall display switch (the screen stays on and the controls fade), Auto quality that fits each tile, Go to a date and time, previous and next event buttons ([ and ]), and a badge on a tile that has had no picture.',
+      'Pan and tilt cameras never keep turning after you let go, and Hikvision and ANNKE pan-tilt cameras get the pad too.',
+      'Hikvision motion events come back with the video after a power cut, an ONVIF camera whose clock drifted is no longer taken for a wrong password, sound stays in step with the picture on long streams, and turning the Wyze plugin off stops it talking to Wyze.',
+      'The box checks its drives’ health each day, keeps its clock across restarts, brings a damaged settings file back from the copy kept before the last save, warns when its network cable runs slower than a gigabit, and an update that fails its checks rolls back.',
+    ],
+  },
+  {
     version: '0.1.129',
     date: '2026-10-30',
     title: 'The right time on Apple Home’s video',

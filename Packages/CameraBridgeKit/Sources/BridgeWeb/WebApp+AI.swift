@@ -207,6 +207,8 @@ struct AISettingsResource: Encodable {
     var lastError: String?
     var lastErrorAt: Date?
     var needsRecordingsFolder: Bool
+    /// The service could not take three events in a row: nothing is described before this (null when it is not waiting).
+    var retryAt: Date?
 
     init(_ settings: AIDescriptionSettings, key: (saved: Bool, hint: String?), status: AIStatus) {
         provider = settings.provider?.rawValue
@@ -222,11 +224,12 @@ struct AISettingsResource: Encodable {
         lastError = status.lastError
         lastErrorAt = status.lastErrorAt
         needsRecordingsFolder = status.needsRecordingsFolder
+        retryAt = status.retryAt
     }
 
     private enum CodingKeys: String, CodingKey {
         case provider, model, baseURL, dailyLimit, keySaved, keyHint, today, last7Days, limitReached, paused, lastError, lastErrorAt
-        case needsRecordingsFolder
+        case needsRecordingsFolder, retryAt
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -244,5 +247,6 @@ struct AISettingsResource: Encodable {
         try container.encode(lastError, forKey: .lastError)
         try container.encode(lastErrorAt, forKey: .lastErrorAt)
         try container.encode(needsRecordingsFolder, forKey: .needsRecordingsFolder)
+        try container.encode(retryAt, forKey: .retryAt)
     }
 }

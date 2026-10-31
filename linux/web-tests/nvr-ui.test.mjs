@@ -5,7 +5,7 @@ import { loadNVR } from '../web/js/nvr/lite.js';
 test('loadNVR imports the aggregator, and the aggregator offers exactly what the other screens call', async () => {
   const ui = await loadNVR();
   assert.ok(ui, 'ui.js loads (a syntax error in the NVR code would make this null)');
-  assert.deepEqual(Object.keys(ui).sort(), ['chooseStorage', 'keyframeNote', 'recordCard', 'recordSwitch', 'storageCard']);
+  assert.deepEqual(Object.keys(ui).sort(), ['chooseStorage', 'keptCard', 'keyframeNote', 'recordCard', 'recordSwitch', 'storageCard']);
   for (const name of Object.keys(ui)) assert.equal(typeof ui[name], 'function', name);
 });
 

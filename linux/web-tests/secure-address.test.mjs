@@ -19,6 +19,9 @@ function all(root, match) {
   return out;
 }
 const buttons = (card) => all(card, (n) => n.localName === 'button');
+/** The switch of the row titled like `title`. */
+const switchFor = (card, title) => all(all(card, (n) => n.className === 'switch-row').find((row) => title.test(text(row))), (n) => n.localName === 'input')[0];
+const REDIRECT = /Send camera-bridge\.local/;
 
 test('no card where the box has no TLS front, or has not said yet', async () => {
   const { secureAddressCard } = await import('../web/js/screens/secure-address.js');
@@ -35,7 +38,7 @@ test('a ready address shows the link, the install hint, the renewal date and the
   assert.match(words, /Open it once, then install the app from there\./);
   assert.match(words, /renews by itself around November 20, 2026|renews by itself around 20 November 2026|renews by itself around/);
   assert.equal(all(card, (n) => n.localName === 'a')[0].getAttribute('href'), `https://${HOST}`);
-  const toggle = all(card, (n) => n.localName === 'input')[0];
+  const toggle = switchFor(card, REDIRECT);
   assert.ok(toggle.checked);
   assert.match(words, /Send camera-bridge\.local to the secure address/);
 });
@@ -44,7 +47,7 @@ test('the redirect switch reports the new value', async () => {
   const { secureAddressCard } = await import('../web/js/screens/secure-address.js');
   const seen = [];
   const card = secureAddressCard({ ...READY, redirect: false, redirectActive: false }, { setRedirect: (value) => seen.push(value) });
-  const toggle = all(card, (n) => n.localName === 'input')[0];
+  const toggle = switchFor(card, REDIRECT);
   assert.ok(!toggle.checked);
   toggle.checked = true;
   toggle.dispatchEvent({ type: 'change', target: toggle });
@@ -93,4 +96,33 @@ test('the test button is there once the box has a name, and busy disables the co
   assert.ok(buttons(card).some((b) => /Test this address/.test(text(b))));
   assert.ok(buttons(card).every((b) => b.disabled));
   assert.equal(buttons(secureAddressCard({ ...READY, host: null, state: 'off' }, {})).length, 0);
+});
+
+test('the secure address has its own switch, on by default; off, the card says so and the box calls nobody for it', async () => {
+  const { secureAddressCard } = await import('../web/js/screens/secure-address.js');
+  const seen = [];
+  const card = secureAddressCard({ ...READY, enabled: true }, { setEnabled: (value) => seen.push(value) });
+  const words = text(card);
+  assert.match(words, new RegExp(`Use the secure address \\(https://${HOST.replaceAll('.', '\\.')}\\)`));
+  assert.match(words, /When off, the box never contacts camera-bridge\.app or Let’s Encrypt\./);
+  const toggle = switchFor(card, /Use the secure address/);
+  assert.ok(toggle.checked);
+  toggle.checked = false;
+  toggle.dispatchEvent({ type: 'change', target: toggle });
+  assert.deepEqual(seen, [false]);
+
+  const off = secureAddressCard({ ...READY, enabled: false, state: 'off', redirectActive: false }, { setEnabled: (value) => seen.push(value) });
+  const offWords = text(off);
+  assert.ok(!switchFor(off, /Use the secure address/).checked);
+  assert.match(offWords, /The secure address is off\./);
+  assert.doesNotMatch(offWords, /Test this address|Send camera-bridge\.local|renews/, 'nothing else while it is off');
+  assert.match(text(secureAddressCard({ ...READY, state: 'off', url: null, host: null }, {})), /Use the secure address \(https:\/\/…\)/, 'no name yet');
+});
+
+test('a box with no internet is waiting, calmly: no warning', async () => {
+  const { secureAddressCard } = await import('../web/js/screens/secure-address.js');
+  const card = secureAddressCard({ ...READY, state: 'waiting', url: null, redirectActive: false,
+    problem: { code: 'no_internet', message: 'The box can’t reach the internet.' } }, {});
+  assert.match(text(card), /Waiting for the internet\./);
+  assert.equal(all(card, (n) => n.classList?.contains('banner') || n.getAttribute?.('role') === 'alert').length, 0);
 });

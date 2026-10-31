@@ -158,6 +158,9 @@ small, .small { font-size: 0.875rem; }
 .nav a[aria-current="page"] { background: var(--surface-2); color: var(--text); font-weight: 650; }
 .nav svg, .side-btn svg { width: 20px; height: 20px; flex: none; }
 .nav a:focus-visible, .side-btn:focus-visible { outline: 3px solid var(--focus); outline-offset: -2px; }
+/* The items a phone's tab bar keeps under More (app.js): wider than a phone they are simply the rest of the menu. */
+.nav-overflow { display: contents; }
+.nav-more { display: none; }
 .power-btn:hover { color: var(--danger); }
 .sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 2px; padding-top: 12px; border-top: 1px solid var(--border); }
 .version { color: var(--text-3); font-size: 0.78rem; padding: 8px 12px 0; }
@@ -194,7 +197,21 @@ small, .small { font-size: 0.875rem; }
     backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
     border-top: 1px solid var(--border);
   }
-  .nav a { flex: 1; flex-direction: column; justify-content: center; gap: 2px; width: auto; padding: 6px 10px; font-size: 0.72rem; text-align: center; }
+  .nav a, .nav-more { flex: 1 1 0; min-width: 0; flex-direction: column; justify-content: center; gap: 2px; width: auto; padding: 6px 4px; font-size: 0.72rem; text-align: center; }
+  .nav a span, .nav-more span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* More: the tab bar's last item; its list opens above the bar, right-aligned, and closes when a page opens, on Escape or a tap elsewhere. */
+  .nav-more {
+    display: flex; align-items: center; border: 0; border-radius: 10px; background: none; color: var(--text-2); font: inherit; font-weight: 550;
+    font-size: 0.72rem; cursor: pointer;
+  }
+  .nav-more[aria-expanded="true"], .nav-more[data-current="true"] { background: var(--surface-2); color: var(--text); font-weight: 650; }
+  .nav-more:focus-visible { outline: 3px solid var(--focus); outline-offset: -2px; }
+  .nav-overflow {
+    display: none; position: absolute; right: 8px; bottom: calc(100% + 6px); min-width: 210px; padding: 6px; flex-direction: column; gap: 2px;
+    background: var(--bg-raised); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 10px 30px rgb(0 0 0 / 35%);
+  }
+  .nav[data-more="open"] .nav-overflow { display: flex; }
+  .nav .nav-overflow a { flex: none; flex-direction: row; justify-content: flex-start; gap: 12px; padding: 11px 12px; font-size: 0.95rem; text-align: left; }
   .main { padding: 20px var(--gutter) 96px; }
 }
 
@@ -571,6 +588,8 @@ dialog { border: 1px solid var(--border-strong); border-radius: 16px; background
 dialog::backdrop { background: rgb(0 0 0 / 0.6); backdrop-filter: blur(3px); }
 dialog h2 { margin-bottom: 8px; }
 dialog .buttons { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+/* The bridge's refusal of a dialog's own request (dom.js submitter): the dialog stays open to try again. */
+dialog .dialog-problem { color: var(--danger); font-weight: 550; margin: 8px 0 0; }
 .toasts { position: fixed; z-index: 60; left: 50%; transform: translateX(-50%); bottom: calc(86px + env(safe-area-inset-bottom)); display: grid; gap: 8px; width: min(440px, calc(100vw - 24px)); pointer-events: none; }
 @media (min-width: 641px) { .toasts { bottom: 24px; } }
 .toast { background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); pointer-events: auto; animation: toast-in 0.2s ease-out; }
@@ -591,6 +610,11 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 10px; margin-to
 .token { display: flex; gap: 8px; align-items: center; }
 .token code { flex: 1; min-width: 0; overflow-wrap: anywhere; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .disk { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.update-bar {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 12px; padding: 6px 12px;
+  background: var(--surface-2); color: var(--text); border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.9rem;
+}
+.update-bar[hidden] { display: none; }
 .reconnect { position: fixed; top: 0; left: 0; right: 0; z-index: 50; background: var(--warning); color: #151517; text-align: center; padding: 6px 12px; font-weight: 600; font-size: 0.9rem; }
 hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
 .link-button { background: none; border: 0; padding: 0; font: inherit; color: var(--link); text-decoration: underline; cursor: pointer; }

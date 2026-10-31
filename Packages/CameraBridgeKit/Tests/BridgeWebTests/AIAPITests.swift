@@ -220,10 +220,12 @@ import TestSupport
         #expect(fresh["lastError"] is NSNull && fresh["lastErrorAt"] is NSNull, "none yet: null, not missing")
         #expect(fresh["needsRecordingsFolder"] as? Bool == true, "no recordings folder is chosen: no event is kept, so none is described")
         #expect(fresh["paused"] as? Bool == false)
+        #expect(fresh["retryAt"] is NSNull)
 
         backend.write {
             $0.aiStatus = AIStatus(today: 200, last7Days: 640, limitReached: true, paused: true, lastError: "The key was refused.",
-                                   lastErrorAt: Date(timeIntervalSince1970: 1_792_383_540), needsRecordingsFolder: false)
+                                   lastErrorAt: Date(timeIntervalSince1970: 1_792_383_540), needsRecordingsFolder: false,
+                                   retryAt: Date(timeIntervalSince1970: 1_792_383_600))
         }
         let answer = await session.get("/api/v1/settings")
         let busy = ai(answer)
@@ -231,6 +233,7 @@ import TestSupport
         #expect(busy["lastError"] as? String == "The key was refused." && busy["lastErrorAt"] as? String == "2026-10-19T04:19:00Z")
         #expect(busy["paused"] as? Bool == true, "the page need not read it from the sentence")
         #expect(busy["needsRecordingsFolder"] as? Bool == false)
+        #expect(busy["retryAt"] as? String == "2026-10-19T04:20:00Z", "the service is out: nothing is described before then")
         #expect(ai(await session.send("PATCH", "/api/v1/settings", json: ["ai": ["dailyLimit": 300]]))["today"] as? Int == 200,
                 "a settings change answers the same")
     }

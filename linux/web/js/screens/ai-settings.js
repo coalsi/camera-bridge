@@ -1,12 +1,14 @@
 // Settings › AI descriptions: the AI service that writes a short sentence for each event (Claude, or any service that speaks the OpenAI chat
-// API at an address, a model at home among them), its model, the daily limit, the write-only key, the day's counts and the last problem, and
-// Try it on one camera. GET settings' `ai` says what is saved: the key only as `keySaved` and its last four characters (`keyHint`, null for a
-// key too short to show any of). PATCH settings {ai} saves the rest; PUT ai/key takes the key, DELETE ai/key forgets it, and POST ai/try
-// describes a camera's pictures of now. The bridge forgets the saved key when the service changes, or the OpenAI-compatible address names
-// another server, so a save sends the settings first and the key only once the bridge has them.
+// API at an address, a model at home among them), its model, the daily limit, the write-only key, the day's counts, when it tries again after
+// the service failed, and the last problem, and Try it on one camera. GET settings' `ai` says what is saved: the key only as `keySaved` and
+// its last four characters (`keyHint`, null for a key too short to show any of). PATCH settings {ai} saves the rest; PUT ai/key takes the
+// key, DELETE ai/key forgets it, and POST ai/try describes a camera's pictures of now. The bridge forgets the saved key when the service
+// changes, or the OpenAI-compatible address names another server, so a save sends the settings first and the key only once the bridge has
+// them.
 import { del, get, patch, post, put } from '../api.js';
 import { confirmDialog, h, replace, toast } from '../dom.js';
 import { icon } from '../icons.js';
+import { dateTime, timeOfDay } from '../format.js';
 import { cameraList, subscribe } from '../store.js';
 import { field, inlineError } from './common.js';
 
@@ -52,6 +54,8 @@ export const AI_TEXT = {
   counts: (today, limit, week) => `Today: ${today} of ${limit} · last 7 days: ${week}`,
   limitReached: 'Today’s limit is reached. Events are kept without a description until midnight.',
   paused: 'Paused: the key was refused. Save a new key to start again.',
+  /** While the bridge waits after the service failed several events in a row (`retryAt`); the time is the bridge's. */
+  retry: (time) => `The service couldn’t take the last few events; trying again at ${time}.`,
   needsKey: 'Claude needs a key: events are described once it is saved.',
   lastProblem: 'Last problem',
   recordings: `AI descriptions need a place for recordings (${RECORDING_LINK}).`,
@@ -81,6 +85,8 @@ export function cleanAddress(text) {
  *   key           "Key saved (…0000)", "Key saved" for a key too short for a hint, or null when none is saved
  *   counts        "Today: N of LIMIT · last 7 days: M"; this and the rest are null while no service is chosen
  *   limitReached, paused, needsKey, recordings   a sentence each, or null
+ *   retry         "The service couldn’t take the last few events; trying again at 9:40 PM." (the bridge's time) while the bridge waits to try the service
+ *                 again (`retryAt`), or null
  *   lastError     { message, at } (at: the ISO time, or null) or null: a description that worked since does not clear it
  */
 export function aiSettingsView(settings) {
@@ -89,6 +95,7 @@ export function aiSettingsView(settings) {
   const on = provider !== null;
   const dailyLimit = Number.isInteger(ai.dailyLimit) ? ai.dailyLimit : LIMIT.standard;
   const count = (n) => (Number.isFinite(n) ? n : 0);
+  const retryTime = on && typeof ai.retryAt === 'string' ? timeOfDay(ai.retryAt) : '';
   return {
     provider,
     model: typeof ai.model === 'string' ? ai.model : CLAUDE_MODEL,
@@ -98,6 +105,7 @@ export function aiSettingsView(settings) {
     counts: on ? AI_TEXT.counts(count(ai.today), dailyLimit, count(ai.last7Days)) : null,
     limitReached: on && ai.limitReached ? AI_TEXT.limitReached : null,
     paused: on && ai.paused ? AI_TEXT.paused : null,
+    retry: retryTime ? AI_TEXT.retry(retryTime) : null,
     needsKey: provider === 'anthropic' && !ai.keySaved ? AI_TEXT.needsKey : null,
     lastError: on && typeof ai.lastError === 'string' && ai.lastError ? { message: ai.lastError, at: typeof ai.lastErrorAt === 'string' ? ai.lastErrorAt : null } : null,
     recordings: on && ai.needsRecordingsFolder ? AI_TEXT.recordings : null,
@@ -145,9 +153,9 @@ export function aiNotices(view, { keyNotes = true, fix = null } = {}) {
 
 /** "Oct 19, 2026, 9:05 AM" in a <time>, or nothing for a time that cannot be read. */
 function when(iso) {
-  const date = iso ? new Date(iso) : null;
-  if (!date || Number.isNaN(date.getTime())) return null;
-  return h('time', { datetime: iso, title: date.toLocaleString() }, date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }));
+  const text = iso ? dateTime(iso) : '';
+  if (!text) return null;
+  return h('time', { datetime: iso, title: text }, text);
 }
 
 /**
@@ -264,6 +272,7 @@ export function createAISettingsCard(initial, {
       aiNotices(saved),
       h('p', { class: 'ai-counts' }, saved.counts),
       saved.limitReached ? h('p', { class: 'small' }, saved.limitReached) : null,
+      saved.retry ? h('p', { class: 'small ai-retry' }, saved.retry) : null,
       problemLine);
   }
 

@@ -43,6 +43,17 @@ enum SecureAddressRules {
         return privateOnes.first
     }
 
+    /// A box name as the website makes it: 4 to 16 lowercase letters and digits (the system's `obtainCertificate` and `cb-tls` check the same).
+    static func isBoxName(_ name: String) -> Bool {
+        (4...16).contains(name.utf8.count) && name.utf8.allSatisfy { (0x61...0x7A).contains($0) || (0x30...0x39).contains($0) }
+    }
+
+    /// The box's host for `name`: `<name>.box.camera-bridge.app`, and nothing else. The website's answer becomes an allowed `Host` and the
+    /// page's link, so it is never taken unchecked.
+    static func isBoxHost(_ host: String, name: String) -> Bool {
+        isBoxName(name) && host == "\(name).box.camera-bridge.app"
+    }
+
     static func isPrivateIPv4(_ text: String) -> Bool {
         let parts = text.split(separator: ".", omittingEmptySubsequences: false).compactMap { Int($0) }
         guard parts.count == 4, text.split(separator: ".").count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
@@ -54,15 +65,17 @@ enum SecureAddressRules {
     /// Where a plain-HTTP request goes, or nil to serve it. Only a browser opening a page (GET or HEAD, asking for HTML) at a `.local` name,
     /// and only when the switch is on, a valid certificate is in place and the setup hotspot is not open. Never an API call (Apple Home's
     /// helpers, `cbctl`, the health check), never a request from this box itself (the TLS front, the box's tools), never an address typed
-    /// as an IP number, so that one stays a way in if the certificate ever fails.
-    static func redirectTarget(for request: HTTPRequest, host: String?, enabled: Bool, certificateValid: Bool, hotspotOpen: Bool) -> String? {
-        guard enabled, certificateValid, !hotspotOpen, let host, !request.isSecure else { return nil }
+    /// as an IP number, so that one stays a way in if the certificate ever fails. `hotspotOpen` (a file read on the box) is asked last,
+    /// only for a request that would otherwise be redirected: never for a fragment, a picture or an API call.
+    static func redirectTarget(for request: HTTPRequest, host: String?, enabled: Bool, certificateValid: Bool, hotspotOpen: @autoclosure () -> Bool) -> String? {
+        guard enabled, certificateValid, let host, !request.isSecure else { return nil }
         guard request.method == "GET" || request.method == "HEAD" else { return nil }
         guard !isLoopback(request.remoteAddress) else { return nil }
         let path = request.path
         guard path != "/api", !path.hasPrefix("/api/"), !path.hasPrefix("/.well-known/") else { return nil }
         guard let name = request.hostName?.lowercased(), name.hasSuffix(".local") || name.hasSuffix(".local.") else { return nil }
         guard (request.headers["Accept"] ?? "").lowercased().contains("text/html") else { return nil }
+        guard !hotspotOpen() else { return nil }
         return "https://\(host)\(request.target)"
     }
 

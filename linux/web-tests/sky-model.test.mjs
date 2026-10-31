@@ -733,7 +733,7 @@ test('the name is Sky Watcher everywhere, and no sentence claims a real size, di
   assert.equal(SKY_TEXT.page, 'Sky Watcher');
   assert.equal(SKY_TEXT.card.switchTitle, 'Watch the sky');
   assert.equal(SKY_TEXT.card.switchDesc, 'For a camera that looks at the sky. Camera Bridge logs everything that crosses it — planes, satellites, meteors, bugs and birds — and tells you only about what it can’t explain. One camera can’t tell how far away something is, so it compares how things move across the sky; it never guesses a real size or speed.');
-  assert.equal(SKY_TEXT.card.leaves, 'It works without the internet. When the internet is there, Camera Bridge can also download satellite orbits once a day and ask free online services for flights and weather in a wide area around you, never your exact spot. Still pictures of what it can’t explain go to your AI service if you set one up. Nothing leaves the box while it’s off.');
+  assert.equal(SKY_TEXT.card.leaves, 'Works without the internet: planes come from a flight receiver on your network. Nothing leaves the box.');
   assert.deepEqual([SKY_TEXT.card.locationTitle, SKY_TEXT.card.locationKept, SKY_TEXT.card.useBrowser, SKY_TEXT.card.latitude, SKY_TEXT.card.longitude],
     ['Where the box is', 'Kept only on this box.', 'Use this browser’s location', 'Latitude', 'Longitude']);
   assert.deepEqual([SKY_TEXT.card.facingTitle, SKY_TEXT.card.tiltTitle, SKY_TEXT.card.groundTitle], ['Which way the camera faces', 'Tilt above the horizon', 'Ground and horizon at the bottom']);

@@ -479,6 +479,9 @@ export function createSkyDetectorCard(camera, { save, saveLocation = (place) => 
   };
 }
 
+/** Whether the Setup panel shows the most questions a day Sky Watcher may ask the AI. Off: nothing asks the AI yet (2026-10-31). */
+export const SHOW_AI_LIMIT = false;
+
 /**
  * The Sky Watcher page's Setup panel: where the box is (kept only on the box), the address of a flight feed, with "Find a feed", which lists what
  * answers on the network, and the most questions a day the Sky Watcher may ask the AI. A `<details>`: open until the box has a place, and folded
@@ -488,7 +491,7 @@ export function createSkyDetectorCard(camera, { save, saveLocation = (place) => 
  *   onSettings(s)   the page takes the settings the bridge answered with
  */
 export function createSkySettingsCard(settings, { onSettings = () => {}, save = (partial) => patch('settings', { sky: partial }), find = () => post('sky/feeds/find'),
-  geolocate = browserLocation(), timers = realTimers, open = !isPlace(settings?.sky?.location) } = {}) {
+  geolocate = browserLocation(), timers = realTimers, open = !isPlace(settings?.sky?.location), aiLimit = SHOW_AI_LIMIT } = {}) {
   const T = SKY_TEXT.settings;
   let saved = { location: null, feed: '', limit: DEFAULT_AI_LIMIT };
   let feedTyped = false;           // the address field was typed in since it was last filled from the settings
@@ -521,7 +524,8 @@ export function createSkySettingsCard(settings, { onSettings = () => {}, save = 
       h('legend', null, T.feedTitle),
       h('div', { class: 'field' }, h('label', { for: feed.id }, T.feedLabel), feed, h('span', { class: 'hint', id: `${id}-hint` }, T.feedHint)),
       h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', onclick: () => saveFeed() }, T.save), findButton), found),
-    h('fieldset', { class: 'sky-group' },
+    // The most questions a day for the AI: hidden until Sky Watcher asks the AI (nothing reads the limit yet, so it would promise what does not happen).
+    !aiLimit ? null : h('fieldset', { class: 'sky-group' },
       h('legend', null, T.aiTitle),
       h('div', { class: 'field' }, h('label', { for: limit.id }, T.aiLabel), limit,
         h('span', { class: 'hint', id: `${id}-limit-hint` }, T.aiHint, ' ', h('a', { href: '#/settings/ai' }, T.aiSetup))),

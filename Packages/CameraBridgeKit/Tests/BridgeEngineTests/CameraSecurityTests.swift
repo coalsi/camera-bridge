@@ -104,9 +104,9 @@ import Testing
         #expect(security.findings.first { $0.feature == .internetGuard } == CameraSecurityFinding(
             feature: .internetGuard, state: .on, level: .gold,
             sentence: "The Internet guard blocked 12 attempts to reach the internet in the last 24 hours (p2p.example.com, api.example.com, time.example.net). "
-                + "Nothing got out.", canChange: false))
+                + "Each lookup was blocked; a camera can still try an address it already knows, which the guard can’t see.", canChange: false))
         let one = assess(allOff, guard: GuardEvidence(watched: true, outsideLookups24h: 1, lastLookupNames: [], available: true, watchedFor: 3600))
-        #expect(one.level == .green && one.findings.first { $0.feature == .internetGuard }?.sentence == "The Internet guard blocked 1 attempt to reach the internet in the last 24 hours. Nothing got out.",
+        #expect(one.level == .green && one.findings.first { $0.feature == .internetGuard }?.sentence == "The Internet guard blocked 1 attempt to reach the internet in the last 24 hours. Each lookup was blocked; a camera can still try an address it already knows, which the guard can’t see.",
                 "seen at once; green before a full day, the same as a camera that never tried")
         let quiet = assess(allOff, guard: GuardEvidence(watched: true, outsideLookups24h: 0, lastLookupNames: [], available: true, watchedFor: 3600))
         #expect(one.level == quiet.level)
@@ -172,7 +172,10 @@ import Testing
         let security = assess(allOff, guard: Self.watchedQuiet)
         #expect(security.level == .gold && security.title == "Local only")
         #expect(security.summary == "Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the Internet guard "
-            + "saw nothing get out in the last 24 hours.")
+            + "let none of its internet lookups through in the last 24 hours.")
+        // Review finding (engine-events F1): the guard sees and blocks lookups only; a camera that falls back to an address it knows is out of
+        // its sight, so nothing says "Nothing got out." any more.
+        #expect(!security.summary.contains("got out") && !security.summary.contains("get out"))
         #expect(security.findings.allSatisfy { $0.level == .gold })
         #expect(security.findings.first { $0.feature == .ddns }?.sentence == "The camera has no dynamic DNS.")
         #expect(security.findings.first { $0.feature == .internetGuard }?.sentence

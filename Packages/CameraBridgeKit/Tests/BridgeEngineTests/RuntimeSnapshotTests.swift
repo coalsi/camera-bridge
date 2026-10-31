@@ -192,7 +192,78 @@ import PlatformApple
         #expect(width <= 320 && height <= 180 && width >= 300)
         await feeder.stop()
     }
+
+    /// Apple's codecs, noting the dispatch queue every JPEG encode and resize runs on.
+    struct QueueNotingCodecs: MediaCodecs {
+        let base = AppleMediaCodecs()
+        let ranOn = Box<[String]>([])
+
+        private func note() { ranOn.update { $0.append(String(cString: __dispatch_queue_get_label(nil))) } }
+
+        func makeVideoDecoder(format: VideoFormat) throws -> any VideoDecoding { try base.makeVideoDecoder(format: format) }
+        func makeVideoEncoder(settings: VideoEncoderSettings) throws -> any VideoEncoding { try base.makeVideoEncoder(settings: settings) }
+        func makeVideoTranscoder(output: VideoEncoderSettings) throws -> any VideoTranscoding { try base.makeVideoTranscoder(output: output) }
+        func makeAudioTranscoder(input: AudioFormat, output: AudioEncoderSettings) throws -> any AudioTranscoding {
+            try base.makeAudioTranscoder(input: input, output: output)
+        }
+        func jpeg(from frame: any DecodedVideoFrame, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data {
+            note()
+            return try base.jpeg(from: frame, maxWidth: maxWidth, maxHeight: maxHeight, quality: quality)
+        }
+        func resizeJPEG(_ jpeg: Data, maxWidth: Int?, maxHeight: Int?) throws -> Data {
+            note()
+            return try base.resizeJPEG(jpeg, maxWidth: maxWidth, maxHeight: maxHeight)
+        }
+        func silentAACFrames(duration: Duration, sampleRate: Int, channels: Int, startPTS: MediaTime, wallClock: Date) throws -> [EncodedAudioFrame] {
+            try base.silentAACFrames(duration: duration, sampleRate: sampleRate, channels: channels, startPTS: startPTS, wallClock: wallClock)
+        }
+        func makeSyntheticSource(displayName: String, width: Int, height: Int, fps: Int, keyframeInterval: Duration, audio: AudioCodec?,
+                                 audioSampleRate: Int) -> any MediaSource {
+            base.makeSyntheticSource(displayName: displayName, width: width, height: height, fps: fps, keyframeInterval: keyframeInterval,
+                                     audio: audio, audioSampleRate: audioSampleRate)
+        }
+    }
+
+    /// Review finding (engine-events F3): Home's and the web's snapshots resized the camera's JPEG, and encoded decoded pictures, on the
+    /// snapshot provider's own thread: a cooperative one of the N150's four, held for each ffmpeg child (up to 15 s for one that hangs) while
+    /// Home asks for every tile at once. That work runs on a thread of its own now, as the AI pictures' and the corrections' already did.
+    @Test(.timeLimit(.minutes(1))) func homesSnapshotWorkRunsOffTheCooperativePool() async throws {
+        let feeder = HubFeeder(source: syntheticSource(width: 640, height: 360, audio: nil))
+        #expect(await feeder.waitUntilReady())
+        let codecs = QueueNotingCodecs()
+        let decoded = SnapshotProvider(cameraSnapshot: nil, codecs: codecs, hub: feeder.hub, log: Self.log)
+        let still = try await decoded.snapshot(SnapshotRequest(width: 640, height: 360, reason: .event))
+        let fromCamera = SnapshotProvider(cameraSnapshot: { still }, codecs: codecs, hub: feeder.hub, log: Self.log)
+        let resized = try await fromCamera.snapshot(SnapshotRequest(width: 320, height: 180, reason: .event))
+        #expect(try jpegSize(resized).0 <= 320)
+        #expect(codecs.ranOn.value.count >= 2 && codecs.ranOn.value.allSatisfy { $0 == CodecOffload.queueLabel }, "\(codecs.ranOn.value)")
+        await feeder.stop()
+    }
     #endif
+
+    /// Review finding (engine-events F5): Home asking for 640×360 while the web asked for 1280×720 ran two decodes of one GOP on the provider's
+    /// one decoder at once: frames fed twice, pictures mixed up, and a failure of one dropping the decoder under the other. One decode at a
+    /// time now; the second continues where the first left off.
+    @Test(.timeLimit(.minutes(1))) func snapshotsOfTwoSizesNeverDecodeAtTheSameTime() async throws {
+        let hub = MediaHub()
+        await hub.ingest(.video(Self.keyframe()))
+        let inFlight = Box(0), most = Box(0)
+        let provider = SnapshotProvider(cameraSnapshot: nil, resize: { jpeg, _, _ in jpeg }, keyframeJPEG: { _, _, _ in Data([0xFF, 0xD8]) },
+                                        newestJPEG: { _, width, _, _ in
+                                            let now = inFlight.update { count -> Int in
+                                                count += 1
+                                                return count
+                                            }
+                                            most.update { $0 = max($0, now) }
+                                            try await Task.sleep(for: .milliseconds(150))
+                                            inFlight.update { $0 -= 1 }
+                                            return Data([0xFF, 0xD8, UInt8(truncatingIfNeeded: width ?? 0)])
+                                        }, hub: hub, log: Self.log)
+        async let small = provider.snapshot(SnapshotRequest(width: 640, height: 360, reason: .event))
+        async let large = provider.snapshot(SnapshotRequest(width: 1280, height: 720, reason: .event))
+        let (first, second) = try await (small, large)
+        #expect(first != second && most.value == 1, "one decode at a time")
+    }
 
     /// Collects what a private `LogRouter` logs.
     final class CapturingSink: LogSink {

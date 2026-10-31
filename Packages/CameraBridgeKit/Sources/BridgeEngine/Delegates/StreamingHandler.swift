@@ -199,8 +199,8 @@ actor StreamingHandler: CameraStreamingDelegate {
         let address = localController ?? StreamAddress.accessoryAddress(localAddress: request.localAddress, ipv6: request.isIPv6,
                                                                        interfaces: interfaces, controller: route.host)
         if let localController, localController != StreamAddress.canonical(request.localAddress) {
-            context.log.info("The Home app on this Mac connected over \(StreamAddress.canonical(request.localAddress)) and asked for a stream to its own "
-                             + "address \(localController); sending from \(localController) (from another address of this Mac the packets may have no route)")
+            context.log.info("The Home app on this computer connected over \(StreamAddress.canonical(request.localAddress)) and asked for a stream to its own "
+                             + "address \(localController); sending from \(localController) (from another address of this computer the packets may have no route)")
         }
         let host = loopbackOnly ? Self.bindHost(loopbackOnly: true, ipv6: request.isIPv6)
             : Self.bindHost(accessoryAddress: address, destination: route.host, ipv6: request.isIPv6, interfaces: interfaces)
@@ -364,7 +364,7 @@ actor StreamingHandler: CameraStreamingDelegate {
             if let last = dualSubnetReports[shared.network], ContinuousClock.now - last < .seconds(3_600) { continue }
             dualSubnetReports[shared.network] = .now
             let list = shared.members.joined(separator: ", ")
-            context.log.info("This Mac is on \(shared.network) through two interfaces (\(list)); live video is sent from the address the Home device "
+            context.log.info("This bridge is on \(shared.network) through two interfaces (\(list)); live video is sent from the address the Home device "
                              + "connected to (\(accessoryAddress)) and scoped to that interface, which works either way, but turning one of them off is more reliable")
             networkNotices?(NetworkNotice(kind: .dualHomedSubnet, interfaceName: shared.interfaces.joined(separator: ", "),
                                           detail: "\(shared.network) (\(list))"))

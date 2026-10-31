@@ -484,7 +484,7 @@ extension SkyServiceTests {
         let recordings = earlier.recordings.url
         func context(_ settings: SkyDetectorSettings) -> SkyCameraDetector.Context {
             SkyCameraDetector.Context(cameraID: id, cameraName: "North Sky", settings: settings, observer: SkyFixtures.observer, zone: SkyDetectorRig.zone,
-                                      pictureWidth: 1920, pictureHeight: 1080, folder: { recordings }, still: { _ in nil })
+                                      pictureWidth: 1920, pictureHeight: 1080, folder: { recordings }, still: { _, _ in nil })
         }
         let sky = SkySettings(location: Self.place)
         let detector = try #require(await service.update(settings: sky, cameras: [id: context(SkyDetectorTests.singleCard)])[id])
@@ -523,7 +523,7 @@ extension SkyServiceTests {
         let recordings = earlier.recordings.url
         let context = SkyCameraDetector.Context(cameraID: id, cameraName: "North Sky", settings: turned, observer: SkyFixtures.observer,
                                                 zone: SkyDetectorRig.zone, pictureWidth: 1920, pictureHeight: 1080, folder: { recordings },
-                                                still: { _ in nil })
+                                                still: { _, _ in nil })
         let detector = try #require(await service.update(settings: SkySettings(location: Self.place), cameras: [id: context])[id])
         let aim = await detector.status.aim
         #expect(aim == SkyAimStatus.unaimed(), "\(aim)")

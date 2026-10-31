@@ -54,6 +54,8 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
   let clipEdge = null;                // the handle being dragged ('from' | 'to'), or null
   let clipFocus = null;               // the handle that has the keyboard focus
   let clipKey = '';
+  let kept = [];                      // [{ fromMs, toMs }] kept from retention (nvr/kept.js), drawn as gold marks under the track
+  let keptKey = '';
 
   // MARK: Elements
 
@@ -72,7 +74,8 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
   const clipTo = clipHandle('to', 'Clip end');
   const clipLabel = h('div', { class: 'nvr-cliprange-label', 'aria-hidden': 'true', hidden: true });
   const clipBand = h('div', { class: 'nvr-cliprange', hidden: true, dataset: { nvr: 'clip-band' } }, h('div', { class: 'nvr-cliprange-fill' }), clipFrom, clipTo, clipLabel);
-  const trackWrap = h('div', { class: 'nvr-track-wrap' }, track, clipBand);
+  const keptMarks = h('div', { class: 'nvr-kept-marks', 'aria-hidden': 'true' });
+  const trackWrap = h('div', { class: 'nvr-track-wrap' }, track, keptMarks, clipBand);
   const empty = h('p', { class: 'nvr-empty small muted', hidden: true }, EMPTY_TEXT);
   const problem = h('p', { class: 'nvr-problem small', role: 'status', hidden: true }, 'The activity graph can’t load right now. Trying again.');
   const announcer = h('div', { class: 'sr-only', role: 'status', 'aria-live': 'polite' });
@@ -202,6 +205,7 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
     }
 
     drawClipRange();
+    drawKept();
 
     if (ariaDirty && timestamp - lastAriaAt >= 250 && !scrubbing) { ariaDirty = false; lastAriaAt = timestamp; updateAria(); }
     if (timestamp - lastSecondAt >= 1000) {
@@ -249,6 +253,24 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
     }
     clipLabel.hidden = !showLabel;
     if (showLabel) clipLabel.textContent = clipText();
+  }
+
+  /** The kept stretches in the window, each a mark at least 3 px wide under the track; nothing is touched while they stay where they are. */
+  function drawKept() {
+    const v = model.viewport;
+    const spans = !kept.length || model.empty || !width ? [] : kept
+      .map((range) => [Math.max(0, xForTime(v, range.fromMs, width)), Math.min(width, xForTime(v, range.toMs, width))])
+      .filter(([x1, x2]) => x2 >= 0 && x1 <= width && x2 >= x1);
+    const offset = spans.length ? track.offsetLeft + (track.clientLeft || 0) : 0;
+    const key = `${offset}|${spans.map(([x1, x2]) => `${x1.toFixed(1)}-${x2.toFixed(1)}`).join(',')}`;
+    if (key === keptKey) return;
+    keptKey = key;
+    replace(keptMarks, spans.map(([x1, x2]) => {
+      const mark = h('span', { class: 'nvr-kept-mark' });
+      mark.style.left = `${(offset + x1).toFixed(1)}px`;
+      mark.style.width = `${Math.max(3, x2 - x1).toFixed(1)}px`;
+      return mark;
+    }));
   }
 
   /** A new range too narrow to grab, or out of the window: the timeline zooms so it is about a third of the window, in the middle. */
@@ -360,6 +382,11 @@ export function createTimeline({ host = null, session, catalog, timeZone, isHeal
       onClipEdge = range ? onEdge : null;
       if (!range) { clipEdge = null; clipFocus = null; }
       clipKey = '';
+    },
+    /** The stretches kept from retention to mark under the track ([{ fromMs, toMs }]; the screen picks those of the cameras it shows). */
+    setKept(ranges) {
+      kept = Array.isArray(ranges) ? ranges.filter((r) => Number.isFinite(r?.fromMs) && Number.isFinite(r?.toMs) && r.toMs > r.fromMs) : [];
+      keptKey = '';
     },
     /** The sentence shown while nothing is recorded (the screen knows whether Record is on). */
     setEmptyText(text) { if (empty.textContent !== text) empty.textContent = text; },

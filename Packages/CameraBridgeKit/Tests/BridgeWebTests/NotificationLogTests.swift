@@ -1,3 +1,4 @@
+import BridgeEngine
 import Foundation
 import Testing
 import TestSupport
@@ -40,6 +41,24 @@ import TestSupport
         #expect(log.entries().count == 1)
         let entry = try #require(log.entries().first)
         #expect(entry.category == "security" && entry.cameraID == camera && entry.action == "open-camera")
+    }
+
+    /// Review finding (engine-events F6): "The Internet guard can't watch Patio" was an event like the first try, so when the same camera
+    /// left the guard again weeks later (a DHCP renewal, a new router) nothing was logged or shown. It is a state: it is told every time it
+    /// comes back; the first try is still told once.
+    @Test func aCameraTheGuardCannotWatchIsToldAgainWhenItComesBack() throws {
+        let log = NotificationLog(directory: try directory())
+        let camera = UUID()
+        let away = NoticeResource.internetGuardNotice(InternetGuardAlert(cameraID: camera, cameraName: "Patio", kind: .stoppedAsking, date: Self.now))
+        let tried = NoticeResource.internetGuardNotice(InternetGuardAlert(cameraID: camera, cameraName: "Patio", kind: .firstTry, date: Self.now))
+        #expect(away.category == "security" && tried.category == "security")
+        log.record([away, tried], now: Self.now)
+        #expect(log.claim([away, tried]).count == 2)
+        log.record([], now: Self.now.addingTimeInterval(60))   // watched again
+        log.record([away, tried], now: Self.now.addingTimeInterval(86_400))   // and gone again
+        #expect(log.entries().filter { $0.noticeID == away.id }.count == 2, "told again")
+        #expect(log.entries().filter { $0.noticeID == tried.id }.count == 1, "the first try is told once")
+        #expect(log.claim([away, tried]).map(\.noticeID) == [away.id], "and shown again")
     }
 
     @Test func theLogIsBoundedByCountAndAge() throws {

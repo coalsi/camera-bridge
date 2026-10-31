@@ -90,9 +90,8 @@ public struct TimestampOverlayText: Sendable, Equatable {
     /// weekday/month/day pattern ("Thu, Oct 2"), the time its own pattern for 12- or 24-hour time (`settings.use24Hour`).
     public static func make(at date: Date, settings: TimestampOverlaySettings, cameraName: String = "", locale: Locale = .current,
                             timeZone: TimeZone = .current) -> TimestampOverlayText {
-        let key = TextCache.Key(second: Int(date.timeIntervalSinceReferenceDate.rounded(.down)), showDate: settings.showDate,
-                                showSeconds: settings.showSeconds, use24Hour: settings.use24Hour, showCameraName: settings.showCameraName,
-                                cameraName: cameraName, locale: locale.identifier, timeZone: timeZone.identifier)
+        let key = textKey(second: Int(date.timeIntervalSinceReferenceDate.rounded(.down)), settings: settings, cameraName: cameraName, locale: locale,
+                          timeZone: timeZone)
         if let cached = textCache.cached(key) { return cached }
         func format(_ template: String) -> String {
             let formatter = formatters.formatter(template: template, locale: locale, timeZone: timeZone)
@@ -110,13 +109,20 @@ public struct TimestampOverlayText: Sendable, Equatable {
         return text
     }
 
-    /// The last words made, for the same second and settings: a stream draws the overlay on every picture (30 a second), and
-    /// the words change once a second, so the formatting runs once a second instead of 30 times.
+    /// The cache's key for these words: the camera's name only when it is shown (cameras with the same settings share the words).
+    static func textKey(second: Int, settings: TimestampOverlaySettings, cameraName: String, locale: Locale, timeZone: TimeZone) -> TextCache.Key {
+        TextCache.Key(second: second, showDate: settings.showDate, showSeconds: settings.showSeconds, use24Hour: settings.use24Hour,
+                      showCameraName: settings.showCameraName, cameraName: settings.showCameraName ? cameraName : "", locale: locale.identifier,
+                      timeZone: timeZone.identifier)
+    }
+
+    /// The last words made for each stream's settings, with their second: a stream draws the overlay on every picture (30 a second), and
+    /// the words change once a second, so the formatting runs once a second instead of 30 times, however many overlaid streams run at once.
     private static let textCache = TextCache()
     private static let formatters = FormatterCache()
 
-    private final class TextCache: Sendable {
-        struct Key: Equatable, Sendable {
+    final class TextCache: Sendable {
+        struct Key: Hashable, Sendable {
             var second: Int
             var showDate: Bool
             var showSeconds: Bool
@@ -125,16 +131,28 @@ public struct TimestampOverlayText: Sendable, Equatable {
             var cameraName: String
             var locale: String
             var timeZone: String
+
+            /// The key without its second: one stream's words.
+            var stream: Key {
+                var stream = self
+                stream.second = 0
+                return stream
+            }
         }
 
-        private let last = Mutex<(key: Key, text: TimestampOverlayText)?>(nil)
+        /// More than any box draws at once (a few live views and Home recordings); past it everything is forgotten and made again.
+        static let capacity = 64
+        private let entries = Mutex<[Key: (second: Int, text: TimestampOverlayText)]>([:])
 
         func cached(_ key: Key) -> TimestampOverlayText? {
-            last.withLock { entry in entry.flatMap { $0.key == key ? $0.text : nil } }
+            entries.withLock { entries in entries[key.stream].flatMap { $0.second == key.second ? $0.text : nil } }
         }
 
         func store(_ key: Key, _ text: TimestampOverlayText) {
-            last.withLock { $0 = (key, text) }
+            entries.withLock { entries in
+                if entries[key.stream] == nil, entries.count >= Self.capacity { entries.removeAll() }
+                entries[key.stream] = (key.second, text)
+            }
         }
     }
 

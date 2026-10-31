@@ -46,6 +46,7 @@ extension WebApp {
             settings.plugins[id] = state
         }
         if id == EufyPlugin.id { await eufy.setEnabled(body.enabled) }
+        if id == WyzePlugin.id { await wyze.setEnabled(body.enabled) }
         return try await plugins()
     }
 

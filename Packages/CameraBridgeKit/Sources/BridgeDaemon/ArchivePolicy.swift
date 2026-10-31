@@ -21,6 +21,7 @@ import Darwin
 /// - `isSameVolume`: both folders have the same `st_dev` (the archive drive must not be on the recordings drive); what cannot be measured counts as the
 ///   same, the safe answer.
 /// - `lowerThreadPriority`: the archive mover's thread at the lowest priority (`lowerThisThread`).
+/// - `dropCachedPages`: `POSIX_FADV_DONTNEED` on a moved copy before it is read back (`dropCachedPages(of:)`).
 enum DaemonArchivePolicy {
     /// `deviceOf` and `spaceOf` are the two things that touch the machine; tests replace them.
     static func make(dataDirectory: URL,
@@ -40,7 +41,19 @@ enum DaemonArchivePolicy {
             return left == right
         }
         policy.lowerThreadPriority = { DaemonArchivePolicy.lowerThisThread() }
+        policy.dropCachedPages = { DaemonArchivePolicy.dropCachedPages(of: $0) }
         return policy
+    }
+
+    /// Asks the kernel to forget the cached pages of a file whose data was synced (`POSIX_FADV_DONTNEED`), so the next read comes from the drive.
+    /// Best effort: a file that cannot be opened is simply read from wherever it is.
+    static func dropCachedPages(of url: URL) {
+        #if os(Linux)
+        let descriptor = open(url.path(percentEncoded: false), O_RDONLY | O_CLOEXEC)
+        guard descriptor >= 0 else { return }
+        _ = posix_fadvise(descriptor, 0, 0, POSIX_FADV_DONTNEED)
+        _ = close(descriptor)
+        #endif
     }
 
     /// The calling thread at the least CPU and disk priority: `nice` 19 (on Linux the nice value is per thread: `setpriority` with id 0 is the

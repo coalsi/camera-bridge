@@ -66,6 +66,7 @@ extension ArchiveStore {
     func loadCatalog(_ run: ArchiveRun) async {
         guard let folder = state.withLock({ state in state.isCurrent(run) ? state.folder : nil }) else { return }
         let scan = await onControl { [self] in CatalogLoader.scan(root: folder, isCancelled: { !self.state.withLock { $0.isCurrent(run) } }) }
+        let kept = await onControl { KeptRecordings.read(folder: folder) }
         // What the archive drive held when it was last seen, for a drive that is not (yet) here: its recordings show as on the drive.
         let dataDirectory = environment.dataDirectory
         let index = state.withLock({ $0.drive.folder != nil && !$0.drive.loaded }) ? await onControl { ArchiveDriveIndex.read(from: dataDirectory) } : nil
@@ -103,6 +104,7 @@ extension ArchiveStore {
                 }
             }
             state.drive.loneMainSidecars = scan.loneSidecars
+            state.kept = kept
             state.isReady = true
             state.reloadWhenFolderReturns = false
             state.removalFailed = []

@@ -1,11 +1,14 @@
 // The system under the bridge: what runs, updates, SSH, restarting, resetting, and installing to the machine's own disk.
 // Camera Bridge OS does these as requests to a root helper, so the long ones (an update, an installation) are followed by asking
-// /system again every few seconds.
+// /system again every few seconds. What erases a disk, resets the bridge or opens SSH asks for the administrator password again: its dialog sends
+// the request itself (`password` in the body) and stays open with the bridge's sentence when it is refused (dom.js phraseDialog, promptDialog).
+// Before a factory reset, the cameras whose settings Set up for Camera Bridge changed (`setupBackup`) can be given their own settings back.
 import { get, post } from '../api.js';
 import { confirmDialog, h, phraseDialog, promptDialog, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { bytes, duration, timeAgo } from '../format.js';
-import { store } from '../store.js';
+import { cameraList, store } from '../store.js';
+import { sendRestore, setupErrorText, summarize } from './camera-setup.js';
 import { banners } from './banners.js';
 import { inlineError, switchRow } from './common.js';
 import { askToPowerOff, powerOff as sendPowerOff } from '../power.js';
@@ -13,12 +16,37 @@ import { isBeta } from '../release-notes.js';
 import { secureAddressSection } from './secure-address.js';
 import { wifiCardFor } from './wifi-card.js';
 import { archiveCardFor, archivePhrase } from './archive-drive-card.js';
+import { driveHealthCardFor } from './drive-health-card.js';
 
 /** An update in words: "beta build 0.1.109" while the system is in beta, "version 1.0.0" from 1.0 (`capital`: at the start of a sentence). */
 export function updateLabel(version, capital = false) {
   const text = isBeta(version) ? `beta build ${version}` : `version ${version}`;
   return capital ? text[0].toUpperCase() + text.slice(1) : text;
 }
+
+/** "Front Door", "Front Door and Porch", "Front Door, Porch and Shed". */
+function nameList(names) {
+  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
+
+/** The factory reset's words, in one table. */
+export const RESET_TEXT = {
+  title: 'Erase all settings?',
+  body: 'This removes every camera, your password, all Home pairings and every recording saved on this bridge, then restarts it as new. It also forgets the box’s Wi-Fi network, SSH keys and update settings, so a box on Wi-Fi drops off the network and opens its setup hotspot again. Add the bridge to Apple Home again afterwards (remove the old one from Home first). The recordings cannot be brought back.',
+  confirm: 'Erase everything and restart',
+  /** The cameras Set up for Camera Bridge changed: the bridge keeps their own settings (`setupBackup`) until the reset erases them. */
+  changed: (names) => (names.length === 1
+    ? `Camera Bridge changed the settings of ${names[0]} when it set it up. The reset erases the copy of its own settings that the bridge kept.`
+    : `Camera Bridge changed the settings of ${nameList(names)} when it set them up. The reset erases the copy of their own settings that the bridge kept.`),
+  giveBack: 'Give the cameras their own settings back first',
+  giveBackDesc: 'One camera at a time, before anything is erased. A camera that can’t take them back keeps Camera Bridge’s settings, and the reset goes on.',
+  giving: (name, n, total) => `Giving ${name} its own settings back (${n} of ${total})…`,
+  someRefused: 'Some settings could not be put back.',
+  failed: (name, why) => `${name}: ${why}`,
+  resetting: 'Resetting. The bridge restarts and shows the first-run page.',
+  notGiven: (names) => `${nameList(names)} didn’t get ${names.length === 1 ? 'its' : 'their'} own settings back.`,
+  cancelled: (names) => `Nothing was erased. ${nameList(names)} ${names.length === 1 ? 'has its' : 'have their'} own settings back.`,
+};
 
 const MODES = {
   installed: 'Camera Bridge OS',
@@ -34,6 +62,13 @@ const INSTALL_STEPS = {
   'boot-entry': 'Making the disk bootable',
   done: 'Done',
 };
+
+/** The sentence for an update that did not start (`update.state` "rolled-back"): the bridge's own, else made from the versions. */
+export function rolledBackText(update, running) {
+  if (typeof update?.message === 'string' && update.message.trim()) return update.message.trim();
+  const back = update?.current || running || 'the version it had';
+  return `${update?.failedVersion ? `Version ${update.failedVersion}` : 'An update'} did not start, so the box went back to ${back}. It won’t install that version again.`;
+}
 
 const POLL_MS = 3000;
 const MAX_POLLS = 800;   // about 40 minutes: an update on a slow line
@@ -150,6 +185,10 @@ export function renderSystem() {
       message = h('div', { class: 'banner error', role: 'alert' }, icon('alert'), h('div', { class: 'text' }, update.message || 'The update did not work.'));
     } else if (update?.available) {
       message = h('div', { class: 'banner info' }, icon('info'), h('div', { class: 'text' }, h('span', { class: 'title' }, `${updateLabel(update.latest, true)} is available`), update.notes || 'It installs next to the system you are running and takes effect when you restart.'));
+    } else if (state === 'rolled-back') {
+      // A newer version did not start, so the box went back by itself and won't offer it again (docs/linux/UPDATES.md): the bridge's sentence.
+      message = h('div', { class: 'banner warning', role: 'status' }, icon('alert'), h('div', { class: 'text' }, rolledBackText(update, info.version),
+        update.checked ? h('div', { class: 'small muted' }, `Checked ${timeAgo(update.checked)}.`) : null));
     } else if (update?.checked) {
       message = h('p', { class: 'muted' }, `You have the latest version. Checked ${timeAgo(update.checked)}.`);
     } else if (update?.message) {
@@ -205,12 +244,11 @@ export function renderSystem() {
       title: 'Turn on SSH', multiline: true, label: 'Your public key',
       body: 'Paste the public key (the line from your .pub file) of each computer that may sign in as root. Only key login works, never a password. You can paste up to 20 keys, one per line.',
       placeholder: 'ssh-ed25519 AAAA… you@computer', confirm: 'Turn on SSH',
+      password: true, submit: async (text, password) => { info = await post('system/ssh', { enabled: true, authorizedKeys: text, password }); },
     });
-    if (keys === undefined) return;
-    run('ssh', async () => {
-      info = await post('system/ssh', { enabled: true, authorizedKeys: keys });
-      toast('SSH is on. Sign in as root with your key.', 'ok');
-    });
+    if (keys === undefined || destroyed) return;
+    toast('SSH is on. Sign in as root with your key.', 'ok');
+    draw();
   }
 
   async function disableSSH() {
@@ -285,11 +323,16 @@ export function renderSystem() {
       const ok = await phraseDialog({
         title: `Erase ${disk.name} and record to it?`, phrase, confirm: 'Erase the drive and record to it',
         body: `Everything on ${disk.name}${disk.model ? ` (${disk.model}, ${bytes(disk.sizeBytes)})` : ''} will be erased, and a new file system made for recordings. The bridge restarts for a moment. A drive made this way is for Camera Bridge: other computers may not be able to read it without extra software.`,
+        password: true, submit: (password) => post('system/recording-drive', { targetID: disk.id, phrase, keepData: false, password }),
       });
-      if (!ok) return;
+      if (!ok || destroyed) return;
+      toast('Setting up the drive. The bridge restarts when it is ready; this page may lose contact for a minute.', 'ok', 12000);
+      drives = null;
+      draw();
+      return;
     }
     run('drive', async () => {
-      await post('system/recording-drive', { targetID: disk.id, phrase: keepData ? '' : phrase, keepData });
+      await post('system/recording-drive', { targetID: disk.id, phrase: '', keepData: true });
       toast('Setting up the drive. The bridge restarts when it is ready; this page may lose contact for a minute.', 'ok', 12000);
       drives = null;
     });
@@ -342,11 +385,12 @@ export function renderSystem() {
       const ok = await phraseDialog({
         title: `Erase ${disk.name} and use it as the archive drive?`, phrase, confirm: 'Erase the drive and use it as the archive',
         body: `Everything on ${disk.name}${disk.model ? ` (${disk.model}, ${bytes(disk.sizeBytes)})` : ''} will be erased, and a new file system made for older recordings. Recording goes on meanwhile. A drive made this way is for Camera Bridge: other computers may not be able to read it without extra software.`,
+        password: true, submit: (password) => post('system/archive-drive', { targetID: disk.id, phrase, keepData: false, password }),
       });
-      if (!ok) return;
+      if (!ok || destroyed) return;
     }
     run('archive', async () => {
-      await post('system/archive-drive', { targetID: disk.id, phrase: keepData ? '' : phrase, keepData });
+      if (keepData) await post('system/archive-drive', { targetID: disk.id, phrase: '', keepData: true });
       toast('Setting up the archive drive. Older recordings start moving there within a few minutes.', 'ok', 12000);
       archives = null;
       storage = await get('nvr/storage').catch(() => storage);
@@ -416,10 +460,10 @@ export function renderSystem() {
     const ok = await phraseDialog({
       title: `Install to ${disk.name}?`, phrase, confirm: 'Erase the disk and install',
       body: `Everything on ${disk.name}${disk.model ? ` (${disk.model}, ${bytes(disk.sizeBytes)})` : ''} will be erased, then Camera Bridge OS is copied there${copyData ? ', with your cameras, settings, pairings and any recordings' : ', empty'}. This can’t be undone. When it is done the machine switches off: remove the stick, then start it again.`,
+      password: true, submit: (password) => post('system/install', { targetID: disk.id, phrase, copyData, password }),
     });
-    if (!ok) return;
+    if (!ok || destroyed) return;
     run('install', async () => {
-      await post('system/install', { targetID: disk.id, phrase, copyData });
       await refresh();
       toast('Installing. Remove the stick when the bridge says it is done, then start it from the disk.', 'ok', 10000);
     });
@@ -427,16 +471,79 @@ export function renderSystem() {
 
   // Factory reset -----------------------------------------------------------------------------------------------------------
 
+  // The cameras Set up for Camera Bridge changed are listed, with "Give the cameras their own settings back first" (on): once the sentence and
+  // the password are in, each is restored in turn (sendRestore, as its Restore does) before the reset is sent. A camera that can't take them
+  // back is said by name and the reset goes on; Cancel stops it (after the camera being restored, which is never cut off). A second try, after
+  // a wrong password, sends no camera again. The bridge checks the password only with the reset itself, so it comes after the cameras.
   async function factoryReset() {
+    const changed = cameraList().filter((camera) => camera.setupBackup);
+    const giveBack = h('input', { type: 'checkbox', id: 'reset-give-back', checked: true });
+    const progress = h('p', { class: 'small', role: 'status', hidden: true });
+    const problems = h('div', { role: 'alert' });
+    const restored = [];        // given their own settings back in this dialog
+    const tried = new Set();    // sent once, never again (the setup's rule)
+    const notGiven = [];
+    let open = true;
+    let sending = false;
+
+    async function giveSettingsBack() {
+      const due = changed.filter((camera) => !tried.has(camera.id));
+      for (const [index, camera] of due.entries()) {
+        if (!open) break;
+        tried.add(camera.id);
+        progress.hidden = false;
+        progress.textContent = RESET_TEXT.giving(camera.name, index + 1, due.length);
+        let why = null;
+        try {
+          if (summarize(await sendRestore(camera)).refused) why = RESET_TEXT.someRefused;
+        } catch (error) {
+          why = setupErrorText(error);
+        }
+        if (why) {
+          notGiven.push(camera.name);
+          problems.append(h('p', { class: 'small dialog-problem' }, RESET_TEXT.failed(camera.name, why)));
+        } else {
+          restored.push(camera.name);
+        }
+      }
+      progress.hidden = true;
+    }
+
+    // Said once the dialog is gone: the reset was taken (and which cameras kept Camera Bridge's settings), or nothing was erased (and which
+    // cameras have their own settings back all the same).
+    const finish = (taken) => {
+      if (taken) {
+        toast(RESET_TEXT.resetting, 'ok', 10000);
+        if (notGiven.length) toast(RESET_TEXT.notGiven(notGiven), 'error', 10000);
+      } else if (restored.length) {
+        toast(RESET_TEXT.cancelled(restored), 'ok', 10000);
+      }
+    };
     const ok = await phraseDialog({
-      title: 'Erase all settings?', phrase: 'RESET', confirm: 'Erase everything and restart',
-      body: 'This removes every camera, your password, all Home pairings and every recording saved on this bridge, then restarts it as new. Add the bridge to Apple Home again afterwards (remove the old one from Home first). Your cameras themselves are not touched. The recordings cannot be brought back.',
+      title: RESET_TEXT.title, phrase: 'RESET', confirm: RESET_TEXT.confirm,
+      body: [RESET_TEXT.body, changed.length ? h('div', null,
+        h('p', null, RESET_TEXT.changed(changed.map((camera) => camera.name))),
+        h('label', { class: 'check-row', for: 'reset-give-back' }, giveBack,
+          h('span', { class: 'text' }, h('span', { class: 'title' }, RESET_TEXT.giveBack), h('span', { class: 'desc' }, RESET_TEXT.giveBackDesc))),
+        progress, problems) : null],
+      password: true,
+      submit: async (password) => {
+        let taken = false;
+        sending = true;
+        try {
+          if (giveBack.checked) await giveSettingsBack();
+          if (!open) return;   // cancelled while a camera was being restored: nothing is erased
+          await post('system/factory-reset', { confirm: 'RESET', password });
+          taken = true;
+        } finally {
+          sending = false;
+          if (!open) finish(taken);   // the dialog was cancelled meanwhile: what happened is said here
+        }
+      },
     });
-    if (!ok) return;
-    run('reset', async () => {
-      await post('system/factory-reset', { confirm: 'RESET' });
-      toast('Resetting. The bridge restarts and shows the first-run page.', 'ok', 10000);
-    });
+    open = false;
+    if (ok) finish(true);
+    else if (!sending) finish(false);
   }
 
   function resetCard() {
@@ -447,7 +554,7 @@ export function renderSystem() {
   }
 
   function draw() {
-    replace(root, boxCard(), restartCard(), updateCard(), wifiCard(), secure.el, sshCard(), driveCard(), archiveCard(), installCard(), resetCard());
+    replace(root, boxCard(), restartCard(), updateCard(), wifiCard(), secure.el, sshCard(), driveCard(), archiveCard(), driveHealthCardFor(info), installCard(), resetCard());
   }
 
   replace(root, h('div', { class: 'checking' }, spinner()));

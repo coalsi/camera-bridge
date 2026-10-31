@@ -13,7 +13,9 @@ struct ServerEvent: Sendable, Equatable {
         name.isEmpty ? ": \(data)\n\n" : "event: \(name)\ndata: \(data)\n\n"
     }
 
-    static let ping = ServerEvent(name: "", data: "ping")
+    /// The keep-alive: a named event, not a comment, so the page sees it (EventSource never hands a comment to a listener) and can tell a
+    /// quiet bridge from a connection that went silent.
+    static let ping = ServerEvent(name: "ping", data: "{}")
 }
 
 extension BridgeOverview {
@@ -58,21 +60,24 @@ struct RemovedEventResource: Encodable {
 /// Turns the bridge's changing state into events: the engine publishes state (it is observable on its actor), the hub looks at it
 /// twice a second while somebody listens and says what changed — a camera's status or configuration (`camera`), motion starting
 /// or stopping (`motion`), a doorbell ring (`doorbell`), a camera removed (`removed`), the bridge starting or pausing (`bridge`)
-/// and the network notices (`notices`). A comment line every 15 s keeps idle connections open.
+/// and the network notices (`notices`). A `ping` event (`data: {}`) every 15 s keeps idle connections open and tells the page the bridge is there.
 final class EventHub: Sendable {
     private let backend: any BridgeBackend
     private let interval: Duration
     private let broadcaster = AsyncBroadcaster<ServerEvent>(bufferingNewest: 256)
     private let task = Mutex<Task<Void, Never>?>(nil)
+    /// How often `ping` is sent while somebody listens.
+    private let pingInterval: Duration
 
     private let notifications: NotificationLog?
     /// How often the notices are put in the notification log while nobody listens (they are, every look, while somebody does).
     private let recordEvery: Duration = .seconds(5)
 
-    init(backend: any BridgeBackend, interval: Duration = .milliseconds(500), notifications: NotificationLog? = nil) {
+    init(backend: any BridgeBackend, interval: Duration = .milliseconds(500), notifications: NotificationLog? = nil, pingInterval: Duration = .seconds(15)) {
         self.backend = backend
         self.notifications = notifications
         self.interval = interval
+        self.pingInterval = pingInterval
     }
 
     func start() {
@@ -160,8 +165,7 @@ final class EventHub: Sendable {
                     if before?.motionActive != status.motionActive, before != nil || status.motionActive {
                         broadcaster.yield(Self.event("motion", MotionEventResource(id: configuration.id, name: configuration.name, active: status.motionActive)))
                     }
-                    if let date = status.lastEventDate, date != before?.lastEventDate, status.lastEvent?.localizedCaseInsensitiveContains("doorbell") == true,
-                       before != nil {
+                    if let date = status.lastRingDate, date != before?.lastRingDate, before != nil {   // its own date: an event right after it is `lastEvent`
                         broadcaster.yield(Self.event("doorbell", DoorbellEventResource(id: configuration.id, name: configuration.name, date: date)))
                     }
                 }
@@ -177,7 +181,7 @@ final class EventHub: Sendable {
                 notifications?.record(currentNotices, now: now)   // in the log before the page hears of it
                 broadcaster.yield(Self.event("notices", currentNotices))
             }
-            if ContinuousClock.now - lastPing >= .seconds(15) {
+            if ContinuousClock.now - lastPing >= pingInterval {
                 lastPing = .now
                 broadcaster.yield(.ping)
             }

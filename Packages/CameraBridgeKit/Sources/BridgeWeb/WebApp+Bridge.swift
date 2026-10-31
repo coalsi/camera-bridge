@@ -11,7 +11,7 @@ extension WebApp {
     func getSettings() async -> HTTPResponse {
         let overview = await backend.overview()
         return .json(SettingsResource(settings: overview.settings, cameras: overview.configurations, bridgeName: await auth.bridgeName, webhookProblem: overview.webhookProblem,
-                                      aiKey: await backend.aiKeyStatus(), aiStatus: await backend.aiStatus()))
+                                      aiKey: await backend.aiKeyStatus(), aiStatus: await backend.aiStatus(), monitorToken: await auth.monitorToken))
     }
 
     private struct SettingsPatch: Decodable {
@@ -27,6 +27,9 @@ extension WebApp {
         var cameraOrder: [UUID]?
         var ai: AIPatch?
         var sky: SkyPatch?
+        /// Read-only monitoring on (a token is made) or off (the token is forgotten), and a new token.
+        var monitorEnabled: Bool?
+        var regenerateMonitorToken: Bool?
     }
 
     func patchSettings(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -47,6 +50,15 @@ extension WebApp {
         if let aiPatch = patch.ai { aiChange = try await self.aiChange(from: aiPatch) }   // checked before anything is changed
         var skyChange: SkyChange?
         if let skyPatch = patch.sky { skyChange = try await self.skyChange(from: skyPatch) }
+        if patch.monitorEnabled != nil || patch.regenerateMonitorToken == true {
+            let monitoring = await auth.monitorToken != nil
+            let enabled = patch.monitorEnabled ?? monitoring
+            do {
+                try await auth.setMonitoring(enabled: enabled, regenerate: patch.regenerateMonitorToken == true)
+            } catch let failure as AuthStore.Failure {
+                throw authError(failure)
+            }
+        }
         if let name = patch.bridgeName {
             guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError.badRequest("Give the bridge a name.", field: "bridgeName") }
             do {
@@ -121,11 +133,12 @@ extension WebApp {
             return .error(APIError(status: 429, code: "too_many_streams", message: "Too many pages are listening. Close one and try again.", headers: [("Retry-After", "5")]))
         }
         let logs = logs
+        let release = ReleaseOnce { [self] in releaseEventSlot() }
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
         headers["X-Accel-Buffering"] = "no"
-        return .stream(contentType: "text/event-stream; charset=utf-8", headers: headers) { [self] stream in
-            defer { releaseEventSlot() }
+        var response = HTTPResponse.stream(contentType: "text/event-stream; charset=utf-8", headers: headers) { stream in
+            defer { release() }
             let live = logs.subscribe()   // before the backlog, so nothing falls between the two
             try await stream.write("retry: 3000\n\n")
             var seen = Set<UUID>()
@@ -137,6 +150,8 @@ extension WebApp {
                 try await stream.write(EventHub.event("log", LogLineResource(entry)).text)
             }
         }
+        response.onDiscard = { release() }
+        return response
     }
 
     func diagnostics() async -> HTTPResponse {
@@ -163,13 +178,16 @@ extension WebApp {
         headers["Cache-Control"] = "no-store"
         headers["X-Accel-Buffering"] = "no"
         let (backend, hub) = (backend, hub)
-        return .stream(contentType: "text/event-stream; charset=utf-8", headers: headers) { [self] stream in
-            defer { releaseEventSlot() }
+        let release = ReleaseOnce { [self] in releaseEventSlot() }
+        var response = HTTPResponse.stream(contentType: "text/event-stream; charset=utf-8", headers: headers) { stream in
+            defer { release() }
             let live = hub.subscribe()
             try await stream.write("retry: 3000\n\n")
             for event in EventHub.snapshotEvents(await backend.overview()) { try await stream.write(event.text) }
             for await event in live { try await stream.write(event.text) }
         }
+        response.onDiscard = { release() }
+        return response
     }
 
     // MARK: System
@@ -247,6 +265,8 @@ extension WebApp {
         /// What the person typed: "ERASE ALL DATA ON <disk name>".
         var phrase: String?
         var copyData: Bool?
+        /// The administrator's password (`confirmPassword`).
+        var password: String?
     }
 
     func systemInstall(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -255,6 +275,7 @@ extension WebApp {
         guard let phrase = body.phrase, !phrase.isEmpty, phrase.utf8.count <= 200 else {
             throw APIError.badRequest("Type the sentence shown to confirm that the disk may be erased.", field: "phrase")
         }
+        try await confirmPassword(body.password, ctx)
         do {
             log.notice("install to a disk requested from the web interface")
             try await system.install(targetID: target, phrase: phrase, copyData: body.copyData ?? true)
@@ -278,6 +299,8 @@ extension WebApp {
         /// What the person typed: "ERASE ALL DATA ON <disk name>" (not needed with `keepData`).
         var phrase: String?
         var keepData: Bool?
+        /// The administrator's password, when the drive is erased (`confirmPassword`).
+        var password: String?
     }
 
     func systemUseRecordingDrive(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -288,6 +311,7 @@ extension WebApp {
         guard keep || (!phrase.isEmpty && phrase.utf8.count <= 200) else {
             throw APIError.badRequest("Type the sentence shown to confirm that the drive may be erased.", field: "phrase")
         }
+        if !keep { try await confirmPassword(body.password, ctx) }
         do {
             log.notice("recording drive chosen from the web interface")
             try await system.useRecordingDrive(targetID: target, phrase: phrase, keepData: keep)
@@ -326,6 +350,7 @@ extension WebApp {
         guard keep || (!phrase.isEmpty && phrase.utf8.count <= 200) else {
             throw APIError.badRequest("Type the sentence shown to confirm that the drive may be erased.", field: "phrase")
         }
+        if !keep { try await confirmPassword(body.password, ctx) }
         do {
             log.notice("archive drive chosen from the web interface")
             try await system.useArchiveDrive(targetID: target, phrase: phrase, keepData: keep)
@@ -351,6 +376,8 @@ extension WebApp {
     private struct SSHRequest: Decodable {
         var enabled: Bool?
         var authorizedKeys: String?
+        /// The administrator's password, to turn SSH on (`confirmPassword`).
+        var password: String?
     }
 
     func systemSSH(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -363,6 +390,7 @@ extension WebApp {
             } catch let error as SystemError {
                 throw APIError.badRequest(error.message, field: "authorizedKeys")
             }
+            try await confirmPassword(body.password, ctx)
         }
         do {
             log.notice("SSH \(enabled ? "on" : "off") requested from the web interface")
@@ -390,11 +418,14 @@ extension WebApp {
 
     private struct FactoryResetRequest: Decodable {
         var confirm: String?
+        /// The administrator's password (`confirmPassword`).
+        var password: String?
     }
 
     func systemFactoryReset(_ ctx: RequestContext) async throws -> HTTPResponse {
         let body = try decode(FactoryResetRequest.self, from: ctx)
         guard body.confirm == "RESET" else { throw APIError.badRequest("Type RESET to confirm.", field: "confirm") }
+        try await confirmPassword(body.password, ctx)
         do {
             log.notice("factory reset requested from the web interface")
             try await system.factoryReset()

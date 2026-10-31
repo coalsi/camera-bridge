@@ -3,6 +3,7 @@ import CameraAdapters
 import Foundation
 import MediaCore
 import Testing
+import TestSupport
 @testable import BridgeEngine
 #if canImport(Darwin)
 import PlatformApple
@@ -100,6 +101,56 @@ import PlatformApple
         let camera = UUID()
         try secrets.write(Data([0xFF, 0xFE]), account: "camera.\(camera.uuidString)")
         #expect(throws: CredentialStoreError.self) { _ = try CredentialStore(secrets: secrets).password(for: camera) }
+    }
+}
+
+@Suite struct CameraEditTests {
+    /// Review finding (engine-core F7): the camera page's edits each sent a whole camera read before the engine's turn, so two edits made while
+    /// the engine was busy (a reconnect, a setup run, another camera's restart) undid one another, both answering "Saved". A change applied to
+    /// the camera as it is when the turn comes keeps both.
+    @MainActor @Test func twoEditsMadeWhileTheEngineIsBusyBothStick() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let engine = BridgeEngine(environment: .inert(directory: directory.url))
+        let camera = CameraConfiguration(name: "Porch", kind: .camera, vendor: .demo, endpoint: CameraEndpoint(host: "localhost"), username: "")
+        try await engine.addCamera(camera, password: nil)
+        let (gate, open) = AsyncStream.makeStream(of: Void.self)
+        let busy = Task { @MainActor in await engine.operations.withLock { for await _ in gate {} } }
+        #expect(await eventually { engine.operations.isLocked })
+        let first = Task { @MainActor in try await engine.updateCamera(id: camera.id, password: nil) { $0.motionHoldSeconds = 45 } }
+        #expect(await eventually { engine.operations.waiterCount == 1 })
+        let second = Task { @MainActor in try await engine.updateCamera(id: camera.id, password: nil) { $0.audioEnabled = false } }
+        #expect(await eventually { engine.operations.waiterCount == 2 })
+        open.finish()
+        await busy.value
+        try await first.value
+        try await second.value
+        let saved = try #require(engine.configurations.first)
+        #expect(saved.motionHoldSeconds == 45 && !saved.audioEnabled, "both edits stick")
+        #expect(try ConfigurationStore(directory: directory.url).load()?.cameras.first == saved)
+
+        struct Refused: Error {}
+        await #expect(throws: Refused.self) { try await engine.updateCamera(id: camera.id, password: nil) { _ in throw Refused() } }
+        await #expect(throws: EngineError.unknownCamera) { try await engine.updateCamera(id: UUID(), password: nil) { _ in } }
+        #expect(engine.configurations.first == saved, "a refused change changes nothing")
+    }
+}
+
+extension CameraEditTests {
+    /// Review clean-up (engine-core): a removed camera left its id in the person's camera order (and its optimizer undo and heartbeat
+    /// strikes in memory). Its place in the order goes with it.
+    @MainActor @Test func aRemovedCameraLeavesTheCameraOrder() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let engine = BridgeEngine(environment: .inert(directory: directory.url))
+        let porch = CameraConfiguration(name: "Porch", kind: .camera, vendor: .demo, endpoint: CameraEndpoint(host: "localhost"), username: "")
+        let yard = CameraConfiguration(name: "Yard", kind: .camera, vendor: .demo, endpoint: CameraEndpoint(host: "localhost"), username: "")
+        try await engine.addCamera(porch, password: nil)
+        try await engine.addCamera(yard, password: nil)
+        try await engine.updateSettings { $0.cameraOrder = [yard.id, porch.id] }
+        await engine.removeCamera(id: yard.id)
+        #expect(engine.settings.cameraOrder == [porch.id])
+        #expect(try ConfigurationStore(directory: directory.url).load()?.settings.cameraOrder == [porch.id])
     }
 }
 

@@ -10,6 +10,10 @@
 #   cb-system reboot | poweroff
 #   cb-system process-requests               (internal) handle files the daemon dropped in /run/camera-bridge/requests
 #   cb-system run-job NAME                   (internal) run one validated job; see camera-bridge-job@.service
+#   cb-system housekeeping                   (internal, every 5 minutes) the daemon's restart count, the clock and the link in system.json,
+#                                            the time kept for the next boot; see camera-bridge-housekeeping.timer
+#   cb-system clock-restore | clock-save     (internal, boot and shutdown) the last time the box knew; see camera-bridge-clock.service
+#   cb-system disk-health                    (internal, daily) the drives' health in status/disk-health.json; see camera-bridge-disk-health.timer
 #
 # The web UI never runs as root. camerabridged writes a small JSON request file; camera-bridge-request.path wakes
 # `process-requests`, which accepts only the names listed in ALLOWED_JOBS, parses the file with jq and passes validated
@@ -28,6 +32,7 @@ ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboo
 HEAVY_JOBS=" update-apply install-to-disk factory-reset drive-use drive-forget archive-use archive-forget "
 
 SSH_DIR=$CB_SYSTEM/ssh
+JOURNAL_DIR=/var/log/journal
 KEY_RE='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+={0,3}( [^[:cntrl:]]{0,100})?$'
 
 require_root() { [ "$(id -u)" -eq 0 ] || cb_die "run as root"; }
@@ -38,7 +43,85 @@ system_status() {
     [ -e "$CB_SYSTEM/auto-update" ] && auto=true
     jq -n --arg version "$(cb_os_version)" --argjson ssh "$ssh" --argjson auto "$auto" \
         --arg booted "$(bootctl status 2>/dev/null | awk -F': ' '/Current Entry/ {print $2; exit}')" \
-        '{version: $version, sshEnabled: $ssh, autoUpdate: $auto, bootEntry: $booted}'
+        --argjson clock "$(clock_status)" --argjson link "$(link_status)" \
+        '{version: $version, sshEnabled: $ssh, autoUpdate: $auto, bootEntry: $booted, clock: $clock, link: $link}'
+}
+
+# --- the clock -----------------------------------------------------------------------------------------------------------
+
+# clock_status: whether the clock follows a time server, as chrony sees it (JSON: synchronized, source, offsetSeconds, lastSync), or null
+# when chrony does not answer. Serving its own clock (local stratum 10, no server reached) is not synchronized.
+clock_status() {
+    local line
+    line=$(chronyc -c -n tracking 2>/dev/null | head -1) || line=""
+    [ -n "$line" ] || { echo null; return 0; }
+    jq -cR 'split(",") as $f | ($f[0] != "7F7F0101" and $f[0] != "00000000" and ($f[13] // "") != "Not synchronised"
+                               and (($f[2] | tonumber? // 16) < 16)) as $synced
+            | {synchronized: $synced, source: (if $synced and ($f[1] // "") != "" then $f[1] else null end),
+               offsetSeconds: ($f[4] | tonumber? // null),
+               lastSync: (if $synced then ($f[3] | tonumber? // 0 | if . > 0 then (floor | todate) else null end) else null end)}' <<<"$line" 2>/dev/null || echo null
+}
+
+clock_synchronized() { [ "$(clock_status | jq -r '.synchronized // false' 2>/dev/null)" = true ]; }
+
+LAST_TIME=$CB_SYSTEM/last-time   # the last time the box knew (seconds since 1970), so a flat clock battery never sends it back in time
+
+saved_time() {
+    local t
+    t=$(tr -cd '0-9' <"$LAST_TIME" 2>/dev/null) || return 1
+    # Nothing before 2026 or after 2100 is a time this box saw.
+    [ -n "$t" ] && [ "${#t}" -le 10 ] && [ "$t" -ge 1767225600 ] && [ "$t" -le 4102444800 ] && printf '%s' "$t"
+}
+
+# clock_restore (camera-bridge-clock.service, early at boot): a clock that is behind the last time the box knew (a mini PC with a flat clock
+# battery starts in the past) is set forward to it, so recordings, certificates and the cameras the box serves time to never go back in time.
+# chrony corrects the rest once it reaches a time server.
+clock_restore() {
+    local saved now
+    saved=$(saved_time) || return 0
+    now=$(date -u +%s)
+    [ "$now" -lt "$saved" ] || return 0
+    date -u -s "@$saved" >/dev/null || { cb_log "could not set the clock forward"; return 0; }
+    cb_log "the clock was $((saved - now)) s behind the last time the box knew (a flat clock battery?); it was set forward to that time"
+}
+
+# clock_save [--always]: keeps the time for the next boot: at shutdown always, otherwise once an hour. A clock that went back is only taken
+# when it follows a time server (it was ahead before, then).
+clock_save() {
+    local now saved
+    now=$(date -u +%s)
+    saved=$(saved_time) || saved=0
+    if [ "${1:-}" != --always ] && [ "$now" -ge "$saved" ] && [ $((now - saved)) -lt 3600 ]; then return 0; fi
+    if [ "$now" -lt "$saved" ] && ! clock_synchronized; then return 0; fi
+    install -d -m 0755 "$CB_SYSTEM"
+    printf '%s\n' "$now" >"$LAST_TIME.new" && mv -f "$LAST_TIME.new" "$LAST_TIME"
+}
+
+# --- the network link ----------------------------------------------------------------------------------------------------
+
+SYSFS=/sys
+
+# link_status: the interface that carries the box's traffic (the default route's, else the first wired one that is up) and, for a cable, the
+# speed and duplex it negotiated (JSON: interface, wired, speedMbps, duplex; null without one). A gigabit port that came up at 100 Mb/s
+# means a bad cable or switch port: ten cameras need about 90 Mb/s.
+link_status() {
+    local dev speed duplex wired=true f
+    dev=$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
+    [ -n "$dev" ] || dev=$(ip -6 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
+    if [ -z "$dev" ]; then
+        for f in "$SYSFS"/class/net/*; do
+            if [ -e "$f/device" ] && [ ! -e "$f/wireless" ] && [ "$(cat "$f/operstate" 2>/dev/null)" = up ]; then dev=${f##*/}; break; fi
+        done
+    fi
+    if [ -z "$dev" ] || [ ! -e "$SYSFS/class/net/$dev" ]; then echo null; return 0; fi
+    if [ -e "$SYSFS/class/net/$dev/wireless" ] || [ -e "$SYSFS/class/net/$dev/phy80211" ]; then wired=false; fi
+    speed=$(cat "$SYSFS/class/net/$dev/speed" 2>/dev/null || true)
+    duplex=$(cat "$SYSFS/class/net/$dev/duplex" 2>/dev/null || true)
+    case $speed in ''|-*|*[!0-9]*) speed="" ;; esac
+    case $duplex in full|half) ;; *) duplex="" ;; esac
+    [ "$wired" = true ] || { speed=""; duplex=""; }
+    jq -cn --arg dev "$dev" --argjson wired "$wired" --arg speed "$speed" --arg duplex "$duplex" \
+        '{interface: $dev, wired: $wired, speedMbps: (if $speed == "" then null else ($speed | tonumber) end), duplex: (if $duplex == "" then null else $duplex end)}'
 }
 
 refresh_status() {
@@ -78,16 +161,16 @@ cmd_ssh_enable() {
     local keyfile=${1:?usage: cb-system ssh-enable KEYFILE}
     [ -f "$keyfile" ] || cb_die "no such file: $keyfile"
     validate_keys "$keyfile"
-    install -d -m 0700 "$SSH_DIR"
-    install -m 0600 /dev/null "$SSH_DIR/authorized_keys.new"
-    grep -Ev '^[[:space:]]*(#|$)' "$keyfile" >"$SSH_DIR/authorized_keys.new"
-    mv -f "$SSH_DIR/authorized_keys.new" "$SSH_DIR/authorized_keys"
+    install -d -m 0700 "$SSH_DIR" || return 1
+    install -m 0600 /dev/null "$SSH_DIR/authorized_keys.new" || return 1
+    grep -Ev '^[[:space:]]*(#|$)' "$keyfile" >"$SSH_DIR/authorized_keys.new" || return 1
+    mv -f "$SSH_DIR/authorized_keys.new" "$SSH_DIR/authorized_keys" || return 1
     if [ ! -s "$SSH_DIR/ssh_host_ed25519_key" ]; then
-        ssh-keygen -q -t ed25519 -N '' -C camera-bridge -f "$SSH_DIR/ssh_host_ed25519_key"
+        ssh-keygen -q -t ed25519 -N '' -C camera-bridge -f "$SSH_DIR/ssh_host_ed25519_key" || return 1
     fi
-    touch "$SSH_DIR/enabled"
-    ssh_apply_firewall
-    systemctl restart ssh.service
+    touch "$SSH_DIR/enabled" || return 1
+    ssh_apply_firewall || return 1
+    systemctl restart ssh.service || return 1
     cb_log "SSH enabled"
 }
 
@@ -100,8 +183,8 @@ cmd_ssh_disable() {
 
 cmd_auto_update() {
     case ${1:-} in
-        on)  touch "$CB_SYSTEM/auto-update" ;;
-        off) rm -f "$CB_SYSTEM/auto-update" ;;
+        on)  touch "$CB_SYSTEM/auto-update" || return 1 ;;
+        off) rm -f "$CB_SYSTEM/auto-update" || return 1 ;;
         *)   cb_die "usage: cb-system auto-update on|off" ;;
     esac
     cb_log "automatic updates: $1"
@@ -109,12 +192,32 @@ cmd_auto_update() {
 
 # --- reset / power ----------------------------------------------------------------------------------------------------
 
+# wipe_settings: everything of the owner's that the box keeps, so a box that is given away tells nothing about its last home: the bridge's
+# data, the secure address, the guard's lists, the saved Wi-Fi networks (their passwords are in the files), SSH (keys and the host key), the
+# update settings and downloads, and the log of earlier boots (camera names, addresses). The recording and archive drive choices stay: their
+# drives are not erased.
 wipe_settings() {
     cb_wipe_dir_contents "$CB_DATA" || true   # -xdev: a recording drive mounted below it is left alone
-    rm -f "$CB_SYSTEM/first-boot-done" "$CB_SYSTEM/auto-update" "$SSH_DIR/enabled"
+    rm -f "$CB_SYSTEM/first-boot-done" "$CB_SYSTEM/auto-update" "$CB_SYSTEM/update.conf" "$CB_SYSTEM/wifi-pending"
     rm -rf "$CB_SYSTEM/tls"   # the secure address's certificate, key and account: the box registers anew
     rm -rf "$CB_SYSTEM/guard"   # the internet guard's list of watched cameras and what they asked for
+    cb_wipe_dir_contents "$SSH_DIR" || true
+    cb_wipe_dir_contents "$CB_SYSTEM/network-connections" || true
+    nmcli connection reload >/dev/null 2>&1 || true   # NetworkManager forgets them now too (when it runs already)
+    cb_wipe_dir_contents /srv/update/cache || true
+    cb_wipe_dir_contents /srv/update/stage || true
+    wipe_journal
     sync
+}
+
+# wipe_journal: the log of earlier boots goes; what is logged from now on (this reset included) stays.
+wipe_journal() {
+    local current
+    journalctl --rotate >/dev/null 2>&1 || true
+    journalctl --vacuum-time=1s >/dev/null 2>&1 || true
+    current=$(cat /etc/machine-id 2>/dev/null || true)
+    [ -d "$JOURNAL_DIR" ] || return 0
+    find "$JOURNAL_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "${current:-none}" -exec rm -rf --one-file-system -- {} + 2>/dev/null || true
 }
 
 # Called early in every boot: if the user put a file named camera-bridge-factory-reset on the boot partition (a FAT
@@ -138,6 +241,30 @@ cmd_factory_reset() {
     systemctl reboot --no-block
 }
 
+# --- housekeeping (camera-bridge-housekeeping.timer, every 5 minutes) -------------------------------------------------------
+
+# forget_daemon_restarts: once the daemon has run for half an hour since its last start, its restart count goes back to 0 (reset-failed),
+# so a crash weeks later is restarted after 3 s again and not after the longest pause (the pause grows with the count, see
+# camerabridged.service). A daemon that keeps crashing never runs that long, so its pauses stay long.
+forget_daemon_restarts() {
+    local restarts since now
+    restarts=$(systemctl show -p NRestarts --value camerabridged.service 2>/dev/null || true)
+    case $restarts in ''|0|*[!0-9]*) return 0 ;; esac
+    systemctl is-active --quiet camerabridged.service || return 0
+    since=$(systemctl show -p ActiveEnterTimestampMonotonic --value camerabridged.service 2>/dev/null || true)
+    case $since in ''|0|*[!0-9]*) return 0 ;; esac
+    now=$(awk '{ printf "%d", $1 * 1000000 }' /proc/uptime)
+    [ $((now - since)) -ge $((30 * 60 * 1000000)) ] || return 0
+    systemctl reset-failed camerabridged.service || return 0
+    cb_log "the daemon has run for half an hour since its last restart; its $restarts restarts are forgotten"
+}
+
+housekeeping() {
+    forget_daemon_restarts
+    clock_save
+    cb_status system ok "system state" "$(system_status)"   # the clock's and the link's state (refresh_status after a job also renews tls.json)
+}
+
 # --- request dispatcher -----------------------------------------------------------------------------------------------
 
 job_allowed() {
@@ -146,44 +273,56 @@ job_allowed() {
     return 1
 }
 
+# discard PATH: removes an entry of the request folder (any type), after moving it into the root-only jobs folder (a rename moves a link
+# itself, not what it points to, and nothing the daemon user does in its folder reaches the copy).
+discard() {
+    rm -rf -- "$JOBS/.discard"
+    mv -fT -- "$1" "$JOBS/.discard" 2>/dev/null || return 0
+    rm -rf -- "$JOBS/.discard"
+}
+
 process_requests() {
-    local f name size
+    local f name size incoming=$JOBS/.incoming
     mkdir -p "$JOBS" "$CB_STATUS"
     chmod 0700 "$JOBS"
-    # The request folder is writable by the daemon user: look at regular files only, bounded size, allow-listed names.
+    # The request folder is writable by the daemon user, which could swap a file between a check and a read (a FIFO that blocks the read,
+    # a link to a root-only file, a directory). So each request is first renamed into the root-only jobs folder, and every check and read is
+    # of that copy: regular files only, bounded size, allow-listed names, a JSON object.
     for f in "$REQUESTS"/*.json; do
         [ -e "$f" ] || [ -L "$f" ] || continue
         name=$(basename "$f" .json)
-        if [ -L "$f" ] || [ ! -f "$f" ] || ! job_allowed "$name"; then
+        rm -rf -- "$incoming"
+        mv -fT -- "$f" "$incoming" 2>/dev/null || continue
+        if [ -L "$incoming" ] || [ ! -f "$incoming" ] || ! job_allowed "$name"; then
             cb_log "ignoring unexpected request entry '$name'"
-            rm -f -- "$f"
+            rm -rf -- "$incoming"
             continue
         fi
-        size=$(stat -c %s -- "$f")
+        size=$(stat -c %s -- "$incoming")
         if [ "$size" -gt "$MAX_REQUEST_BYTES" ]; then
             cb_log "request '$name' too large"
-            rm -f -- "$f"
+            rm -f -- "$incoming"
             cb_status "$name" failed "request too large"
             continue
         fi
-        if ! head -c "$MAX_REQUEST_BYTES" -- "$f" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        # The content is read once into a file of our own (the daemon may still hold the original open), and that is what is checked and run.
+        head -c "$MAX_REQUEST_BYTES" -- "$incoming" >"$JOBS/.$name.new"
+        rm -f -- "$incoming"
+        chmod 0600 "$JOBS/.$name.new"
+        if ! jq -e 'type == "object"' "$JOBS/.$name.new" >/dev/null 2>&1; then
             cb_log "request '$name' is not a JSON object"
-            rm -f -- "$f"
+            rm -f -- "$JOBS/.$name.new"
             cb_status "$name" failed "request is not a JSON object"
             continue
         fi
-        # Move the content into the root-only jobs folder first, so the file cannot change after validation. A job still running has
-        # moved its own arguments aside (run_job): this request waits in $name.json, replacing an older one that waits, and that job
-        # runs it when it is done (a start of a running job merges into it).
-        head -c "$MAX_REQUEST_BYTES" -- "$f" >"$JOBS/.$name.new"
-        chmod 0600 "$JOBS/.$name.new"
+        # A job still running has moved its own arguments aside (run_job): this request waits in $name.json, replacing an older one that
+        # waits, and that job runs it when it is done (a start of a running job merges into it).
         mv -f "$JOBS/.$name.new" "$JOBS/$name.json"
-        rm -f -- "$f"
         cb_status "$name" queued "waiting to run"
         systemctl start --no-block "camera-bridge-job@$name.service" || cb_log "could not start job $name"
     done
-    # Anything else in the folder (wrong extension, directories) is removed so the path unit does not retrigger forever.
-    find "$REQUESTS" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+    # Anything else in the folder (wrong extension, directories, FIFOs, links) is removed so the path unit does not retrigger forever.
+    while IFS= read -r -d '' f; do discard "$f"; done < <(find "$REQUESTS" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
 }
 
 # take_args NAME: moves the waiting request of the job aside as the one it runs now ($name.running.json); fails when none waits.
@@ -207,7 +346,9 @@ run_job() {
     while :; do
         cb_status "$name" running "started"
         rc=0
-        run_job_body "$name" "$args" || rc=$?
+        # In a subshell: a cb_die inside ends the body, not the job (whose status must still be written). Bash ignores errexit in a function
+        # called left of "||", so every step of a body that can fail returns its status itself.
+        ( run_job_body "$name" "$args" ) || rc=$?
         rm -f "$args"
         take_args "$name" && continue
         refresh_status
@@ -234,21 +375,21 @@ run_job_body() {
             cmd_ssh_enable "$tmp" || { rm -f "$tmp"; return 1; }
             rm -f "$tmp"
             ;;
-        ssh-disable) cmd_ssh_disable ;;
+        ssh-disable) cmd_ssh_disable || return $? ;;
         auto-update)
-            value=$(jq -r 'if .enabled == true then "on" elif .enabled == false then "off" else "invalid" end' "$args")
-            cmd_auto_update "$value"
+            value=$(jq -r 'if .enabled == true then "on" elif .enabled == false then "off" else "invalid" end' "$args") || return 1
+            cmd_auto_update "$value" || return 1
             ;;
-        update-check) /usr/sbin/cb-update check ;;
+        update-check) /usr/sbin/cb-update check || return $? ;;
         update-apply)
-            /usr/sbin/cb-update apply
+            /usr/sbin/cb-update apply || return $?
             if [ "$(jq -r '.reboot == true' "$args")" = "true" ]; then systemctl reboot --no-block; fi
             ;;
         reboot) systemctl reboot --no-block ;;
         poweroff) systemctl poweroff --no-block ;;
         factory-reset)
             [ "$(jq -r '.confirm // ""' "$args")" = "RESET" ] || { cb_log "factory-reset without the RESET confirmation"; return 1; }
-            cmd_factory_reset --yes
+            cmd_factory_reset --yes || return $?
             ;;
         install-list) /usr/sbin/cb-install-to-disk --list --json >"$CB_STATUS/install-candidates.json.new" \
                           && chmod 0644 "$CB_STATUS/install-candidates.json.new" \
@@ -261,7 +402,7 @@ run_job_body() {
             [ "$(jq -r '.reboot == true' "$args")" = "true" ] && extra+=(--reboot)
             [ "$(jq -r '.poweroff == true' "$args")" = "true" ] && extra+=(--poweroff)
             [ "$(jq -r '.dryRun == true' "$args")" = "true" ] && extra+=(--dry-run)
-            /usr/sbin/cb-install-to-disk --device "$device" --confirm "$phrase" --status-name install-to-disk "${extra[@]}"
+            /usr/sbin/cb-install-to-disk --device "$device" --confirm "$phrase" --status-name install-to-disk "${extra[@]}" || return $?
             ;;
         drive-list) /usr/sbin/cb-recording-drive --list --json >"$CB_STATUS/recording-drive-candidates.json.new" \
                         && chmod 0644 "$CB_STATUS/recording-drive-candidates.json.new" \
@@ -270,32 +411,32 @@ run_job_body() {
             device=$(jq -r '.device // ""' "$args")
             phrase=$(jq -r '.phrase // ""' "$args")
             if [ "$(jq -r '.keepData == true' "$args")" = "true" ]; then
-                /usr/sbin/cb-recording-drive --device "$device" --keep
+                /usr/sbin/cb-recording-drive --device "$device" --keep || return $?
             else
-                /usr/sbin/cb-recording-drive --device "$device" --confirm "$phrase"
+                /usr/sbin/cb-recording-drive --device "$device" --confirm "$phrase" || return $?
             fi
             ;;
-        drive-forget) /usr/sbin/cb-recording-drive --forget ;;
+        drive-forget) /usr/sbin/cb-recording-drive --forget || return $? ;;
         # The archive drive: the same list (drive-list) and the same rules; erased with the typed sentence, or kept when it already is one.
         archive-use)
             device=$(jq -r '.device // ""' "$args")
             phrase=$(jq -r '.phrase // ""' "$args")
             if [ "$(jq -r '.keepData == true' "$args")" = "true" ]; then
-                /usr/sbin/cb-recording-drive --archive --device "$device" --keep
+                /usr/sbin/cb-recording-drive --archive --device "$device" --keep || return $?
             else
-                /usr/sbin/cb-recording-drive --archive --device "$device" --confirm "$phrase"
+                /usr/sbin/cb-recording-drive --archive --device "$device" --confirm "$phrase" || return $?
             fi
             ;;
-        archive-forget) /usr/sbin/cb-recording-drive --archive --forget ;;
-        wifi-scan) /usr/sbin/cb-wifi --scan --json >/dev/null ;;
+        archive-forget) /usr/sbin/cb-recording-drive --archive --forget || return $? ;;
+        wifi-scan) /usr/sbin/cb-wifi --scan --json >/dev/null || return $? ;;
         wifi-join)
-            # The password stays in the argument file (root-only, removed after the job); it is never logged.
-            jq '{ssid: (.ssid // ""), password: (.password // "")}' "$args" | /usr/sbin/cb-wifi --join
+            # The password stays in the argument file (root-only, removed after the job); it is never logged. Restarted only when it was saved.
+            jq '{ssid: (.ssid // ""), password: (.password // "")}' "$args" | /usr/sbin/cb-wifi --join || return $?
             if [ "$(jq -r '.reboot == true' "$args")" = "true" ]; then systemctl reboot --no-block; fi
             ;;
-        wifi-forget) /usr/sbin/cb-wifi --forget "$(jq -r '.ssid // ""' "$args")" ;;
+        wifi-forget) /usr/sbin/cb-wifi --forget "$(jq -r '.ssid // ""' "$args")" || return $? ;;
         # The internet guard's list of watched cameras; cb-guard checks every address (private ranges only, at most 64, level watch).
-        guard-set) /usr/sbin/cb-guard set "$args" ;;
+        guard-set) /usr/sbin/cb-guard set "$args" || return $? ;;
         # The secure address's certificate (cb-tls). The box key arrives in the request (root-only folder), is used by cb-tls-hook to sign calls to
         # the website, and is removed when the job ends.
         tls-obtain)
@@ -326,7 +467,11 @@ main() {
         poweroff)         require_root; systemctl poweroff ;;
         process-requests) require_root; process_requests ;;
         run-job)          require_root; run_job "${1:?job name}" ;;
-        ''|-h|--help|help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+        housekeeping)     require_root; housekeeping ;;
+        clock-restore)    require_root; clock_restore ;;
+        clock-save)       require_root; clock_save --always ;;
+        disk-health)      require_root; exec /usr/lib/camera-bridge/cb-disk-health ;;
+        ''|-h|--help|help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
         *) cb_die "unknown command: $cmd (try: cb-system help)" ;;
     esac
 }

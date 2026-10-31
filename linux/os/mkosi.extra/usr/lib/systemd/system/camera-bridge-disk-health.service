@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the health of the box's drives (SMART, file system errors)
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/linux/os/README.md
+After=var-lib-camera\x2dbridge.mount camera-bridge-recording-drive.service camera-bridge-archive-drive.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/cb-system disk-health
+TimeoutStartSec=5min
+Nice=10
+IOSchedulingClass=idle

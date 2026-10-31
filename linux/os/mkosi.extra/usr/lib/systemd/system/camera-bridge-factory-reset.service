@@ -6,10 +6,13 @@ Description=Camera Bridge factory reset (marker file on the boot partition)
 # The wipe removes the SSH flag and the guard's list, so it finishes before anything reads them: otherwise SSH could stay on after a reset
 # (camera-bridge-ssh opened port 22 and sshd started first), or a VM's credential could lose it half way (CI, 2026-10-17: "ssh did not come
 # back after the reset", the wipe landed between ssh-enable's flag and its firewall rule).
-After=var-lib-camera\x2dbridge.mount srv.mount
+# It also forgets the saved Wi-Fi networks before NetworkManager reads them (a Wi-Fi file on the boot partition is imported after it), and the
+# log of earlier boots once the journal is on the data partition.
+After=var-lib-camera\x2dbridge.mount srv.mount systemd-journal-flush.service
 Requires=var-lib-camera\x2dbridge.mount
 Before=camera-bridge-firstboot.service camerabridged.service
 Before=camera-bridge-ssh.service camera-bridge-credentials.service ssh.service camera-bridge-guard.service
+Before=NetworkManager.service camera-bridge-wifi-import.service
 
 [Service]
 Type=oneshot

@@ -43,7 +43,7 @@ import TestSupport
                                                                      date: Self.now)],
                                       internetGuardAlerts: alerts)
         let notices = NoticeResource.resources(for: overview, now: Self.now)
-        #expect(notices.map(\.kind) == ["dualHomedSubnet", "internetGuard", "internetGuard"], "no daily notice")
+        #expect(notices.map(\.kind) == ["dualHomedSubnet", "internetGuard", "internetGuardWatch"], "no daily notice")
         let tried = notices[1], away = notices[2]
         #expect(tried.id == "guard-tried-\(camera.id.uuidString)" && tried.severity == "info" && tried.title == "North tried to reach the internet")
         #expect(tried.action == "open-camera" && tried.cameraID == camera.id && tried.cameraName == "North" && tried.category == "security")

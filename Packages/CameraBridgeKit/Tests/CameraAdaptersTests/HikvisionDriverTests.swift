@@ -506,6 +506,37 @@ private func channelAlertPart(_ type: String, channel: Int) -> Data {
         await third.stop()
     }
 
+    /// Review Oct 31 (adapters F4): a camera that lost power left its alertStream half-open, and the box waited out the 5-minute idle
+    /// watchdog after the camera was back. When its video comes back after an outage, a stream that connected before the outage is
+    /// reconnected at once; one that connected since is left alone.
+    @Test func videoThatCameBackReconnectsAnAlertStreamOlderThanTheOutage() async throws {
+        let camera = try await MockHikvisionCamera.start { writer, index in
+            guard index > 1 else {
+                await writer.write(alertPart("alert-videoloss-heartbeat.xml"))
+                try? await Task.sleep(for: .seconds(20))   // the camera lost power: the connection is silent, never closed
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+            await writer.write(alertPart("alert-vmd.xml"))
+            try? await Task.sleep(for: .seconds(20))
+        }
+        defer { camera.stop() }
+        let source = try #require(driver(camera, timing: timing()).makeEventSource())
+        let recorder = Recorder(source.events())
+        #expect(await recorder.wait { $0.contains(.eventChannel(connected: true)) })
+        #expect(camera.alertConnections.value == 1)
+        let wentDown = ContinuousClock.now
+        try await Task.sleep(for: .milliseconds(50))
+        source.videoResumed(downSince: wentDown)
+        #expect(await eventually { camera.alertConnections.value == 2 }, "the old stream is dropped and a new one opened")
+        #expect(await recorder.wait { $0.contains(.motion(true)) })
+        // The new stream began after that outage: the same news again changes nothing.
+        source.videoResumed(downSince: wentDown)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(camera.alertConnections.value == 2)
+        await source.stop()
+    }
+
     @Test func failedAudioUploadClosesTheTwoWaySession() async throws {
         let camera = try await MockHikvisionCamera.start()
         defer { camera.stop() }

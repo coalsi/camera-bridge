@@ -13,7 +13,7 @@
 import { api } from '../api.js';
 import { h, replace, svg } from '../dom.js';
 import { icon } from '../icons.js';
-import { timeAgo } from '../format.js';
+import { dateTime, timeAgo } from '../format.js';
 import { describeGuardName } from '../guard-names.js';
 import { putCamera, store } from '../store.js';
 import { inlineError } from './common.js';
@@ -27,9 +27,9 @@ export const SECURITY_TEXT = {
   title: 'Security',
   levels: { red: 'Outside access possible', yellow: 'Needs work', green: 'Good', gold: 'Local only' },
   colours: { red: 'Red', yellow: 'Yellow', green: 'Green', gold: 'Gold' },
-  /** What each colour means (the owner's words, 2026-10-17). */
+  /** What each colour means (the owner's words, 2026-10-17; gold's says what the guard blocked, not that nothing got out: it sees lookups only). */
   meanings: {
-    gold: 'Camera Bridge found no way in from outside, and its Internet guard saw nothing get out for a full day and has seen at least one lookup from it.',
+    gold: 'Camera Bridge found no way in from outside, and for a full day its Internet guard blocked every internet lookup the camera made (it has seen at least one).',
     green: 'Its cloud is off; something Camera Bridge can’t confirm remains.',
     yellow: 'Camera Bridge found nothing that lets it in from outside, but something needs work: its cloud is on but not linked, its video plays '
       + 'without a password on your network, or Camera Bridge can’t read its cloud.',
@@ -76,11 +76,12 @@ export const GUARD_TEXT = {
     + 'then stops working away from home; Camera Bridge, Apple Home and your recordings keep working.',
   limit: 'Watch sees lookups by name only. A camera with a built-in internet address needs none, so to be sure, also block it in your router (below).',
   quiet: 'It made no internet lookups in the last 24 hours.',
-  /** A watched camera whose attempts the guard blocks: the guard working, so it reads as a success. */
+  /** A watched camera whose lookups the guard blocks: the guard working, so it reads as a success. It says what was blocked, never that
+   *  nothing got out: the guard sees lookups only (`limit`, said under it). */
   blocked: (today, week) => {
-    const attempts = (n) => `${n} attempt${n === 1 ? '' : 's'}`;
-    return today > 0 ? `Blocked ${attempts(today)} today, ${week} in the last 7 days. Nothing got out.`
-      : `Blocked ${attempts(week)} in the last 7 days, none today. Nothing got out.`;
+    const lookups = (n) => `${n} internet lookup${n === 1 ? '' : 's'}`;
+    return today > 0 ? `Blocked ${lookups(today)} today, ${week} in the last 7 days.`
+      : `Blocked ${lookups(week)} in the last 7 days, none today.`;
   },
   blockedName: 'Blocked',
   names: 'The internet names it looked up (last 7 days)',
@@ -157,20 +158,31 @@ export function securityView(camera) {
 const CLOUD_ONLY_SERVICES = new Set(['wyze', 'eufy', 'ring', 'nest', 'tuya']);
 
 /**
- * Whether `host` (a URL's host name) is on the home network: a private (10/8, 172.16/12, 192.168/16), loopback (127/8) or link-local
- * (169.254/16) IPv4 address, the IPv6 loopback or link-local address, `localhost`, or a `.local` or `.lan` name.
+ * Whether `host` (a URL's host name) is on the home network, by the engine's own rule (AIDescriptionSettings.isHomeNetworkHost, which lets
+ * such a service be reached over plain http): a private (10/8, 172.16/12, 192.168/16), loopback (127/8), link-local (169.254/16) or shared
+ * (100.64/10, a Tailscale address) IPv4 address; the IPv6 loopback, a unique-local (fc00::/7) or link-local (fe80::/10) address; a name
+ * ending in .local, .lan, .home.arpa or .internal; or a name with no dot (localhost, a computer's name). An empty host is not one.
  */
 export function isHomeNetworkHost(host) {
-  const name = String(host ?? '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  const name = String(host ?? '').toLowerCase().replace(/^[[\]]+|[[\]]+$/g, '');
   if (!name) return false;
-  const four = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(name);
-  if (four) {
-    const [a, b, c, d] = four.slice(1).map(Number);
-    if ([a, b, c, d].some((part) => part > 255)) return false;
-    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  if (name.includes(':')) {
+    if (name === '::1') return true;
+    const first = name.split(':')[0];
+    if (!/^[0-9a-f]+$/.test(first)) return false;
+    const word = parseInt(first, 16);
+    return word <= 0xffff && ((word & 0xfe00) === 0xfc00 || (word & 0xffc0) === 0xfe80);
   }
-  if (name.includes(':')) return name === '::1' || /^fe[89ab][0-9a-f]?:/.test(name);
-  return name === 'localhost' || name.endsWith('.local') || name.endsWith('.lan');
+  const parts = name.split('.');
+  if (parts.length === 4 && parts.every((part) => /^[0-9]*$/.test(part))) {
+    const bytes = parts.map((part) => (part ? Number(part) : NaN));
+    if (bytes.some((byte) => !(byte <= 255))) return false;
+    const [a, b] = bytes;
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+      || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (!name.includes('.')) return true;
+  return ['.local', '.lan', '.home.arpa', '.internal'].some((end) => name.endsWith(end));
 }
 
 /**
@@ -321,7 +333,7 @@ export function drawSecurityDot(slot, camera) {
 // MARK: The camera page
 
 function when(ms, now) {
-  return h('time', { datetime: new Date(ms).toISOString(), title: new Date(ms).toLocaleString() }, timeAgo(ms, now));
+  return h('time', { datetime: new Date(ms).toISOString(), title: dateTime(ms) }, timeAgo(ms, now));
 }
 
 /** A finding of the card; `help(key, view)` draws its "Change it by hand" (open as the person left it). */

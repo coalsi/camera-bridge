@@ -24,6 +24,20 @@ import Testing
         #expect(abs(start.timeIntervalSince(Date(timeIntervalSinceReferenceDate: 0))) < 0.001, "measured from the monitor's start, not the wall clock")
     }
 
+    /// Review Oct 31 (engine-core F6): the decoder made a picture of every frame and the monitor threw three of four away. It now asks for
+    /// every Nth only, never fewer than four a second, once the stream's rate is known.
+    @Test func theDecoderIsAskedForAboutFourPicturesASecond() {
+        #expect(SoftMotionMonitor.keepEvery(frameRate: nil) == 1, "rate not known yet: every picture, the time gate keeps four a second")
+        #expect(SoftMotionMonitor.keepEvery(frameRate: 15) == 3)
+        #expect(SoftMotionMonitor.keepEvery(frameRate: 25) == 6)
+        #expect(SoftMotionMonitor.keepEvery(frameRate: 30) == 7)
+        #expect(SoftMotionMonitor.keepEvery(frameRate: 5) == 1)
+        #expect(SoftMotionMonitor.keepEvery(frameRate: .infinity) == 1)
+        for rate in stride(from: 4.0, through: 60, by: 0.5) {
+            #expect(rate / Double(SoftMotionMonitor.keepEvery(frameRate: rate)) >= 4, "at least four pictures a second at \(rate) fps")
+        }
+    }
+
     @Test(.timeLimit(.minutes(1))) func analysesAboutFourPicturesASecondAndReportsMotion() async throws {
         // The synthetic pattern's box moves every frame: at full sensitivity that is motion.
         let feeder = HubFeeder(source: syntheticSource(width: 320, height: 180, fps: 15, gop: .seconds(1), audio: nil))

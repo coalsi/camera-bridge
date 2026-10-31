@@ -6,3 +6,5 @@ StartLimitBurst=100
 [Service]
 Type=oneshot
 ExecStart=/usr/sbin/cb-system process-requests
+# It only moves and checks small files; one that hangs must not hold every later request (a restart, a factory reset) for good.
+TimeoutStartSec=30s

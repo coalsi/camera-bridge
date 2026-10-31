@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   ARCHIVE_MAX_RANGE_MS, ARCHIVE_OVERLAP_MS, ARCHIVE_PAGE, ARCHIVE_REFRESH_MS, ARCHIVE_RETRY_MS, LIVE_GRACE_MS, MERGE_MS, PAGE_ROWS, PRE_ROLL_MS, batteryBadge,
-  createEventArchive, durationText, eventKind, eventRange, gatherEvents, isRecorded, pickAction, sameEvent, seekTarget, visibleEvents,
+  createEventArchive, durationText, eventKind, eventNear, eventRange, gatherEvents, isRecorded, pickAction, sameEvent, seekTarget, visibleEvents,
 } from '../web/js/screens/wall-events-model.js';
 import { createGridController } from '../web/js/screens/nvr-controller.js';
 import { fakeTime, settle } from './nvr-grid-helpers.mjs';
@@ -17,6 +17,20 @@ const iso = (ms) => new Date(ms).toISOString();
 function camera(n, recent = [], extra = {}) {
   return { id: id(n), name: `Camera ${n}`, isEnabled: true, nvrEnabled: true, status: { connection: 'online', recentEvents: recent, ...extra } };
 }
+
+test('[ and ]: the event before or after the moment on screen, of the cameras on the wall, with a recording, never the one being looked at', () => {
+  const extent = { oldest: T0 - 86_400_000, newest: T0 };
+  const ev = (n, at, extra = {}) => ({ at, cameraId: id(n), label: 'Motion', recorded: null, ...extra });
+  const events = [ev(1, T0 - 600_000), ev(2, T0 - 300_000), ev(1, T0 - 120_000, { recorded: false }), ev(3, T0 - 60_000), ev(1, T0 - 30_000)];
+  const near = (ms, direction, cameraIds = [id(1), id(2)]) => eventNear(events, { cameraIds, ms, direction, extentOf: () => extent })?.at ?? null;
+  assert.equal(near(T0, -1), T0 - 30_000, 'live: the newest one');
+  // A step plays from PRE_ROLL_MS before an event: from there the next step goes on to another one.
+  assert.equal(near(T0 - 30_000 - PRE_ROLL_MS, -1), T0 - 300_000, 'one not recorded is skipped, and so is a camera not on the wall');
+  assert.equal(near(T0 - 300_000 - PRE_ROLL_MS, 1), T0 - 30_000);
+  assert.equal(near(T0 - 600_000 - PRE_ROLL_MS, -1), null, 'nothing earlier');
+  assert.equal(near(T0 - 30_000 - PRE_ROLL_MS, 1), null, 'nothing later');
+  assert.equal(near(T0 - 300_000 - PRE_ROLL_MS, 1, [id(3)]), T0 - 60_000);
+});
 
 test('eventKind names motion, detections and doorbell rings', () => {
   assert.deepEqual(eventKind('Motion'), { label: 'Motion', level: 'motion' });

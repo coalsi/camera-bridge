@@ -458,16 +458,6 @@ public actor CameraSettingsService {
         try await isapi().setSmartCodecEnabled(enabled, channelID: channelID)
     }
 
-    /// Hikvision only: a channel's codec, frame rate and keyframe interval (frames) over ISAPI.
-    public func hikvisionEncoder(channelID: String) async throws -> (codec: String?, fps: Double?, govLength: Int?) {
-        try await isapi().encoderSettings(channelID: channelID)
-    }
-
-    /// Hikvision only: sets a channel's keyframe interval (frames) over ISAPI, leaving everything else unchanged.
-    public func setHikvisionGovLength(_ frames: Int, channelID: String) async throws {
-        try await isapi().setGovLength(frames, channelID: channelID)
-    }
-
     // MARK: - Conversions
 
     /// Whether an encoding is one the bridge streams (H.264 or H.265). A JPEG or MPEG-4 encoder configuration (a camera's snapshot

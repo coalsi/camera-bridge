@@ -35,7 +35,7 @@ final class SkyFakeFeed: SkyHTTP {
     static func context(_ id: UUID, folder: URL, name: String = "North Sky") -> SkyCameraDetector.Context {
         SkyCameraDetector.Context(cameraID: id, cameraName: name, settings: SkyDetectorSettings(enabled: true, facing: 330, tilt: 15),
                                   observer: SkyFixtures.observer, zone: SkyDetectorRig.zone, pictureWidth: 4256, pictureHeight: 1888,
-                                  folder: { folder }, still: { _ in nil })
+                                  folder: { folder }, still: { _, _ in nil })
     }
 
     @Test func nothingIsFetchedWhileTheDetectorIsOff() async throws {

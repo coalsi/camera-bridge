@@ -13,6 +13,8 @@ const WIDTH = 320;
 const QUALITY = 0.7;
 const DECODE_MS = 6000;
 const KEEP = 400;                     // pictures kept in memory (data URLs of 10 to 20 KB)
+const RETRY_MS = 30_000;              // a picture that failed for a passing reason is asked for again after this, if its tile is still on screen
+const TRIES = 3;                      // and after this many failures it is a plain placeholder for good
 
 /** Reads the X-CB-Part header of a keyframe answer: { mime, initId }, or null. */
 function partOf(headers) {
@@ -70,32 +72,46 @@ export async function decodeFirstFrame({ mime, init, media }) {
   }
 }
 
-/** The picture of camera `cameraId` at `atMs` as a data: URL; null when it cannot be had (a 404 gap is a plain "no footage"). */
-export async function loadKeyframePicture(cameraId, atMs) {
+/**
+ * The picture of camera `cameraId` at `atMs` as a data: URL; null when there is none (a 404 gap is a plain "no footage", and so is a browser that
+ * cannot decode it). A passing failure (busy, the drive slow or away, the network) rejects. `bytes(path)` fetches: the page's request scheduler
+ * (nvr/fetcher.js), so the pictures keep to its budget of the browser's connections; getBytes alone by default.
+ */
+export async function loadKeyframePicture(cameraId, atMs, { bytes = (path) => getBytes(path, { timeoutMs: 8000 }) } = {}) {
   const base = `nvr/cameras/${encodeURIComponent(cameraId)}`;
   let answer;
   try {
-    answer = await getBytes(`${base}/keyframe?at=${Math.floor(atMs)}`, { timeoutMs: 8000 });
+    answer = await bytes(`${base}/keyframe?at=${Math.floor(atMs)}`);
   } catch (error) {
     if (error?.status === 404 || error?.code === 'gap') return null;
     throw error;
   }
   const part = partOf(answer.headers);
   if (!part) return null;
-  const init = await getBytes(`${base}/fragments/${encodeURIComponent(part.initId)}/init`, { timeoutMs: 8000 });
+  const init = await bytes(`${base}/fragments/${encodeURIComponent(part.initId)}/init`);
   return decodeFirstFrame({ mime: part.mime, init: init.data, media: answer.data });
+}
+
+/** A loader of pictures through the page's request scheduler (`fetcher`, nvr/fetcher.js): the lowest priority, so a button or a tile goes first. */
+export function fetcherPictures(fetcher) {
+  return (cameraId, atMs) => loadKeyframePicture(cameraId, atMs, { bytes: (path) => fetcher.bytes(path, { priority: -1 }) });
 }
 
 /**
  * The tiles: `tile(cameraId, atMs)` is a <div class="ev-thumb" data-state="idle|loading|loaded|none"> that loads its picture when it comes into view.
- *   load(cameraId, atMs)      the picture as a data: URL or null (default: loadKeyframePicture); a rejection leaves "none" too
+ *   load(cameraId, atMs)      the picture as a data: URL or null for none (default: loadKeyframePicture); a rejection is a passing failure: the
+ *                             tile is idle again and asked for again when it next comes into view or after RETRY_MS, and after TRIES failures it
+ *                             is "none" (only a definite answer is kept for the page's life)
  *   createObserver(callback)  an IntersectionObserver-like { observe, unobserve, disconnect }; null: tiles load as they are made
  *   concurrency               pictures in flight at once
  */
-export function createThumbnails({ load = loadKeyframePicture, createObserver = defaultObserver, concurrency = 2, keep = KEEP } = {}) {
+export function createThumbnails({ load = loadKeyframePicture, createObserver = defaultObserver, concurrency = 2, keep = KEEP, retryMs = RETRY_MS,
+  setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (t) => clearTimeout(t) } = {}) {
   const cache = new Map();            // `${camera}|${ms}` -> data URL, or null for no picture
+  const failures = new Map();         // `${camera}|${ms}` -> passing failures so far
   const waiting = [];                 // tiles that are visible and wait for a turn
   const records = new Map();          // tile -> { cameraId, atMs, key, visible }
+  const retries = new Set();          // timers of tiles to ask for again
   let running = 0;
   let destroyed = false;
   const observer = createObserver ? createObserver((entries) => {
@@ -130,15 +146,35 @@ export function createThumbnails({ load = loadKeyframePicture, createObserver = 
       if (cache.has(record.key)) { show(el, cache.get(record.key)); continue; }
       running += 1;
       el.dataset.state = 'loading';
-      Promise.resolve().then(() => load(record.cameraId, record.atMs)).catch(() => null).then((picture) => {
+      Promise.resolve().then(() => load(record.cameraId, record.atMs)).then((picture) => {
         running -= 1;
         if (destroyed) return;
-        cache.set(record.key, picture ?? null);
-        if (cache.size > keep) cache.delete(cache.keys().next().value);
-        if (records.has(el)) show(el, picture);
+        remember(record.key, picture ?? null);
+        if (records.has(el)) show(el, picture ?? null);
+        pump();
+      }, (error) => {
+        running -= 1;
+        if (destroyed) return;
+        const count = (failures.get(record.key) ?? 0) + 1;
+        failures.set(record.key, count);
+        if (count >= TRIES || error?.status === 404 || error?.code === 'gap') {
+          remember(record.key, null);
+          if (records.has(el)) show(el, null);
+        } else if (records.has(el)) {
+          // Busy, the drive slow or away, the network: not "no picture". Idle again, and asked for again while it is on screen.
+          el.dataset.state = 'idle';
+          const timer = setTimer(() => { retries.delete(timer); if (!destroyed && records.get(el)?.visible) request(el); }, retryMs);
+          retries.add(timer);
+        }
         pump();
       });
     }
+  }
+
+  function remember(key, picture) {
+    failures.delete(key);
+    cache.set(key, picture);
+    if (cache.size > keep) cache.delete(cache.keys().next().value);
   }
 
   return {
@@ -159,6 +195,8 @@ export function createThumbnails({ load = loadKeyframePicture, createObserver = 
     },
     destroy() {
       destroyed = true;
+      for (const timer of retries) clearTimer(timer);
+      retries.clear();
       observer?.disconnect();
       records.clear();
       waiting.length = 0;

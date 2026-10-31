@@ -101,15 +101,68 @@ import Testing
         defer { directory.remove() }
         let store = ConfigurationStore(directory: directory.url)
         try Data("{ truncated".utf8).write(to: store.fileURL)
-        let (configuration, recoveredFrom) = try store.loadOrRecover()
+        let (configuration, recovery) = try store.loadOrRecover()
         #expect(configuration.cameras.isEmpty)
-        let backup = try #require(recoveredFrom)
+        let backup = try #require(recovery?.setAside)
+        #expect(recovery?.restoredPrevious == false, "there was no earlier copy")
         #expect(backup.lastPathComponent.hasPrefix("config.corrupt-") && backup.pathExtension == "json")
         #expect(try String(contentsOf: backup, encoding: .utf8) == "{ truncated")
         #expect(!FileManager.default.fileExists(atPath: store.fileURL.path(percentEncoded: false)))
         // A missing file is not a recovery.
         let (fresh, none) = try store.loadOrRecover()
         #expect(fresh.cameras.isEmpty && none == nil)
+    }
+
+    /// Review finding (engine-core F4): a damaged config.json (an empty file after a power cut, a bad sector, a hand edit) was set aside
+    /// and the bridge came up with no cameras, with nothing to go back to. Every save keeps the file it replaces as config.json.bak, and a
+    /// damaged file is replaced by that copy (and said so).
+    @Test func aDamagedFileFallsBackToTheCopyKeptBeforeTheLastSave() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let store = ConfigurationStore(directory: directory.url)
+        let sample = sampleConfiguration()
+        var earlier = sample
+        earlier.cameras.removeLast()
+        try store.save(earlier)
+        try store.save(sample)
+        try Data().write(to: store.fileURL)   // a power cut while it was written
+
+        let (configuration, recovery) = try store.loadOrRecover()
+        #expect(configuration == earlier)
+        let setAside = try #require(recovery?.setAside)
+        #expect(recovery?.restoredPrevious == true)
+        let setAsideBytes = try Data(contentsOf: setAside)
+        #expect(setAside.lastPathComponent.hasPrefix("config.corrupt-") && setAsideBytes.isEmpty)
+        #expect(try ConfigurationStore(directory: directory.url).load() == earlier, "the copy is config.json again")
+        #expect(store.recoveryNotice() == recovery, "said so until dismissed, across launches")
+        try store.clearRecoveryNotice()
+        #expect(store.recoveryNotice() == nil)
+
+        // A copy that is damaged too gives the defaults, as before.
+        try Data("{".utf8).write(to: store.fileURL)
+        try Data("[".utf8).write(to: directory.file("config.json.bak"))
+        let (defaults, second) = try store.loadOrRecover()
+        #expect(defaults.cameras.isEmpty && second?.restoredPrevious == false)
+    }
+
+    /// Review finding (engine-core F9): an update that moved config.json to a newer schema, then rolled back by the A/B image, left the older
+    /// build failed with no cameras, although the migration had kept the file it could read. That copy is used (read only: the newer file is
+    /// never written over).
+    @Test func aNewerFileAfterARollbackRunsOnTheCopyItsMigrationKept() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let store = ConfigurationStore(directory: directory.url)
+        let sample = sampleConfiguration()
+        try store.save(sample)
+        let ours = try Data(contentsOf: store.fileURL)
+        try ours.write(to: directory.file("config.json.v\(ConfigurationStore.currentSchemaVersion).bak"))
+        let newer = Data(#"{"schemaVersion": 7, "settings": {}, "cameras": [], "future": true}"#.utf8)
+        try newer.write(to: store.fileURL)
+
+        let (configuration, recovery) = try store.loadOrRecover()
+        #expect(configuration == sample && recovery == nil)
+        #expect(throws: ConfigurationStoreError.unsupportedSchemaVersion(7)) { try store.save(configuration) }
+        #expect(try Data(contentsOf: store.fileURL) == newer, "never overwritten")
     }
 
     @Test func missingFieldsTakeTheirDefaults() throws {
@@ -328,9 +381,9 @@ import Testing
         let store = ConfigurationStore(directory: directory.url, migrations: [0: { _ in throw Broken() }])
         let original = Data(#"{"schemaVersion": 0, "cameraList": []}"#.utf8)
         try original.write(to: store.fileURL)
-        let (configuration, recoveredFrom) = try store.loadOrRecover()
+        let (configuration, recovery) = try store.loadOrRecover()
         #expect(configuration.cameras.isEmpty)
-        let backup = try #require(recoveredFrom)
+        let backup = try #require(recovery?.setAside)
         #expect(backup.lastPathComponent.hasPrefix("config.corrupt-"))
         #expect(try Data(contentsOf: backup) == original)
     }

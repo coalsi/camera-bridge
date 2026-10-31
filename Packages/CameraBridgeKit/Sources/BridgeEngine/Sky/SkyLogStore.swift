@@ -528,15 +528,28 @@ final class SkyLogStore: Sendable {
     /// engine runs it on the store's read queue). A missing file, or one reached through a link, is nothing. A file larger than
     /// `maximumReadBytes` is read from its end: a night is filed after the day before it, so a day that flooded the file does not hide its night.
     func contents(camera: UUID, night: String, folder: URL) -> SkyLogContents {
-        guard Self.isValidNight(night) else { return SkyLogContents() }
+        Self.parse(rawNight(camera: camera, night: night, folder: folder), camera: camera)
+    }
+
+    /// What `contents` reads of a night, not parsed yet: the file (at most its last `maximumReadBytes`) and the lines still waiting for the drive.
+    /// The disk work alone (the engine runs it on the store's read queue, under its deadline, and parses after: review Oct 31).
+    struct RawNight: Sendable {
+        var file: Data?
+        var waiting: [Data] = []
+    }
+
+    func rawNight(camera: UUID, night: String, folder: URL) -> RawNight {
+        guard Self.isValidNight(night) else { return RawNight() }
         // What waits is looked at before the file, so a line that is written meanwhile is read twice (harmless) and never not at all.
         let waiting = waitingLines(camera: camera, night: night, folder: folder)
-        var lines: [Data] = []
-        if let data = Self.readTail(Self.nightFile(folder: folder, camera: camera, night: night), folder: folder, camera: camera) {
-            lines = data.split(separator: 0x0A, omittingEmptySubsequences: true).map { Data($0) }
-        }
-        lines += waiting
-        return Self.parse(lines, camera: camera)
+        return RawNight(file: Self.readTail(Self.nightFile(folder: folder, camera: camera, night: night), folder: folder, camera: camera), waiting: waiting)
+    }
+
+    /// `raw`'s lines, applied: see `contents`.
+    static func parse(_ raw: RawNight, camera: UUID) -> SkyLogContents {
+        var lines = raw.file.map { $0.split(separator: 0x0A, omittingEmptySubsequences: true).map { Data($0) } } ?? []
+        lines += raw.waiting
+        return parse(lines, camera: camera)
     }
 
     /// The lines read, applied: see `contents`. A capped line read twice (it waited, and then it was in the file) counts once; the distinct

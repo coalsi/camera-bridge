@@ -287,6 +287,7 @@ extension ArchiveStore {
         controls.chunkBytes = tuning.moveChunkBytes
         controls.bytesPerSecond = tuning.moveBytesPerSecond
         controls.crash = tuning.moveCrash
+        controls.dropCachedPages = policy?.dropCachedPages
         let givesWayFor = tuning.moveGivesWayFor
         controls.isCancelled = { [weak self] in
             guard let self else { return true }

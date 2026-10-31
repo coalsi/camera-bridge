@@ -7,8 +7,7 @@ set -euo pipefail
 
 # --- users and permissions ---------------------------------------------------------------------------------------------
 systemd-sysusers
-chmod 0755 /usr/sbin/cb-install-to-disk /usr/sbin/cb-update /usr/sbin/cb-system /usr/sbin/cb-guard \
-    /usr/lib/camera-bridge/cb-* /usr/lib/camera-bridge/lib.sh
+chmod 0755 /usr/sbin/cb-* /usr/lib/camera-bridge/cb-* /usr/lib/camera-bridge/lib.sh
 passwd -l root >/dev/null
 # SSH host keys are made on the box (when SSH is enabled), never shipped: they would be shared by every copy of the image.
 rm -f /etc/ssh/ssh_host_*
@@ -29,10 +28,13 @@ systemctl enable \
     avahi-daemon.service \
     chrony.service \
     nftables.service \
+    camera-bridge-lan-prefixes.service \
     ssh.service \
     camerabridged.service \
     'var-lib-camera\x2dbridge.mount' \
     var-log-journal.mount \
+    var-lib-chrony.mount \
+    camera-bridge-clock.service \
     camera-bridge-journal-prune.service \
     camera-bridge-firstboot.service \
     camera-bridge-factory-reset.service \
@@ -45,12 +47,19 @@ systemctl enable \
     camera-bridge-wifi.service \
     camera-bridge-request.path \
     camera-bridge-update.timer \
+    camera-bridge-update-boot.service \
     camera-bridge-banner.timer \
+    camera-bridge-housekeeping.timer \
+    camera-bridge-disk-health.timer \
     camera-bridge-banner.service \
     camera-bridge-guard.service \
     camera-bridge-tls.service \
     nginx.service \
     fstrim.timer
+
+# The drives' health is cb-system disk-health's (daily, status/disk-health.json); smartd would poll them too and mail root, whom nobody reads.
+systemctl disable smartmontools.service >/dev/null 2>&1 || true
+systemctl mask smartmontools.service smartd.service >/dev/null 2>&1 || true
 
 # Debian ships two chrony units that conflict; with both enabled either may win. We want the one that can set the clock.
 systemctl mask chronyd-restricted.service >/dev/null

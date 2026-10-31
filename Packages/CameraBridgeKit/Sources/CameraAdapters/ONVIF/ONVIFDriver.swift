@@ -45,7 +45,8 @@ final class ONVIFDriver: CameraDriver, Sendable {
         self.rtspFactory = rtspFactory ?? RTSPProbing.factory(transport: transport)
         self.timing = timing
         self.sharedClient = ONVIFClient.deviceServiceURL(for: endpoint).map {
-            ONVIFClient(deviceServiceURL: $0, credentials: credentials, cameraID: cameraID)
+            // Long-lived (keyframe requests, PTZ, imaging): it keeps its WS-Security timestamps in step with the camera's clock.
+            ONVIFClient(deviceServiceURL: $0, credentials: credentials, cameraID: cameraID, keepsClockInStep: true)
         }
     }
 

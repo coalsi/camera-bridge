@@ -28,6 +28,20 @@ import Testing
         #expect(HikvisionTimeZone.same("CST+7:00:00", "MST7"))
     }
 
+    /// Review Oct 31 (adapters F6): the camera page's "Set the camera's clock to the bridge's time zone" used ONVIF only, so a Hikvision with
+    /// ONVIF off (current firmware ships so) was refused, and nothing read the zone back. It is the setup's step now: ISAPI first, read back.
+    @Test func theCameraPagesTimeZoneGoesThroughTheSetupsStep() async throws {
+        let camera = try await FakeSetupCamera.start()
+        defer { camera.stop() }
+        #expect(try await hikvision(camera).setCameraTimeZone(posix: "MST7") == nil)
+        #expect(camera.puts(to: HikvisionISAPI.timePath).count == 1, "through ISAPI")
+        #expect(HikvisionISAPI.elementText("timeZone", in: camera.documents.value[HikvisionISAPI.timePath] ?? "") == "CST+7:00:00")
+        // A camera that answers OK and keeps its zone: said, not reported as set.
+        camera.ignorePUT.update { $0.insert(HikvisionISAPI.timePath) }
+        let kept = try await hikvision(camera).setCameraTimeZone(posix: "CST6CDT,M3.2.0,M11.1.0")
+        #expect(kept != nil, "the read-back says the camera kept its zone")
+    }
+
     @Test func zonesAreWrittenAsOffsetsForPeople() {
         #expect(CameraSetupText.zone("MST7") == "UTC−7")
         #expect(CameraSetupText.zone("CST+8:00:00DST01:00:00,M3.2.0/02:00:00,M11.1.0/02:00:00") == "UTC−8 with daylight saving")

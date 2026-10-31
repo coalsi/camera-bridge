@@ -4,7 +4,7 @@
 #
 #   cb-tls issue --name NAME --host HOST --key KEYFILE   (the tls-obtain job) get a certificate for HOST (NAME.box.camera-bridge.app) from
 #                                                       Let's Encrypt with lego and the DNS challenge, or renew it when 30 days or less are
-#                                                       left; install it for the TLS front (nginx) and restart that. KEYFILE is the box's
+#                                                       left; install it for the TLS front (nginx) and reload that. KEYFILE is the box's
 #                                                       Ed25519 key (PKCS#8 PEM): cb-tls-hook signs the website's calls with it.
 #   cb-tls refresh                                       (boot, and after every system job) write status/tls.json from what is installed
 #   cb-tls status                                        print that status
@@ -107,8 +107,10 @@ install_certificate() { # install_certificate HOST: copy lego's files to where t
 
 restart_front() {
     [ -n "$ROOT" ] && return 0
-    # (the unit starts only when a certificate exists: ConditionPathExists in its drop-in)
-    systemctl restart nginx.service || cb_log "nginx did not start; the plain address keeps working"
+    # A reload reads the new certificate while the old workers finish what they serve (live views, the event stream, clip downloads); a
+    # restart cut them all. It starts the front when it is not running yet (the unit starts only when a certificate exists:
+    # ConditionPathExists in its drop-in).
+    systemctl reload-or-restart nginx.service || cb_log "nginx did not start; the plain address keeps working"
 }
 
 cmd_issue() {

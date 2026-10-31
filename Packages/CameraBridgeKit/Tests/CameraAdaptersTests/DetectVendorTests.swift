@@ -20,6 +20,16 @@ import Testing
         #expect(await detect(CameraEndpoint(host: "127.0.0.1", httpPort: Int(server.port))) == .hikvision)
     }
 
+    /// Review Oct 31 (adapters clean-up): detection had its own realm check, which had drifted from `isHikvisionRealm` and missed the
+    /// `IP Camera(…)` realm of ANNKE and newer Hikvision firmware, so without credentials an ANNKE was taken for a plain ONVIF camera.
+    @Test func anANNKEIsFoundByItsIPCameraRealm() async throws {
+        let server = try await MockHTTPServer.start { request in
+            request.path == "/ISAPI/System/deviceInfo" ? .digestChallenge(realm: "IP Camera(K1234)") : .status(404)
+        }
+        defer { server.stop() }
+        #expect(await detect(CameraEndpoint(host: "127.0.0.1", httpPort: Int(server.port))) == .hikvision)
+    }
+
     @Test func hikvisionByISAPINamespaceWhenTheRealmIsGeneric() async throws {
         let server = try await MockHTTPServer.start { request in
             guard request.path == "/ISAPI/System/deviceInfo" else { return .status(404) }

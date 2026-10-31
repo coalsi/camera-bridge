@@ -1,0 +1,19 @@
+[Unit]
+Description=chrony's measurements of the clock (bound from the data partition)
+# /var is a tmpfs: without this chrony forgot the clock's measured drift at every boot and ran uncorrected until it reached a time server
+# again (or for good, on a box without the internet that serves the cameras' time).
+DefaultDependencies=no
+Requires=srv.mount camera-bridge-datadirs.service
+After=srv.mount camera-bridge-datadirs.service
+Before=local-fs.target chrony.service
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=/srv/system/chrony
+Where=/var/lib/chrony
+Type=none
+Options=bind
+
+[Install]
+WantedBy=local-fs.target

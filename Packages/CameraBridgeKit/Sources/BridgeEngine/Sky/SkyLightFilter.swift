@@ -65,8 +65,13 @@ enum SkyLightFilter {
     /// the ring no longer holds the middle of a long one and answers with the oldest picture it has: that light is logged without one, and the
     /// recording gives it the picture of its middle (`SkyStillBackfill`).
     static func stillIsOf(_ entry: SkyEntry, at time: Date) -> Bool {
-        let reach = max(stillReach, entry.end.timeIntervalSince(entry.start) / 4)
-        return abs(time.timeIntervalSince(SkyStillBackfill.middle(of: entry))) <= reach
+        abs(time.timeIntervalSince(SkyStillBackfill.middle(of: entry))) <= stillReach(of: entry)
+    }
+
+    /// How far from `entry`'s middle a picture may be to be its (`stillIsOf`): the ring is asked for none further off, so a long light whose
+    /// middle it no longer holds costs no decode (review Oct 31).
+    static func stillReach(of entry: SkyEntry) -> TimeInterval {
+        max(stillReach, entry.end.timeIntervalSince(entry.start) / 4)
     }
 
     /// Whether an entry of this label, given by `source`, has a picture (Ruling S31): what nothing explains, what the rules say is a meteor, a bug or

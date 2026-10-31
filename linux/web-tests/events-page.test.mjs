@@ -194,6 +194,42 @@ test('thumbnails load only when seen, two at a time, and a picture that scrolled
   } finally { browser.restore(); }
 });
 
+test('a picture that failed for a passing reason is not kept as "no picture": it is asked for again while on screen, and is a placeholder after three tries', async () => {
+  const browser = installFakeBrowser();
+  const timers = [];
+  try {
+    const observer = fakeObserver();
+    const loader = fakeLoader();
+    const thumbs = createThumbnails({ load: loader.load, createObserver: observer.create, setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimer() {} });
+    const tile = thumbs.tile(id(1), NOW);
+    observer.show(tile);
+    await settle();
+    const busy = Object.assign(new Error('The bridge is busy.'), { status: 429 });
+    loader.calls[0].reject(busy);
+    await settle();
+    assert.equal(tile.dataset.state, 'idle', 'not "none": a busy box is no answer');
+    assert.equal(timers.at(-1).ms, 30_000);
+    timers.at(-1).fn();
+    await settle();
+    assert.equal(loader.calls.length, 2, 'asked for again after 30 s while it is on screen');
+    loader.calls[1].reject(Object.assign(new Error('The recordings drive isn’t connected.'), { status: 503 }));
+    await settle();
+    observer.hide(tile);
+    timers.at(-1).fn();
+    await settle();
+    assert.equal(loader.calls.length, 2, 'not while it is off screen');
+    observer.show(tile);
+    await settle();
+    assert.equal(loader.calls.length, 3, 'but as soon as it comes back');
+    loader.calls[2].reject(new Error('network'));
+    await settle();
+    assert.equal(tile.dataset.state, 'none', 'three failures: a placeholder');
+    const again = thumbs.tile(id(1), NOW);
+    assert.equal(again.dataset.state, 'none', 'and kept');
+    thumbs.destroy();
+  } finally { browser.restore(); }
+});
+
 test('a picture already loaded is not asked for twice, and no video element is ever made', async () => {
   const browser = installFakeBrowser();
   try {

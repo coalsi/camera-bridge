@@ -3,6 +3,7 @@
 // The events themselves are wall-events-model.js gatherEvents(): { at, endAt, cameraId, cameraName, label, level, recorded, description }.
 import { AI_KINDS, PRE_ROLL_MS } from './wall-events-model.js';
 import { EPOCH_MIN_MS } from './nvr-model.js';
+import { browserZone, previousDayKey, startOfZonedDay, zonedDayKey, zonedFormat, zonedParts } from '../zone.js';
 
 const DAY_MS = 86_400_000;
 export const EVENT_RANGES = { today: 'Today', '24h': 'Last 24 hours', '7d': '7 days', '30d': '30 days' };
@@ -51,16 +52,19 @@ export function filtersToQuery(filters) {
   return params.toString().replace(/\+/g, '%20');
 }
 
-/** The range to ask the archive for: from the range's start, to now and everything newer (it follows live). */
-export function queryRange(filters, now) {
-  const fromMs = filters.range === 'today' ? new Date(new Date(now).setHours(0, 0, 0, 0)).getTime()
+/**
+ * The range to ask the archive for: from the range's start, to now and everything newer (it follows live). "Today" starts at midnight in `zone`,
+ * the bridge's time zone (store.js bridgeZone), not the browser's.
+ */
+export function queryRange(filters, now, zone = browserZone()) {
+  const fromMs = filters.range === 'today' ? startOfZonedDay(now, zone)
     : now - (filters.range === '24h' ? 1 : filters.range === '30d' ? 30 : 7) * DAY_MS;
   return { fromMs, toMs: Infinity };
 }
 
-/** The events `filters` let through, in the order given. */
-export function filterEvents(events, filters, { now }) {
-  const { fromMs } = queryRange(filters, now);
+/** The events `filters` let through, in the order given (`zone`: where "Today" begins, as in queryRange). */
+export function filterEvents(events, filters, { now, zone = browserZone() }) {
+  const { fromMs } = queryRange(filters, now, zone);
   const cameras = new Set(filters.cameras);
   const types = new Set(filters.types.map((type) => type.toLowerCase()));
   const saw = new Set(filters.saw);
@@ -91,21 +95,22 @@ export function typeChoices(events) {
   return out;
 }
 
-const dayKey = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; };
-
-/** Newest-first events in groups by local day: [{ key, label, events }], labelled Today, Yesterday, then the date (with the year when it is not this one). */
-export function groupByDay(events, now) {
-  const today = dayKey(now);
-  const yesterday = dayKey(now - DAY_MS);
-  const thisYear = new Date(now).getFullYear();
+/**
+ * Newest-first events in groups by day in `zone` (the bridge's time zone): [{ key, label, events }], labelled Today, Yesterday, then the date (with
+ * the year when it is not this one).
+ */
+export function groupByDay(events, now, zone = browserZone()) {
+  const today = zonedDayKey(now, zone);
+  const yesterday = previousDayKey(today);
+  const thisYear = zonedParts(now, zone).year;
   const groups = [];
   for (const event of events) {
-    const key = dayKey(event.at);
+    const key = zonedDayKey(event.at, zone);
     let group = groups.at(-1);
     if (!group || group.key !== key) {
-      const date = new Date(event.at);
+      const sameYear = zonedParts(event.at, zone).year === thisYear;
       const label = key === today ? 'Today' : key === yesterday ? 'Yesterday'
-        : date.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short', ...(date.getFullYear() === thisYear ? {} : { year: 'numeric' }) });
+        : zonedFormat({ weekday: 'long', day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) }, zone).format(event.at);
       group = { key, label, events: [] };
       groups.push(group);
     }

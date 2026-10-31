@@ -104,37 +104,109 @@ export function confirmDialog({ title, body, confirm = 'OK', cancel = 'Cancel', 
   }, { label: title }).then((value) => value === true);
 }
 
-/** Collects a line of text (for example a new name), or several lines with `multiline`. Resolves the text, or undefined when cancelled. */
-export function promptDialog({ title, body, label, value = '', confirm = 'Save', type = 'text', autocomplete = 'off', multiline = false, placeholder = null }) {
+/**
+ * "Your Camera Bridge password": the bridge asks for it again before it erases a disk, resets itself or opens SSH. Its refusal (403
+ * `password_required` or `wrong_password`, 429 after too many tries) is said under the field. -> { el, input, say(text) }
+ */
+function passwordField() {
+  const input = h('input', { type: 'password', id: 'dialog-password', autocomplete: 'current-password', required: true, 'aria-describedby': 'dialog-password-problem' });
+  const problem = h('span', { class: 'error', id: 'dialog-password-problem', role: 'alert', hidden: true });
+  return {
+    input,
+    el: h('div', { class: 'field' }, h('label', { for: 'dialog-password' }, 'Your Camera Bridge password'), input, problem),
+    say(text) { problem.textContent = text || ''; problem.hidden = !text; },
+  };
+}
+
+/** A refusal about the password itself (said beside the field); anything else is said above the buttons. */
+const aboutPassword = (error) => error?.status === 429 || (error?.status === 403 && (error.code === 'password_required' || error.code === 'wrong_password'));
+
+/**
+ * The confirm of a dialog that sends its request itself (`submit(password)`): the button waits meanwhile, a refusal is said in the dialog (a
+ * wrong password beside the field) and the dialog stays open to try again or cancel; `done()` closes it once the bridge took the request.
+ */
+function submitter({ submit, go, password, problem, done }) {
+  let busy = false;
+  return async () => {
+    if (busy) return;
+    busy = true;
+    go.disabled = true;
+    password?.say('');
+    problem.textContent = '';
+    problem.hidden = true;
+    try {
+      await submit(password ? password.input.value : undefined);
+      done();
+    } catch (error) {
+      const text = error?.message || 'Something went wrong.';
+      if (password && aboutPassword(error)) {
+        password.say(text);
+        password.input.focus();
+        password.input.select?.();
+      } else {
+        problem.textContent = text;
+        problem.hidden = false;
+      }
+    } finally {
+      busy = false;
+      go.disabled = false;
+    }
+  };
+}
+
+/**
+ * Collects a line of text (for example a new name), or several lines with `multiline`. Resolves the text, or undefined when cancelled.
+ * `password`: the field for the administrator password too; `submit(text, password)`: the dialog sends the request itself and stays open on a
+ * refusal (see submitter).
+ */
+export function promptDialog({ title, body, label, value = '', confirm = 'Save', type = 'text', autocomplete = 'off', multiline = false, placeholder = null,
+  password = false, submit = null }) {
   return modal((close) => {
     const input = multiline
       ? h('textarea', { id: 'prompt-input', value, autocomplete, autofocus: true, rows: 5, spellcheck: 'false', placeholder })
       : h('input', { type, id: 'prompt-input', value, autocomplete, autofocus: true, placeholder });
-    return h('form', { onsubmit: (e) => { e.preventDefault(); close(input.value); } },
+    const secret = password ? passwordField() : null;
+    const problem = h('p', { class: 'small dialog-problem', role: 'alert', hidden: true });
+    const go = h('button', { class: 'btn primary', type: 'submit' }, confirm);
+    const send = submit ? submitter({ submit: (pass) => submit(input.value, pass), go, password: secret, problem, done: () => close(input.value) }) : null;
+    return h('form', { onsubmit: (e) => { e.preventDefault(); if (send) send(); else close(input.value); } },
       h('h2', null, title),
       body ? h('p', { class: 'muted' }, body) : null,
       h('div', { class: 'field' }, h('label', { for: 'prompt-input' }, label), input),
+      secret?.el, problem,
       h('div', { class: 'buttons' },
-        h('button', { class: 'btn', type: 'button', onclick: () => close(undefined) }, 'Cancel'),
-        h('button', { class: 'btn primary', type: 'submit' }, confirm)));
+        h('button', { class: 'btn', type: 'button', onclick: () => close(undefined) }, 'Cancel'), go));
   }, { label: title });
 }
 
 /**
  * Asks for a typed sentence before something that erases data. The button stays off until the text typed is exactly `phrase`
  * (the system checks the same sentence again). Resolves true when confirmed.
+ * `password`: the field for the administrator password too (the button also waits for it); `submit(password)`: the dialog sends the request
+ * itself, and stays open with the bridge's sentence when it refuses (a wrong password beside the field).
  */
-export function phraseDialog({ title, body, phrase, confirm = 'Confirm' }) {
+export function phraseDialog({ title, body, phrase, confirm = 'Confirm', password = false, submit = null }) {
   return modal((close) => {
     const input = h('input', { type: 'text', id: 'phrase-input', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', autofocus: true, 'aria-describedby': 'phrase-text' });
+    const secret = password ? passwordField() : null;
+    const problem = h('p', { class: 'small dialog-problem', role: 'alert', hidden: true });
     const go = h('button', { class: 'btn danger', type: 'submit', disabled: true }, confirm);
-    input.addEventListener('input', () => { go.disabled = input.value !== phrase; });
-    return h('form', { onsubmit: (e) => { e.preventDefault(); if (input.value === phrase) close(true); } },
+    const ready = () => input.value === phrase && (!secret || Boolean(secret.input.value));
+    const check = () => { go.disabled = !ready(); };
+    input.addEventListener('input', check);
+    secret?.input.addEventListener('input', check);
+    const send = submit ? submitter({ submit, go, password: secret, problem, done: () => close(true) }) : null;
+    return h('form', { onsubmit: (e) => {
+      e.preventDefault();
+      if (!ready()) return;
+      if (send) send(); else close(true);
+    } },
       h('h2', null, title),
       h('div', { class: 'muted' }, body),
       h('p', { class: 'muted' }, 'Type this sentence exactly to go on:'),
       h('code', { class: 'phrase', id: 'phrase-text' }, phrase),
       h('div', { class: 'field' }, h('label', { for: 'phrase-input', class: 'sr-only' }, 'The sentence'), input),
+      secret?.el, problem,
       h('div', { class: 'buttons' },
         h('button', { class: 'btn', type: 'button', onclick: () => close(false) }, 'Cancel'), go));
   }, { label: title }).then((value) => value === true);

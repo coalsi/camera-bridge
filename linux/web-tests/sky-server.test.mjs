@@ -416,7 +416,8 @@ test('the night says how big its pictures are, and size=thumb is the close-up of
     const small = await still(light, '&size=thumb');
     assert.equal(small.status, 200);
     assert.equal(small.headers['content-type'], 'image/jpeg');
-    const rect = thumbRect(light.path, picture.width, picture.height);
+    // A light joined from parts is cut around the path of the part its still is of (`stillPart`), as the grid draws it.
+    const rect = thumbRect(light.stillPart?.id === light.id ? light.stillPart.path : light.path, picture.width, picture.height);
     const size = jpegSize(small.buffer);
     assert.ok(size, 'a JPEG');
     if (rect) {

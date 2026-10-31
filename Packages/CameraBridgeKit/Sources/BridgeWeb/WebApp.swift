@@ -120,8 +120,11 @@ struct APIError: Error {
     }
 }
 
+/// `{error, code, message, field?}`: `error` and `code` are the same short code (`code` is the name a page may look for first), `message`
+/// the sentence for the person, `field` the input it is about.
 private struct ErrorBody: Encodable {
     var error: String
+    var code: String
     var message: String
     var field: String?
 }
@@ -136,8 +139,8 @@ extension HTTPResponse {
     }
 
     static func error(_ error: APIError) -> HTTPResponse {
-        var response = json(ErrorBody(error: error.code, message: error.message, field: error.field), status: error.status)
-        for (name, value) in error.headers { response.headers[name] = value }
+        var response = json(ErrorBody(error: error.code, code: error.code, message: error.message, field: error.field), status: error.status)
+        for (name, value) in error.headers { response.headers.add(name, value) }   // added: two `Set-Cookie` lines both stay
         return response
     }
 }
@@ -150,13 +153,17 @@ extension HTTPResponse {
 ///    `allowedHosts` is served, so a web page on the internet cannot reach the bridge through the visitor's browser by pointing a
 ///    name of its own at the bridge's address (DNS rebinding).
 /// 2. **Setup.** Until the administrator's password exists, the API answers only the status, the session probe and setup itself.
-/// 3. **Session.** Every other API call needs the `cb_session` cookie (256 random bits, `HttpOnly`, `SameSite=Strict`).
+/// 3. **Session.** Every other API call needs the session cookie (256 random bits, `HttpOnly`, `SameSite=Strict`): `cb_session`, and over
+///    HTTPS `__Host-cb_session` (a sibling name under camera-bridge.app cannot set a `__Host-` cookie, so it cannot shadow it; a browser
+///    that signed in over HTTPS before has `cb_session`, which is still read and moved to the new name on its next request).
 /// 4. **Cross-site requests.** A request that changes anything must have an `Origin` (or `Sec-Fetch-Site`) of this same site, and a
 ///    signed-in one must carry the session's `X-CSRF-Token`; a body must be `application/json`.
 /// 5. **Headers on every answer.** A strict Content-Security-Policy (own files only), `nosniff`, no referrer, no framing, no
 ///    cross-origin reads; API answers are `no-store`.
 public final class WebApp: Sendable {
     static let cookieName = "cb_session"
+    /// The session cookie's name over HTTPS: a cookie with the `__Host-` prefix must be `Secure`, `Path=/` and without `Domain`.
+    static let secureCookieName = "__Host-cb_session"
 
     let configuration: WebConfiguration
     let backend: any BridgeBackend
@@ -197,6 +204,7 @@ public final class WebApp: Sendable {
         self.logs = logs
         self.auth = auth ?? AuthStore(directory: configuration.dataDirectory, iterations: configuration.passwordIterations)
         notifications = NotificationLog(directory: configuration.dataDirectory)
+        Self.clearClipWork(dataDirectory: configuration.dataDirectory)
         hub = EventHub(backend: backend, interval: configuration.eventInterval, notifications: notifications)
         files = StaticFiles(directory: configuration.staticDirectory)
         launched = Date()
@@ -257,9 +265,9 @@ public final class WebApp: Sendable {
 
     private func dispatch(_ request: HTTPRequest) async -> HTTPResponse {
         let secure = secureAddress.snapshot.current
-        let hotspotOpen = secure.redirect && secure.certificateValid && system.setupHotspot() != nil
+        // The hotspot's status is a file read on the box: asked only for a request the redirect would otherwise send on.
         if let target = SecureAddressRules.redirectTarget(for: request, host: secure.host, enabled: secure.redirect, certificateValid: secure.certificateValid,
-                                                          hotspotOpen: hotspotOpen) {
+                                                          hotspotOpen: self.system.setupHotspot() != nil) {
             var response = HTTPResponse.text("", status: 302)
             response.headers["Location"] = target
             response.headers["Cache-Control"] = "no-store"
@@ -316,14 +324,19 @@ public final class WebApp: Sendable {
         }
         var context = RequestContext(request: request, params: params)
         let configured = await auth.isConfigured
-        if let token = request.cookies[Self.cookieName], let session = await auth.session(token: token) {
+        var movesCookie = false
+        let cookies = request.cookies
+        for (name, legacy) in [(Self.secureCookieName, false), (Self.cookieName, true)] {
+            guard let token = cookies[name], let session = await auth.session(token: token) else { continue }
             context.session = session
             context.sessionToken = token
+            movesCookie = legacy && request.isSecure
+            break
         }
         if route.access == .session {
             guard configured else { throw APIError(status: 403, code: "setup_required", message: "Set the administrator password first.") }
             guard let session = context.session else {
-                throw APIError(status: 401, code: "unauthorized", message: "Sign in to continue.", headers: [("Set-Cookie", Self.clearedCookie())])
+                throw APIError(status: 401, code: "unauthorized", message: "Sign in to continue.", headers: Self.clearedCookies().map { ("Set-Cookie", $0) })
             }
             if unsafe {
                 guard let presented = request.headers["X-CSRF-Token"], Secrets.constantTimeEqual(presented, session.csrfToken) else {
@@ -331,17 +344,32 @@ public final class WebApp: Sendable {
                 }
             }
         }
-        return try await route.handler(self, context)
+        var response = try await route.handler(self, context)
+        // A browser signed in over HTTPS before `__Host-cb_session` existed: the same session under the new name, the old name cleared.
+        if movesCookie, let token = context.sessionToken, response.headers.values(for: "Set-Cookie").isEmpty {
+            response.headers.add("Set-Cookie", sessionCookie(token: token, secure: true))
+            response.headers.add("Set-Cookie", Self.clearedCookie(named: Self.cookieName))
+        }
+        return response
     }
 
     // MARK: Cookies
 
+    /// `__Host-cb_session` with `Secure` over HTTPS, `cb_session` on plain HTTP (where a browser keeps no `Secure` cookie).
     func sessionCookie(token: String, secure: Bool) -> String {
-        "\(Self.cookieName)=\(token); Path=/; HttpOnly; SameSite=Strict; Max-Age=\(Int(AuthStore.absoluteLifetime))" + (secure || configuration.secureCookies ? "; Secure" : "")
+        let secure = secure || configuration.secureCookies
+        return "\(secure ? Self.secureCookieName : Self.cookieName)=\(token); Path=/; HttpOnly; SameSite=Strict; Max-Age=\(Int(AuthStore.absoluteLifetime))"
+            + (secure ? "; Secure" : "")
     }
 
-    static func clearedCookie() -> String {
-        "\(cookieName)=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+    /// Clears the cookie `name` (the `__Host-` one needs `Secure`, or the browser ignores the line).
+    static func clearedCookie(named name: String = cookieName) -> String {
+        "\(name)=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" + (name == secureCookieName ? "; Secure" : "")
+    }
+
+    /// Both names cleared: signing out, or a session that is gone.
+    static func clearedCookies() -> [String] {
+        [clearedCookie(named: cookieName), clearedCookie(named: secureCookieName)]
     }
 
     // MARK: Request checks

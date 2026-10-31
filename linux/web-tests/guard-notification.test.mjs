@@ -28,7 +28,7 @@ const NOW = Date.parse('2026-10-18T15:00:00Z');
 /** A notification of the Internet guard (the bridge's log entry): a camera seen trying the internet, blocked. */
 const guardEntry = (overrides = {}) => ({
   id: 'e1', key: 'k', noticeID: `guard-tried-${PATIO}`, kind: 'internetGuard', category: 'security', severity: 'info', title: 'Patio New tried to reach the internet',
-  detail: 'Camera Bridge blocked it. Nothing got out.', cameraID: PATIO, cameraName: 'Patio New', date: new Date(NOW).toISOString(), action: 'open-camera',
+  detail: 'Camera Bridge blocked its lookup. A camera can still try an address it already knows, which the guard can’t see.', cameraID: PATIO, cameraName: 'Patio New', date: new Date(NOW).toISOString(), action: 'open-camera',
   read: false, toasted: false, ...overrides,
 });
 

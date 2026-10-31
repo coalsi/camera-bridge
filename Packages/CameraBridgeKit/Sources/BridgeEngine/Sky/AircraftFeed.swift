@@ -375,6 +375,7 @@ actor FlightFeedPoller {
 
     private func pollOnce() async {
         let answer: (body: Data, status: Int)
+        let sent = now()
         do {
             answer = try await http.get(url, timeout: Self.timeout, maximumBytes: AircraftFeedParser.maximumBytes)
         } catch is CancellationError {
@@ -392,7 +393,10 @@ actor FlightFeedPoller {
             problem = Self.answered(answer.status)
             return
         }
-        guard let reading = AircraftFeedParser.read(answer.body, receivedAt: received) else {
+        // The feed's ages count from when it wrote the answer, somewhere in the request: its middle, not its end (a slow transfer would add its
+        // whole time to every position's age, 0.5° and more of a fast plane's place at 15 km).
+        let current = received <= sent ? received : sent.addingTimeInterval(received.timeIntervalSince(sent) / 2)
+        guard let reading = AircraftFeedParser.read(answer.body, receivedAt: current) else {
             problem = Self.notUnderstood
             return
         }

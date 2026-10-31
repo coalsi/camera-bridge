@@ -126,7 +126,7 @@ final class BoxClient: Sendable {
         do {
             answer = try await transport.send(method: method, url: url, headers: headers, body: body)
         } catch {
-            throw BoxClientError(kind: .unreachable, message: "The Camera Bridge website can’t be reached. Check that the box has internet.")
+            throw BoxClientError(kind: .unreachable, message: "Waiting for the internet: the Camera Bridge website can’t be reached yet. The box tries again by itself.")
         }
         if (200..<300).contains(answer.status) { return answer.body }
         struct Failure: Decodable { var error: String }

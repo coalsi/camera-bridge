@@ -4,7 +4,7 @@ import { h, replace, spinner, toast } from './dom.js';
 import { icon } from './icons.js';
 import { askToPowerOff, powerOff } from './power.js';
 import { THEME_EVENT, THEME_INFO, applyTheme, currentTheme, nextTheme, setTheme } from './theme.js';
-import { store, startEvents, stopEvents, subscribe, loadCameras, loadPlugins, pluginOn, setCameraOrder } from './store.js';
+import { store, startEvents, stopEvents, subscribe, loadCameras, loadPlugins, noteVersion, pluginOn, setBridgeZone, setCameraOrder } from './store.js';
 import { onUnread, startNotifications, unreadCount } from './notifications.js';
 import { renderSetup, renderLogin } from './screens/auth.js';
 import { renderCameras } from './screens/cameras.js';
@@ -28,13 +28,14 @@ let stopUnread = null;
 /** Whether the Sky Watcher plugin is on (Plugins): the menu shows its item only then, whatever the cameras are set to. */
 const skyIsOn = () => pluginOn('sky');
 
+// `phone`: the items a phone's tab bar shows itself; the others are under its More button (a phone is too narrow for ten).
 const NAV = [
-  { href: '#/', label: 'Monitor', icon: 'monitor', match: (p) => p === '' || p === 'monitor' || p === 'nvr' || p.startsWith('nvr/') },
-  { href: '#/events', label: 'Events', icon: 'clock', match: (p) => p === 'events' || p.startsWith('events?') },
-  { href: '#/notifications', label: 'Notifications', icon: 'bell', match: (p) => p === 'notifications' },
+  { href: '#/', label: 'Monitor', icon: 'monitor', match: (p) => p === '' || p === 'monitor' || p === 'nvr' || p.startsWith('nvr/'), phone: true },
+  { href: '#/events', label: 'Events', icon: 'clock', match: (p) => p === 'events' || p.startsWith('events?'), phone: true },
+  { href: '#/notifications', label: 'Notifications', icon: 'bell', match: (p) => p === 'notifications', phone: true },
   // Sky Watcher's morning log (#/sky, #/sky/<camera>): in the menu, and so in a phone's tab bar, only while the Sky Watcher plugin is on (showSkyMenu).
-  { href: '#/sky', label: SKY_TEXT.menu, icon: 'moon', match: (p) => p === 'sky' || p.startsWith('sky/') || p.startsWith('sky?'), when: skyIsOn },
-  { href: '#/cameras', label: 'Cameras', icon: 'camera', match: (p) => p === 'cameras' || p.startsWith('camera/') || p === 'add' || p.startsWith('pair') },
+  { href: '#/sky', label: SKY_TEXT.menu, icon: 'moon', match: (p) => p === 'sky' || p.startsWith('sky/') || p.startsWith('sky?'), when: skyIsOn, phone: true },
+  { href: '#/cameras', label: 'Cameras', icon: 'camera', match: (p) => p === 'cameras' || p.startsWith('camera/') || p === 'add' || p.startsWith('pair'), phone: true },
   { href: '#/plugins', label: 'Plugins', icon: 'plugin', match: (p) => p === 'plugins' || p.startsWith('plugins/') },
   { href: '#/logs', label: 'Log', icon: 'list', match: (p) => p === 'logs' },
   { href: '#/system', label: 'System', icon: 'server', match: (p) => p === 'system' },
@@ -138,21 +139,39 @@ function route() {
 }
 
 function markNav(path) {
-  for (const link of shell.nav.querySelectorAll('a')) {
-    const item = NAV.find((n) => n.href === link.getAttribute('href'));
-    if (item?.match(path)) link.setAttribute('aria-current', 'page');
+  for (const [index, link] of shell.links.entries()) {
+    if (NAV[index].match(path)) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
+  // On a phone, the More button is marked while the page shown is one of its items, and it closes when a page opens.
+  shell.more.dataset.current = String(NAV.some((item) => !item.phone && item.match(path)));
+  showMore(false);
+}
+
+/** Opens or closes the phone's More list (the tab bar's items that do not fit). */
+function showMore(open) {
+  if (!shell) return;
+  shell.nav.dataset.more = open ? 'open' : '';
+  shell.more.setAttribute('aria-expanded', String(open));
 }
 
 function buildShell() {
   const name = h('span', null, store.session.bridgeName);
   const links = NAV.map((item) => h('a', { href: item.href, title: item.label, hidden: item.when ? !item.when() : false }, icon(item.icon), h('span', null, item.label),
     item.href === '#/notifications' ? h('span', { class: 'nav-badge', id: 'nav-unread', hidden: true }) : null));
-  const nav = h('nav', { class: 'nav', 'aria-label': 'Main' }, links);
+  // A phone's tab bar shows the first items and a More button; the rest open above it as a list (style.css). Wider, the list is just the
+  // rest of the menu and the button is not there.
+  const more = h('button', { class: 'nav-more', type: 'button', 'aria-expanded': 'false', 'aria-controls': 'nav-overflow',
+    onclick: () => showMore(nav.dataset.more !== 'open') }, icon('more'), h('span', null, 'More'));
+  const overflow = h('div', { class: 'nav-overflow', id: 'nav-overflow' }, links.filter((_, i) => !NAV[i].phone));
+  const nav = h('nav', { class: 'nav', 'aria-label': 'Main', onkeydown: (event) => { if (event.key === 'Escape' && nav.dataset.more === 'open') { showMore(false); more.focus(); } } },
+    links.filter((_, i) => NAV[i].phone), overflow, more);
   const content = h('div');
   const main = h('main', { id: 'main', class: 'main', tabindex: '-1' }, content);
   const reconnect = h('div', { class: 'reconnect', role: 'status', hidden: true }, 'Lost contact with the bridge. Trying again…');
+  // The bridge was updated while this page was open: its pages no longer match the ones loaded here (the Monitor reloads by itself when idle).
+  const updated = h('div', { class: 'update-bar', role: 'status', hidden: true }, h('span', null, 'Camera Bridge was updated.'),
+    h('button', { class: 'btn small', type: 'button', onclick: () => location.reload() }, icon('refresh'), 'Reload'));
   // The system's version (Camera Bridge OS beta · build 0.1.108, or Camera Bridge OS 1.0.0); a click opens About and its notes.
   const notice = h('div', { class: 'notice-host' });
   const version = h('a', { class: 'version', href: '#/about', title: 'About this version' });
@@ -170,13 +189,15 @@ function buildShell() {
       h('a', { class: 'brand', href: '#/', title: store.session.bridgeName }, h('img', { src: '/mark-small.svg?v=3', alt: '', width: 30, height: 30 }), name),
       nav,
       h('div', { class: 'sidebar-foot' }, theme, power, version)),
-    h('div', { class: 'app-main' }, reconnect, notice, main));
-  shell = { nav, content, main, name, reconnect, version, theme, sky: links[NAV.findIndex((item) => item.href === '#/sky')] };
+    h('div', { class: 'app-main' }, reconnect, updated, notice, main));
+  shell = { nav, links, more, content, main, name, reconnect, updated, version, theme, sky: links[NAV.findIndex((item) => item.href === '#/sky')] };
+  updated.hidden = store.newVersion === null;
   showTheme();
   stopUnread?.();
   stopUnread = onUnread(showUnread);
   showUnread(unreadCount());
   get('system').then((s) => {
+    noteVersion(s.version);
     power.hidden = !s.canManage;
     version.textContent = versionLabel(s.product, s.version);
     const news = whatsNewNotice(s.version);
@@ -216,6 +237,7 @@ async function showApp() {
   unsubscribe = subscribe((kind) => {
     if (kind === 'connection' && shell) shell.reconnect.hidden = store.connected;
     if (kind === 'plugins' && shell) showSkyMenu();
+    if (kind === 'updated' && shell) shell.updated.hidden = false;
   });
   // Which plugins are on is asked at the same time as the cameras; the Sky Watcher's menu item and card wait for it (without it they stay out).
   const plugins = loadPlugins().catch(() => {});
@@ -228,6 +250,8 @@ async function showApp() {
     const settings = await get('settings');
     setCameraOrder(settings.cameraOrder);
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // Every time on the page is said in the bridge's zone (store.js bridgeZone), the one its own label and the cameras' clocks use.
+    setBridgeZone(settings.timeZone || zone);
     if (!settings.timeZone && zone) patch('settings', { timeZone: zone }).catch(() => {});
   } catch { /* the cameras are by name until the next load */ }
   stopNotifications?.();
@@ -265,15 +289,28 @@ function showSetup() {
   replace(root, renderSetup({ session: store.session, onDone: showSignedIn }));
 }
 
+// A bridge that does not answer at start-up (the box is still starting after a power cut, or its address is not up yet): the page asks again by
+// itself, a little later each time, so a wall display comes back without anyone at it.
+const BOOT_RETRY_MS = [5000, 10000, 20000, 30000];
+let bootTries = 0;
+let bootTimer = null;
+
 async function boot() {
+  clearTimeout(bootTimer);
+  bootTimer = null;
   try {
     store.session = await get('session');
   } catch (error) {
+    const wait = BOOT_RETRY_MS[Math.min(bootTries, BOOT_RETRY_MS.length - 1)];
+    bootTries += 1;
+    bootTimer = setTimeout(boot, wait);
     replace(root, h('div', { class: 'center-page' }, h('div', { class: 'card center-card' },
       h('h1', null, 'Can’t reach the bridge'), h('p', { class: 'lede' }, error.message),
-      h('button', { class: 'btn primary', onclick: () => location.reload() }, 'Try again'))));
+      h('p', { class: 'muted small', role: 'status' }, 'Trying again by itself…'),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => boot() }, 'Try again'))));
     return;
   }
+  bootTries = 0;
   if (store.session.setupRequired) return showSetup();
   if (!store.session.authenticated) return showSignedOut();
   setCSRFToken(store.session.csrfToken);
@@ -285,6 +322,8 @@ onAuthChange(async (kind) => {
   if (kind === 'unauthorized' && shell) { store.session = { ...store.session, authenticated: false }; showSignedOut(); }
 });
 window.addEventListener('hashchange', route);
+// A tap anywhere else closes the phone's More list.
+document.addEventListener('click', (event) => { if (shell?.nav.dataset.more === 'open' && !shell.nav.contains(event.target)) showMore(false); });
 document.addEventListener(THEME_EVENT, showTheme);
 // Another tab of this browser chose an appearance.
 window.addEventListener('storage', (event) => { if (event.key === null || event.key === 'cb-theme') applyTheme(currentTheme()); });

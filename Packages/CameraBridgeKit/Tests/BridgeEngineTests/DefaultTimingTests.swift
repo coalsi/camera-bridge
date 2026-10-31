@@ -55,8 +55,10 @@ import Testing
         #expect(standard.healthyIngestWindow == .seconds(2))
         #expect(standard.runtimeHeartbeatInterval == .seconds(10) && standard.runtimeHeartbeatDeadline == .seconds(3))
         #expect(standard.runtimeHeartbeatStrikes == 3)
-        #expect(standard.accessoryHealth == HAPHealthMonitor.Timing(interval: .seconds(30), probeTimeout: .seconds(1), browseTimeout: .seconds(3),
-                                                                    bonjourMissesBeforeRestart: 2, controllerSilence: .seconds(600)))
+        #expect(standard.runtimeStopLimit == .seconds(15) && standard.beforeAccessoryStop == nil)
+        #expect(standard.accessoryHealth == HAPHealthMonitor.Timing(interval: .seconds(30), probeTimeout: .seconds(3), browseTimeout: .seconds(3),
+                                                                    bonjourMissesBeforeRestart: 2, listenerMissesBeforeRestart: 2,
+                                                                    controllerSilence: .seconds(600)))
         #expect(standard.controller.preparedSessionTimeout == .seconds(20))
         #expect(standard.controller.staleUnstartedSessionAge == .seconds(15))
         #expect(IngestSupervisor.Timing().closeGrace == .seconds(2))
@@ -74,6 +76,7 @@ import Testing
         #expect(timing.unauthorizedRetry == .seconds(600))
         #expect(timing.fallbackAfterFailures == 3)
         #expect(timing.connectTimeout == .seconds(30))
+        #expect(timing.stableAfter == .seconds(30))
     }
 
     /// Camera-facing stops (event source logout, RTSP TEARDOWN, the talkback channel's close) wait at most 3 s — one

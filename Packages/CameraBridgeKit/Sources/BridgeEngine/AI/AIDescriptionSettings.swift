@@ -87,6 +87,9 @@ public struct AIDescriptionSettings: Codable, Sendable, Equatable {
             return Problem(field: "model", message: "Enter the model’s name, up to \(Self.modelLengthRange.upperBound) characters on one line.")
         }
         if let baseURL {
+            if Self.isCleartextToTheInternet(baseURL) {
+                return Problem(field: "baseURL", message: Self.cleartextProblem)
+            }
             if !Self.isValidAddress(baseURL) {
                 return Problem(field: "baseURL", message: "Enter the service’s address, like https://example.com/v1: http or https, with no name or password in it, and nothing after a ? or #.")
             }
@@ -99,7 +102,8 @@ public struct AIDescriptionSettings: Codable, Sendable, Equatable {
         return nil
     }
 
-    /// A service address: http or https, a host, no user info, no query, no fragment, one line of at most `maximumAddressLength` characters.
+    /// A service address: http or https, a host, no user info, no query, no fragment, one line of at most `maximumAddressLength` characters;
+    /// http only for a host on the home network (`isHomeNetworkHost`).
     static func isValidAddress(_ text: String) -> Bool {
         guard !text.isEmpty, text.count <= maximumAddressLength,
               !text.unicodeScalars.contains(where: { isControl($0) || $0.properties.isWhitespace }),
@@ -107,7 +111,41 @@ public struct AIDescriptionSettings: Codable, Sendable, Equatable {
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = components.host, !host.isEmpty,
               components.user == nil, components.password == nil, components.query == nil, components.fragment == nil else { return false }
-        return true
+        return scheme == "https" || isHomeNetworkHost(host)
+    }
+
+    static let cleartextProblem = "Use https:// for a service on the internet. http:// is only for a service on your home network, like http://192.168.1.20:11434/v1."
+
+    /// An http address whose host is not on the home network: the key and the pictures would cross the internet unencrypted.
+    static func isCleartextToTheInternet(_ text: String) -> Bool {
+        guard let components = URLComponents(string: text), components.scheme?.lowercased() == "http", let host = components.host,
+              !host.isEmpty else { return false }
+        return !isHomeNetworkHost(host)
+    }
+
+    /// A host on the home network: a private, loopback, link-local or shared (100.64/10, a Tailscale address) IPv4 address; a loopback,
+    /// unique-local or link-local IPv6 address; a name ending in .local, .lan, .home.arpa or .internal; or a name with no dot (localhost, a
+    /// computer's name).
+    static func isHomeNetworkHost(_ host: String) -> Bool {
+        let name = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if name.contains(":") {
+            // IPv6: ::1, fc00::/7, fe80::/10.
+            if name == "::1" { return true }
+            guard let first = name.split(separator: ":", omittingEmptySubsequences: false).first, let word = UInt16(first, radix: 16) else { return false }
+            return word & 0xFE00 == 0xFC00 || word & 0xFFC0 == 0xFE80
+        }
+        let parts = name.split(separator: ".", omittingEmptySubsequences: false)
+        if parts.count == 4, parts.allSatisfy({ $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }) {
+            let bytes = parts.compactMap { UInt8($0) }
+            guard bytes.count == 4 else { return false }
+            switch (bytes[0], bytes[1]) {
+            case (10, _), (127, _): return true
+            case (172, 16...31), (192, 168), (169, 254), (100, 64...127): return true
+            default: return false
+            }
+        }
+        if !name.contains(".") { return true }
+        return [".local", ".lan", ".home.arpa", ".internal"].contains { name.hasSuffix($0) }
     }
 
     /// A key as it is stored: trimmed of the spaces, tabs and line breaks a paste brings along (a trailing newline would make an invalid

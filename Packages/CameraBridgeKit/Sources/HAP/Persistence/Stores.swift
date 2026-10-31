@@ -173,7 +173,8 @@ enum HAPIdentityCache {
 
 /// Pairings/state as `state.json` (0600) in `directory` (created 0700; an existing one is left as it is — BridgeSupport
 /// `PrivateFiles`, the same policy as the engine's configuration); the identity (device ID, setup code and the Ed25519
-/// long-term key) as JSON in the `SecretStore` under `account` — the Keychain in the app. Writes are atomic.
+/// long-term key) as JSON in the `SecretStore` under `account` — the Keychain in the app. Writes are atomic and synced, and keep the
+/// state they replace as `state.json.bak` for a `state.json` that cannot be read.
 public final class FileHAPStore: HAPStore {
     private let directory: URL
     private let secretStore: any SecretStore
@@ -218,11 +219,21 @@ public final class FileHAPStore: HAPStore {
         HAPIdentityCache.remember(identity, for: identityLockName)
     }
 
+    /// A `state.json` that cannot be read (a power cut as it was written, a bad sector) would cost every pairing: the copy the last save
+    /// replaced (`state.json.bak`) is used instead and put back in its place.
     public func loadState() throws -> HAPPersistentState? {
         try lock.withLock { _ in
             let path = stateURL.path(percentEncoded: false)
             guard FileManager.default.fileExists(atPath: path) else { return nil }
-            return try JSONDecoder().decode(HAPPersistentState.self, from: Data(contentsOf: stateURL))
+            do {
+                return try JSONDecoder().decode(HAPPersistentState.self, from: Data(contentsOf: stateURL))
+            } catch {
+                guard let previous = try? Data(contentsOf: PrivateFiles.previousURL(of: stateURL)),
+                      let state = try? JSONDecoder().decode(HAPPersistentState.self, from: previous) else { throw error }
+                Log(category: "hap").warning("The HomeKit pairings of \(account) could not be read; using the copy kept before the last save")
+                try? PrivateFiles.write(previous, to: stateURL)
+                return state
+            }
         }
     }
 
@@ -233,7 +244,7 @@ public final class FileHAPStore: HAPStore {
         try lock.withLock { _ in
             do {
                 try PrivateFiles.prepareDirectory(directory)
-                try PrivateFiles.write(data, to: stateURL)
+                try PrivateFiles.write(data, to: stateURL, keepingPrevious: true)
             } catch PrivateFiles.Failure.createFailed(let name) {
                 throw HAPStoreError.writeFailed(name)
             }
@@ -242,8 +253,9 @@ public final class FileHAPStore: HAPStore {
 
     public func deleteAll() throws {
         try lock.withLock { _ in
-            let path = stateURL.path(percentEncoded: false)
-            if FileManager.default.fileExists(atPath: path) { try FileManager.default.removeItem(atPath: path) }
+            for url in [stateURL, PrivateFiles.previousURL(of: stateURL)] where PrivateFiles.exists(url) {
+                try FileManager.default.removeItem(at: url)
+            }
         }
         try secretStore.write(nil, account: account)
         HAPIdentityCache.forget(identityLockName)

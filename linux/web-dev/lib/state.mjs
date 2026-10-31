@@ -419,7 +419,8 @@ export class DevState {
   notices() {
     const guard = this.cameraList().filter((camera) => camera.definition.security === 'trying').map((camera) => ({
       id: `guard-tried-${camera.definition.id}`, kind: 'internetGuard', severity: 'info', title: `${camera.definition.name} tried to reach the internet`,
-      detail: 'Camera Bridge blocked it. Nothing got out.', cameraID: camera.definition.id, cameraName: camera.definition.name,
+      detail: 'Camera Bridge blocked its lookup. A camera can still try an address it already knows, which the guard can’t see.',
+      cameraID: camera.definition.id, cameraName: camera.definition.name,
       date: isoSeconds(this.serverNow()), action: 'open-camera',
     }));
     return [...this.storageNotices(), ...guard].map((notice) => ({ ...notice, category: categoryOf(notice.kind), key: keyOf(notice) }));

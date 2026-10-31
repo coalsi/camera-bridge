@@ -31,6 +31,13 @@ struct AIUsage: Codable, Equatable, Sendable {
         days[Self.dayName(date, in: zone), default: 0] += 1
     }
 
+    /// One less on the day of `date` (never below zero): a send the service could not take is given back.
+    mutating func remove(at date: Date, in zone: TimeZone) {
+        let day = Self.dayName(date, in: zone)
+        guard let count = days[day], count > 0 else { return }
+        days[day] = count > 1 ? count - 1 : nil
+    }
+
     /// "2026-10-18": the calendar day of `date` in `zone`.
     static func dayName(_ date: Date, in zone: TimeZone) -> String {
         let parts = calendar(zone).dateComponents([.year, .month, .day], from: date)

@@ -108,6 +108,12 @@ final class HikvisionDriver: CameraDriver, Sendable {
         }
     }
 
+    /// Pan, tilt and zoom through ISAPI's `PTZCtrl` (`HikvisionPanTilt`): the runtime asks the camera once whether its channel has them.
+    func makePanTilt() -> (any PanTiltControl)? {
+        HikvisionPanTilt(isapi: isapi, channel: cameraNumber, loginHost: "\(endpoint.host):\(endpoint.httpPort)",
+                         log: Log(category: "hikvision-ptz", cameraID: cameraID))
+    }
+
     /// nil for HTTPS cameras (see `offersTwoWayAudio`): no Speaker is published for a talkback that cannot open. The sink
     /// opens the TwoWayAudio channel the probe offered (`HikvisionTalkbackSink.channel(forCamera:in:)`).
     func makeTalkbackSink() -> (any TalkbackSink)? {

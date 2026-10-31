@@ -80,8 +80,10 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
   call refused, or a write refused after only those, is a refused login as before (logins pause), and a refused login ends the proof. A camera
   whose ONVIF checks no password on its reads but does on its writes would read a wrong password as `.notPermitted` too: no pause, and the
   same words. The other way round, a write that no call proving the login came before on its client is still a refused login when the
-  camera refuses it to the account: the page's camera time zone (`setCameraTimeZone(posix:)` asks only `GetSystemDateAndTime` first, a
-  call before authentication) pauses logins for 2 minutes on such an account, as a Restore does whose first ONVIF call is a write. A
+  camera refuses it to the account: the page's camera time zone through ONVIF (`setCameraTimeZone(posix:)` asks only `GetSystemDateAndTime`
+  first, a call before authentication) pauses logins for 2 minutes on such an account, as a Restore does whose first ONVIF call is a write.
+  Since 2026-10-31 `setCameraTimeZone(posix:)` is the setup's time zone step (`applyTimeZone(posix:)`): Hikvision ISAPI or Reolink's API first,
+  ONVIF only for other cameras, and the zone read back. A
   keyframe request refused so (`SetSynchronizationPoint`) marks the camera as having none (`CameraKeyframeGuard`), so it is not sent again
   at every spacing.
 
@@ -97,8 +99,9 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
   30 s); `ReconnectLoop` logs the first failure of a streak as a warning, the rest at debug with a summary every 10 min; after
   5 short sessions in a row the source emits `.eventChannelUnreliable` and the engine falls back to built-in motion detection.
   Tapo (measured, unauthenticated): its ONVIF HTTP server closes a connection idle for 10.3 s, which kills a PullMessages long
-  poll (`Timeout` PT1M); the PullPoint loop retries on the same subscription with 70 % of the time the camera tolerated and
-  remembers it per host. `EventHoldState`
+  poll (`Timeout` PT1M); the PullPoint loop retries on the same subscription, and after two drops in a row at about the same point
+  (within 1 s: one alone may be a reboot or a Wi-Fi blip, `PullDrops`, 2026-10-31) with 70 % of the time the camera tolerated, which it
+  remembers per host for a day (`learnedPullLifetime`; then the configured timeout is tried again). `EventHoldState`
   emits every transition once: a key is on while any source is on; pulse sources expire after their hold (20 s);
   doorbell rings within 3 s of the previous ring are dropped (ONVIF `Visitor` + Reolink polling). When a channel drops,
   level states (sources without a hold) end with `false` events before `.eventChannel(connected: false)`; the
@@ -107,7 +110,10 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
 - Camera-reported numbers (sample rates, sizes, frame rates, JSON numbers, dates) pass through `CameraNumbers` or range
   checks: NaN, ∞, huge or negative values are dropped, never converted (no traps on hostile input).
 - ONVIF: WS-UsernameToken PasswordDigest with the camera clock offset (SHA-1 from BridgeSupport's `Hashes.sha1`, i.e.
-  swift-crypto; no hand-written hash here); XAddrs keep port/path but take the configured
+  swift-crypto; no hand-written hash here). The offset is measured again every 10 minutes by a client that measured it once, and from
+  the first call by the driver's long-lived client (`keepsClockInStep`); a refused login with an offset older than a minute is checked
+  against the camera's clock first, and when the offset moved by more than 5 s the call is made once more and the refusal does not count
+  (2026-10-31); XAddrs keep port/path but take the configured
   host; with "Use HTTPS" (an HTTPS device service) reported `http` XAddrs, subscription addresses and snapshot URIs
   become `https` on the device service's port, so media, events, PullPoint and snapshots never fall back to cleartext
   (W4 review, round 3); stream/snapshot URIs lose credentials. Event states with a stop (MotionAlarm, cell motion,
@@ -126,7 +132,10 @@ Foundation `XMLParser` (`FoundationXML` on Linux), WS-Discovery through BSD UDP 
   VMD/smart/tamper/IO/audio pulses held 20 s; any bytes (videoloss heartbeat) feed the 5-min idle watchdog; a stream
   that died within 10 s waits ≥ 10 s. Re-subscribing (every event source after a driver's first one: wake, network
   change) reconnects the shared stream at once when every camera on it has re-subscribed since its current attempt
-  began — one reconnect per refresh, none when a camera just joins, none after rejected credentials. Probe:
+  began — one reconnect per refresh, none when a camera just joins, none after rejected credentials. The camera's video coming back
+  after an outage (`CameraEventSource.videoResumed(downSince:)`, 2026-10-31; the default does nothing) reconnects it the same way when
+  its current attempt began before the outage: a camera that lost power leaves the stream half-open, which only the idle watchdog
+  would notice, minutes later. Probe:
   `deviceInfo`, `Streaming/channels`, `Event/triggers` (only `center` notifications reach alertStream),
   `TwoWayAudio/channels` (skipped for HTTPS cameras, which report no two-way audio). Intercoms are not flagged
   `isDoorbell` (no ring event is mapped; the webhook `doorbell` event can ring a camera the user set up as a doorbell).
@@ -530,12 +539,19 @@ tests fake it), `EufyModels` (model codes to names: T8134 is the SoloCam S220), 
 snapshots never wake the camera; motion and people from eufy's push notifications, held 30 s after the last), `Go2RTCSource.eufyBridge(port:token:serial:)`
 (the helper's stream URL for go2rtc; its description never shows the token), `IntegrationService.eufy`, `IntegrationSettings.Key.eufySerial` /
 `eufyModel`. `CameraDriver.streamsOnDemand` defaults to false.
-The Wyze plugin's cameras carry `IntegrationSettings.Key.wyzeMAC`, `wyzeModel` and `wyzeWay` (`rtsp`, `local`, `cloud`, `gwell`).
+The Wyze plugin's cameras carry `IntegrationSettings.Key.wyzeMAC`, `wyzeModel` and `wyzeWay` (`rtsp`, `local`, `cloud`, `gwell`), and a `local` one
+`wyzeAddress` (2026-10-31: the address its go2rtc source was made for).
 
 Pan and tilt (2026-10-16): `PanTiltControl` (continuous `move(pan:tilt:)` in -1…1, `stop()`) and `CameraDriver.makePanTilt()` (default nil). The Wyze
 Cam Pan v4 (`WyzeModels.pansAndTilts(_:)`) turns through `wyze-lake`'s loopback control server, one nudge per move.
 `PanTiltControl.capabilities()` (`PanTiltCapabilities`: pan/tilt, zoom) and `zoom(_:)`; ONVIF cameras with a PTZ profile get `ONVIFPanTilt` (steps:
-`ContinuousMove` for 0.4 s then `Stop`, never left turning).
+`ContinuousMove` for 0.4 s then `Stop`, never left turning). Since 2026-10-31 a move carries `Timeout` PT1S (a camera that refuses it is moved
+without it from then on), a `Stop` follows any move the camera may have acted on (its answer lost or unreadable) and is sent once more when it
+got no answer itself, always from a task a cancelled request cannot cancel; only one move waits behind the step under way (a newer one takes its
+place and the older answers at once), and `stop()` drops it, so a held arrow on a slow camera stops turning when it is let go (`PanTiltSteps`,
+shared with Hikvision's). Hikvision and ANNKE cameras added through ISAPI (2026-10-31) get `HikvisionPanTilt`: ISAPI `PTZCtrl/channels/<n>/continuous`
+in the same steps at half speed, the channel's `capabilities` (continuous pan/tilt and zoom spaces) asked once (a 4xx: no PTZ; a refused login:
+none until the camera starts again), logins through `ONVIFLoginGuard`'s pause. Night vision through ISAPI is not done yet.
 
 IP camera web API (2026-10-16, `IPCWeb/`, notes: `docs/integrations/ip-camera-web-api.md`): the own web API of a family of OEM cameras (an
 Anjvision platform sold under many brands, its sign-in page showing "IP Camera Web Login"), used next to ONVIF for what their ONVIF reports wrongly.

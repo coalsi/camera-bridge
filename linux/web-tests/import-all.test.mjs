@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { installFakeBrowser } from './support/fake-browser.mjs';
 
@@ -59,15 +59,35 @@ test('index.html links only files that exist, and loads one module script and th
   assert.match(html, /<script type="module" src="\/js\/app\.js">/);
 });
 
-test('app.js starts the page: with no bridge to talk to, it shows its own error card', async () => {
+test('app.js starts the page: with no bridge to talk to, it shows its own error card and asks again by itself, a little later each time', async () => {
   const browser = installFakeBrowser();
+  // The page's own timers are the test's: its next try waits on one, which would otherwise keep this process open.
+  mock.timers.enable({ apis: ['setTimeout'] });
+  let asked = 0;
+  globalThis.fetch = async () => { asked += 1; throw new TypeError('fetch failed (no bridge in this test)'); };
+  const settle = async () => { for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   try {
     await import(urlOf('js/app.js'));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await settle();
     const text = browser.document.getElementById('app').textContent;
     assert.match(text, /Can’t reach the bridge/);
+    assert.match(text, /Trying again by itself/);
     assert.match(text, /Try again/);
+    assert.equal(asked, 1);
+    mock.timers.tick(4_999);
+    await settle();
+    assert.equal(asked, 1, 'not before 5 s');
+    mock.timers.tick(1);
+    await settle();
+    assert.equal(asked, 2, 'a box that is still starting is asked again after 5 s');
+    mock.timers.tick(9_999);
+    await settle();
+    assert.equal(asked, 2, 'then after 10 s');
+    mock.timers.tick(1);
+    await settle();
+    assert.equal(asked, 3);
   } finally {
+    mock.timers.reset();
     browser.restore();
   }
 });

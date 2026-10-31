@@ -270,11 +270,18 @@ public struct SystemInfo: Codable, Sendable, Equatable {
     public var install: InstallProgress?
     /// The system runs from a USB drive (the installer stick); nil when it can't be told. The page offers installing to a disk then.
     public var runningFromUSB: Bool?
+    /// The drives' health from the system's daily check; nil where the system does not check it (or has not yet since it started).
+    public var driveHealth: DriveHealthReport?
+    /// Whether the clock follows a time server; nil where the system does not say.
+    public var clock: ClockStatus?
+    /// The network connection that carries the box's traffic, with a cable's speed; nil where the system does not say.
+    public var networkLink: NetworkLink?
 
     public init(product: String, version: String, build: String, mode: String, osName: String? = nil, hostname: String? = nil,
                 hardware: String? = nil, architecture: String? = nil, canUpdate: Bool = false, canReboot: Bool = false,
                 canInstall: Bool = false, update: UpdateStatus? = nil, canManage: Bool = false, runningFromUSB: Bool? = nil, sshEnabled: Bool? = nil,
-                automaticUpdates: Bool? = nil, install: InstallProgress? = nil) {
+                automaticUpdates: Bool? = nil, install: InstallProgress? = nil, driveHealth: DriveHealthReport? = nil, clock: ClockStatus? = nil,
+                networkLink: NetworkLink? = nil) {
         self.product = product
         self.version = version
         self.build = build
@@ -292,6 +299,131 @@ public struct SystemInfo: Codable, Sendable, Equatable {
         self.automaticUpdates = automaticUpdates
         self.install = install
         self.runningFromUSB = runningFromUSB
+        self.driveHealth = driveHealth
+        self.clock = clock
+        self.networkLink = networkLink
+    }
+}
+
+/// The health of the box's drives, as the system checks it every day (SMART, NVMe wear, the errors their file systems recorded).
+public struct DriveHealthReport: Codable, Sendable, Equatable {
+    /// "ok", "warning" (a drive needs attention), "failing" (a drive says it is failing) or "unknown" (no drive reports its health).
+    public var state: String
+    public var message: String
+    /// When the system checked.
+    public var checked: Date?
+    /// The box's own disk, the recording drive and the archive drive, those that are attached.
+    public var drives: [DriveHealth]
+
+    public init(state: String, message: String, checked: Date? = nil, drives: [DriveHealth] = []) {
+        self.state = state
+        self.message = message
+        self.checked = checked
+        self.drives = drives
+    }
+}
+
+/// One drive's health.
+public struct DriveHealth: Codable, Sendable, Equatable {
+    /// "system" (the box's own disk), "recording" (the recording drive) or "archive" (the archive drive).
+    public var role: String
+    /// The kernel's name ("nvme0n1", "sdb") and the model, when known.
+    public var name: String?
+    public var model: String?
+    /// "ok", "warning", "failing" or "unknown" (the drive does not report its health: many USB enclosures do not).
+    public var state: String
+    /// What it reports, in sentences for the person.
+    public var message: String
+    /// How much of its rated life it has used (an SSD's wear; above 100 past it); nil when it does not say.
+    public var percentUsed: Int?
+    public var temperatureCelsius: Int?
+    public var powerOnHours: Int?
+    /// NVMe's media errors, and a hard disk's replaced and unreadable sectors.
+    public var mediaErrors: Int?
+    public var reallocatedSectors: Int?
+    public var pendingSectors: Int?
+    /// The errors its file system recorded.
+    public var fileSystemErrors: Int?
+
+    public init(role: String, name: String? = nil, model: String? = nil, state: String, message: String, percentUsed: Int? = nil, temperatureCelsius: Int? = nil,
+                powerOnHours: Int? = nil, mediaErrors: Int? = nil, reallocatedSectors: Int? = nil, pendingSectors: Int? = nil, fileSystemErrors: Int? = nil) {
+        self.role = role
+        self.name = name
+        self.model = model
+        self.state = state
+        self.message = message
+        self.percentUsed = percentUsed
+        self.temperatureCelsius = temperatureCelsius
+        self.powerOnHours = powerOnHours
+        self.mediaErrors = mediaErrors
+        self.reallocatedSectors = reallocatedSectors
+        self.pendingSectors = pendingSectors
+        self.fileSystemErrors = fileSystemErrors
+    }
+
+    /// It says it is failing, or it has used more than 90% of its rated life: the person should replace it (a notice says so).
+    public var needsReplacing: Bool { state == "failing" || (percentUsed ?? 0) > 90 }
+}
+
+/// The clock, as the system's time service sees it.
+public struct ClockStatus: Codable, Sendable, Equatable {
+    /// The clock follows a time server. False also while the box only serves its own clock (no server reached): recordings and the cameras it
+    /// serves time to may then drift from the real time.
+    public var synchronized: Bool
+    /// The time server it follows (an address), when synchronized.
+    public var source: String?
+    /// How far off the clock is from the server, in seconds.
+    public var offsetSeconds: Double?
+    /// When it last heard from the server.
+    public var lastSync: Date?
+
+    public init(synchronized: Bool, source: String? = nil, offsetSeconds: Double? = nil, lastSync: Date? = nil) {
+        self.synchronized = synchronized
+        self.source = source
+        self.offsetSeconds = offsetSeconds
+        self.lastSync = lastSync
+    }
+}
+
+/// The network connection that carries the box's traffic.
+public struct NetworkLink: Codable, Sendable, Equatable {
+    public var interface: String
+    /// A network cable (false: Wi-Fi).
+    public var wired: Bool
+    /// The speed the cable negotiated, in Mb/s, and its duplex ("full", "half"); nil when unknown or on Wi-Fi.
+    public var speedMbps: Int?
+    public var duplex: String?
+
+    public init(interface: String, wired: Bool, speedMbps: Int? = nil, duplex: String? = nil) {
+        self.interface = interface
+        self.wired = wired
+        self.speedMbps = speedMbps
+        self.duplex = duplex
+    }
+
+    /// A cable that came up below 1 Gb/s (a bad cable or switch port, on boxes whose port does a gigabit): with many cameras the box runs out
+    /// of room.
+    public var isSlowerThanGigabit: Bool { wired && (speedMbps.map { $0 < 1000 } ?? false) }
+}
+
+/// Something the system under the bridge reports that needs the person (a drive that is failing or worn out), for the page's notices. The daemon
+/// hands them to the web interface with the bridge's overview (`BridgeOverview.systemNotices`).
+public struct SystemNotice: Sendable, Equatable {
+    public var id: String
+    public var kind: String
+    /// "warning" or "info".
+    public var severity: String
+    public var title: String
+    public var detail: String
+    public var date: Date
+
+    public init(id: String, kind: String, severity: String, title: String, detail: String, date: Date) {
+        self.id = id
+        self.kind = kind
+        self.severity = severity
+        self.title = title
+        self.detail = detail
+        self.date = date
     }
 }
 
@@ -315,7 +447,7 @@ public struct InstallProgress: Codable, Sendable, Equatable {
 }
 
 public struct UpdateStatus: Codable, Sendable, Equatable {
-    private enum CodingKeys: String, CodingKey { case state, available, current, latest, notes, checked, message, rebootRequired }
+    private enum CodingKeys: String, CodingKey { case state, available, current, latest, notes, checked, message, rebootRequired, failedVersion }
 
     /// The system's helper may leave out what it does not know: every field has a default.
     public init(from decoder: any Decoder) throws {
@@ -328,6 +460,7 @@ public struct UpdateStatus: Codable, Sendable, Equatable {
         checked = try container.decodeIfPresent(Date.self, forKey: .checked)
         message = try container.decodeIfPresent(String.self, forKey: .message)
         rebootRequired = try container.decodeIfPresent(Bool.self, forKey: .rebootRequired) ?? false
+        failedVersion = try container.decodeIfPresent(String.self, forKey: .failedVersion)
     }
 
     /// "idle", "checking", "downloading" (downloading, verifying or installing), "ready" (installed, waiting for a restart) or
@@ -340,9 +473,12 @@ public struct UpdateStatus: Codable, Sendable, Equatable {
     public var checked: Date?
     public var message: String?
     public var rebootRequired: Bool
+    /// A newer version that was installed and did not start properly, so the box went back to `current` by itself; it is never offered again
+    /// (`message` says so in a sentence). nil when that did not happen, or a newer version runs now.
+    public var failedVersion: String?
 
     public init(state: String = "idle", available: Bool = false, current: String, latest: String? = nil, notes: String? = nil,
-                checked: Date? = nil, message: String? = nil, rebootRequired: Bool = false) {
+                checked: Date? = nil, message: String? = nil, rebootRequired: Bool = false, failedVersion: String? = nil) {
         self.state = state
         self.available = available
         self.current = current
@@ -351,6 +487,7 @@ public struct UpdateStatus: Codable, Sendable, Equatable {
         self.checked = checked
         self.message = message
         self.rebootRequired = rebootRequired
+        self.failedVersion = failedVersion
     }
 }
 

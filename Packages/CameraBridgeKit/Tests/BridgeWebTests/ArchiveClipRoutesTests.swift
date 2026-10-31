@@ -43,7 +43,39 @@ import Testing
         #expect(Int64(file.count) == planned, "exactly the planned number of bytes")
         #expect(Array(file.prefix(8).suffix(4)) == Array("ftyp".utf8) && file.count > 1_000)
         #expect(response.headers["Content-Type"] == "video/mp4" && response.headers["Cache-Control"] == "no-store")
+        #expect(response.headers["Content-Length"] == String(planned), "the browser can show progress and tell a cut download from a finished one")
         #expect(response.headers["Content-Disposition"]?.hasPrefix("attachment; filename=\"") == true && response.headers["Content-Disposition"]?.contains("filename*=UTF-8''") == true)
+    }
+
+    @Test func aClipThatCannotBeFinishedFailsInsteadOfEndingAsADownload() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        let file = try rig.file(fragments: 8, gopFragments: 2)
+        archive.files = [file]
+        let response = await rig.harness.raw("GET", "/api/v1/nvr/cameras/\(rig.cameraID)/clip?" + query(rig, 1_500, 6_000, extra: "&part=1"), cookie: rig.session.cookie)
+        #expect(response.status == 200)
+        guard case .stream(let body) = response.body else { Issue.record("the clip is not a stream"); return }
+        for fragment in file.fragments { archive.fail(fragment.id, with: .unreadable("the drive went away")) }   // after the plan, before the bytes
+        let collected = Box(Data())
+        await #expect(throws: (any Error).self, "the server then leaves out the last chunk, and the browser marks the download failed") {
+            try await body(ResponseStream { data in collected.update { $0.append(data) } })
+        }
+        #expect(!collected.value.isEmpty && Int64(collected.value.count) < Int64(response.headers["Content-Length"] ?? "") ?? 0, "half a file was sent")
+        #expect(rig.harness.app.archiveSlotsInUse == 0)
+    }
+
+    @Test func aClipThatIsNeverSentGivesItsArchiveSlotBack() async throws {
+        let rig = try await rig()
+        let response = await rig.harness.raw("GET", "/api/v1/nvr/cameras/\(rig.cameraID)/clip?" + query(rig, 1_500, 6_000, extra: "&part=1"), cookie: rig.session.cookie)
+        #expect(response.status == 200 && rig.harness.app.archiveSlotsInUse == 1)
+        response.onDiscard?()   // what the server does when the answer's head cannot be sent
+        #expect(rig.harness.app.archiveSlotsInUse == 0)
+        guard case .stream(let body) = response.body else { Issue.record("the clip is not a stream"); return }
+        try? await body(ResponseStream { _ in })
+        #expect(rig.harness.app.archiveSlotsInUse == 0, "given back once, not twice")
+        let other = await rig.harness.raw("GET", "/api/v1/nvr/cameras/\(rig.cameraID)/clip?" + query(rig, 1_500, 6_000, extra: "&part=1"), cookie: rig.session.cookie)
+        #expect(other.status == 200 && rig.harness.app.archiveSlotsInUse == 1)
+        other.onDiscard?()
     }
 
     @Test func badRequestsAndNothingRecordedAreAnsweredInWords() async throws {

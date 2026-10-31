@@ -67,7 +67,7 @@ extension BridgeEngine {
         let name = night ?? SkyNight.latestLogName(view: view, now: now, observer: observer, zone: zone)
         let span = SkyNight.logSpan(named: name, view: view, observer: observer, zone: zone)
         let log = skyLog
-        let stored = try await nvr.store.skyRead { try Self.readNight(log, camera: cameraID, night: name, folder: folder) }
+        let stored = try await Self.readNight(log, from: nvr.store, camera: cameraID, night: name, folder: folder)
         let inView = stored.entries.filter { $0.start >= span.lowerBound && $0.start < span.upperBound }
         let conditions = stored.conditions.filter { $0.to > span.lowerBound && $0.from < span.upperBound }
         let capped = stored.capped.filter { $0.hour.addingTimeInterval(3_600) > span.lowerBound && $0.hour < span.upperBound }
@@ -90,7 +90,7 @@ extension BridgeEngine {
     /// `observer` (the box's place; with none, never by day), the latest correction of a joined light's parts showing (`corrected`).
     func skyJoined(_ entries: [SkyEntry], cameraID: UUID, observer: SkyObserver?, stills: SkyPictureSize?, corrected: [String: Date]) async -> [SkyEntry] {
         guard entries.count >= 2 else { return entries }
-        let picture = skyStitchPicture(cameraID, stills: stills)
+        let picture = await skyStitchPicture(cameraID, stills: stills)
         return await Task.detached(priority: .userInitiated) {
             SkyStitch.joined(entries, picture: picture, isDay: { date in
                 observer.map { SunEphemeris.direction(at: date, observer: $0).elevation >= SunEphemeris.darkElevation } ?? false
@@ -98,10 +98,12 @@ extension BridgeEngine {
         }.value
     }
 
-    /// A camera's picture as the joining reads it: the analysed size (the picture's, at most `SkyStreamChoice.maximumAnalysisWidth` wide, from the camera's
-    /// main stream as last seen, else from the night's `stills`, else 1,920 × 1,080) and, for two lenses side by side (as the camera is set, else 2:1 and
+    /// A camera's picture as the joining reads it: its running detector's (the size it analyses, which is the sub stream's when it watches that one,
+    /// and its seam; review Oct 31), else the analysed size (the picture's, at most `SkyStreamChoice.maximumAnalysisWidth` wide, from the camera's main
+    /// stream as last seen, else from the night's `stills`, else 1,920 × 1,080) and, for two lenses side by side (as the camera is set, else 2:1 and
     /// wider), the seam.
-    func skyStitchPicture(_ cameraID: UUID, stills: SkyPictureSize?) -> SkyStitch.Picture {
+    func skyStitchPicture(_ cameraID: UUID, stills: SkyPictureSize?) async -> SkyStitch.Picture {
+        if let detector = skyDetectors[cameraID], let live = await detector.stitchPicture { return live }
         let stream = cameras.first { $0.id == cameraID }?.mainStreamInfo.flatMap { info -> SkyPictureSize? in
             info.width > 0 && info.height > 0 ? SkyPictureSize(width: info.width, height: info.height) : nil
         }
@@ -159,7 +161,7 @@ extension BridgeEngine {
         guard SkyEntry.isValidID(entryID) else { throw SkyLogError.unknownEntry }
         guard let folder = skyFolder else { throw SkyLogError.noFolder }
         let log = skyLog
-        let stored = try await nvr.store.skyRead { try Self.readNight(log, camera: cameraID, night: night, folder: folder) }
+        let stored = try await Self.readNight(log, from: nvr.store, camera: cameraID, night: night, folder: folder)
         guard let said = stored.entries.first(where: { $0.id == entryID }) else { throw SkyLogError.unknownEntry }
         let observer = settings.sky.location.map { SkyObserver(latitude: $0.latitude, longitude: $0.longitude, heightMeters: $0.heightMeters) }
         // Joined as the page showed it: within the view (the night or the day) the entry began in, as `skyNightLog` joins it.
@@ -221,9 +223,14 @@ extension BridgeEngine {
         guard SkyLogStore.isValidNight(name), SkyNight.localDay(named: name, zone: BridgeTime.zone) != nil else { throw SkyLogError.unknownNight }
     }
 
-    nonisolated static func readNight(_ log: SkyLogStore, camera: UUID, night: String, folder: URL) throws -> SkyLogContents {
-        guard SkyLogStore.folderExists(folder) else { throw ArchiveUnavailable.folderMissing }
-        return log.contents(camera: camera, night: night, folder: folder)
+    /// A night of the log through `store`'s read queue: only the bytes are read under its deadline (bounded disk work); they are parsed after,
+    /// off the queue. A parse is CPU work: under the deadline, a slow one on a loaded box marked the drive's reads stalled and failed playback.
+    nonisolated static func readNight(_ log: SkyLogStore, from store: ArchiveStore, camera: UUID, night: String, folder: URL) async throws -> SkyLogContents {
+        let raw = try await store.skyRead { () throws -> SkyLogStore.RawNight in
+            guard SkyLogStore.folderExists(folder) else { throw ArchiveUnavailable.folderMissing }
+            return log.rawNight(camera: camera, night: night, folder: folder)
+        }
+        return await Task.detached(priority: .userInitiated) { SkyLogStore.parse(raw, camera: camera) }.value
     }
 
     /// The camera's aim and learning for the log: its detector's while it runs; otherwise not fitted, with nothing matched.
@@ -325,7 +332,7 @@ extension BridgeEngine {
         return SkyCameraDetector.Context(cameraID: id, cameraName: camera.name, settings: detectorSettings,
                                          observer: SkyObserver(latitude: location.latitude, longitude: location.longitude, heightMeters: location.heightMeters),
                                          zone: BridgeTime.zone, pictureWidth: size?.width ?? 0, pictureHeight: size?.height ?? 0, folder: { folder },
-                                         still: { [weak self] date in await self?.skyStillPicture(cameraID: id, around: date) },
+                                         still: { [weak self] date, reach in await self?.skyStillPicture(cameraID: id, around: date, within: reach) },
                                          roomForStills: { [weak self] in await self?.skyStillsHaveRoom() ?? false },
                                          recordedStill: { date in
                                              await Task.detached(priority: .utility) {
@@ -336,7 +343,7 @@ extension BridgeEngine {
                                          },
                                          readLog: { night in
                                              guard let folder else { return nil }
-                                             return try? await store.skyRead { try Self.readNight(log, camera: id, night: night, folder: folder).entries }
+                                             return try? await Self.readNight(log, from: store, camera: id, night: night, folder: folder).entries
                                          },
                                          stillWritten: { entryID, night in
                                              guard let folder else { return }
@@ -377,9 +384,10 @@ extension BridgeEngine {
             let bytes = try await archive.read(key, .keyframe)
             let info = try FMP4InitReader.parse(try await archive.read(key, .initialization))
             let frame = try FMP4FrameSlicer.frame(fromKeyframeBytes: bytes, info: info, start: key.start)
-            let picture = try await decoders.jpeg(fromKeyframe: frame, maxWidth: nil, maxHeight: nil, quality: 0.8)
-            guard let smaller = await skyStillJPEG(picture, codecs: codecs) else { return .failed }
-            return .made(smaller)
+            // Made `skyStillWidth` wide in the one encode (review Oct 31: a full-size encode, then a second decode and encode to shrink it).
+            let picture = try await decoders.jpeg(fromKeyframe: frame, maxWidth: skyStillWidth, maxHeight: nil, quality: 0.8)
+            guard !picture.isEmpty else { return .failed }
+            return .made(picture)
         } catch ArchiveError.fileGone {
             return .gone
         } catch ArchiveError.timedOut {
@@ -408,20 +416,14 @@ extension BridgeEngine {
         SkyLightFilter.stillsHaveRoom(nvr.storageStatus())
     }
 
-    /// A still for the sky log: the camera's own picture nearest `date` (`CameraRuntime.skyStill`), at most `skyStillWidth` wide (a stitched
-    /// camera's full picture is about 1 MB; the log keeps one for each light nothing explains, at most 30 an hour). nil when the picture cannot
-    /// be made smaller: a full-size one is not kept.
-    func skyStillPicture(cameraID: UUID, around date: Date) async -> (jpeg: Data, at: Date)? {
-        guard let runtime = runtimes[cameraID], let still = await runtime.skyStill(around: date),
-              let smaller = await Self.skyStillJPEG(still.jpeg, codecs: environment.codecs) else { return nil }
-        return (smaller, still.at)
-    }
-
-    /// `jpeg` made at most `skyStillWidth` wide, off the main actor; nil when `codecs` cannot (or answers nothing).
-    nonisolated static func skyStillJPEG(_ jpeg: Data, codecs: any MediaCodecs) async -> Data? {
-        let smaller = try? await offMain { try codecs.resizeJPEG(jpeg, maxWidth: skyStillWidth, maxHeight: nil) }
-        guard let smaller, !smaller.isEmpty else { return nil }
-        return smaller
+    /// A still for the sky log: the camera's own picture nearest `date` from a keyframe at most `reach` seconds from it (`CameraRuntime.skyStill`),
+    /// at most `skyStillWidth` wide (a stitched camera's full picture is about 1 MB; the log keeps one for each light nothing explains, at most 30
+    /// an hour), made that size in the one decode and encode. nil when the ring has no keyframe that near (nothing is decoded) or the picture
+    /// cannot be made.
+    func skyStillPicture(cameraID: UUID, around date: Date, within reach: TimeInterval) async -> (jpeg: Data, at: Date)? {
+        guard let runtime = runtimes[cameraID], let still = await runtime.skyStill(around: date, within: reach, maxWidth: Self.skyStillWidth),
+              !still.jpeg.isEmpty else { return nil }
+        return still
     }
 
     nonisolated static let skyStillWidth = 1920

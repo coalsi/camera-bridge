@@ -5,7 +5,9 @@ import MediaCore
 
 // Saving a clip from the browser (export-clip design, section 6): what a clip of one camera would be (`GET /nvr/cameras/:id/clip-plan`) and the
 // clip itself as one MP4 download (`GET /nvr/cameras/:id/clip`). The planning and the writing are `ClipExporter`'s; this only parses the request,
-// holds an archive slot for as long as a download runs and turns the engine's errors into sentences.
+// holds an archive slot for as long as a download runs (given back once, also when the answer is never sent: `HTTPResponse.onDiscard`) and
+// turns the engine's errors into sentences. A clip that fails half way throws out of the stream, so the server leaves out the last chunk
+// (or, for a clip sent with its size, ends short) and the browser marks the download failed instead of finished.
 
 extension WebApp {
     private struct PartResource: Encodable {
@@ -95,7 +97,9 @@ extension WebApp {
         }
     }
 
-    /// The bytes of one part, written to the connection as the writer produces them (chunked: the size is in the plan, not in a header).
+    /// The bytes of one part, written to the connection as the writer produces them. The recording's own bytes are sent with the plan's exact
+    /// size as `Content-Length` (`ClipWriter` writes exactly `ClipPart.byteCount`), so the browser shows progress and knows a cut download;
+    /// a converted clip's size is not known before it is made, so it is chunked.
     func nvrClip(_ ctx: RequestContext) async throws -> HTTPResponse {
         try refuseHEAD(ctx)
         let request = try await clipRequest(ctx)
@@ -106,16 +110,17 @@ extension WebApp {
         guard takeArchiveSlot(address: address) else {
             throw APIError(status: 429, code: "busy", message: "The bridge is busy with other recordings. Try again in a moment.", headers: [("Retry-After", "1")])
         }
+        let release = ReleaseOnce { [self] in releaseArchiveSlot(address: address) }
         let exporter = ClipExporter(archive: archive)
         let plan: ClipPlan
         do {
             plan = try await exporter.plan(request)
         } catch {
-            releaseArchiveSlot(address: address)
+            release()
             throw Self.clipAPIError(error)
         }
         guard plan.parts.indices.contains(part - 1) else {
-            releaseArchiveSlot(address: address)
+            release()
             throw APIError.notFound("The clip has no part \(part).")
         }
         // Re-encoded for the bridge's label (name, date and time) burned in, and for the camera's picture correction when the person asked for
@@ -128,21 +133,24 @@ extension WebApp {
         }
         if labels || correction != nil || speed != nil {
             return try await processedClip(plan: plan, part: part, exporter: exporter, cameraID: request.camera, name: request.cameraName, labels: labels,
-                                           correction: correction, speed: speed, release: { [self] in releaseArchiveSlot(address: address) })
+                                           correction: correction, speed: speed, release: { release() })
         }
         let name = plan.parts[part - 1].fileName
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
         headers["Content-Disposition"] = Self.attachment(name)
         log.notice("a clip of \(request.cameraName) is being sent")
-        return HTTPResponse.stream(contentType: "video/mp4", headers: headers) { stream in
-            defer { self.releaseArchiveSlot(address: address) }
+        var response = HTTPResponse.stream(contentType: "video/mp4", headers: headers, contentLength: plan.parts[part - 1].byteCount) { stream in
+            defer { release() }
             do {
                 try await exporter.export(plan, part: part, to: StreamClipSink(stream: stream)) { _ in }
             } catch {
-                self.log.warning("sending a clip failed: \(String(describing: error))")
+                self.log.warning("sending a clip failed: \(Redact.string(String(describing: error)))")
+                throw error
             }
         }
+        response.onDiscard = { release() }
+        return response
     }
 
     /// The speeds a time-lapse clip can be saved at (`speed` on the clip route): the Monitor's time-lapse speeds.

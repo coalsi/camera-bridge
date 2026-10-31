@@ -286,6 +286,15 @@ private func milliseconds(_ date: Date) -> Int64 { WebApp.milliseconds(date) }
 /// Glibc has a function of that name.)
 private func plain(_ value: Double) -> Double { value.isFinite ? value : 0 }
 
+/// `value` to `places` decimals (a finite one; else 0): a path's points are served to what the page can show, a hundred-thousandth of the
+/// picture and a millisecond, not at full double precision (about 70 bytes a point, 64 points a light: several MB for a busy night).
+private func rounded(_ value: Double, places: Int) -> Double {
+    guard value.isFinite else { return 0 }
+    let scale = pow(10, Double(places))
+    let scaled = (value * scale).rounded()
+    return scaled.isFinite ? scaled / scale : value
+}
+
 /// One entry of the log as the page reads it: the entry's own fields, `display` (the label the log shows: the person's word wins), `watch`
 /// (the recordings' moment to open, three seconds before it began) and `sortedLater` (logged before the rules and sorted by them as the log was
 /// read: `SkySortLater`). Optional values are null, not left out. A light seen in pieces says how many (`pieces`); one the log kept in pieces and
@@ -308,6 +317,12 @@ struct SkyEntryResource: Encodable {
         var t: Double
         var x: Double
         var y: Double
+
+        init(_ point: SkyPathPoint) {
+            t = rounded(point.t, places: 3)
+            x = rounded(point.x, places: 5)
+            y = rounded(point.y, places: 5)
+        }
     }
 
     private struct StillPart: Encodable {
@@ -329,7 +344,7 @@ struct SkyEntryResource: Encodable {
         try container.encode(entry.kind.rawValue, forKey: .kind)
         try container.encode(milliseconds(entry.start), forKey: .start)
         try container.encode(milliseconds(entry.end), forKey: .end)
-        try container.encode(entry.path.map { Point(t: plain($0.t), x: plain($0.x), y: plain($0.y)) }, forKey: .path)
+        try container.encode(entry.path.map(Point.init), forKey: .path)
         try container.encode(SkyMeasuresResource(entry.measures), forKey: .measures)
         try container.encode(entry.label.rawValue, forKey: .label)
         try container.encode(SkyDisplay.label(entry).rawValue, forKey: .display)
@@ -351,7 +366,7 @@ struct SkyEntryResource: Encodable {
         try container.encode(max(1, entry.pieces), forKey: .pieces)
         try container.encode(entry.parts, forKey: .parts)
         try container.encode(OrNull(entry.stillPart.map { part in
-            StillPart(id: part.id, path: part.path.map { Point(t: plain($0.t), x: plain($0.x), y: plain($0.y)) })
+            StillPart(id: part.id, path: part.path.map(Point.init))
         }), forKey: .stillPart)
     }
 }

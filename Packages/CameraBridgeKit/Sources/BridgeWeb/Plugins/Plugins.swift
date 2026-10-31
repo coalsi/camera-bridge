@@ -40,7 +40,8 @@ enum PluginCatalog {
             summary: "Watches the sky with a camera pointed up and keeps a log of planes, satellites, meteors and anything it can’t explain.",
             needs: "A camera that looks at the sky, and a recordings folder for the sky log.",
             needsInternet: false,
-            internetNote: "Works without the internet: planes come from a flight receiver on your network. When the internet is there, Camera Bridge can also download satellite orbits once a day and ask free online services for flights and weather in a wide area around you, never your exact spot. Nothing leaves the box while Sky Watcher is off."),
+            // What ships, and nothing more: no orbits, no online flights or weather are fetched (review Oct 31).
+            internetNote: "Works without the internet: planes come from a flight receiver on your network. Nothing leaves the box."),
     ]
 
     static func descriptor(id: String) -> Descriptor? { all.first { $0.id == id } }

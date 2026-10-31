@@ -18,7 +18,9 @@ final class SecureAddressSnapshot: Sendable {
 /// The secure address, from the box's side: it registers with the Camera Bridge website once, keeps the website told of its home
 /// address, and asks the system (`obtainCertificate`, the `tls-obtain` request) for a certificate when there is none and 30 days before
 /// it expires, with growing waits after a failure. The certificate's key is made on the box by the system; the website only writes DNS
-/// records. Only a system with a TLS front takes part (`certificateStatus() != nil`).
+/// records. Only a system with a TLS front takes part (`certificateStatus() != nil`), and only while its switch is on (`setEnabled`, on
+/// unless turned off): off, it calls nobody and browsers are not sent to the name. The website's answer is a box name and its host under
+/// `box.camera-bridge.app`, or it is refused (it becomes an allowed `Host` and the page's link).
 actor SecureAddressService {
     struct Problem: Encodable, Equatable, Sendable {
         /// `no_internet`, `service_not_ready`, `rate_limited`, `refused`, `certificate`.
@@ -35,7 +37,10 @@ actor SecureAddressService {
 
     struct Report: Encodable, Equatable, Sendable {
         var available: Bool
-        /// `off` (not registered yet), `waiting` (registered, certificate on its way), `ready`, `error`.
+        /// The switch (`setEnabled`).
+        var enabled: Bool
+        /// `off` (switched off, or not registered yet), `waiting` (certificate on its way, or waiting for the internet: `problem.code`
+        /// `no_internet`), `ready`, `error`.
         var state: String
         var host: String?
         var url: String?
@@ -65,19 +70,35 @@ actor SecureAddressService {
     private var rebind: Rebind?
     private var available = false
     private var loop: Task<Void, Never>?
+    /// The rebind self-test under way: a second page asking meanwhile waits for its answer.
+    private var rebindCheck: Task<Rebind, Never>?
 
+    /// The default `resolver` looks names up on a thread of its own: `getaddrinfo` blocks for the resolver's whole timeout when DNS is down,
+    /// and Swift's cooperative pool (4 threads on the box) runs the live video and the recordings.
     init(backend: any BridgeBackend, system: any SystemControlling, directory: URL, client: BoxClient? = nil,
-         resolver: @escaping @Sendable (String) async -> [String] = { name in await Task.detached { SecureAddressService.resolve(name) }.value }, now: @escaping @Sendable () -> Date = { Date() }) {
+         resolver: @escaping @Sendable (String) async -> [String] = SecureAddressService.resolveOffThePool, now: @escaping @Sendable () -> Date = { Date() }) {
         self.backend = backend
         self.system = system
         self.directory = directory
-        let loaded = SecureAddressState.load(from: directory)
+        var loaded = SecureAddressState.load(from: directory)
+        let registered = loaded.name.flatMap { name in loaded.host.map { SecureAddressRules.isBoxHost($0, name: name) } } ?? false
+        if !registered, loaded.name != nil || loaded.host != nil {
+            loaded.name = nil   // not what the website makes: registered again
+            loaded.host = nil
+            loaded.address = nil
+        }
         state = loaded
         self.client = client ?? BoxClient()
         self.client.seed(loaded.lastTimestamp)
         self.resolver = resolver
         self.now = now
-        snapshot.update { $0.host = loaded.host; $0.redirect = loaded.redirect }
+        snapshot.update { $0.host = loaded.host; $0.redirect = loaded.redirect && loaded.isEnabled }
+    }
+
+    @Sendable static func resolveOffThePool(_ name: String) async -> [String] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { continuation.resume(returning: resolve(name)) }
+        }
     }
 
     func start() {
@@ -103,6 +124,7 @@ actor SecureAddressService {
         available = status != nil
         guard let status else { return refreshSnapshot() }
         problem = nil
+        guard state.isEnabled else { return refreshSnapshot() }   // switched off: nobody is called
         if let wait = state.websiteWaitUntil, wait > now() { return refreshSnapshot() }   // left alone after the website failed
         do {
             if state.name == nil { try await register() }
@@ -132,6 +154,9 @@ actor SecureAddressService {
     private func register() async throws {
         let identity = try await loadIdentity()
         let registration = try await client.register(publicKey: identity.publicKeyBase64)
+        guard SecureAddressRules.isBoxHost(registration.host, name: registration.name) else {
+            throw BoxClientError(kind: .refused, message: "The Camera Bridge website gave an answer this box doesn’t understand.")
+        }
         state.name = registration.name
         state.host = registration.host
         state.attempts = 0
@@ -197,6 +222,20 @@ actor SecureAddressService {
         refreshSnapshot()
     }
 
+    /// The secure address's switch. On again, it starts at once (the waits are forgotten).
+    func setEnabled(_ enabled: Bool) async {
+        state.enabled = enabled
+        problem = nil
+        if enabled {
+            state.nextAttempt = nil
+            state.websiteWaitUntil = nil
+        }
+        persist()
+        refreshSnapshot()
+        log.notice("the secure address was switched \(enabled ? "on" : "off")")
+        if enabled { await tick() }
+    }
+
     /// Forget the waits and try now (the page's "Try again").
     func retryNow() async {
         state.nextAttempt = nil
@@ -209,17 +248,29 @@ actor SecureAddressService {
         available = status != nil
         refreshSnapshot()
         let valid = SecureAddressRules.isValid(status, host: state.host, now: now())
-        let waiting = state.host != nil && !valid
-        let shownState = problem != nil && !valid ? "error" : valid ? "ready" : waiting ? "waiting" : "off"
+        let enabled = state.isEnabled
+        // No internet is not an error: the box waits for it and tries again by itself.
+        let noInternet = problem?.code == "no_internet"
+        let waiting = (state.host != nil || noInternet) && !valid
+        let shownState = !enabled ? "off" : problem != nil && !valid && !noInternet ? "error" : valid ? "ready" : waiting ? "waiting" : "off"
         let expires = valid ? status?.notAfter : nil
-        return Report(available: available, state: available ? shownState : "off", host: state.host, url: state.host.map { "https://\($0)" }, address: state.address,
-                      expiresOn: expires, renewsOn: expires.map { $0.addingTimeInterval(-SecureAddressRules.renewBefore) }, redirect: state.redirect,
-                      redirectActive: state.redirect && valid, problem: problem, rebind: rebind)
+        return Report(available: available, enabled: enabled, state: available ? shownState : "off", host: state.host, url: state.host.map { "https://\($0)" },
+                      address: state.address, expiresOn: expires, renewsOn: expires.map { $0.addingTimeInterval(-SecureAddressRules.renewBefore) },
+                      redirect: state.redirect, redirectActive: enabled && state.redirect && valid, problem: enabled ? problem : nil, rebind: rebind)
     }
 
     /// The self-test for routers that hide names pointing into the home (DNS rebind protection): ask this box's own resolver for the
     /// secure address and see whether the home address comes back.
     func checkRebind() async -> Rebind {
+        if let running = rebindCheck { return await running.value }
+        let check = Task { await self.runRebindCheck() }
+        rebindCheck = check
+        let result = await check.value
+        rebindCheck = nil
+        return result
+    }
+
+    private func runRebindCheck() async -> Rebind {
         let at = now()
         let result: Rebind
         if let host = state.host, let address = state.address {
@@ -242,7 +293,7 @@ actor SecureAddressService {
 
     private func refreshSnapshot() {
         let valid = SecureAddressRules.isValid(status, host: state.host, now: now())
-        let host = state.host, redirect = state.redirect
+        let host = state.host, redirect = state.redirect && state.isEnabled   // off: the name is no longer kept up to date
         snapshot.update { $0.host = host; $0.redirect = redirect; $0.certificateValid = valid }
     }
 

@@ -227,6 +227,8 @@ struct EventResource: Encodable {
 struct CameraStatusResource: Encodable {
     var connection: String
     var connectionReason: String?
+    /// Since when `connection` has been what it is, as this run of the bridge saw it (`CameraStatus.connectionSince`).
+    var connectionSince: Date?
     var summary: String
     var eventChannelConnected: Bool
     var videoSummary: String?
@@ -266,6 +268,7 @@ struct CameraStatusResource: Encodable {
     init(_ status: CameraStatus) {
         connection = StatusText.connectionName(status.connection)
         connectionReason = StatusText.connectionReason(status.connection)
+        connectionSince = status.connectionSince
         summary = StatusText.summary(for: status)
         eventChannelConnected = status.eventChannelConnected
         videoSummary = status.videoSummary
@@ -478,16 +481,17 @@ struct NoticeResource: Encodable {
     var cameraID: UUID?
     var cameraName: String?
     var date: Date
-    /// What the notice's button does: "choose-folder" (the storage chooser), "open-settings" (Settings > Recording) or "open-camera" (the page
-    /// of the notice's `cameraID`); nil for a notice with no button. Always encoded, as null when nil (a page that does not know the field
+    /// What the notice's button does: "choose-folder" (the storage chooser), "open-settings" (Settings > Recording), "open-camera" (the page
+    /// of the notice's `cameraID`) or "dismiss" (the notice stays until the person dismisses it: `POST notifications/dismiss {id}`); nil for
+    /// a notice with no button. Always encoded, as null when nil (a page that does not know the field
     /// ignores it).
     var action: String?
     /// Where the notification page files it: "security", "recording", "cameras" or "system" (by `kind`).
     var category: String {
         switch kind {
-        case "internetGuard": "security"
-        case "nvrStorage": "recording"
-        case "liveViewNotReceived": "cameras"
+        case "internetGuard", "internetGuardWatch", "signInAttempts": "security"
+        case "nvrStorage", "cameraNotRecording": "recording"
+        case "liveViewNotReceived", "cameraOffline": "cameras"
         default: "system"
         }
     }
@@ -513,19 +517,96 @@ struct NoticeResource: Encodable {
         try container.encode(key, forKey: .key)
     }
 
-    /// Everything that is a notification now: the network notices (below), at most one storage notice, first, and what the internet guard
-    /// found, last. This is what the status answer, the event stream's snapshot, its change detection and the notification log all use.
+    /// Everything that is a notification now: the notice about a damaged configuration, first, then the cameras that are offline or not
+    /// recording, at most one storage notice, the network notices (below), what the internet guard found, and what the system reports (a
+    /// failing or worn-out drive), last. This is what the status answer, the event stream's snapshot, its change detection and the
+    /// notification log all use.
     static func resources(for overview: BridgeOverview, now: Date = Date()) -> [NoticeResource] {
         var notices = resources(for: overview.networkNotices, now: now)
         if let storage = storageNotice(for: overview, now: now) { notices.insert(storage, at: 0) }
+        notices.insert(contentsOf: cameraNotices(for: overview, now: now), at: 0)
+        if let configuration = configurationNotice(for: overview, now: now) { notices.insert(configuration, at: 0) }
         notices += overview.internetGuardAlerts.map(internetGuardNotice)
+        notices += overview.systemNotices.map(systemNotice)
         return notices
+    }
+
+    /// How long a camera must have been offline, or its recorder waiting, before it is a notice (a camera that restarts, a Wi-Fi blip, the
+    /// first seconds after the box starts are not).
+    static let cameraTroubleAfter: TimeInterval = 5 * 60
+
+    /// "Driveway Is Offline" for a camera the bridge has had no picture from for `cameraTroubleAfter`, and "Driveway Isn't Recording" for one
+    /// whose Record switch is on but whose recorder has waited that long (a full drive has the storage notice instead). Warnings, with a button
+    /// to the camera's page; gone by themselves when the camera is back. The time is told in the bridge's zone.
+    static func cameraNotices(for overview: BridgeOverview, now: Date) -> [NoticeResource] {
+        let zone = overview.settings.timeZone.flatMap(TimeZone.init(identifier:)) ?? .current
+        func when(_ date: Date) -> String {
+            let format = Date.FormatStyle(date: Calendar(identifier: .gregorian).isDate(date, equalTo: now, toGranularity: .day) ? .omitted : .abbreviated,
+                                          time: .shortened, timeZone: zone)
+            return date.formatted(format)
+        }
+        var notices: [NoticeResource] = []
+        for configuration in overview.configurations where configuration.isEnabled {
+            guard let status = overview.cameras.first(where: { $0.id == configuration.id }) else { continue }
+            if case .offline(let reason) = status.connection, let since = status.connectionSince, now.timeIntervalSince(since) >= cameraTroubleAfter {
+                let gap = configuration.nvrEnabled ? " Its recording has a gap until it is back." : ""
+                notices.append(NoticeResource(
+                    id: "camera-offline-\(configuration.id.uuidString)", kind: "cameraOffline", severity: "warning", title: "\(configuration.name) Is Offline",
+                    detail: "Camera Bridge hasn’t reached \(configuration.name) since \(when(since)): \(Redact.string(reason)).\(gap)",
+                    cameraID: configuration.id, cameraName: configuration.name, date: since, action: "open-camera"))
+            } else if configuration.nvrEnabled, status.connection == .online, let since = status.nvrWaitingSince, now.timeIntervalSince(since) >= cameraTroubleAfter {
+                notices.append(NoticeResource(
+                    id: "camera-not-recording-\(configuration.id.uuidString)", kind: "cameraNotRecording", severity: "warning",
+                    title: "\(configuration.name) Isn’t Recording",
+                    detail: "Its Record switch is on, but nothing has been recorded since \(when(since))." + (status.nvr.detail.map { " " + Redact.string($0) } ?? ""),
+                    cameraID: configuration.id, cameraName: configuration.name, date: since, action: "open-camera"))
+            }
+        }
+        return notices
+    }
+
+    /// What the system reports (a drive that is failing or worn out): no button.
+    static func systemNotice(_ notice: SystemNotice) -> NoticeResource {
+        NoticeResource(id: notice.id, kind: notice.kind, severity: notice.severity, title: notice.title, detail: notice.detail, cameraID: nil,
+                       cameraName: nil, date: notice.date, action: nil)
+    }
+
+    /// A burst of wrong passwords (`AuthStore.SignInAlert`): a warning in the security category, one entry per burst (its id carries when it
+    /// began, so the next burst, after a quiet day, is a new one). No button.
+    static func signInNotice(_ alert: AuthStore.SignInAlert) -> NoticeResource {
+        let count = "\(alert.count) wrong password\(alert.count == 1 ? " was" : "s were") entered"
+        let from = alert.addressCount <= 1 ? " from \(alert.addresses.first ?? "an unknown address")"
+            : " from \(alert.addressCount) addresses, the latest \(alert.addresses.first ?? "unknown")"
+        let detail = count + from + ". Sign-ins from there wait a while after each one. If that wasn’t you, a device on your network may be "
+            + "guessing the password."
+        return NoticeResource(id: "sign-in-\(Int(alert.since.timeIntervalSince1970))", kind: "signInAttempts", severity: "warning",
+                              title: "Wrong Passwords Entered", detail: detail, cameraID: nil, cameraName: nil, date: alert.since, action: nil)
+    }
+
+    /// The id of the notice about a damaged configuration: the one notice `POST notifications/dismiss` takes.
+    static let configurationRecoveredID = "configuration-recovered"
+
+    /// "Settings Restored From a Backup" (the copy kept before the last change is in use) or "Settings Could Not Be Read" (the bridge started
+    /// without cameras) while the engine has a recovery nobody dismissed; nil otherwise.
+    static func configurationNotice(for overview: BridgeOverview, now: Date) -> NoticeResource? {
+        guard overview.configurationRecovered else { return nil }
+        if overview.configurationRestoredPrevious {
+            return NoticeResource(id: configurationRecoveredID, kind: "configurationRecovered", severity: "warning", title: "Settings Restored From a Backup",
+                                  detail: "Camera Bridge’s settings file was damaged, so it went back to the copy saved before your last change. Your cameras are back; check that the change you made last is still there.",
+                                  cameraID: nil, cameraName: nil, date: now, action: "dismiss")
+        }
+        return NoticeResource(id: configurationRecoveredID, kind: "configurationRecovered", severity: "warning", title: "Settings Could Not Be Read",
+                              detail: "Camera Bridge’s settings file was damaged and no good copy was found, so the bridge started without cameras. The damaged file was kept on the bridge. Add your cameras again; each one needs to be added to the Home app again too.",
+                              cameraID: nil, cameraName: nil, date: now, action: "dismiss")
     }
 
     /// "Patio New tried to reach the internet": information, with a button to the camera's page at its Security card (`action` "open-camera");
     /// a warning for a camera the guard can no longer watch.
     static func internetGuardNotice(_ alert: InternetGuardAlert) -> NoticeResource {
-        NoticeResource(id: alert.id, kind: "internetGuard", severity: alert.isWarning ? "warning" : "info", title: alert.title, detail: alert.detail,
+        // A camera seen trying is an event, told once; one the guard can't watch is a state, told again whenever it comes back
+        // (`NotificationLog.eventKinds`).
+        NoticeResource(id: alert.id, kind: alert.kind == .firstTry ? "internetGuard" : "internetGuardWatch", severity: alert.isWarning ? "warning" : "info",
+                       title: alert.title, detail: alert.detail,
                        cameraID: alert.cameraID, cameraName: alert.cameraName, date: alert.date, action: "open-camera")
     }
 
@@ -616,8 +697,38 @@ struct SettingsResource: Encodable {
     var ai: AISettingsResource
     /// The Sky Watcher's settings: where the box is (shown here, to the signed-in page, and nowhere else), the flight feed and the AI's daily limit.
     var sky: SkySettingsResource
+    /// Read-only monitoring (`GET monitor`): on while there is a token, which is shown here for the owner to copy (null while off).
+    var monitorEnabled: Bool
+    var monitorToken: String?
 
-    init(settings: BridgeSettings, cameras: [CameraConfiguration] = [], bridgeName: String, webhookProblem: String?, aiKey: (saved: Bool, hint: String?), aiStatus: AIStatus) {
+    private enum CodingKeys: String, CodingKey {
+        case bridgeName, basePort, sensorsBridgePort, webhookEnabled, webhookPort, webhookToken, webhookProblem, logLevel, motionShadowTest, timeZone
+        case cameraOrder, ai, sky, monitorEnabled, monitorToken
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(bridgeName, forKey: .bridgeName)
+        try container.encode(basePort, forKey: .basePort)
+        try container.encode(sensorsBridgePort, forKey: .sensorsBridgePort)
+        try container.encode(webhookEnabled, forKey: .webhookEnabled)
+        try container.encode(webhookPort, forKey: .webhookPort)
+        try container.encode(webhookToken, forKey: .webhookToken)
+        try container.encodeIfPresent(webhookProblem, forKey: .webhookProblem)
+        try container.encode(logLevel, forKey: .logLevel)
+        try container.encode(motionShadowTest, forKey: .motionShadowTest)
+        try container.encodeIfPresent(timeZone, forKey: .timeZone)
+        try container.encode(cameraOrder, forKey: .cameraOrder)
+        try container.encode(ai, forKey: .ai)
+        try container.encode(sky, forKey: .sky)
+        try container.encode(monitorEnabled, forKey: .monitorEnabled)
+        try container.encode(monitorToken, forKey: .monitorToken)   // null while off
+    }
+
+    init(settings: BridgeSettings, cameras: [CameraConfiguration] = [], bridgeName: String, webhookProblem: String?, aiKey: (saved: Bool, hint: String?), aiStatus: AIStatus,
+         monitorToken: String? = nil) {
+        self.monitorToken = monitorToken
+        monitorEnabled = monitorToken != nil
         self.bridgeName = bridgeName
         basePort = settings.basePort
         sensorsBridgePort = settings.sensorsBridgePort

@@ -4,6 +4,7 @@
 import { get, post } from '../api.js';
 import { h, replace, toast } from '../dom.js';
 import { icon } from '../icons.js';
+import { dateTime } from '../format.js';
 import { notificationActions, notificationIcon, relativeTime, setUnread } from '../notifications.js';
 import { subscribe } from '../store.js';
 
@@ -42,9 +43,15 @@ export function renderNotifications() {
       icon(notificationIcon(entry)),
       h('div', { class: 'notif-text' },
         h('div', { class: 'notif-head' }, h('span', { class: 'notif-title' }, entry.title),
-          h('time', { class: 'notif-time', datetime: entry.date, title: new Date(entry.date).toLocaleString() }, relativeTime(entry.date))),
+          h('time', { class: 'notif-time', datetime: entry.date, title: dateTime(entry.date) }, relativeTime(entry.date))),
         h('p', { class: 'notif-detail' }, entry.detail),
-        actions.length ? h('div', { class: 'actions' }, h('button', { class: 'btn small', type: 'button', onclick: actions[0].run }, actions[0].label)) : null));
+        actions.length ? h('div', { class: 'actions' }, h('button', { class: 'btn small', type: 'button', onclick: () => act(actions[0]) }, actions[0].label)) : null));
+  }
+
+  /** Does a notification's action; drawn again after it, so the Dismiss of a notice put away goes at once (the entry itself stays in the log). */
+  async function act(action) {
+    await action.run();
+    if (!destroyed) draw();
   }
 
   function draw() {

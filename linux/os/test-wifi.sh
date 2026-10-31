@@ -167,5 +167,32 @@ expect "a move that fails puts the connection back as it was" "$(CB_TEST_FAIL_AP
 connection up id Maple Cottage ifname wlan0"
 expect "nothing is saved in the connection (no band, no BSSID)" "$(grep -c 'modify' "$tmp/run/nmcli.log" || true)" "0"
 
+# --- when the setup hotspot takes the radio -------------------------------------------------------------------------------------
+# The functions of the copy, without its last part (the command line), in a subshell with the stand-ins.
+sed '/^true$/,$d' "$tmp/cb-wifi" >"$tmp/cb-wifi-functions"
+grep -q '^do_watch() {' "$tmp/cb-wifi-functions" || bad "the test copy has cb-wifi's functions"
+due() { (. "$tmp/cb-wifi-functions" 2>/dev/null; if hotspot_due "$@"; then echo open; else echo wait; fi); }
+expect "a box that knows no Wi-Fi network opens the hotspot (it is the way in)" "$(due 0 0 0)" "open"
+expect "a box that knows a network waits for it: a router restarting is no reason to take the radio" "$(due 1 0 30)" "wait"
+expect "and still waits after 9 minutes" "$(due 1 0 599)" "wait"
+expect "after 10 minutes without a network the hotspot opens" "$(due 1 0 600)" "open"
+expect "a network just chosen that could not be joined opens it at once (the person is there to fix the password)" "$(due 1 1 30)" "open"
+retry=$(sed -n 's/^RETRY=\${CB_WIFI_RETRY:-\([0-9]*\)}.*/\1/p' "$WIFI")
+expect "while the hotspot is open the radio goes back to the saved networks every minute" "$retry" "60"
+
+# The online test (lib.sh's cb_online, the same as cb-wait-online's): a default route, or a global address that is not the hotspot's own.
+online_with() { # online_with ROUTE4 ROUTE6 ADDRESSES
+    printf '#!/bin/sh\ncase "$*" in\n"-4 route show default") printf %%s "%s" ;;\n"-6 route show default") printf %%s "%s" ;;\n"-o addr show scope global -tentative") printf "%%s\\n" "%s" ;;\nesac\n' "$1" "$2" "$3" >"$tmp/bin/ip"
+    (. "$tmp/cb-wifi-functions" 2>/dev/null; if online; then echo online; else echo offline; fi)
+}
+expect "a default route is a network" "$(online_with "default via 192.0.2.1 dev eth0" "" "")" "online"
+expect "an IPv6 default route alone is one too" "$(online_with "" "default via fe80::1 dev eth0" "")" "online"
+expect "a camera network without a router (a global address, no route) is a network: no hotspot on a wired box" \
+    "$(online_with "" "" "2: eth0    inet 192.0.2.40/24 brd 192.0.2.255 scope global eth0")" "online"
+expect "the hotspot's own address is not a network" "$(online_with "" "" "3: wlan0    inet 10.42.0.1/24 brd 10.42.0.255 scope global noprefixroute wlan0")" "offline"
+expect "nothing is no network" "$(online_with "" "" "")" "offline"
+printf '#!/bin/sh\ncase "$*" in\n    "-4 route show default") echo "default via 192.168.77.1 dev ${CB_TEST_ROUTE_DEV:-wlan0} proto dhcp" ;;\nesac\n' >"$tmp/bin/ip"
+chmod +x "$tmp/bin/ip"
+
 [ "$fail" -eq 0 ] && echo "all passed"
 exit "$fail"

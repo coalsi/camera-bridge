@@ -47,7 +47,7 @@ struct NotificationEntry: Codable, Equatable, Sendable {
 final class NotificationLog: Sendable {
     /// Notices of these kinds are events: once logged they are never logged again, though they leave the list and come back. Any other
     /// notice is a state: when it goes away and comes back, it happened again.
-    private static let eventKinds: Set<String> = ["internetGuard"]
+    private static let eventKinds: Set<String> = ["internetGuard", "signInAttempts"]
 
     private struct Stored: Codable {
         var entries: [NotificationEntry] = []
@@ -100,6 +100,23 @@ final class NotificationLog: Sendable {
             stored.entries = Array(stored.entries.filter { now.timeIntervalSince($0.date) <= maximumAge }.prefix(maximumEntries))
             stored.events = Array(stored.events.suffix(Self.maximumEvents))
             if changed || before != (stored.entries.count, stored.events.count) { save(stored) }
+        }
+    }
+
+    /// Adds an entry for `notice`, an event (`eventKinds`), unless it was logged before; the state notices are left as they are (`record`
+    /// with a list would take every one missing from it for gone).
+    func recordEvent(_ notice: NoticeResource, now: Date = Date()) {
+        guard Self.eventKinds.contains(notice.kind) else { return }
+        state.withLock { stored in
+            guard !stored.events.contains(notice.key) else { return }
+            stored.events.append(notice.key)
+            stored.events = Array(stored.events.suffix(Self.maximumEvents))
+            stored.entries.insert(NotificationEntry(
+                id: UUID().uuidString, key: notice.key, noticeID: notice.id, kind: notice.kind, category: notice.category, severity: notice.severity,
+                title: notice.title, detail: notice.detail, cameraID: notice.cameraID, cameraName: notice.cameraName, action: notice.action,
+                date: now, read: false, toasted: false), at: 0)
+            stored.entries = Array(stored.entries.prefix(maximumEntries))
+            save(stored)
         }
     }
 

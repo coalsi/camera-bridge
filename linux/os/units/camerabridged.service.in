@@ -7,9 +7,11 @@ Wants=network-online.target avahi-daemon.service
 Requires=camera-bridge-firstboot.service
 RequiresMountsFor=/var/lib/camera-bridge
 ConditionPathExists=@CB_DAEMON@
-# A daemon that keeps failing must stop being restarted, so the boot counts as bad and the previous system comes back.
-StartLimitIntervalSec=300
-StartLimitBurst=10
+# Never given up on: a daemon that crashes is started again, at first after 3 s, then after longer pauses (at most 2 minutes) while it
+# keeps crashing. A camera that crashes it must never end recording until someone restarts the box. Whether a new version is kept is
+# the boot health check's call (cb-health-check: on its trial boot the daemon may not be restarted once), not a start limit here. The
+# pause grows with the restarts of this boot; cb-system housekeeping forgets them once the daemon has run for half an hour.
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -17,6 +19,8 @@ NotifyAccess=main
 ExecStart=@CB_DAEMON@
 Restart=always
 RestartSec=3
+RestartSteps=5
+RestartMaxDelaySec=120
 # The daemon must send WATCHDOG=1 (sd_notify) at least every WatchdogSec/2.
 WatchdogSec=30
 TimeoutStartSec=120
@@ -73,6 +77,11 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 UMask=0077
 LimitNOFILE=65536
 OOMScoreAdjust=-300
+# Its helpers (ffmpeg, go2rtc, the eufy and Wyze helpers) share the OOM protection above, so a leak among them would make the kernel pick
+# avahi, NetworkManager, nginx or journald instead. Bounded: above 80% of the memory the bridge's own pages (mostly the recordings' file cache) are reclaimed first, and at 90%
+# the out-of-memory kill happens inside the bridge (Restart= brings it back) and the rest of the box keeps running.
+MemoryHigh=80%
+MemoryMax=90%
 # The bridge comes first on its own box: the most CPU and disk share when anything else (an update, the journal) competes.
 CPUWeight=1000
 IOWeight=1000

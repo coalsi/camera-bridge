@@ -153,6 +153,8 @@ public final class BridgeEngine {
     /// Bumped by every operation that changes what `refreshStatus` reads (cameras, runtimes, the sensors bridge, the
     /// state): a refresh that read before it publishes nothing (the operation refreshes again).
     @ObservationIgnored private var statusGeneration = 0
+    /// What each camera's connection was at the last status, and since when, and since when its recorder has waited (`stampSince`).
+    @ObservationIgnored private var statusSince: [UUID: (connection: String, connectionSince: Date, waitingSince: Date?)] = [:]
 
     struct StoredIdentity: Sendable {
         var code: String
@@ -198,7 +200,7 @@ public final class BridgeEngine {
             Self.useBridgeTimeZone(configuration.settings.timeZone)
         }
         // A damaged configuration set aside on an earlier launch and not dismissed yet.
-        configurationRecoveredFrom = store.recoveryNotice()
+        configurationRecovery = store.recoveryNotice()
     }
 
     /// Fixed engine state for `preview()`; the engine never starts networking with it.
@@ -245,7 +247,7 @@ public final class BridgeEngine {
         recentLogs = Array(snapshot.recentLogs.suffix(1000))
         storedSettings = snapshot.settings
         webhookProblem = snapshot.webhookProblem
-        configurationRecoveredFrom = snapshot.configurationRecoveredFrom
+        configurationRecovery = snapshot.configurationRecoveredFrom.map { ConfigurationRecovery(setAside: $0, restoredPrevious: false) }
         recentNetworkNotices = snapshot.networkNotices
         macVPN = snapshot.macVPN
     }
@@ -258,17 +260,20 @@ public final class BridgeEngine {
     /// or the bridge is paused or stopped. Settings shows it with Try Again (`retryWebhook()`).
     public private(set) var webhookProblem: String?
 
-    /// Where a damaged `config.json` was set aside when the engine loaded it (`config.corrupt-<time>.json`): the bridge
-    /// started with the defaults, without the cameras, and the app says so (a banner, the menu bar) until the person
-    /// dismisses it (`acknowledgeConfigurationRecovery()`), also across relaunches: the notice is saved next to
-    /// `config.json` (`config.recovered`) and read at `init`, since the configuration saved after the recovery loads
-    /// normally. nil when nothing was set aside or the person dismissed it.
-    public private(set) var configurationRecoveredFrom: URL?
+    /// What became of a damaged `config.json` when the engine loaded it: where it was set aside (`config.corrupt-<time>.json`), and
+    /// whether the copy kept before the last save took its place (the cameras are back) or the bridge started with the defaults, without
+    /// the cameras. The app and the web page say so until the person dismisses it (`acknowledgeConfigurationRecovery()`), also across
+    /// relaunches: the notice is saved next to `config.json` (`config.recovered`) and read at `init`, since the configuration saved
+    /// after the recovery loads normally. nil when nothing was set aside or the person dismissed it.
+    public private(set) var configurationRecovery: ConfigurationRecovery?
 
-    /// The person saw that the configuration was set aside: `configurationRecoveredFrom` becomes nil, now and at the next
+    /// `configurationRecovery`'s damaged file.
+    public var configurationRecoveredFrom: URL? { configurationRecovery?.setAside }
+
+    /// The person saw that the configuration was set aside: `configurationRecovery` becomes nil, now and at the next
     /// launch (the saved notice is removed; the damaged file stays).
     public func acknowledgeConfigurationRecovery() async {
-        configurationRecoveredFrom = nil
+        configurationRecovery = nil
         guard !isPreview else { return }
         let store = store
         do {
@@ -280,6 +285,10 @@ public final class BridgeEngine {
 
     /// Running or starting (paused and stopped engines bridge nothing).
     var isActive: Bool { state == .running || state == .starting }
+
+    /// How long the lifecycle or configuration operation under way has run; nil when none is. One that never ends would hold every later
+    /// save, edit and reconnect, so the daemon stops feeding systemd's watchdog past a limit and the bridge is restarted.
+    public nonisolated var operationHeldFor: Duration? { operations.heldFor }
 
     /// Whether `cameraID`'s accessory may be published (`homeKitAllowlist`).
     func mayPublish(_ cameraID: UUID) -> Bool { homeKitAllowlist?.contains(cameraID) ?? true }
@@ -502,7 +511,6 @@ public final class BridgeEngine {
         }
         if removedKey { log.notice("The AI key was removed: the AI service changed to \(settings.ai.serviceForLog)") }
         storedSettings = settings
-        Self.applyTimeZone(settings.timeZone)
         if old.timeZone != settings.timeZone { BridgeTime.use(settings.timeZone) }
         if old.logLevel != settings.logLevel { applyLogLevel() }
         // Every change to the AI settings starts a new generation of the describer: the last error was about what was in use before, and a
@@ -583,66 +591,92 @@ public final class BridgeEngine {
         }
     }
 
-    /// `password` nil = unchanged.
+    /// `password` nil = unchanged. Prefer `updateCamera(id:password:_:)`: a whole configuration copied before this operation's turn undoes a
+    /// change another edit made meanwhile.
     public func updateCamera(_ configuration: CameraConfiguration, password: String?) async throws {
         guard !isPreview else { return }
         try await operations.withLock {
             try await ensureLoaded()
-            guard let index = configurations.firstIndex(where: { $0.id == configuration.id }) else { throw EngineError.unknownCamera }
-            let old = configurations[index]
-            clockUnsupported[configuration.id] = nil
-            onvifRefusals[configuration.id] = nil   // new settings (a new password, an ONVIF user added): ask again
-            var updated = configurations
-            let credentials = credentials
-            // Query credentials typed into a stream URL replace the stored ones (a restart below sends them); an address the form left
-            // as shown keeps them.
-            let typedStreamCredentials = configuration.mainStreamURL?.hasStreamCredentials == true
-                || configuration.subStreamURL?.hasStreamCredentials == true
-            var camera = try await Self.offMain { try credentials.storeStreamCredentials(of: configuration) }
-            if camera.hapPort == 0 { camera.hapPort = old.hapPort }
-            camera.hiddenCameraClock = old.hiddenCameraClock   // the engine owns it (`setCameraClockHidden`); a form never carries it back
-            camera.cleanPictureBackup = old.cleanPictureBackup   // and this one (`setCleanPicture`)
-            camera.setupBackup = old.setupBackup               // and "Set up for Camera Bridge" owns these two
-            camera.setupState = old.setupState
-            camera.dnsWatch = old.dnsWatch                     // and the Internet guard's DNS reads this one
-            camera.nvrEnabled = old.nvrEnabled                 // and `setNVR` owns these two: an edit made from a stale copy never undoes Record
-            camera.nvrRecordSound = old.nvrRecordSound
-            updated[index] = camera
-            updated = PortAllocator.assignPorts(to: updated, settings: storedSettings)
-            let id = camera.id
-            if let password { try await Self.offMain { try credentials.setPassword(password, for: id) } }
-            try await save(BridgeConfiguration(settings: storedSettings, cameras: updated))
-            configurations = updated
-            statusInputsChanged()
-            camera = updated[index]
-            if (old.skyDetector?.enabled ?? false) != (camera.skyDetector?.enabled ?? false) {
-                log.notice("Sky Watcher turned \(camera.skyDetector?.enabled == true ? "on" : "off") for \(camera.name)")
-            }
-            await router.register(camera)
-            await bridge?.update(cameras: bridgedConfigurations)
-            if isActive {
-                let paired = await runtimes[camera.id]?.isPaired ?? false
-                if password != nil || typedStreamCredentials || Self.needsRestart(old, camera, paired: paired) {
-                    log.notice("Restarting \(camera.name) with its new settings")
-                    await stopRuntime(camera.id)
-                    if camera.isEnabled { await startRuntimes([camera]) } else { await startOffAccessories([camera]) }
-                } else {
-                    if old.motionSensitivity != camera.motionSensitivity, let runtime = runtimes[camera.id] {
-                        await runtime.updateMotionSensitivity(camera.motionSensitivity)
-                    }
-                    if old.name != camera.name { offAccessories[camera.id]?.rename(camera.name) }
-                    if old.timestampOverlay != camera.timestampOverlay || old.name != camera.name, let runtime = runtimes[camera.id] {
-                        runtime.updateTimestampOverlay(camera.timestampOverlay, cameraName: camera.name)
-                    }
-                    if old.pictureCorrection != camera.pictureCorrection, let runtime = runtimes[camera.id] {
-                        await runtime.updatePictureCorrection(camera.pictureCorrection)
-                    }
-                }
-                await applySky()   // its switch, its card, its name; a restarted runtime was given to its detector already
-            }
-            invalidateStoredIdentity(camera.id)
-            await refreshStatus()
+            try await applyCameraUpdate(configuration, password: password)
         }
+    }
+
+    /// Applies `change` to the camera `id` as it is when this operation's turn comes (after any lifecycle or configuration operation under
+    /// way, another camera edit included), then saves it like `updateCamera(_:password:)`; `password` nil = unchanged. Two edits made while
+    /// the engine is busy therefore both stick, where two whole configurations copied before either was applied would undo one another. What
+    /// `change` throws is thrown, and nothing is changed; a change that changes nothing saves nothing.
+    public func updateCamera(id: UUID, password: String?, _ change: (inout CameraConfiguration) throws -> Void) async throws {
+        guard !isPreview else { return }
+        try await operations.withLock {
+            try await ensureLoaded()
+            guard let current = configurations.first(where: { $0.id == id }) else { throw EngineError.unknownCamera }
+            var camera = current
+            try change(&camera)
+            camera.id = id
+            guard camera != current || password != nil else { return }
+            try await applyCameraUpdate(camera, password: password)
+        }
+    }
+
+    /// `updateCamera`'s work; the caller holds `operations`.
+    private func applyCameraUpdate(_ configuration: CameraConfiguration, password: String?) async throws {
+        guard let index = configurations.firstIndex(where: { $0.id == configuration.id }) else { throw EngineError.unknownCamera }
+        let old = configurations[index]
+        clockUnsupported[configuration.id] = nil
+        onvifRefusals[configuration.id] = nil   // new settings (a new password, an ONVIF user added): ask again
+        var updated = configurations
+        let credentials = credentials
+        // Query credentials typed into a stream URL replace the stored ones (a restart below sends them); an address the form left
+        // as shown keeps them.
+        let typedStreamCredentials = configuration.mainStreamURL?.hasStreamCredentials == true
+            || configuration.subStreamURL?.hasStreamCredentials == true
+        var camera = try await Self.offMain { try credentials.storeStreamCredentials(of: configuration) }
+        if camera.hapPort == 0 { camera.hapPort = old.hapPort }
+        camera.hiddenCameraClock = old.hiddenCameraClock   // the engine owns it (`setCameraClockHidden`); a form never carries it back
+        camera.cleanPictureBackup = old.cleanPictureBackup   // and this one (`setCleanPicture`)
+        camera.setupBackup = old.setupBackup               // and "Set up for Camera Bridge" owns these two
+        camera.setupState = old.setupState
+        camera.dnsWatch = old.dnsWatch                     // and the Internet guard's DNS reads this one
+        camera.nvrEnabled = old.nvrEnabled                 // and `setNVR` owns these two: an edit made from a stale copy never undoes Record
+        camera.nvrRecordSound = old.nvrRecordSound
+        updated[index] = camera
+        updated = PortAllocator.assignPorts(to: updated, settings: storedSettings)
+        let id = camera.id
+        if let password { try await Self.offMain { try credentials.setPassword(password, for: id) } }
+        try await save(BridgeConfiguration(settings: storedSettings, cameras: updated))
+        configurations = updated
+        statusInputsChanged()
+        camera = updated[index]
+        if (old.skyDetector?.enabled ?? false) != (camera.skyDetector?.enabled ?? false) {
+            log.notice("Sky Watcher turned \(camera.skyDetector?.enabled == true ? "on" : "off") for \(camera.name)")
+        }
+        await router.register(camera)
+        await bridge?.update(cameras: bridgedConfigurations)
+        if isActive {
+            let paired = await runtimes[camera.id]?.isPaired ?? false
+            if password != nil || typedStreamCredentials || Self.needsRestart(old, camera, paired: paired) {
+                log.notice("Restarting \(camera.name) with its new settings")
+                await stopRuntime(camera.id)
+                if camera.isEnabled { await startRuntimes([camera]) } else { await startOffAccessories([camera]) }
+            } else {
+                if old.motionSensitivity != camera.motionSensitivity, let runtime = runtimes[camera.id] {
+                    await runtime.updateMotionSensitivity(camera.motionSensitivity)
+                }
+                if old.name != camera.name {
+                    offAccessories[camera.id]?.rename(camera.name)
+                    await runtimes[camera.id]?.rename(camera.name)
+                }
+                if old.timestampOverlay != camera.timestampOverlay || old.name != camera.name, let runtime = runtimes[camera.id] {
+                    runtime.updateTimestampOverlay(camera.timestampOverlay, cameraName: camera.name)
+                }
+                if old.pictureCorrection != camera.pictureCorrection, let runtime = runtimes[camera.id] {
+                    await runtime.updatePictureCorrection(camera.pictureCorrection)
+                }
+            }
+            await applySky()   // its switch, its card, its name; a restarted runtime was given to its detector already
+        }
+        invalidateStoredIdentity(camera.id)
+        await refreshStatus()
     }
 
     /// Saves the configuration first: when it cannot be saved the camera stays (running, with its password and HomeKit
@@ -653,17 +687,22 @@ public final class BridgeEngine {
         await operations.withLock {
             guard (try? await ensureLoaded()) != nil, let camera = configurations.first(where: { $0.id == id }) else { return }
             let remaining = configurations.filter { $0.id != id }
+            var settings = storedSettings
+            settings.cameraOrder.removeAll { $0 == id }   // its place in the person's order goes with it
             do {
-                try await save(BridgeConfiguration(settings: storedSettings, cameras: remaining))
+                try await save(BridgeConfiguration(settings: settings, cameras: remaining))
             } catch {
                 log.error("\(camera.name) was not removed: the configuration could not be saved (\(error))")
                 return
             }
+            storedSettings = settings
             await giveDNSBackOnRemoval(camera)
             await stopRuntime(id)
             await removeSky(id)   // its aim goes with it
             onvifRefusals[id] = nil
             clockUnsupported[id] = nil
+            homeKitOptimizationSnapshots[id] = nil
+            heartbeatStrikes[id] = nil
             forgetSecurity(id)
             await router.unregister(cameraID: id)
             configurations = remaining
@@ -1943,8 +1982,10 @@ public final class BridgeEngine {
         let off = Array(offAccessories.values)
         offAccessories.removeAll()
         statusInputsChanged()
+        let limit = tuning.runtimeStopLimit, log = log
         await withTaskGroup(of: Void.self) { group in
-            for runtime in running { group.addTask { await runtime.stop() } }
+            // Each bounded: one camera whose stop hangs must not hold the pause (and every operation after it) for good.
+            for runtime in running { group.addTask { await Self.stop(runtime, within: limit, log: log) } }
             for accessory in off { group.addTask { await accessory.stop() } }
         }
         await nvr.stop()
@@ -2120,18 +2161,28 @@ public final class BridgeEngine {
         }
     }
 
-    /// `limit`: wait at most this long for the runtime to stop (a runtime that does not answer may never).
+    /// Waits at most `limit` (`EngineTuning.runtimeStopLimit` when nil) for the runtime to stop: a runtime that does not answer may never,
+    /// and the caller holds the engine's operations. What the stop still does after that changes nothing the next runtime set up (its
+    /// streams are closed first, and its writes to the router are dropped: `CameraRuntime.stop()`).
     func stopRuntime(_ cameraID: UUID, within limit: Duration? = nil) async {
         cancelAccessoryRetries(cameraID)
         await nvr.detach(cameraID)   // before the runtime stops: the recorder flushes its group and closes the file
         if let off = offAccessories.removeValue(forKey: cameraID) { await off.stop(); invalidateStoredIdentity(cameraID) }
         guard let runtime = runtimes.removeValue(forKey: cameraID) else { return }
-        if let limit {
-            _ = try? await withDeadline(limit, followsCancellation: false) { await runtime.stop() }
-        } else {
-            await runtime.stop()
-        }
+        await Self.stop(runtime, within: limit ?? tuning.runtimeStopLimit, log: log)
         invalidateStoredIdentity(cameraID)
+    }
+
+    /// `runtime.stop()`, waiting at most `limit`; a stop that takes longer is logged and left to end on its own. It runs in a task of its own,
+    /// which giving up on it does not cancel: every later step of the stop still runs, each with its own bound (a cancelled one would skip
+    /// the event source's logout and close).
+    private nonisolated static func stop(_ runtime: CameraRuntime, within limit: Duration, log: Log) async {
+        let stopping = Task { await runtime.stop() }
+        do {
+            try await withDeadline(limit, followsCancellation: false) { await stopping.value }
+        } catch {
+            log.warning("\(runtime.configuration.name) did not finish stopping within \(MediaFit.seconds(limit)) s; going on without waiting for it")
+        }
     }
 
     private func runtimeDependencies() -> CameraRuntime.Dependencies {
@@ -2496,7 +2547,8 @@ public final class BridgeEngine {
 
     /// Every `runtimeHeartbeatInterval` each running camera is asked to answer within `runtimeHeartbeatDeadline`. A runtime
     /// (or the accessory server behind it) that misses `runtimeHeartbeatStrikes` heartbeats in a row is restarted, that camera
-    /// only: Home would show it as not responding for as long as it hangs, with nothing else to say why.
+    /// only: Home would show it as not responding for as long as it hangs, with nothing else to say why. A round that most of
+    /// three or more cameras missed says the bridge itself is busy, and counts for none.
     private func startHeartbeat() {
         guard heartbeatTask == nil else { return }
         let interval = tuning.runtimeHeartbeatInterval
@@ -2528,6 +2580,14 @@ public final class BridgeEngine {
             for await result in group { results.append(result) }
             return results
         }
+        let missed = results.filter { !$0.1 }.count
+        if results.count >= 3, missed * 2 > results.count {
+            // Most cameras missed the same round: the bridge itself is too busy (or was frozen) to answer, and restarting them all at once
+            // would only add to its load. This round counts against none of them.
+            log.warning("\(missed) of \(results.count) cameras did not answer within \(MediaFit.seconds(deadline)) s: the bridge is too busy; "
+                        + "no camera is restarted for it")
+            return
+        }
         var unresponsive: [UUID] = []
         for (id, answered) in results {
             guard runtimes[id] != nil else { continue }
@@ -2550,8 +2610,8 @@ public final class BridgeEngine {
                   let camera = configurations.first(where: { $0.id == cameraID }), camera.isEnabled else { return }
             heartbeatStrikes[cameraID] = nil
             log.error("\(camera.name) did not answer \(tuning.runtimeHeartbeatStrikes) heartbeats in a row; restarting that camera")
-            // The stop is bounded: a runtime that does not answer may never finish stopping.
-            await stopRuntime(cameraID, within: .seconds(5))
+            // A runtime that does not answer may never finish stopping: the restart waits for it 5 s at most.
+            await stopRuntime(cameraID, within: min(.seconds(5), tuning.runtimeStopLimit))
             _ = runtime
             await startRuntimes([camera])
             await bridge?.update(cameras: bridgedConfigurations)
@@ -2598,6 +2658,27 @@ public final class BridgeEngine {
     /// The status loop's refreshes leave `recentLogs` to the log loop (`publishingLogs` false): both loops publishing it, out of
     /// step (a refresh that takes a while), published it up to twice per `statusInterval`. An operation's refresh publishes it
     /// at once, with the operation's outcome.
+    /// Sets `connectionSince` and `nvrWaitingSince` from what the earlier statuses saw (the camera notices say how long a camera has been offline
+    /// or not recording).
+    private func stampSince(_ status: inout CameraStatus, now: Date) {
+        let kind: String = switch status.connection {
+        case .online: "online"
+        case .offline: "offline"
+        case .connecting: "connecting"
+        case .idle: "idle"
+        case .disabled: "disabled"
+        }
+        var entry = statusSince[status.id] ?? (connection: kind, connectionSince: now, waitingSince: nil)
+        if entry.connection != kind {
+            entry.connection = kind
+            entry.connectionSince = now
+        }
+        if case .waiting = status.nvr.state { entry.waitingSince = entry.waitingSince ?? now } else { entry.waitingSince = nil }
+        statusSince[status.id] = entry
+        status.connectionSince = entry.connectionSince
+        status.nvrWaitingSince = entry.waitingSince
+    }
+
     func refreshStatus(publishingLogs: Bool = true) async {
         let generation = statusGeneration
         defer { if publishingLogs { drainLogs() } }
@@ -2652,8 +2733,11 @@ public final class BridgeEngine {
                     status.connection = .idle
                 }
             }
+            stampSince(&status, now: Date())
             statuses.append(status)
         }
+        let current = Set(configurations.map(\.id))
+        statusSince = statusSince.filter { current.contains($0.key) }
         var bridgeStatus: SensorsBridgeStatus?
         let bridge = bridge
         if let bridge {
@@ -2797,7 +2881,6 @@ public final class BridgeEngine {
         let (configuration, recovered) = loadedConfiguration
         guard !loaded else { return }
         storedSettings = configuration.settings
-        Self.applyTimeZone(storedSettings.timeZone)
         Self.useBridgeTimeZone(storedSettings.timeZone)
         configurations = configuration.cameras
         loaded = true
@@ -2809,10 +2892,15 @@ public final class BridgeEngine {
                        + "camera as not responding in Apple Home. It can be turned off in Settings.")
         }
         if let recovered {
-            log.error("The configuration was unreadable and was set aside as \(recovered.lastPathComponent); starting without cameras")
-            configurationRecoveredFrom = recovered
+            if recovered.restoredPrevious {
+                log.error("The configuration was unreadable and was set aside as \(recovered.setAside.lastPathComponent); the copy kept before "
+                          + "the last change is in use")
+            } else {
+                log.error("The configuration was unreadable and was set aside as \(recovered.setAside.lastPathComponent); starting without cameras")
+            }
+            configurationRecovery = recovered
         }
-        if !existed || recovered != nil { await persist() }
+        if !existed || (recovered.map { !$0.restoredPrevious } ?? false) { await persist() }
     }
 
     /// Writes `configuration` to `config.json` off the main actor. The internet guard's list follows what was saved (a Watch done or
@@ -2887,20 +2975,12 @@ public final class BridgeEngine {
         return ports
     }
 
-    /// The loaded configuration's zone for the clock times the bridge words for people and the zone it hands the box (`BridgeTime`). The
-    /// process's own zone is left as it is at launch (the recorder names its folders in it; `applyTimeZone` runs when settings are saved).
-    /// Without a zone the bridge already uses the process's.
+    /// The loaded configuration's zone for the clock times the bridge words for people, the timestamp overlay and the zone it hands the box
+    /// (`BridgeTime`). The process's own zone is never changed: it stays the one it started with (UTC on Camera Bridge OS) for the whole run,
+    /// so the recorder's folders and the janitor's "today" agree, and nothing calls `setenv` from a running, multi-threaded process. Without a
+    /// zone the bridge already uses the process's.
     private static func useBridgeTimeZone(_ identifier: String?) {
         if let identifier { BridgeTime.use(identifier) }
-    }
-
-    /// Makes `identifier` the process's time zone (the timestamp overlay and the dates formatted in the process's zone follow it; ffmpeg
-    /// children inherit `TZ`). nil leaves the system's. Clock times worded for people follow `BridgeTime` instead.
-    static func applyTimeZone(_ identifier: String?) {
-        guard let identifier, TimeZone(identifier: identifier) != nil else { return }
-        setenv("TZ", identifier, 1)
-        NSTimeZone.resetSystemTimeZone()
-        if let zone = TimeZone(identifier: identifier) { NSTimeZone.default = zone }
     }
 
     /// Sets the camera's clock to the bridge's time zone (`BridgeSettings.timeZone`, else the system's), so the date and time the camera draws on its

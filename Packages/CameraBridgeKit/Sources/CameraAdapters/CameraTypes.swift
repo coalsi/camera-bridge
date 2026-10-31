@@ -117,10 +117,15 @@ public protocol CameraEventSource: Sendable {
     /// (or when CameraBridge's short login pause ends) instead of after the long wait that protects cameras from lockouts. Once per
     /// streak of refusals; the default does nothing.
     func credentialsConfirmed()
+    /// The camera's video came back after it was down since `downSince` (the camera lost power, its cable or switch dropped): a channel
+    /// whose connection began before then may be a dead (half-open) connection the bridge would not notice for minutes, so it reconnects
+    /// now. The default does nothing (channels that ask the camera often find out soon on their own).
+    func videoResumed(downSince: ContinuousClock.Instant)
 }
 
 extension CameraEventSource {
     public func credentialsConfirmed() {}
+    public func videoResumed(downSince: ContinuousClock.Instant) {}
 }
 
 public protocol TalkbackSink: Sendable {

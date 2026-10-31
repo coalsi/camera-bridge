@@ -36,6 +36,8 @@ struct ArchiveDriveState: Sendable {
     var writeProblem: String?
     /// Its files were read since it connected (`loadGeneration`); moves and its retention wait for that.
     var loaded = false
+    /// Since when retention has waited for the files to be read (`ArchiveStore.awaitsArchiveLoad`).
+    var loadAwaitedSince: ContinuousClock.Instant?
     var loadGeneration = 0
     /// Moves that failed on the archive's side, in a row; after `ArchiveDriveState.failureLimit` the drive counts as failing for a while.
     var failures = 0

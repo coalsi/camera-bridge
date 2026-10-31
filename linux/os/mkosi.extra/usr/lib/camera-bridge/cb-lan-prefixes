@@ -1,0 +1,73 @@
+#!/bin/bash
+# The box's own network for the firewall, when it is not a private range: the sets onlink4/onlink6 of /etc/nftables.conf hold the prefixes
+# the box is on (a home network's global IPv6 prefix from the router, an IPv4 network numbered from a public range). With them, devices on
+# that network reach the web page, HomeKit and the media ports at the box's global address, while the internet does not (IPv6 has no NAT
+# to hide the box behind). From the main routing table: routes without a gateway, not the default, at least a /16 (IPv4) or /48 (IPv6).
+#
+#   cb-lan-prefixes            fill the sets once
+#   cb-lan-prefixes --print    print the nft commands only (tests)
+#   cb-lan-prefixes --watch    fill them, then again after every change of the addresses or routes (camera-bridge-lan-prefixes.service)
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+export CB_TAG=camera-bridge-lan-prefixes
+# shellcheck source=lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+last=""   # what the sets hold now (logged when it changes)
+
+# prefixes FAMILY SHORTEST: the on-link prefixes of the main table that are at least SHORTEST bits long.
+prefixes() {
+    ip "-$1" route show table main 2>/dev/null | awk -v shortest="$2" '
+        $1 != "default" && $2 == "dev" && $3 != "lo" && $1 ~ /\// && $0 !~ / via / {
+            split($1, p, "/"); if (p[2] + 0 >= shortest) print $1
+        }' | sort -u
+}
+
+commands() {
+    local v4 v6
+    v4=$(prefixes 4 16 | paste -sd, - | sed 's/,/, /g')
+    v6=$(prefixes 6 48 | paste -sd, - | sed 's/,/, /g')
+    echo "flush set inet camera_bridge onlink4"
+    echo "flush set inet camera_bridge onlink6"
+    [ -z "$v4" ] || echo "add element inet camera_bridge onlink4 { $v4 }"
+    [ -z "$v6" ] || echo "add element inet camera_bridge onlink6 { $v6 }"
+}
+
+apply() {
+    local now
+    if ! nft list set inet camera_bridge onlink6 >/dev/null 2>&1; then
+        cb_log "the firewall is not loaded; the local network's own prefixes wait"
+        return 0
+    fi
+    now=$(commands)
+    if ! nft -f - <<<"$now"; then
+        cb_log "the firewall did not take the local network's prefixes"
+        return 0
+    fi
+    if [ "$now" != "$last" ]; then
+        cb_log "the local network: $(grep '^add' <<<"$now" | sed 's/^add element inet camera_bridge //' | tr '\n' ' ' || true)"
+        last=$now
+    fi
+}
+
+watch() {
+    apply
+    while :; do
+        # One line for each change of an address or a route; a burst of them (a new lease, a router advertisement) is applied once, after
+        # 2 s of quiet.
+        while IFS= read -r _; do
+            while IFS= read -r -t 2 _; do :; done
+            apply
+        done < <(ip monitor address route 2>/dev/null)
+        sleep 5
+        apply
+    done
+}
+
+case ${1:-} in
+    '') apply ;;
+    --print) commands ;;
+    --watch) watch ;;
+    *) cb_die "usage: cb-lan-prefixes [--print | --watch]" ;;
+esac

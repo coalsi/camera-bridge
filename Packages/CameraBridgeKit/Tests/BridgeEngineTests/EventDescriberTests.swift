@@ -266,6 +266,31 @@ import Testing
         #expect(service.requests.value.count == 3)
     }
 
+    /// Improvement (engine-events I2): the person walking up to the door starts Person first, which used the doorbell's minute, so the ring
+    /// 10 to 30 s later, a doorbell's most important event, was never described. A ring is described within the minute too, once 10 s have
+    /// passed since the camera's last described event (`Timing.ringAfter`: sooner its pictures would be the same), so a child pressing
+    /// again and again does not use up the day.
+    @Test func aDoorbellRingIsDescribedEvenWithinTheCamerasMinute() async throws {
+        let rig = try await Rig()
+        let service = ScriptedService()
+        rig.describer.setService(service, dailyLimit: 200, fresh: true)
+        let (door, frames) = rig.camera("Front Door")
+        let person = rig.event(door, "Person")
+        rig.describer.eventsStarted([person])
+        #expect(await rig.settle())
+        rig.advance(15)
+        let ring = rig.event(door, "Doorbell ring")
+        rig.describer.eventsStarted([ring])
+        #expect(await rig.settle())
+        rig.advance(5)
+        rig.describer.eventsStarted([rig.event(door, "Doorbell ring")])   // pressed again 5 s later: not again
+        rig.advance(1)
+        rig.describer.eventsStarted([rig.event(door, "Motion")])          // and the minute still holds for the rest
+        #expect(await rig.settle())
+        #expect(rig.recorded.value.map(\.event) == [person, ring])
+        #expect(frames.gathers.value.count == 2 && service.requests.value.count == 2)
+    }
+
     /// Motion first, then a more specific kind of the same camera a moment later in a publish of its own (the camera's person detection
     /// lags its motion): the later one takes the waiting event's place, frames and all, so the description lands on its row.
     @Test func aMoreSpecificKindSoonAfterTakesThePlaceOfTheWaitingEvent() async throws {
@@ -422,7 +447,7 @@ import Testing
         #expect(service.calls.value == 1, "the retry was not sent")
         #expect(rig.recorded.value.isEmpty)
         let status = await rig.describer.status
-        #expect(status.today == 1, "the first request was sent, and counted once")
+        #expect(status.today == 0, "the first request was sent, but the service could not take it: it is given back")
         #expect(status.lastError == AIProviderError.unreachable.sentence, "and its failure is the service's, still true")
     }
 
@@ -497,7 +522,7 @@ import Testing
         #expect(rig.recorded.value.isEmpty)
         let status = await rig.describer.status
         #expect(status.lastError == AIProviderError.unreachable.sentence && status.lastErrorAt == rig.clock.value)
-        #expect(status.today == 2, "only what was sent counts")
+        #expect(status.today == 0, "only what was sent counts, and what the service could not take is given back")
     }
 
     @Test func aNetworkErrorOr5xxIsTriedOnceMoreAndAnyOtherFailureIsNot() async throws {
@@ -521,8 +546,42 @@ import Testing
             #expect(rig.recorded.value.contains { $0.event == event } == described, "\(script)")
         }
         let status = await rig.describer.status
-        #expect(status.today == cases.count, "a retry is the same description: counted once")
+        #expect(status.today == cases.count - 2, "a retry is the same description: counted once; what the service could not take is given back")
         #expect(status.lastError == AIProviderError.badAnswer.sentence)
+    }
+
+    /// Review finding (engine-events F2): while the service could not be reached (a home Ollama box asleep, Claude down), every event cost one
+    /// of the day's descriptions, five decoded pictures and two requests, so the day's limit was gone within the hour and nothing was described
+    /// once the service came back. A send the service could not take is given back, and after three in a row nothing is gathered or sent until
+    /// a wait (1 minute, then 2, 4 … up to 15) is over; a send that works ends it.
+    @Test func anOutageGivesItsCountsBackAndWaitsBeforeTryingAgain() async throws {
+        let rig = try await Rig()
+        let script: [Result<EventDescription, AIProviderError>] = Array(repeating: .failure(.unreachable), count: 6) + [.success(Self.answer())]
+        let service = ScriptedService(script)
+        rig.describer.setService(service, dailyLimit: 200, fresh: true)
+        let cameras = (0..<5).map { rig.camera("Camera \($0)") }
+        for camera in cameras.prefix(3) {
+            rig.describer.eventsStarted([rig.event(camera.id)])
+            #expect(await rig.settle())
+            rig.advance(1)
+        }
+        var status = await rig.describer.status
+        #expect(service.requests.value.count == 6, "each tried once more")
+        #expect(status.today == 0, "a send the service could not take is given back")
+        let retryAt = try #require(status.retryAt)
+        #expect(retryAt == rig.clock.value.addingTimeInterval(59), "a minute after the third failure")
+
+        rig.describer.eventsStarted([rig.event(cameras[3].id)])
+        #expect(await rig.settle())
+        #expect(cameras[3].frames.gathers.value.isEmpty && service.requests.value.count == 6, "while it waits nothing is gathered or sent")
+
+        rig.advance(60)
+        let event = rig.event(cameras[4].id)
+        rig.describer.eventsStarted([event])
+        #expect(await rig.settle())
+        #expect(rig.recorded.value.map(\.event) == [event])
+        status = await rig.describer.status
+        #expect(status.retryAt == nil && status.today == 1)
     }
 
     // MARK: The daily limit
@@ -771,13 +830,13 @@ import Testing
         #expect(rig.recorded.value.map(\.event) == [event])
     }
 
-    @Test func oneTryAtATime() async throws {
+    @Test(.timeLimit(.minutes(1))) func oneTryAtATime() async throws {
         let rig = try await Rig()
         let held = HeldService()
         rig.describer.setService(held, dailyLimit: 200, fresh: true)
         let camera = rig.camera().id
         let first = Task { try await rig.describer.tryNow(cameraID: camera) }
-        #expect(await eventually { held.waiting == 1 })
+        try #require(await eventually(timeout: .seconds(20)) { held.waiting == 1 }, "the first try reached the service (else answering it would wait forever)")
         await #expect(throws: AIDescriberError.alreadyTrying) { try await rig.describer.tryNow(cameraID: camera) }
         #expect(AIDescriberError.alreadyTrying.sentence == "A try is already running.")
         held.answer(.failure(.notFound))

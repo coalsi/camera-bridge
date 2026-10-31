@@ -108,10 +108,18 @@ extension CameraSettingsService {
         case failed(CameraConfigFailure)
     }
 
-    /// Puts the camera's clock in `posixTimeZone` (ONVIF `SetSystemDateAndTime`), so the date and time it draws on its picture is local time. Returns
-    /// nil when it worked, else why not. Throws only `CancellationError`.
+    /// Puts the camera's clock in `posixTimeZone`, so the date and time it draws on its picture is local time: the setup's time zone step
+    /// (`applyTimeZone(posix:)`: Hikvision ISAPI or Reolink's API first, else ONVIF `SetSystemDateAndTime`, read back). Returns nil when it
+    /// worked, else why not. Throws only `CancellationError`.
     public func setCameraTimeZone(posix posixTimeZone: String) async throws -> String? {
-        try await cameraTimeZoneRefusal(posix: posixTimeZone)?.detail
+        do {
+            let outcome = try await applyTimeZone(posix: posixTimeZone)
+            return outcome.succeeded ? nil : outcome.detail
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return CameraSetupOutcome.refused(error).detail
+        }
     }
 
     /// `setCameraTimeZone(posix:)` as a setup step's refusal: nil when it worked, else the outcome (with `notPermitted` for a change the

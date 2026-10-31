@@ -135,3 +135,17 @@ import TestSupport
         #expect(await late.wait { $0.contains("The drive isn’t answering.") })
     }
 }
+
+/// A drive the system reports failing or worn out is a notice like the others (the daemon fills `BridgeOverview.systemNotices`).
+@Suite(.timeLimit(.minutes(1))) struct SystemNoticeTests {
+    @Test func aSystemNoticeIsAWarningInTheList() throws {
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        let worn = SystemNotice(id: "drive-health-recording", kind: "driveHealth", severity: "warning", title: "The Recording Drive Is Wearing Out",
+                                detail: "Portable SSD has used 93% of its rated life. Plan to replace it.", date: date)
+        let overview = BridgeOverview(state: .running, cameras: [], configurations: [], systemNotices: [worn])
+        let notice = try #require(NoticeResource.resources(for: overview, now: date).first)
+        #expect(notice.id == "drive-health-recording" && notice.kind == "driveHealth" && notice.severity == "warning" && notice.category == "system")
+        #expect(notice.title == "The Recording Drive Is Wearing Out" && notice.date == date && notice.action == nil)
+        #expect(NoticeResource.resources(for: BridgeOverview(state: .running, cameras: [], configurations: []), now: date).isEmpty)
+    }
+}

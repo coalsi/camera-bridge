@@ -26,6 +26,8 @@
 .monitor h1 { font-size: 1.1rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--mon-dim); }
 .mon-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .mon-big-clock { font-size: 1.35rem; font-weight: 650; font-variant-numeric: tabular-nums; margin-left: auto; }
+/* The bridge's zone ("MST"), shown only when this browser's clock is in another. */
+.mon-clock-zone { margin-left: 0.4em; font-size: 0.7em; font-weight: 600; color: rgb(255 255 255 / 62%); }
 .mon-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 :is(.monitor, .sky-player) .btn { background: #15151a; border-color: #2c2c34; color: var(--mon-text); }
 :is(.monitor, .sky-player) .btn:hover { background: #1d1d24; }
@@ -111,6 +113,17 @@
 @keyframes mon-pulse { 50% { box-shadow: 0 0 0 4px #ffd36b55; } }
 @media (prefers-reduced-motion: reduce) { .nvr-tile[data-alert] { animation: none !important; } }
 
+/* No picture has come for a while although the wall is live (screens/nvr.js drawHealth). */
+.mon-stall { padding: 2px 8px; border-radius: 999px; background: #3a2a10; color: #ffd36b; border: 1px solid #6b4e1a; font-weight: 650; font-size: 0.78rem; white-space: nowrap; }
+
+/* Go to a moment: the event before, a date and time, the event after. */
+.nvr-jump { display: inline-flex; align-items: center; gap: 4px; }
+
+/* A wall display (wall-mode.js): its controls fade out a few seconds after the pointer last moved, and the pointer with them; a move brings them back. */
+.monitor[data-wall="true"] :is(.mon-actions, .mon-timeline, .nvr-sound, .mon-ptz, .mon-nv) { transition: opacity 0.4s ease; }
+.monitor[data-wall="true"][data-idle="true"] :is(.mon-actions, .mon-timeline, .nvr-sound, .mon-ptz, .mon-nv) { opacity: 0; pointer-events: none; }
+.monitor[data-wall="true"][data-idle="true"], .monitor[data-wall="true"][data-idle="true"] * { cursor: none; }
+
 /* A notice for each new event, on top of the wall. */
 .mon-banners { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); z-index: 5; display: grid; gap: 6px; width: min(560px, 92%); pointer-events: none; }
 .mon-banner {
@@ -150,7 +163,12 @@
 .mon-timeline-head { display: flex; align-items: center; gap: 10px; }
 .mon-timeline-head strong { font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mon-dim); }
 .mon-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; font-size: 0.88rem; overscroll-behavior: contain; }
-.mon-item { border-top: 1px solid var(--mon-line); }
+.mon-item { border-top: 1px solid var(--mon-line); display: flex; align-items: flex-start; }
+.mon-item > .mon-event { flex: 1; min-width: 0; }
+/* Keep this event, beside the row: quiet until the row is hovered or the button has the keyboard. */
+.mon-keep { flex: none; align-self: center; margin: 0 2px; padding: 4px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--mon-dim); cursor: pointer; }
+.mon-keep:hover, .mon-keep:focus-visible { color: var(--mon-text); background: #15151a; }
+.mon-keep:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .mon-item:first-child { border-top: 0; }
 .mon-event-count { margin-left: auto; color: var(--mon-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 /* One event: a button (Enter or Space plays it). Time on top; camera, kind and duration under it; a play mark on the right. */
@@ -187,7 +205,7 @@
 .mon-event .ev-describing { grid-column: 2 / -1; grid-row: 3; }
 .mon-all-events { font-size: 0.8rem; color: var(--brand-accent); text-decoration: none; white-space: nowrap; }
 .mon-all-events:hover { text-decoration: underline; }
-.mon-item-more { padding: 8px 2px; text-align: center; }
+.mon-item-more { padding: 8px 2px; text-align: center; justify-content: center; }
 .mon-empty { color: var(--mon-dim); padding: 8px 2px; }
 
 /* A camera with a battery (status.battery): its level beside the Record chip; a bolt while charging; warning colour when low. */
@@ -348,7 +366,11 @@
 .ev-item[data-concern="alarm"] { border-left-color: var(--danger); }
 .ev-item[data-concern="unusual"] { border-left-color: var(--warning); }
 .ev-item[data-concern="nothing"] { opacity: 0.72; }
-.ev-row { display: flex; gap: 12px; padding: 8px; color: var(--text); text-decoration: none; border-radius: var(--radius-sm); }
+.ev-item { display: flex; align-items: flex-start; }
+.ev-row { flex: 1; min-width: 0; display: flex; gap: 12px; padding: 8px; color: var(--text); text-decoration: none; border-radius: var(--radius-sm); }
+/* Keep this event (js/nvr/kept.js), beside the row's link. */
+.ev-keep { flex: none; margin: 8px 8px 0 0; }
+.ev-keep svg, .mon-keep svg { width: 16px; height: 16px; }
 a.ev-row:hover { background: var(--surface-2); }
 a.ev-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 div.ev-row { cursor: default; }

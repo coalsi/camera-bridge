@@ -6,9 +6,17 @@ CB_STATUS=$CB_RUN/status
 CB_DATA=/var/lib/camera-bridge          # the daemon's data (bind mount of /srv/camera-bridge)
 CB_SYSTEM=/srv/system                   # root-owned system state: flags, SSH keys
 CB_HOTSPOT_FLAG=$CB_RUN/hotspot-open    # while the setup hotspot is open (cb-wifi); the internet guard's DNS waits (cb-guard)
+CB_HOTSPOT_ADDRESS=10.42.0.1            # the box's address on its setup hotspot
 
 # cb_esp: where the boot partition (ESP) is mounted. systemd-gpt-auto-generator picks /boot or /efi, so ask bootctl.
 cb_esp() { bootctl --print-esp-path 2>/dev/null; }
+
+# cb_online: the box is on a network: a default route (IPv4 or IPv6) or a global address (networkd's "routable": a camera network without a
+# router counts too), Ethernet or Wi-Fi. The setup hotspot's own address is not a network.
+cb_online() {
+    [ -n "$(ip -4 route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)" ] && return 0
+    ip -o addr show scope global -tentative 2>/dev/null | grep ' inet' | grep -vqF " $CB_HOTSPOT_ADDRESS/"
+}
 
 # cb_log MESSAGE...: to the journal (tag = $CB_TAG) and to stderr.
 cb_log() {

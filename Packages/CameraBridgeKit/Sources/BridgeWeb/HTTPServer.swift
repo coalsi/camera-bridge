@@ -289,6 +289,7 @@ public actor HTTPServer {
                 if head.method == "HEAD", case .stream = response.body { response.body = .data(Data()) }
                 switch response.body {
                 case .data(let payload):
+                    response.onDiscard?()   // a HEAD request's stream: its body never runs
                     if wantsClose { response.headers["Connection"] = "close" }
                     var out = HTTPSerializer.response(status: response.status, headers: stamped(response.headers), body: payload)
                     if head.method == "HEAD" { out = out.prefix(out.count - payload.count).withUnsafeBytes { Data($0) } }
@@ -313,18 +314,30 @@ public actor HTTPServer {
         try? await send(HTTPSerializer.response(status: status, headers: headers, body: Data(text.utf8)), on: connection, limits: limits)
     }
 
-    /// Chunked answer until `body` returns; the connection closes afterwards.
+    /// Chunked answer until `body` returns (or, with a `Content-Length`, exactly that many bytes, unchunked); the connection closes
+    /// afterwards. A body that throws ends without the last chunk. When the body is not run (the task was cancelled, or the head could
+    /// not be sent) the response's `onDiscard` runs instead; once the body is added to the group it always runs (its `defer` gives back
+    /// what the handler took).
     private static func stream(_ response: HTTPResponse, body: @escaping @Sendable (ResponseStream) async throws -> Void,
                                request: HTTPRequestHead, connection: any TCPConnection, limits: Limits) async {
         var headers = response.headers
-        let chunked = request.version == "HTTP/1.1"
+        let declared = headers["Content-Length"].flatMap { Int64($0) }.flatMap { $0 >= 0 ? $0 : nil }
+        let chunked = declared == nil && request.version == "HTTP/1.1"
         if chunked { headers["Transfer-Encoding"] = "chunked" }
         headers["Connection"] = "close"
-        headers["Content-Length"] = nil
+        if declared == nil { headers["Content-Length"] = nil }
         var head = "HTTP/1.1 \(response.status) \(HTTPSerializer.reasonPhrase(for: response.status))\r\n"
         for (name, value) in stamped(headers) { head += "\(name): \(value)\r\n" }
         head += "\r\n"
-        do { try await send(Data(head.utf8), on: connection, limits: limits) } catch { return }
+        guard !Task.isCancelled else {
+            response.onDiscard?()
+            return
+        }
+        do { try await send(Data(head.utf8), on: connection, limits: limits) } catch {
+            response.onDiscard?()
+            return
+        }
+        let sent = Mutex<Int64>(0)
         let sink = ResponseStream { data in
             if chunked {
                 var chunk = Data("\(String(data.count, radix: 16))\r\n".utf8)
@@ -332,6 +345,14 @@ public actor HTTPServer {
                 chunk.append(contentsOf: [0x0D, 0x0A])
                 try await send(chunk, on: connection, limits: limits)
             } else {
+                if let declared {
+                    let fits = sent.withLock { total in
+                        guard total + Int64(data.count) <= declared else { return false }
+                        total += Int64(data.count)
+                        return true
+                    }
+                    guard fits else { throw TransportError.failed("more bytes than the answer's Content-Length") }
+                }
                 try await send(data, on: connection, limits: limits)
             }
         }

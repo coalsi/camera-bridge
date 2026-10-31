@@ -97,6 +97,19 @@ final class LinuxTCPListener: TCPListener {
     /// The most connections one readiness event accepts (the source is level triggered: it fires again while more wait).
     private static let acceptBatchLimit = 32
 
+    private static let lastShortageWarning = Mutex<ContinuousClock.Instant?>(nil)
+
+    /// Logs a shortage of descriptors or memory while accepting, at most once a minute.
+    static func outOfDescriptors(_ code: Int32) {
+        let now = ContinuousClock.now
+        let due = lastShortageWarning.withLock { last -> Bool in
+            guard last.map({ now - $0 >= .seconds(60) }) ?? true else { return false }
+            last = now
+            return true
+        }
+        if due { Log(category: "transport").warning("Out of file descriptors or memory accepting a connection (errno \(code)); waiting a second") }
+    }
+
     static func start(port: UInt16, loopbackOnly: Bool) throws -> LinuxTCPListener {
         let (descriptor, boundPort) = try bindListener(port: port, loopbackOnly: loopbackOnly)
         let (connections, continuation) = AsyncStream.makeStream(of: (any TCPConnection).self, bufferingPolicy: .bufferingOldest(64))
@@ -109,7 +122,13 @@ final class LinuxTCPListener: TCPListener {
                 if accepted < 0 {
                     if errno == EINTR { continue }
                     if errno == ECONNABORTED { continue }
-                    if errno == EMFILE || errno == ENFILE { Log(category: "transport").warning("Out of file descriptors accepting a connection") }
+                    if errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM {
+                        // The connection stays in the backlog, so the source would fire again at once and spin a core (and flood the
+                        // log that should explain the leak): rest a second first, saying so at most once a minute.
+                        LinuxTCPListener.outOfDescriptors(errno)
+                        box.source.suspend()
+                        SocketDescriptor.queue.asyncAfter(deadline: .now() + .seconds(1)) { box.source.resume() }
+                    }
                     return
                 }
                 LinuxNetworkTransport.configureTCP(accepted, keepalive: true)
@@ -363,8 +382,8 @@ final class LinuxTCPConnection: TCPConnection {
     private func waitUntil(_ interest: SocketDescriptor.Interest) async throws {
         try await withTaskCancellationHandler {
             do {
-                // Bounded, so a readiness event that went missing delays the next system call by 250 ms instead of forever.
-                try await socket.wait(interest, timeout: .milliseconds(250))
+                // Bounded, so a readiness event that went missing would delay the next system call by a second, not forever.
+                try await socket.wait(interest, timeout: .seconds(1))
             } catch TransportError.timedOut {
                 return   // (the callers retry their system call)
             }

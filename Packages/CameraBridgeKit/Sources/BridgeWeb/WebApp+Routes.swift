@@ -87,13 +87,14 @@ extension WebApp {
         Route("POST", "system/archive-drive/forget", takesBody: true) { app, ctx in try await app.systemForgetArchiveDrive(ctx) },
         Route("POST", "system/poweroff", takesBody: true) { app, ctx in try await app.systemPowerOff(ctx) },
         Route("GET", "system/secure-address") { app, _ in .json(await app.secureAddress.report()) },
+        Route("POST", "system/secure-address/enabled", takesBody: true) { app, ctx in try await app.secureAddressEnabled(ctx) },
         Route("POST", "system/secure-address/redirect", takesBody: true) { app, ctx in try await app.secureAddressRedirect(ctx) },
         Route("POST", "system/secure-address/check", takesBody: true) { app, _ in .json(["rebind": await app.secureAddress.checkRebind()]) },
         Route("POST", "system/secure-address/retry", takesBody: true) { app, _ in await app.secureAddress.retryNow(); return .json(await app.secureAddress.report()) },
         Route("POST", "system/ssh", takesBody: true) { app, ctx in try await app.systemSSH(ctx) },
         Route("POST", "system/auto-update", takesBody: true) { app, ctx in try await app.systemAutomaticUpdates(ctx) },
         Route("POST", "system/factory-reset", takesBody: true) { app, ctx in try await app.systemFactoryReset(ctx) },
-    ] + archiveRoutes + cameraSetupRoutes + aiRoutes + notificationRoutes + skyRoutes
+    ] + archiveRoutes + cameraSetupRoutes + aiRoutes + notificationRoutes + skyRoutes + sessionRoutes + monitorRoutes
 
     // MARK: Status and session
 
@@ -212,21 +213,60 @@ extension WebApp {
         case .passwordTooLong: APIError.badRequest("Use at most \(AuthStore.passwordLength.upperBound) characters.", field: "password")
         case .wrongPassword: APIError(status: 401, code: "wrong_password", message: "That password isn’t right.", field: "password")
         case .storageFailed: APIError(status: 500, code: "storage", message: "The password couldn’t be saved. The disk may be full or read-only.")
+        case .unreadable: Self.authUnreadable
         }
     }
+
+    /// `auth.json` is damaged and has no usable copy (`AuthStore.isDamaged`): nobody can sign in until a factory reset.
+    static let authUnreadable = APIError(
+        status: 503, code: "auth_unreadable",
+        message: "The bridge’s password file is damaged, so no one can sign in. To set a new password, reset the bridge: put an empty file named "
+            + "camera-bridge-factory-reset on its boot drive from a computer, then restart it. This erases its settings and recordings.")
 
     func tooManyAttempts(_ seconds: Int) -> APIError {
         APIError(status: 429, code: "too_many_attempts", message: "Too many wrong tries. Wait \(seconds) second\(seconds == 1 ? "" : "s") and try again.",
                  headers: [("Retry-After", String(seconds))])
     }
 
+    /// The administrator's password once more, for what gives root or erases (SSH on, a factory reset, installing to a disk, erasing a drive):
+    /// on the plain-HTTP address the session cookie crosses the network in clear text, so it alone must not be enough. Checked through the
+    /// sign-in limiter. Missing: `403 password_required`; wrong: `403 wrong_password` (403, not 401: the page stays signed in); too many
+    /// tries: `429 too_many_attempts`. Every answer names the field `password`.
+    func confirmPassword(_ password: String?, _ ctx: RequestContext) async throws {
+        guard let password, !password.isEmpty else {
+            throw APIError(status: 403, code: "password_required", message: "Enter the administrator password to confirm this.", field: "password")
+        }
+        switch await checkPassword(password, ctx) {
+        case .right: return
+        case .wait(let seconds): throw tooManyAttempts(seconds)
+        case .wrong: throw APIError(status: 403, code: "wrong_password", message: "That password isn’t right.", field: "password")
+        }
+    }
+
+    /// `AuthStore.checkPassword` from the request's address; a wrong one may start (or add to) a burst the owner is told of.
+    func checkPassword(_ password: String, _ ctx: RequestContext) async -> AuthStore.PasswordCheck {
+        let result = await auth.checkPassword(password, address: ctx.request.remoteAddress)
+        if result == .wrong { await signInFailed() }
+        return result
+    }
+
+    /// After a wrong password: a burst of them goes into the notification log as a security notice, once (`signInNotice`).
+    func signInFailed() async {
+        guard let alert = await auth.signInAlert() else { return }
+        notifications.recordEvent(NoticeResource.signInNotice(alert), now: alert.since)
+    }
+
     func setup(_ ctx: RequestContext) async throws -> HTTPResponse {
         let body = try decode(Credentials.self, from: ctx)
+        if await auth.isDamaged { throw Self.authUnreadable }
         if await auth.isConfigured { throw authError(.alreadyConfigured) }
         if let expected = configuration.setupToken {
-            if let wait = await auth.loginDelay(address: ctx.request.remoteAddress) { throw tooManyAttempts(wait) }
-            guard Secrets.constantTimeEqual(body.setupToken ?? "", expected) else {
-                await auth.recordLogin(address: ctx.request.remoteAddress, success: false)
+            let address = ctx.request.remoteAddress
+            if let wait = await auth.beginAttempt(address: address) { throw tooManyAttempts(wait) }
+            let right = Secrets.constantTimeEqual(body.setupToken ?? "", expected)
+            await auth.finishAttempt(address: address, success: right)
+            if !right { await signInFailed() }
+            guard right else {
                 throw APIError(status: 403, code: "setup_token", message: "That setup code isn’t right.", field: "setupToken")
             }
         }
@@ -236,38 +276,36 @@ extension WebApp {
             throw authError(failure)
         }
         log.notice("the administrator password was set")
-        return try await startSession(status: 201, secure: ctx.request.isSecure)
+        return try await startSession(status: 201, ctx)
     }
 
     func login(_ ctx: RequestContext) async throws -> HTTPResponse {
         let body = try decode(Credentials.self, from: ctx)
         guard await auth.isConfigured else { throw authError(.notConfigured) }
-        let address = ctx.request.remoteAddress
-        if let wait = await auth.loginDelay(address: address) { throw tooManyAttempts(wait) }
-        guard await auth.verify(body.password) else {
-            await auth.recordLogin(address: address, success: false)
-            throw authError(.wrongPassword)
+        if await auth.isDamaged { throw Self.authUnreadable }
+        switch await checkPassword(body.password, ctx) {
+        case .wait(let seconds): throw tooManyAttempts(seconds)
+        case .wrong: throw authError(.wrongPassword)
+        case .right: return try await startSession(status: 200, ctx)
         }
-        await auth.recordLogin(address: address, success: true)
-        return try await startSession(status: 200, secure: ctx.request.isSecure)
     }
 
-    private func startSession(status: Int, secure: Bool) async throws -> HTTPResponse {
+    private func startSession(status: Int, _ ctx: RequestContext) async throws -> HTTPResponse {
         let created: (token: String, session: AuthStore.Session)
         do {
-            created = try await auth.createSession()
+            created = try await auth.createSession(userAgent: ctx.request.headers["User-Agent"], address: ctx.request.remoteAddress)
         } catch let failure as AuthStore.Failure {
             throw authError(failure)
         }
         var response = HTTPResponse.json(SignedIn(csrfToken: created.session.csrfToken, bridgeName: await auth.bridgeName), status: status)
-        response.headers.add("Set-Cookie", sessionCookie(token: created.token, secure: secure))
+        response.headers.add("Set-Cookie", sessionCookie(token: created.token, secure: ctx.request.isSecure))
         return response
     }
 
     func logout(_ ctx: RequestContext) async -> HTTPResponse {
         if let token = ctx.sessionToken { await auth.endSession(token: token) }
         var response = HTTPResponse.empty()
-        response.headers.add("Set-Cookie", Self.clearedCookie())
+        for cookie in Self.clearedCookies() { response.headers.add("Set-Cookie", cookie) }
         return response
     }
 
@@ -279,17 +317,19 @@ extension WebApp {
     func changePassword(_ ctx: RequestContext) async throws -> HTTPResponse {
         let body = try decode(PasswordChange.self, from: ctx)
         let address = ctx.request.remoteAddress
-        if let wait = await auth.loginDelay(address: address) { throw tooManyAttempts(wait) }
+        if let wait = await auth.beginAttempt(address: address) { throw tooManyAttempts(wait) }
         do {
             try await auth.changePassword(current: body.current, new: body.new, keeping: ctx.session?.id)
         } catch let failure as AuthStore.Failure {
+            // A new password that is too short or long was refused before the current one was checked: that try is not counted.
+            await auth.finishAttempt(address: address, success: failure == .wrongPassword ? false : nil)
             if failure == .wrongPassword {
-                await auth.recordLogin(address: address, success: false)
+                await signInFailed()
                 throw APIError(status: 401, code: "wrong_password", message: "The current password isn’t right.", field: "current")
             }
             throw authError(failure)
         }
-        await auth.recordLogin(address: address, success: true)
+        await auth.finishAttempt(address: address, success: true)
         log.notice("the administrator password was changed; other browsers were signed out")
         return .empty()
     }
@@ -415,9 +455,30 @@ extension WebApp {
         let id = try ctx.uuid("id")
         let patch = try decode(CameraPatch.self, from: ctx)
         let overview = await backend.overview()
-        guard var camera = overview.configurations.first(where: { $0.id == id }) else {
+        guard var preview = overview.configurations.first(where: { $0.id == id }) else {
             throw APIError.notFound("There is no camera with this identifier.")
         }
+        let bridge = overview.settings
+        try apply(patch, to: &preview, bridge: bridge)   // a patch that can't be applied is refused at once, before the engine's queue
+        let password = patch.password.flatMap { $0.isEmpty ? nil : $0 }
+        do {
+            // Applied to the camera as it is when the engine's turn comes: two edits sent while the engine is busy (a reconnect, a setup run,
+            // another camera's restart) both stick, where two whole copies read before either was saved undid one another.
+            try await backend.updateCamera(id: id, password: password) { [self] camera in try apply(patch, to: &camera, bridge: bridge) }
+        } catch let error as APIError {
+            throw error
+        } catch EngineError.unknownCamera {
+            throw APIError.notFound("This camera was removed.")
+        } catch {
+            log.warning("changing \(preview.name) failed: \(ErrorText.logDescription(error))")
+            throw APIError(status: 422, code: "update_failed", message: ErrorText.describe(error))
+        }
+        guard let updated = await backend.overview().cameraResource(id: id) else { throw APIError.notFound("This camera was removed.") }
+        return .json(updated)
+    }
+
+    /// The fields of `patch` that are there, checked and applied to `camera`; `bridge` is the bridge's settings (the Sky Watcher's needs).
+    private func apply(_ patch: CameraPatch, to camera: inout CameraConfiguration, bridge: BridgeSettings) throws {
         if let name = patch.name {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { throw APIError.badRequest("Give the camera a name.", field: "name") }
@@ -491,7 +552,7 @@ extension WebApp {
         if let value = patch.recordingStreamMode { camera.recordingStreamMode = value }
         if let value = patch.recordingQualityMode { camera.recordingQualityMode = value }
         if let value = patch.aiDescriptions { camera.aiDescriptions = value }
-        if let sky = patch.skyDetector { camera.skyDetector = try skyDetectorSettings(applying: sky, to: camera, bridge: overview.settings) }
+        if let sky = patch.skyDetector { camera.skyDetector = try skyDetectorSettings(applying: sky, to: camera, bridge: bridge) }
         if let overlay = patch.timestampOverlay {
             if let value = overlay.enabled { camera.timestampOverlay.enabled = value }
             if let value = overlay.position { camera.timestampOverlay.position = value }
@@ -502,17 +563,6 @@ extension WebApp {
             if let value = overlay.size { camera.timestampOverlay.size = value }
         }
         if let value = patch.pictureCorrection { camera.pictureCorrection = value }
-        let password = patch.password.flatMap { $0.isEmpty ? nil : $0 }
-        do {
-            try await backend.updateCamera(camera, password: password)
-        } catch EngineError.unknownCamera {
-            throw APIError.notFound("This camera was removed.")
-        } catch {
-            log.warning("changing \(camera.name) failed: \(ErrorText.logDescription(error))")
-            throw APIError(status: 422, code: "update_failed", message: ErrorText.describe(error))
-        }
-        guard let updated = await backend.overview().cameraResource(id: id) else { throw APIError.notFound("This camera was removed.") }
-        return .json(updated)
     }
 
     // MARK: Snapshot and live preview
@@ -541,11 +591,12 @@ extension WebApp {
             throw APIError(status: 429, code: "too_many_streams", message: "Too many live previews are open. Close one and try again.", headers: [("Retry-After", "5")])
         }
         let (backend, interval, lifetime) = (backend, configuration.liveFrameInterval, configuration.liveLifetime)
+        let release = ReleaseOnce { [self] in releaseLiveSlot() }
         let boundary = "cbframe"
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
-        return .stream(contentType: "multipart/x-mixed-replace; boundary=\(boundary)", headers: headers) { [self] stream in
-            defer { releaseLiveSlot() }
+        var response = HTTPResponse.stream(contentType: "multipart/x-mixed-replace; boundary=\(boundary)", headers: headers) { stream in
+            defer { release() }
             let deadline = ContinuousClock.now + lifetime
             var waitingSince: ContinuousClock.Instant?
             while !Task.isCancelled, ContinuousClock.now < deadline {
@@ -565,6 +616,8 @@ extension WebApp {
                 try await Task.sleep(for: max(remaining, .milliseconds(50)))
             }
         }
+        response.onDiscard = { release() }
+        return response
     }
 
     // MARK: Pairing

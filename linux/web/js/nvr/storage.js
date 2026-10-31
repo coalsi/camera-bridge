@@ -4,12 +4,13 @@ import { get, patch } from '../api.js';
 import { confirmDialog, h, modal, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { cameraList } from '../store.js';
+import { dateTime } from '../format.js';
 import { inlineError } from '../screens/common.js';
 import { ARCHIVE_PURPOSE, describeArchive } from '../screens/archive-drive-card.js';
 import { KEEP_DAY_CHOICES, MAX_SIZE_CHOICES_GB, deleteSentence, describeLocation, describeStorage, keepLabel, sizeLabel, withCurrent } from './storage-info.js';
 
-const when = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-const whenText = (ms) => (ms === null || ms === undefined ? 'Nothing recorded yet' : when.format(new Date(ms)));
+// In the bridge's time zone, as every time on the page (store.js bridgeZone).
+const whenText = (ms) => (ms === null || ms === undefined ? 'Nothing recorded yet' : dateTime(ms));
 
 // MARK: The dialog
 

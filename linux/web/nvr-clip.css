@@ -22,3 +22,8 @@
 .nvr-clip-lengths .btn[aria-pressed="true"] { background: #9e1b1b; border-color: #c62828; color: #fff; }
 .nvr-clip-custom { font-size: 0.85rem; font-weight: 600; color: #ff8a80; font-variant-numeric: tabular-nums; }
 .nvr-clip-speed { width: auto; }
+/* Keep (js/nvr/kept.js): the range of each camera kept from retention, with an optional note. */
+.nvr-clip-keep { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.nvr-clip-note { flex: 1 1 220px; max-width: 420px; min-height: 32px; padding: 4px 10px; font-size: 0.88rem; }
+.nvr-clip-keep .btn svg { width: 16px; height: 16px; }
+.nvr-clip-kept { color: var(--ok, #3fb950); font-weight: 600; }

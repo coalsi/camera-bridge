@@ -501,10 +501,4 @@ dialog.sky-player::backdrop { background: rgb(0 0 0 / 0.78); backdrop-filter: bl
   .sky-tile-length { right: 5px; bottom: 5px; font-size: 0.68rem; }
 }
 
-/* With Sky Watcher in the menu the phone's tab bar has ten items, more than a phone is wide: it scrolls sideways (the page does not) and every
-   item keeps its own width, so none is cut off. */
-@media (max-width: 640px) {
-  .nav { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
-  .nav::-webkit-scrollbar { display: none; }
-  .nav a { flex: 1 0 auto; }
-}
+/* With Sky Watcher in the menu the phone's tab bar has five items and More (style.css, app.js): it fits a phone without scrolling. */

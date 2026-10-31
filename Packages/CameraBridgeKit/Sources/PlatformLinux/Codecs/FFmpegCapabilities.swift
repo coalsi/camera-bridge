@@ -161,7 +161,8 @@ final class FFmpegRuntime: Sendable {
 
     private struct State {
         var capabilities: FFmpegCapabilities?
-        var vaapiDisabled = false
+        /// When a hardware encoder last died before its first picture: new pipelines encode in software for `hardwareDecodeRetryAfter` after it.
+        var vaapiDisabledAt: Date?
         /// Streams (`hardwareDecodeKey`) the GPU's decoder session ended on before showing a picture, and when: decoded in software for
         /// `hardwareDecodeRetryAfter` after that.
         var hardwareDecodeFailures: [String: Date] = [:]
@@ -213,11 +214,11 @@ final class FFmpegRuntime: Sendable {
         return stored
     }
 
-    /// The VA-API render node decoders use, or nil to decode on the CPU: the GPU decodes wherever it encodes (VA-API usable, not
-    /// turned off by configuration or after a failure).
+    /// The VA-API render node decoders use, or nil to decode on the CPU: the GPU decodes wherever it can encode (VA-API usable, not turned
+    /// off by configuration). A failed encoder does not stop decoding there (each stream that fails to decode is held in software by itself,
+    /// `noteHardwareDecodeFailure`): one encoder that died used to send every 4K and HEVC decode to the CPU for the rest of the run.
     func hardwareDecodeDevice() -> String? {
-        guard configuration.videoEncoder != .software, let capabilities = try? capabilities(), capabilities.vaapiUsable,
-              !state.withLock({ $0.vaapiDisabled }) else { return nil }
+        guard configuration.videoEncoder != .software, let capabilities = try? capabilities(), capabilities.vaapiUsable else { return nil }
         return configuration.vaapiDevice
     }
 
@@ -267,7 +268,13 @@ final class FFmpegRuntime: Sendable {
     /// The H.264 encoder for a new pipeline (logged when it changes).
     func videoBackend() throws -> FFmpegVideoBackend {
         let capabilities = try capabilities()
-        let disabled = state.withLock { $0.vaapiDisabled }
+        let current = now()
+        let disabled = state.withLock { state -> Bool in
+            guard let at = state.vaapiDisabledAt else { return false }
+            if Self.holds(failedAt: at, now: current) { return true }
+            state.vaapiDisabledAt = nil   // the time is up: the GPU encodes again
+            return false
+        }
         let backend: FFmpegVideoBackend
         switch configuration.videoEncoder {
         case .software:
@@ -288,13 +295,16 @@ final class FFmpegRuntime: Sendable {
         return backend
     }
 
-    /// A VA-API pipeline died at start: use software from now on.
+    /// A VA-API pipeline died by itself before its first picture: new pipelines encode in software for `hardwareDecodeRetryAfter`, then the GPU
+    /// is tried again (a latch that never let go kept a whole run on libx264 after one passing failure).
     func disableVAAPI(reason: String) {
-        let first = state.withLock { state -> Bool in
-            defer { state.vaapiDisabled = true }
-            return !state.vaapiDisabled
+        let current = now()
+        let fresh = state.withLock { state -> Bool in
+            if let at = state.vaapiDisabledAt, Self.holds(failedAt: at, now: current) { return false }
+            state.vaapiDisabledAt = current
+            return true
         }
-        if first { log.warning("VA-API encoding failed (\(reason)); switching to libx264 for new pipelines") }
+        if fresh { log.warning("VA-API encoding failed (\(reason)); new pipelines encode with libx264 for \(Int(Self.hardwareDecodeRetryAfter / 60)) minutes") }
     }
 
     /// Whether this ffmpeg can straighten the picture (it has `remap`, `extractplanes` and `mergeplanes`); false, logged once, otherwise.

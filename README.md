@@ -62,8 +62,9 @@ Website: <https://www.camera-bridge.app> · Documentation: <https://docs.camera-
   (Let's Encrypt, renewed by the box itself). It works in every browser at home with nothing to install. Only the name and a
   home address go through camera-bridge.app; video and the page never leave your network. The plain
   `http://camera-bridge.local` sends browsers there, and a switch in Settings › System turns that off.
-- No telemetry and no account. The only things that leave the box are update checks, the time server, and (only if you turn
-  them on) AI descriptions.
+- No telemetry and no account. The only things that leave the box are update checks, the time server, the secure address's
+  name and home address (it can be switched off, and then the box calls neither camera-bridge.app nor Let's Encrypt), and
+  (only if you turn them on) AI descriptions.
 
 ### Apple Home, if you want it
 Camera Bridge OS is a complete NVR on its own. Apple Home is optional: pair a camera with the Home app only if you want it there.

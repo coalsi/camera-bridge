@@ -175,7 +175,8 @@ private final class SilentProbeTransport: NetworkTransport {
         #expect(await monitor.advertisingRestarts == 0)
     }
 
-    /// A listener that accepts and never answers: restarted on the same port, one repair per pass.
+    /// A listener that accepts and never answers: restarted on the same port, one repair per pass. Review Oct 31 (homekit-media F3): one
+    /// missed answer is not enough (a scheduling stall on a busy box withdrew the camera from Bonjour for nothing); two passes in a row are.
     @Test func aListenerThatDoesNotAnswerIsRestarted() async throws {
         let transport = SilentProbeTransport()
         let running = try await startServer(accessory: TestAccessories.sensorHub().accessory, transport: transport)
@@ -184,6 +185,8 @@ private final class SilentProbeTransport: NetworkTransport {
         browser.answer(.found(try await txt(running)))
         let monitor = monitor(running, browser: browser)
         #expect(transport.listenCount == 1)
+        await monitor.runOnce()
+        #expect(await monitor.listenerRestarts == 0, "one miss: left alone")
         await monitor.runOnce()
         #expect(await monitor.listenerRestarts == 1)
         #expect(await eventually(timeout: .seconds(5)) { transport.listenCount == 2 })

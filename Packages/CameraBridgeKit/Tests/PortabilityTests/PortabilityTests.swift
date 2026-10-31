@@ -71,7 +71,7 @@ private let allowedPackageImports: [String: Set<String>] = {
     return graph
 }()
 /// The platform implementations (each wrapped in its own `#if os(...)`) and the C module they use; not portable, not scanned.
-let platformModules: Set<String> = ["PlatformApple", "PlatformLinux", "CDNSSD"]
+let platformModules: Set<String> = ["PlatformApple", "PlatformLinux", "CDNSSD", "CEpoll"]
 let packageModules: Set<String> = Set(allowedPackageImports.keys).union(["PlatformApple", "PlatformLinux"])
 
 /// Test-only modules may also use swift-testing.

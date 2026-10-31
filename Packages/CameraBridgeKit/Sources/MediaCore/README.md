@@ -26,6 +26,9 @@ left). The part of a JPEG (or PNG) inside `crop`, or all of it when `crop` is ni
 as a JPEG at `quality` (0 to 1); a whole picture that already fits comes back unchanged. A crop that is not inside the picture, or data that is not an image, throws
 `unsupported`. The ffmpeg codecs cut at the exact pixel (`crop=…:exact=1`) under `nice -n 10`; the Apple ones use ImageIO and CoreGraphics.
 
+`MediaCodecs.makeMotionDecoder(format:keepEvery:)` (2026-10-31, a requirement with a default, `makeMotionDecoder(format:)`): motion detection's decoder
+making a picture of every `keepEvery`th frame only, as the sky decoder below does (the ffmpeg one drops the others before they are copied out).
+
 The sky detector's decoder (2026-10-25, docs/CONTRACT_CHANGES.md): `MediaCodecs.makeSkyDecoder(format:maxOutputWidth:keepEvery:)` (a requirement with a
 default, `makeMotionDecoder`): a decoder for the sky detector, which looks at a luma picture at most `maxOutputWidth` wide a few times a second. It makes a
 picture of every `keepEvery`th frame it is given (frames 0, N, 2N, … from the first, a keyframe) and answers nil at once for the others; a codec service that can

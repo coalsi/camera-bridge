@@ -4,11 +4,14 @@ import { confirmDialog, h, parseSVG, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { subscribe } from '../store.js';
 
+/** A request that failed (a blip of the network, the bridge restarting) is asked again after this long, the sentence on screen meanwhile. */
+export const PAIRING_RETRY_MS = 5000;
+
 /**
  * `source`: 'cameras/<id>' or 'sensors-bridge'. Polls every 2 s until the accessory is in Apple Home, and follows the event stream
- * (a camera that gets paired flips the panel at once).
+ * (a camera that gets paired flips the panel at once). A failed request does not stop it: the panel says what went wrong and asks again.
  */
-export function pairingPanel({ cameraId, cameraName, source, intro = false, onPaired } = {}) {
+export function pairingPanel({ cameraId, cameraName, source, intro = false, onPaired, retryMs = PAIRING_RETRY_MS } = {}) {
   const path = source || `cameras/${cameraId}/pairing`;
   const el = h('div', { class: 'card', 'aria-live': 'polite' }, h('div', { class: 'checking' }, spinner(), 'Getting the setup code…'));
   let timer = null;
@@ -21,7 +24,10 @@ export function pairingPanel({ cameraId, cameraName, source, intro = false, onPa
     try {
       data = await get(path);
     } catch (error) {
-      if (!stopped) replace(el, h('div', { class: 'banner error' }, icon('alert'), h('div', { class: 'text' }, error.message)));
+      if (stopped) return;
+      replace(el, h('div', { class: 'banner error' }, icon('alert'), h('div', { class: 'text' }, error.message, h('div', { class: 'small muted' }, 'Trying again…'))));
+      clearTimeout(timer);
+      timer = setTimeout(refresh, retryMs);
       return;
     }
     if (stopped) return;

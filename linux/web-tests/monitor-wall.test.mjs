@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   DEFAULT_ASPECT, DEFAULT_MOSAIC_ACROSS, MOSAIC_ACROSS, MOSAIC_MAX_TILES, PACK_SLACK, WALL_GAP, WALL_KEYS,
-  acrossFromMinWidth, gridShape, layoutMosaicPage, packMosaic, packingBox, pictureAspect, pictureFit, readWallPrefs, wallCells, writeWallPref,
+  acrossFromMinWidth, autoWidth, gridShape, layoutMosaicPage, packMosaic, packingBox, pictureAspect, pictureFit, readWallPrefs, wallCells, writeWallPref,
 } from '../web/js/screens/nvr-layout.js';
 import { PAGE_SIZES } from '../web/js/screens/nvr-model.js';
 import { installFakeBrowser, makeStorage } from './support/fake-browser.mjs';
@@ -271,10 +271,20 @@ function storageFns(storage = makeStorage()) {
   };
 }
 
-test('with nothing kept the wall is a grid of nine (two on a phone), fitted, Full quality, mosaic 3 across', () => {
+test('with nothing kept the wall is a grid of nine (two on a phone), fitted, Auto quality, mosaic 3 across', () => {
   const { read } = storageFns();
-  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'main' });
+  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'auto' });
   assert.equal(readWallPrefs(read, { viewportWidth: 390 }).tiles, 2);
+});
+
+test('Auto quality asks for the widest tile’s width in device pixels, in steps of 320 so a small resize keeps the live request', () => {
+  assert.equal(autoWidth(600), 640);
+  assert.equal(autoWidth(600, 2), 1280);
+  assert.equal(autoWidth(641, 2), 1600);
+  assert.equal(autoWidth(1280), 1280);
+  assert.equal(autoWidth(0), null, 'not measured yet');
+  assert.equal(autoWidth(Number.NaN), null);
+  assert.equal(autoWidth(500, 0), 640, 'a ratio that makes no sense counts as 1');
 });
 
 test('every choice is kept and read back the next time the Monitor opens', () => {
@@ -297,26 +307,27 @@ test('every choice is kept and read back the next time the Monitor opens', () =>
 
 test('a value that makes no sense is not kept, and one found in storage counts as nothing kept', () => {
   const { storage, read, write } = storageFns();
+  assert.equal(writeWallPref(storageFns().write, 'quality', 'auto'), 'auto', 'Auto is a choice too');
   for (const [name, value] of [['quality', 'ultra'], ['layout', 'spiral'], ['across', 5], ['across', '3px'], ['minWidth', 320], ['fit', 'stretch'], ['tiles', 17], ['tiles', 'abc'], ['nothing', 1]]) {
     assert.equal(writeWallPref(write, name, value), null, `${name} ${value}`);
   }
   assert.equal(storage.length, 0);
   for (const key of Object.values(WALL_KEYS)) storage.setItem(key, 'garbage');
-  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'main' });
+  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'auto' });
 });
 
 test('?tiles= wins over what is kept and shows that grid', () => {
   const { read, write } = storageFns();
   writeWallPref(write, 'layout', 'mosaic');
   writeWallPref(write, 'tiles', 4);
-  assert.deepEqual(readWallPrefs(read, { query: '16' }), { layout: 'grid', tiles: 16, tilesChosen: true, across: 3, fit: 'fit', quality: 'main' });
+  assert.deepEqual(readWallPrefs(read, { query: '16' }), { layout: 'grid', tiles: 16, tilesChosen: true, across: 3, fit: 'fit', quality: 'auto' });
   assert.equal(readWallPrefs(read, { query: 'x' }).layout, 'mosaic', 'a query that is not a tile count changes nothing');
 });
 
 test('blocked storage: the wall opens with the defaults and a choice simply is not kept', () => {
   const { read, write } = storageFns(makeStorage({ broken: true }));
   assert.equal(writeWallPref(write, 'quality', 'sub'), 'sub');
-  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'main' });
+  assert.deepEqual(readWallPrefs(read), { layout: 'grid', tiles: 9, tilesChosen: false, across: 3, fit: 'fit', quality: 'auto' });
 });
 
 // MARK: Straightened pictures

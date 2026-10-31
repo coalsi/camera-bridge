@@ -741,7 +741,7 @@ final class LiveStreamPipeline: Sendable {
             requestKeyframe()
         }
         context.log.warning("Live stream to \(controllerHost)\(advertisedHost.map { " (the controller advertised \($0))" } ?? ""): the controller sent nothing for \(Self.ms(ContinuousClock.now - begun)) after the start; "
-                            + "it is probably not receiving or decoding our video (check the Mac's firewall and Local Network access)")
+                            + "it is probably not receiving or decoding our video (check that nothing between them and the bridge blocks it: a firewall, a guest network, a VPN)")
     }
 
     private func trace(_ message: String) {

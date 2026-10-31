@@ -91,6 +91,18 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     public var battery: BatteryStatus?
     public var lastEvent: String?
     public var lastEventDate: Date?
+    /// Since when the camera has been offline (`connection` `.offline`) without a break, as the engine saw it; nil while it is not offline
+    /// (`connectionSince` while offline; setting it sets that). The web's "camera is offline" notice waits on it.
+    public var offlineSince: Date? {
+        get {
+            if case .offline = connection { return connectionSince }
+            return nil
+        }
+        set { connectionSince = newValue }
+    }
+    /// When the doorbell last rang (deduplicated, as Home is told): a ring followed at once by another event (the doorbell's Person) is
+    /// no longer `lastEvent`, but is still told by this date.
+    public var lastRingDate: Date?
     public var lastError: String?
     /// The camera's latest events (rising edges, as `lastEvent` names them), oldest first, at most
     /// `EventRouter.recentEventLimit`. Kept by the event router whatever the log level.
@@ -125,6 +137,12 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     /// The Sky Watcher of this camera (`SkyCameraStatus`): nil while it is off for the camera (the plugin off, or the camera's switch off); while
     /// it is on, whether it watches, the stream, the aim and the learning, or why it cannot run.
     public var sky: SkyCameraStatus?
+    /// Since when `connection` has been what it is (online, offline, connecting, idle or off; a new reason while offline is still offline), as
+    /// this run of the engine saw it: what "offline since 2:14 AM" says. Nil before the first status.
+    public var connectionSince: Date?
+    /// Since when the camera's recorder has been waiting while its Record switch is on (`CameraArchiveStatus.state` `.waiting`); nil while it records,
+    /// is off or paused (a full drive has its own notice).
+    public var nvrWaitingSince: Date?
 
     public init(id: UUID, name: String, kind: CameraKind, vendor: CameraVendor, connection: ConnectionState = .idle,
                 eventChannelConnected: Bool = false, videoSummary: String? = nil, isPaired: Bool = false, setupCode: String = "",
@@ -133,7 +151,7 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
                 recentEvents: [CameraEventRecord] = [], subStreamProblem: String? = nil, liveSessions: [LiveSessionStatus] = [],
                 recordingSession: RecordingSessionStatus? = nil, mainStreamInfo: SourceStreamInfo? = nil, subStreamInfo: SourceStreamInfo? = nil,
                 eventsNote: String? = nil, appViewers: Int = 0, homeKitNote: String? = nil, motionShadow: MotionShadowStatus? = nil,
-                nvr: CameraArchiveStatus = CameraArchiveStatus()) {
+                nvr: CameraArchiveStatus = CameraArchiveStatus(), lastRingDate: Date? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -152,6 +170,7 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
         self.appViewers = appViewers
         self.lastEvent = lastEvent
         self.lastEventDate = lastEventDate
+        self.lastRingDate = lastRingDate
         self.lastError = lastError
         self.recentEvents = recentEvents
         self.subStreamProblem = subStreamProblem

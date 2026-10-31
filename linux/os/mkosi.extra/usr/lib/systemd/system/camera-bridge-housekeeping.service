@@ -1,0 +1,9 @@
+[Unit]
+Description=Camera Bridge housekeeping (the daemon's restart count, the clock and the network link)
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/linux/os/README.md
+After=var-lib-camera\x2dbridge.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/cb-system housekeeping
+TimeoutStartSec=2min

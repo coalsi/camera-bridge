@@ -138,7 +138,7 @@ The box checks GitHub for a newer `os-v...` release every day. In **System** you
 
 ## 9. Factory reset
 
-This erases your cameras, passwords, HomeKit pairings **and all recordings made with Record** (the cameras then have to be removed from Home by hand and added again). The confirmation in the web UI says so.
+This erases your cameras, passwords, HomeKit pairings **and all recordings made with Record** (the cameras then have to be removed from Home by hand and added again). The confirmation in the web UI says so. It also forgets the saved Wi-Fi networks and their passwords, SSH and its keys, and the log of earlier starts, so a box you give away tells nothing about your home: a box on Wi-Fi opens its setup hotspot again after the reset (section on Wi-Fi). A recording drive or an archive drive is left as it is.
 
 * In the web UI: **System > Factory reset** (type `RESET` to confirm).
 * From a terminal: `cb-system factory-reset --yes`.
@@ -312,7 +312,7 @@ Sentences already written stay with their events and go when the recordings' rul
 | The page loads but cameras are not found | The box and the cameras must be on the same network segment (or the router must allow traffic between them). Add the camera by hand with its address. Use the **Test** button to see the error. |
 | Home says "No Response" | The box must be on and reachable; the iPhone must be on the same network for the first pairing; a home hub (Apple TV / HomePod) is needed for remote access and recording. If you reinstalled the box without copying the settings, remove the old accessory from Home and pair again. |
 | The picture is jerky or the box is hot | Too many cameras for the CPU (see HARDWARE.md), or the cameras send H.265. Lower the camera's bit rate; use H.264. |
-| The clock is wrong | The box sets its clock from the internet (NTP). It needs internet access for that; wait a few minutes after a power cut. |
+| The clock is wrong | The box sets its clock from the internet (NTP). It needs internet access for that; wait a few minutes after a power cut. **System > Box health** says whether the clock is in sync. Without the internet the box keeps its own time, and it never goes back before the last time it knew (a computer with a flat clock battery). |
 | It runs, but slowly, from a USB stick | Use a USB 3 port and a better stick, or install to the internal SSD (section 7). |
 | After an update the old version came back | That is the safety net working: the new version did not start properly. See UPDATES.md; the web UI (or `cb-update status`) says why. Try again later or report it with the diagnostics export. |
 | Logs | Web UI > Logs, or the diagnostics export. Over SSH: `journalctl -u camerabridged -b`, `journalctl -b -p warning`. |
@@ -357,7 +357,7 @@ With a network cable the box needs nothing else. For Wi-Fi there are three ways:
 2. **The setup hotspot:** with no cable and no network it knows, the box opens its own Wi-Fi, `CameraBridge-XXXX`, about 30 seconds after it starts. Join it with a phone: a page opens by itself (as hotel Wi-Fi does). Choose your network, type its password and press Join. The box restarts and joins it; your phone goes back to your own Wi-Fi, and the box is at `http://camera-bridge.local`. If it can't join, its own network comes back and the page says why. Once the box is set up, the page also asks for its administrator password.
 3. **System > Wi-Fi** in the web page: find networks, join one (the box restarts), forget one.
 
-The box looks for its saved networks again every five minutes while nobody is using its hotspot, so it comes back by itself after a Wi-Fi outage.
+A box that knows a network does not open its hotspot when that network goes away for a while (a router restarting): it waits for it, and opens the hotspot only after 10 minutes without a network. While the hotspot is open, the box looks for its saved networks again every minute when nobody is using the hotspot, so it comes back by itself after a Wi-Fi outage. A box on a network cable never opens it, even on a camera network without a router.
 
 ## Moving from Camera Bridge for Mac
 

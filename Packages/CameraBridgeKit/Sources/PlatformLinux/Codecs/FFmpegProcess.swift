@@ -1,6 +1,9 @@
 import BridgeSupport
 import Foundation
 import MediaCore
+#if os(Linux)
+import Glibc
+#endif
 
 // The process layer of the Linux codecs: everything above it (argument building, FLV framing, the codec objects) talks to
 // `FFmpegProcess` / `FFmpegProcessLaunching`, so tests drive it with a fake and no ffmpeg at all.
@@ -117,16 +120,14 @@ private final class SystemChild: FFmpegProcess, @unchecked Sendable {
         let command = spec.launchCommand()
         process.executableURL = command.executable
         process.arguments = command.arguments
-        var environment = ProcessInfo.processInfo.environment
-        environment["AV_LOG_FORCE_NOCOLOR"] = "1"
-        process.environment = environment
+        process.environment = Self.childEnvironment(ProcessInfo.processInfo.environment)
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
         let semaphore = exitSemaphore
         process.terminationHandler = { _ in semaphore.signal() }
         do {
-            try process.run()
+            try Self.withUnblockedSignals { try process.run() }
         } catch {
             for pipe in [stdinPipe, stdoutPipe, stderrPipe] {
                 try? pipe.fileHandleForReading.close()
@@ -142,6 +143,30 @@ private final class SystemChild: FFmpegProcess, @unchecked Sendable {
     }
 
     // MARK: Input
+
+    /// The daemon's environment without what belongs to the daemon alone: systemd's notify and watchdog sockets, socket activation and
+    /// Camera Bridge's own settings (a setup code can be one), plus ffmpeg's plain logging.
+    static func childEnvironment(_ environment: [String: String]) -> [String: String] {
+        var child = environment.filter { key, _ in
+            !(key == "NOTIFY_SOCKET" || key.hasPrefix("WATCHDOG_") || key.hasPrefix("LISTEN_") || key.hasPrefix("CAMERABRIDGE_"))
+        }
+        child["AV_LOG_FORCE_NOCOLOR"] = "1"
+        return child
+    }
+
+    /// Runs `start` with no signal blocked on this thread: a child inherits the signal mask of the thread that starts it, and libdispatch's
+    /// worker threads block every signal, so an ffmpeg started from one never saw SIGTERM (`terminate()` then always ended in SIGKILL, and
+    /// systemd's stop of the service could not stop it either). `ProcessHelperLauncher` does the same.
+    static func withUnblockedSignals<T>(_ start: () throws -> T) rethrows -> T {
+        #if os(Linux)
+        var unblocked = sigset_t()
+        var previous = sigset_t()
+        sigemptyset(&unblocked)
+        pthread_sigmask(SIG_SETMASK, &unblocked, &previous)
+        defer { pthread_sigmask(SIG_SETMASK, &previous, nil) }
+        #endif
+        return try start()
+    }
 
     func write(_ data: Data) throws {
         guard !data.isEmpty else { return }
@@ -333,6 +358,9 @@ final class FFmpegSession: @unchecked Sendable {
     private var terminated = false
     private var bytesIn = 0
     private let maxBufferedOutput: Int
+    /// `waitForOutputAsync` calls waiting for output or the end (resumed by `received`, `ended`, `terminate` or their timeout).
+    private var outputWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var nextWaiter = 0
 
     /// `maxBufferedOutput`: past this the reader thread stops reading, so the child blocks on its stdout (back-pressure).
     init(launcher: any FFmpegProcessLaunching, spec: FFmpegProcessSpec, maxBufferedOutput: Int = 64 << 20) throws {
@@ -351,19 +379,33 @@ final class FFmpegSession: @unchecked Sendable {
 
     private func received(_ data: Data) {
         condition.lock()
-        defer { condition.unlock() }
         // Back-pressure: hold the reader (and so the child) while the consumer is behind; a terminated session drops output.
         while output.count >= maxBufferedOutput, !terminated { condition.wait() }
-        guard !terminated else { return }
+        guard !terminated else {
+            condition.unlock()
+            return
+        }
         output.append(data)
         condition.broadcast()
+        let waiters = takeOutputWaiters()
+        condition.unlock()
+        for waiter in waiters { waiter.resume() }
     }
 
     private func ended(_ exit: FFmpegExit) {
         condition.lock()
         exitInfo = exit
         condition.broadcast()
+        let waiters = takeOutputWaiters()
         condition.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Under `condition`'s lock.
+    private func takeOutputWaiters() -> [CheckedContinuation<Void, Never>] {
+        guard !outputWaiters.isEmpty else { return [] }
+        defer { outputWaiters = [:] }
+        return Array(outputWaiters.values)
     }
 
     // MARK: Input
@@ -399,7 +441,9 @@ final class FFmpegSession: @unchecked Sendable {
         let current = process
         output.removeAll()
         condition.broadcast()
+        let waiters = takeOutputWaiters()
         condition.unlock()
+        for waiter in waiters { waiter.resume() }
         if !wasTerminated { current?.terminate() }
     }
 
@@ -465,11 +509,40 @@ final class FFmpegSession: @unchecked Sendable {
         return exitInfo
     }
 
-    /// Async wait with a bounded poll (never an unbounded loop): returns when output is buffered, the child ended, or `timeout` passed.
+    /// Returns when output is buffered, the child ended, the session was terminated, `timeout` passed, or the task was cancelled. Woken by the
+    /// reader itself (a 2 ms sleep loop here cost about a thousand wake-ups a second with ten cameras' decoders).
     func waitForOutputAsync(timeout: Duration) async {
-        let limit = ContinuousClock.now + timeout
-        while bufferedOutputBytes == 0, exit == nil, ContinuousClock.now < limit {
-            try? await Task.sleep(for: .milliseconds(2))
+        let id = makeWaiterID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                condition.lock()
+                guard output.isEmpty, exitInfo == nil, !terminated, !Task.isCancelled else {
+                    condition.unlock()
+                    continuation.resume()
+                    return
+                }
+                outputWaiters[id] = continuation
+                condition.unlock()
+                DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(max(0, timeout / .nanoseconds(1))))) { [weak self] in
+                    self?.resumeOutputWaiter(id)
+                }
+            }
+        } onCancel: {
+            resumeOutputWaiter(id)
         }
+    }
+
+    private func makeWaiterID() -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        nextWaiter += 1
+        return nextWaiter
+    }
+
+    private func resumeOutputWaiter(_ id: Int) {
+        condition.lock()
+        let waiter = outputWaiters.removeValue(forKey: id)
+        condition.unlock()
+        waiter?.resume()
     }
 }

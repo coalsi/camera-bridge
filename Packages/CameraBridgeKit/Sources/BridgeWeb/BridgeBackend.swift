@@ -13,19 +13,24 @@ public struct BridgeOverview: Sendable {
     public var networkNotices: [NetworkNotice]
     public var settings: BridgeSettings
     public var webhookProblem: String?
-    /// A damaged configuration was set aside and the bridge started without it.
+    /// A damaged configuration was set aside (`BridgeEngine.configurationRecovery`), until the person dismisses it.
     public var configurationRecovered: Bool
+    /// The copy kept before the last change took its place (the cameras are back); false: the bridge started without cameras.
+    public var configurationRestoredPrevious: Bool
     /// The go2rtc helper (cloud cameras, consoles) is part of this installation.
     public var streamingHelperInstalled: Bool
     /// The recordings folder as numbers; nil before the first measurement.
     public var nvrStorage: ArchiveStorageStatus?
     /// What the internet guard found that needs the person (`BridgeEngine.internetGuardAlerts`); empty where there is no guard.
     public var internetGuardAlerts: [InternetGuardAlert]
+    /// What the system under the bridge reports that needs the person (Camera Bridge OS: a drive that is failing or worn out); empty elsewhere.
+    public var systemNotices: [SystemNotice]
 
     public init(state: EngineState, cameras: [CameraStatus], configurations: [CameraConfiguration], sensorsBridge: SensorsBridgeStatus? = nil,
                 localNetworkAccess: LocalNetworkAccess = .unknown, networkNotices: [NetworkNotice] = [], settings: BridgeSettings = BridgeSettings(),
-                webhookProblem: String? = nil, configurationRecovered: Bool = false, streamingHelperInstalled: Bool = false,
-                nvrStorage: ArchiveStorageStatus? = nil, internetGuardAlerts: [InternetGuardAlert] = []) {
+                webhookProblem: String? = nil, configurationRecovered: Bool = false, configurationRestoredPrevious: Bool = false,
+                streamingHelperInstalled: Bool = false,
+                nvrStorage: ArchiveStorageStatus? = nil, internetGuardAlerts: [InternetGuardAlert] = [], systemNotices: [SystemNotice] = []) {
         self.state = state
         self.cameras = cameras
         self.configurations = configurations
@@ -35,9 +40,11 @@ public struct BridgeOverview: Sendable {
         self.settings = settings
         self.webhookProblem = webhookProblem
         self.configurationRecovered = configurationRecovered
+        self.configurationRestoredPrevious = configurationRestoredPrevious
         self.streamingHelperInstalled = streamingHelperInstalled
         self.nvrStorage = nvrStorage
         self.internetGuardAlerts = internetGuardAlerts
+        self.systemNotices = systemNotices
     }
 }
 
@@ -53,6 +60,9 @@ public protocol BridgeBackend: Sendable {
     func unifiProtectCameras(endpoint: CameraEndpoint, apiKey: String) async throws -> [UnifiProtectCamera]
     func addCamera(_ configuration: CameraConfiguration, password: String?) async throws
     func updateCamera(_ configuration: CameraConfiguration, password: String?) async throws
+    /// `BridgeEngine.updateCamera(id:password:_:)`: `change` applied to the camera as it is when the engine's turn comes. The default reads the
+    /// camera from `overview()`, applies `change` and calls `updateCamera(_:password:)` (a backend without a queue of its own).
+    func updateCamera(id: UUID, password: String?, _ change: @Sendable @escaping (inout CameraConfiguration) throws -> Void) async throws
     func removeCamera(id: UUID) async
     func resetPairing(cameraID: UUID) async throws
     func resetSensorsBridgePairing() async throws
@@ -137,22 +147,36 @@ public protocol BridgeBackend: Sendable {
     func skyStillThumbnail(cameraID: UUID, night: String, entryID: String) async throws -> SkyStillPicture
     /// `BridgeEngine.findFlightFeeds()`: the flight feeds on the box's network, one per host. The default finds none.
     func findFlightFeeds() async -> [URL]
+    /// `BridgeEngine.acknowledgeConfigurationRecovery()`: the person dismissed the notice about a damaged configuration. The default does
+    /// nothing (a backend that never sets one aside).
+    func acknowledgeConfigurationRecovery() async
 }
 
 /// The engine behind the web API.
 public struct EngineBackend: BridgeBackend {
     private let engine: BridgeEngine
+    private let systemNotices: (@Sendable () async -> [SystemNotice])?
 
-    public init(engine: BridgeEngine) {
+    /// `systemNotices`: what the system under the bridge reports that needs the person (the daemon reads Camera Bridge OS's drive health), added
+    /// to every overview.
+    public init(engine: BridgeEngine, systemNotices: (@Sendable () async -> [SystemNotice])? = nil) {
         self.engine = engine
+        self.systemNotices = systemNotices
     }
 
     public func overview() async -> BridgeOverview {
+        var overview = await engineOverview()
+        if let systemNotices { overview.systemNotices = await systemNotices() }
+        return overview
+    }
+
+    private func engineOverview() async -> BridgeOverview {
         await MainActor.run {
             // "Change it by hand" on the findings the setup can't change goes with each camera's status (`withManualHelp`).
             BridgeOverview(state: engine.state, cameras: engine.withManualHelp(engine.cameras), configurations: engine.configurations, sensorsBridge: engine.sensorsBridge,
                            localNetworkAccess: engine.localNetworkAccess, networkNotices: engine.recentNetworkNotices, settings: engine.settings,
-                           webhookProblem: engine.webhookProblem, configurationRecovered: engine.configurationRecoveredFrom != nil,
+                           webhookProblem: engine.webhookProblem, configurationRecovered: engine.configurationRecovery != nil,
+                           configurationRestoredPrevious: engine.configurationRecovery?.restoredPrevious ?? false,
                            streamingHelperInstalled: engine.isStreamingHelperInstalled, nvrStorage: engine.nvrStorage,
                            internetGuardAlerts: engine.internetGuardAlerts)
         }
@@ -189,12 +213,20 @@ public struct EngineBackend: BridgeBackend {
         try await engine.updateCamera(configuration, password: password)
     }
 
+    public func updateCamera(id: UUID, password: String?, _ change: @Sendable @escaping (inout CameraConfiguration) throws -> Void) async throws {
+        try await engine.updateCamera(id: id, password: password, change)
+    }
+
     public func removeCamera(id: UUID) async {
         await engine.removeCamera(id: id)
     }
 
     public func resetPairing(cameraID: UUID) async throws {
         try await engine.resetPairing(cameraID: cameraID)
+    }
+
+    public func acknowledgeConfigurationRecovery() async {
+        await engine.acknowledgeConfigurationRecovery()
     }
 
     public func resetSensorsBridgePairing() async throws {
@@ -358,6 +390,14 @@ public struct EngineBackend: BridgeBackend {
 
 extension BridgeBackend {
     public func notSetUp(endpoint: CameraEndpoint) async -> NotSetUp? { nil }
+
+    public func acknowledgeConfigurationRecovery() async {}
+
+    public func updateCamera(id: UUID, password: String?, _ change: @Sendable @escaping (inout CameraConfiguration) throws -> Void) async throws {
+        guard var camera = await overview().configurations.first(where: { $0.id == id }) else { throw EngineError.unknownCamera }
+        try change(&camera)
+        try await updateCamera(camera, password: password)
+    }
 
     public func pluginSecret(id: String) async throws -> Data? { nil }
 

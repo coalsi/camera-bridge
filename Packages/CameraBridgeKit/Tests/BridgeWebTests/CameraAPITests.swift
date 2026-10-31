@@ -425,6 +425,23 @@ import TestSupport
         #expect(backend.read { $0.passwords[id] } == "secret")
     }
 
+    /// Review Oct 31 (adapters F8): pasted credentials were percent-decoded twice, so a password with `%` and two hex digits (sent as `%25`)
+    /// was saved wrong and the camera refused every login.
+    @Test func credentialsPastedIntoAStreamURLAreDecodedOnce() async throws {
+        let backend = FakeBackend()
+        backend.write {
+            $0.probe = .success(CameraProbeResult(vendor: .rtsp, manufacturer: "", model: "", serialNumber: "", firmware: "", capabilities: CameraCapabilities()))
+        }
+        let harness = try Harness(backend: backend)
+        let session = try await harness.signIn()
+        let answer = await session.send("POST", "/api/v1/cameras", json: ["type": "rtspURL", "mainStreamURL": "rtsp://gu%40st:ab%2512cd@192.0.2.9/live/main",
+                                                                          "name": "Shed"])
+        #expect(answer.status == 201, "\(answer.text)")
+        #expect(answer.json["username"] as? String == "gu@st")
+        let id = try #require(UUID(uuidString: answer.json["id"] as? String ?? ""))
+        #expect(backend.read { $0.passwords[id] } == "ab%12cd")
+    }
+
     @Test func aCloudCameraKeepsItsSourceInTheSecretStore() async throws {
         let backend = FakeBackend()
         backend.write {

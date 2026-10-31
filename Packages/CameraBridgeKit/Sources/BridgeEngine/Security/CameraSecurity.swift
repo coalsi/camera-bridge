@@ -38,8 +38,8 @@ public enum CameraSecurityLevel: String, Sendable, Codable, CaseIterable, Compar
         case .red: "Something on this camera can let it be reached from outside your home."
         case .yellow: "Nothing Camera Bridge read opens this camera to the outside, but something needs work."
         case .green: "Camera Bridge found no cloud turned on, but it can’t confirm everything, so a way out is still possible."
-        case .gold: "Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the \(InternetGuardText.name) saw "
-            + "nothing get out in the last 24 hours."
+        case .gold: "Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the \(InternetGuardText.name) "
+            + "let none of its internet lookups through in the last 24 hours."
         }
     }
 }
@@ -324,7 +324,7 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
         let blocked = evidence.outsideLookups24h
         let blockedSentence = blocked > 0
             ? "The \(name) blocked \(blocked == 1 ? "1 attempt" : "\(blocked) attempts") to reach the internet in the last 24 hours"
-                + (evidence.lastLookupNames.isEmpty ? "" : " (\(evidence.lastLookupNames.prefix(3).joined(separator: ", ")))") + ". Nothing got out." + note
+                + (evidence.lastLookupNames.isEmpty ? "" : " (\(evidence.lastLookupNames.prefix(3).joined(separator: ", ")))") + ". Each lookup was blocked; a camera can still try an address it already knows, which the guard can’t see." + note
             : nil
         guard let watchedFor = evidence.watchedFor, watchedFor >= GuardEvidence.quietDay else {
             let hours = Int((evidence.watchedFor ?? 0) / 3600)

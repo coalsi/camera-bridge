@@ -100,6 +100,23 @@ test('the tab bar of a phone is this same menu: one nav, one item', () => {
   assert.equal(items().filter((link) => link.getAttribute('href') === '#/sky').length, 1);
 });
 
+test('on a phone the tab bar keeps Monitor to Cameras, and More holds the rest; More is marked while one of them is open, and closes when a page opens', async () => {
+  const more = all(nav(), (node) => node.localName === 'button' && node.classList.contains('nav-more'))[0];
+  assert.ok(more, 'a More button in the same nav');
+  assert.equal(more.textContent, 'More');
+  const overflow = all(nav(), (node) => node.classList?.contains('nav-overflow'))[0];
+  assert.deepEqual(all(overflow, (node) => node.localName === 'a').map((link) => link.textContent.trim()), ['Plugins', 'Log', 'System', 'Settings', 'About']);
+  assert.equal(more.getAttribute('aria-controls'), overflow.getAttribute('id'));
+  more.click();
+  assert.equal(nav().dataset.more, 'open');
+  assert.equal(more.getAttribute('aria-expanded'), 'true');
+  await goto('#/about');
+  assert.equal(nav().dataset.more, '', 'a page opened: the list closes');
+  assert.equal(more.dataset.current, 'true', 'About is under More');
+  await goto('#/notifications');
+  assert.equal(more.dataset.current, 'false');
+});
+
 test('the item opens #/sky, which is Sky Watcher’s page', async () => {
   putCamera(camera(SKY, 'North Sky', WATCHING));
   await goto('#/sky');

@@ -38,31 +38,31 @@ final class SourceBox: @unchecked Sendable {
     }
 }
 
-/// A non-blocking socket descriptor with the one rule that keeps descriptors safe: it is closed exactly once, only after no
-/// readiness source watches it any more (closing a descriptor under a live epoll watch lets a reused number be watched), and
-/// no system call runs on it after `close()` began (calls and `close()` take the same lock, and the calls never block).
+/// A non-blocking socket descriptor with the one rule that keeps descriptors safe: it is closed exactly once, by `SocketReactor`
+/// after it left the epoll set (closing a descriptor under a live epoll watch lets a reused number be watched), and no system call
+/// runs on it after `close()` began (calls and `close()` take the same lock, and the calls never block).
 ///
-/// `wait(_:timeout:)` is how a call that got `EAGAIN` waits: one readiness source per wait, cancelled when it fires.
+/// `wait(_:timeout:)` is how a call that got `EAGAIN` waits: the reactor re-arms the socket for it (no libdispatch source per wait).
 final class SocketDescriptor: Sendable {
-    enum Interest: Sendable { case readable, writable }
+    typealias Interest = SocketReactor.Interest
 
-    /// The shared queue of readiness handlers and timeouts: they only resume continuations.
+    /// The shared queue of timeouts and handlers elsewhere in the Linux transport (name lookups, the listener, mDNS).
     static let queue = DispatchQueue(label: "com.coreysilvia.CameraBridge.sockets", qos: .userInitiated, attributes: .concurrent)
 
     private struct State {
         var descriptor: Int32
         var closing = false
-        /// Sources watching the descriptor; the descriptor is closed when the last one is gone after `close()`.
-        var watchers = 0
-        var nextWatcher = 0
-        var cancels: [Int: @Sendable () -> Void] = [:]
     }
 
     private let state: Mutex<State>
+    private let token: UInt64
+    private let reactor: SocketReactor
 
     /// Takes ownership of `descriptor`.
-    init(_ descriptor: Int32) {
+    init(_ descriptor: Int32, reactor: SocketReactor = .shared) {
         state = Mutex(State(descriptor: descriptor))
+        self.reactor = reactor
+        token = reactor.register(descriptor)
     }
 
     deinit {
@@ -84,91 +84,33 @@ final class SocketDescriptor: Sendable {
     func wait(_ interest: Interest, timeout: Duration? = nil) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             let once = ResumeOnce(continuation)
-            let registered = state.withLock { state -> Bool in
-                guard state.descriptor >= 0, !state.closing else { return false }
-                let source: any DispatchSourceProtocol = switch interest {
-                case .readable: DispatchSource.makeReadSource(fileDescriptor: state.descriptor, queue: Self.queue)
-                case .writable: DispatchSource.makeWriteSource(fileDescriptor: state.descriptor, queue: Self.queue)
+            let deadline = timeout.map { ContinuousClock.now + $0 }
+            let accepted = !isClosed && reactor.wait(token, for: interest, until: deadline) { outcome in
+                switch outcome {
+                case .ready: once.resume(with: .success(()))
+                case .timedOut: once.resume(with: .failure(TransportError.timedOut))
+                case .closed: once.resume(with: .failure(TransportError.closed))
                 }
-                let box = SourceBox(source)
-                state.nextWatcher += 1
-                let id = state.nextWatcher
-                state.watchers += 1
-                state.cancels[id] = { box.cancel() }
-                source.setEventHandler {
-                    once.resume(with: .success(()))
-                    box.cancel()
-                }
-                source.setCancelHandler { [self] in
-                    once.resume(with: .failure(TransportError.closed))
-                    watcherEnded(id)
-                }
-                if let timeout {
-                    Self.queue.asyncAfter(deadline: .now() + Self.dispatchInterval(timeout)) {
-                        if once.resume(with: .failure(TransportError.timedOut)) { box.cancel() }
-                    }
-                }
-                source.resume()
-                return true
             }
-            if !registered { once.resume(with: .failure(TransportError.closed)) }
-        }
-    }
-
-    private func watcherEnded(_ id: Int) {
-        state.withLock { state in
-            state.cancels[id] = nil
-            state.watchers -= 1
-            closeIfUnwatched(&state)
+            if !accepted { once.resume(with: .failure(TransportError.closed)) }
         }
     }
 
     /// Idempotent. Pending and later waits throw `.closed`; the peer sees an orderly shutdown.
     func close() {
-        let cancels = state.withLock { state -> [@Sendable () -> Void] in
-            guard !state.closing else { return [] }
+        let closed = state.withLock { state -> Bool in
+            guard !state.closing else { return false }
             state.closing = true
-            // A FIN after what was sent. The descriptor itself stays open a little longer (`lingerThenClose`).
+            // A FIN after what was sent. The descriptor itself stays open a little longer (the reactor's linger).
             if state.descriptor >= 0 { _ = shutdown(state.descriptor, Int32(SHUT_WR)) }
-            closeIfUnwatched(&state)
-            return Array(state.cancels.values)
+            state.descriptor = -1
+            return true
         }
-        for cancel in cancels { cancel() }
-    }
-
-    private func closeIfUnwatched(_ state: inout State) {
-        guard state.closing, state.watchers == 0, state.descriptor >= 0 else { return }
-        Self.lingerThenClose(state.descriptor)
-        state.descriptor = -1
+        if closed { reactor.close(token: token, linger: Self.lingerLimit) }
     }
 
     /// How long a closed connection keeps reading and dropping what the peer still sends, waiting for the peer's FIN.
     static let lingerLimit: Duration = .seconds(2)
-
-    /// Closes `descriptor` the way a server closes a connection it is done with: the FIN went out (`close()`), and the descriptor
-    /// stays open, its incoming data read and dropped, until the peer's FIN arrives or `lingerLimit` passes. Closing at once
-    /// would answer the peer's last segments with a reset, and a reset makes the peer lose what it had received but not yet
-    /// read (an acknowledgement sent right before closing).
-    private static func lingerThenClose(_ descriptor: Int32) {
-        let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
-        let box = SourceBox(source)
-        source.setEventHandler {
-            var finished = false
-            withUnsafeTemporaryAllocation(byteCount: 4096, alignment: 1) { buffer in
-                for _ in 0..<64 {
-                    let count = recv(descriptor, buffer.baseAddress, buffer.count, Int32(MSG_DONTWAIT))
-                    if count > 0 { continue }
-                    if count < 0, errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return }
-                    finished = true   // EOF or an error
-                    return
-                }
-            }
-            if finished { box.cancel() }
-        }
-        source.setCancelHandler { _ = Glibc.close(descriptor) }
-        queue.asyncAfter(deadline: .now() + dispatchInterval(lingerLimit)) { box.cancel() }
-        source.resume()
-    }
 
     static func dispatchInterval(_ duration: Duration) -> DispatchTimeInterval {
         let (seconds, attoseconds) = duration.components

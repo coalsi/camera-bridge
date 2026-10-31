@@ -11,6 +11,8 @@ const AHEAD_SEC = 8;            // keep this much sound ahead of the playhead
 const KEEP_BEHIND_SEC = 10;     // and drop what is older than this behind it
 const DRIFT_SEC = 0.25;         // further from the playhead than this: jump to it
 const SOUND_MIME = 'audio/mp4; codecs="mp4a.40.2"';
+/** A MediaSource that has not opened by then never will (its <audio> was given another source meanwhile): the next tick makes a new one. */
+export const SOURCE_OPEN_TIMEOUT_MS = 3000;
 
 /** True when this browser can play recorded sound through MediaSource. */
 export function soundSupported(scope = globalThis) {
@@ -66,10 +68,17 @@ export function createRecordingSound({ catalog, fetcher, clock, doc = document }
     const created = new Source();
     source = created;
     const mine = generation;
-    audio.src = URL.createObjectURL(created);
-    await new Promise((resolve) => created.addEventListener('sourceopen', resolve, { once: true }));
-    URL.revokeObjectURL(audio.src);
+    const url = URL.createObjectURL(created);
+    audio.src = url;
+    // A speaker moved to another tile while this waits takes the source away (teardown), and `sourceopen` then never comes: without a deadline
+    // `busy` would stay true and the recordings' sound would never play again on this page.
+    const opened = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), SOURCE_OPEN_TIMEOUT_MS);
+      created.addEventListener('sourceopen', () => { clearTimeout(timer); resolve(true); }, { once: true });
+    });
+    URL.revokeObjectURL(url);
     if (mine !== generation || source !== created) return false;
+    if (!opened) { source = null; return false; }
     buffer = created.addSourceBuffer(SOUND_MIME);
     buffer.mode = 'segments';
     return true;

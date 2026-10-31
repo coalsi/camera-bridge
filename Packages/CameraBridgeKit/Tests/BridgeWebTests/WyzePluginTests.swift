@@ -176,6 +176,7 @@ final class FakeWyzeServer: WyzeTransport, Sendable {
         let config = try #require(backend.read { $0.configurations.first { $0.id == id } })
         #expect(config.vendor == .go2rtc)
         #expect(config.integration?.details[IntegrationSettings.Key.wyzeWay] == "local")
+        #expect(config.integration?.details[IntegrationSettings.Key.wyzeAddress] == "192.0.2.40", "the address its source was made for")
         let source = try #require(backend.read { $0.passwords[id] })
         #expect(source.hasPrefix("wyze://192.0.2.40?") && source.contains("subtype=hd"))
         // An unknown camera is refused with a sentence.
@@ -225,6 +226,68 @@ final class FakeWyzeServer: WyzeTransport, Sendable {
         #expect(after[0].aiDescriptions, "an untouched switch stays as it was")
         #expect(!after[1].aiDescriptions, "a switch turned off between the read and the write stays off")
         #expect(backend.read { $0.calls.filter { $0 == "update" }.count } == 2)
+    }
+
+    /// Review Oct 31 (sky F2): the six-hourly sync rewrote every local Wyze camera's go2rtc source with a new password, which restarted
+    /// the camera (a recording gap, a dropped Home stream) even when its address had not changed. The address the source was made for is
+    /// kept with the camera, and only a camera that really moved is written.
+    @Test func aLocalCameraIsRestartedOnlyWhenItsAddressChanged() async throws {
+        let devices = #"""
+        {"code":"1","msg":"","data":{"device_list":[
+          {"mac":"D03F27A1B2C3","enr":"E1","nickname":"Front Yard","product_model":"HL_CAM4","product_type":"Camera","firmware_ver":"4.52.17.19",
+           "conn_state":1,"device_params":{"p2p_id":"P2PUID1234567890ABCD","p2p_type":4,"ip":"192.0.2.41","dtls":1}}
+        ]}}
+        """#
+        let server = FakeWyzeServer(["/api/user/login": (Self.login, 200), "/app/v2/home_page/get_object_list": (devices, 200)])
+        var camera = CameraConfiguration(name: "Front Yard", kind: .camera, vendor: .go2rtc, endpoint: CameraEndpoint(host: "127.0.0.1"), username: "")
+        camera.integration = IntegrationSettings(service: .wyze, details: [IntegrationSettings.Key.wyzeMAC: "D03F27A1B2C3", IntegrationSettings.Key.wyzeWay: "local",
+                                                                           IntegrationSettings.Key.wyzeAddress: "192.0.2.41"])
+        let backend = FakeBackend()
+        backend.write { $0.configurations = [camera] }
+        let plugin = WyzePlugin(backend: backend, cloud: WyzeCloud(transport: server), neighbors: { nil })
+        _ = try await plugin.signIn(email: "someone@example.com", password: "Hunter2-Secret!", keys: WyzeAPIKeys(keyID: "KEYID-1", apiKey: "APIKEY-SECRET"))
+        _ = try await plugin.cameras(refresh: true)
+        await plugin.followAddresses()
+        #expect(backend.read { $0.calls.filter { $0 == "update" }.count } == 0, "the same address: the camera keeps running")
+
+        // It moved: its source is made again for the new address, which is kept for next time.
+        backend.write { $0.configurations[0].integration?.details[IntegrationSettings.Key.wyzeAddress] = "192.0.2.90" }
+        await plugin.followAddresses()
+        #expect(backend.read { $0.calls.filter { $0 == "update" }.count } == 1)
+        #expect(backend.read { $0.configurations[0].integration?.details[IntegrationSettings.Key.wyzeAddress] } == "192.0.2.41")
+        #expect(backend.read { $0.passwords[camera.id] }?.hasPrefix("wyze://192.0.2.41?") == true)
+        await plugin.followAddresses()
+        #expect(backend.read { $0.calls.filter { $0 == "update" }.count } == 1, "written once")
+        try await plugin.signOut()
+    }
+
+    /// Review Oct 31 (web-api F5): turning the plugin off said "Wyze is off." while the plugin kept talking to Wyze's cloud every six hours
+    /// and sweeping the network. Off now means off: no sync at start or on the timer, and the helpers are refused with a sentence.
+    @Test func theOffSwitchStopsTalkingToWyze() async throws {
+        let server = Self.server()
+        let backend = FakeBackend()
+        let harness = try Self.harness(backend, server: server)
+        let session = try await harness.signIn()
+        _ = await session.send("POST", "/api/v1/plugins/wyze/sign-in", json: Self.signInBody)
+        #expect(await harness.app.wyze.syncScheduled)
+        let off = await session.send("PATCH", "/api/v1/plugins/wyze", json: ["enabled": false])
+        #expect(off.status == 200)
+        #expect(await harness.app.wyze.syncScheduled == false, "the six-hourly sync stops")
+        // Wait for the sign-in's own first look to finish, then count what the next daemon start does.
+        _ = try? await harness.app.wyze.cameras(refresh: false)
+        let before = server.paths.value.count
+        await harness.app.wyze.start()
+        #expect(server.paths.value.count == before, "a daemon start while off doesn't ask Wyze")
+        #expect(await harness.app.wyze.syncScheduled == false)
+        await #expect(throws: (any Error).self) {
+            _ = try await harness.app.wyze.helperEnvironment(WyzeHelpers.Request(kind: .cloud, mac: "GW0000000001", model: "HL_PAN4"))
+        }
+        // On again: the sync is back.
+        let on = await session.send("PATCH", "/api/v1/plugins/wyze", json: ["enabled": true])
+        #expect(on.status == 200)
+        #expect(await harness.app.wyze.syncScheduled)
+        _ = try await harness.app.wyze.helperEnvironment(WyzeHelpers.Request(kind: .cloud, mac: "GW0000000001", model: "HL_PAN4"))
+        try await harness.app.wyze.signOut()
     }
 
     @Test func theSweepCoversTheBridgesOwnPrivateNetworks() {

@@ -230,10 +230,22 @@ test('Load more asks the archive for the older part, and an empty place says why
     assert.match(none.page.el.textContent, /Nothing has happened yet/);
     none.page.destroy();
 
-    const noPlace = await pageWith(env, { events: [], fail: Object.assign(new Error('archive_unavailable'), { status: 503 }) });
+    const noPlace = await pageWith(env, { events: [], fail: Object.assign(new Error('Recording isn’t available on this bridge.'), { status: 503, code: 'archive_unavailable', retryAfter: null }) });
     await settle();
     assert.match(noPlace.page.el.textContent, /No place for recordings yet/);
     noPlace.page.destroy();
+
+    // A passing failure (the recordings still loading after a restart, the drive away): its own words, and the page tries again.
+    const loading = await pageWith(env, { events: [], fail: Object.assign(new Error('The recordings are still loading. Try again in a moment.'), { status: 503, code: 'archive_unavailable', retryAfter: 2 }) });
+    await settle();
+    assert.doesNotMatch(loading.page.el.textContent, /No place for recordings/);
+    assert.match(loading.page.el.textContent, /The recordings are still loading\. Try again in a moment\./);
+    assert.match(loading.page.el.textContent, /Trying again…/);
+    loading.page.destroy();
+    const offline = await pageWith(env, { events: [], fail: Object.assign(new Error('The bridge didn’t answer.'), { status: 0, code: 'network' }) });
+    await settle();
+    assert.match(offline.page.el.textContent, /The events can’t be read right now/);
+    offline.page.destroy();
   } finally { env.done(); }
 });
 

@@ -7,6 +7,7 @@
 import { openStream } from '../api.js';
 
 const TYPE = { 1: 'meta', 2: 'init', 3: 'delta', 4: 'keyframe', 5: 'status' };
+const FPS_WINDOW_MS = 4000;
 const decoder = new TextDecoder();
 
 /** The Media Source the browser offers (ManagedMediaSource on iPhone and iPad), or null. */
@@ -45,55 +46,77 @@ export function createParser(onMessage) {
   };
 }
 
+/** A live request that has brought pictures and then nothing for this long is taken for dead (cameras send frames all the time). */
+export const LIVE_SILENCE_MS = 10_000;
+
 /**
  * Opens the live request for `ids` (camera ids, in the order the indexes refer to), with the sound of the cameras in `audio`, and keeps it open: when it ends or fails it is opened again
  * after a short wait. `onMessage(index, { kind, json?, bytes? })` gets every message. Returns { close }.
+ * A request that brought pictures and then no byte for LIVE_SILENCE_MS is given up and opened again: a box that lost power or its cable sends no
+ * word of it, and the browser would wait minutes on the dead connection while every tile froze. (One that never brought a picture is not
+ * watched: all its cameras may be away.) `open`, `setTimer` and `clearTimer` are the tests'.
  */
-export function openLive(ids, { stream = 'sub', width = null, audio = [], onMessage, onState = () => {} } = {}) {
+export function openLive(ids, { stream = 'sub', width = null, audio = [], onMessage, onState = () => {}, open = openStream, silenceMs = LIVE_SILENCE_MS,
+  setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (t) => clearTimeout(t), wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
   let closed = false;
   let controller = null;
   let failures = 0;
+  let silence = null;
   const query = `cameras=${ids.map(encodeURIComponent).join(',')}&stream=${encodeURIComponent(stream)}${width ? `&width=${Math.round(width)}` : ''}`
     + (audio.length ? `&audio=${audio.map(encodeURIComponent).join(',')}` : '');
 
   async function run() {
     while (!closed) {
-      controller = new AbortController();
+      const mine = new AbortController();
+      controller = mine;
+      let pictures = false;
+      const watch = () => {
+        if (silence !== null) clearTimer(silence);
+        silence = pictures ? setTimer(() => { silence = null; onState('silent'); mine.abort(); }, silenceMs) : null;
+      };
       try {
         onState('connecting');
-        const body = await openStream(`live?${query}`, { signal: controller.signal });
+        const body = await open(`live?${query}`, { signal: mine.signal });
         onState('open');
         failures = 0;
         const parse = createParser((kind, index, payload) => {
           if (kind === 'meta' || kind === 'status') onMessage(index, { kind, json: JSON.parse(decoder.decode(payload)) });
           else onMessage(index, { kind, bytes: payload });
+          if (kind === 'delta' || kind === 'keyframe') pictures = true;
         });
         const reader = body.getReader();
         for (;;) {
           const { value, done } = await reader.read();
           if (done || closed) break;
           parse(value);
+          watch();
         }
       } catch (error) {
         if (closed) return;
         failures += 1;
         onState('retrying', error);
+      } finally {
+        if (silence !== null) { clearTimer(silence); silence = null; }
       }
       if (closed) return;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** Math.min(failures, 4), 15000)));
+      await wait(Math.min(1000 * 2 ** Math.min(failures, 4), 15000));
     }
   }
   run();
-  return { close() { closed = true; controller?.abort(); } };
+  return { close() { closed = true; if (silence !== null) clearTimer(silence); controller?.abort(); } };
 }
 
 /**
  * A live player on `video` (muted until `setMuted(false)`, inline): a new MediaSource for every init (a new format or a new timeline), the frames appended as they
  * come, the oldest seconds trimmed, and the playhead kept at the live edge. `onPlaying()` runs when pictures move; `onProblem(text)` when this
- * browser cannot play the camera's format.
+ * browser cannot play the camera's format. `health()` says when the last frame came (`now()`'s clock), the frames a second over the last few
+ * seconds, and the picture's size and stream from the meta.
  */
-export function createLivePlayer(video, { onPlaying = () => {}, onProblem = () => {} } = {}) {
+export function createLivePlayer(video, { onPlaying = () => {}, onProblem = () => {}, now = () => performance.now() } = {}) {
   const Source = mediaSourceClass();
+  let lastFrameAt = null;
+  let frameTimes = [];      // when the frames of the last few seconds came
+  let shape = null;         // { width, height, stream } from the newest meta
   let source = null;
   let buffer = null;
   let mime = null;
@@ -188,13 +211,21 @@ export function createLivePlayer(video, { onPlaying = () => {}, onProblem = () =
 
   return {
     /** A new init segment follows (its mime type and picture size). */
-    meta(json) { pendingMeta = json; },
+    meta(json) {
+      pendingMeta = json;
+      shape = json && Number(json.width) > 0 ? { width: Number(json.width), height: Number(json.height) || 0, stream: json.stream ?? null } : shape;
+    },
     init(bytes) {
       if (!pendingMeta?.mime) return;
       start(pendingMeta.mime, bytes);
     },
     media(bytes, keyframe) {
-      if (destroyed || !source) return;
+      if (destroyed) return;
+      const at = now();
+      lastFrameAt = at;
+      frameTimes.push(at);
+      if (frameTimes.length > 400 || at - frameTimes[0] > FPS_WINDOW_MS) frameTimes = frameTimes.filter((t) => at - t <= FPS_WINDOW_MS);
+      if (!source) return;
       if (waitingForKey) { if (!keyframe) return; waitingForKey = false; }
       queue.push(bytes);
       // Far behind (a slow device): drop what waits and continue at the next keyframe.
@@ -203,8 +234,13 @@ export function createLivePlayer(video, { onPlaying = () => {}, onProblem = () =
     },
     /** Sound on or off (on needs a click on the page first: browsers play sound only after one). */
     setMuted(muted) { video.muted = muted; if (!muted && video.paused) video.play().catch(() => {}); },
-    /** Called when the tab shows again: jump to the newest picture. */
-    catchUp() { chase(); },
+    /** { lastFrameAt (null before the first), fps (null until two seconds of frames), width, height, stream } */
+    health() {
+      const at = now();
+      const recent = frameTimes.filter((t) => at - t <= FPS_WINDOW_MS);
+      const span = recent.length > 1 ? (recent.at(-1) - recent[0]) / 1000 : 0;
+      return { lastFrameAt, fps: span >= 2 ? Math.round((recent.length - 1) / span) : null, width: shape?.width ?? null, height: shape?.height ?? null, stream: shape?.stream ?? null };
+    },
     destroy() {
       destroyed = true;
       video.removeEventListener('playing', onPlay);

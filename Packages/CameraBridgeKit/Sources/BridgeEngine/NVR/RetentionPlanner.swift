@@ -69,6 +69,8 @@ enum RetentionPlanner {
         /// The box's last line (`ArchiveStorageStatus.hardMaximumBytes`): above it the oldest are deleted as today even with an archive, so moves
         /// that lag behind (a slow or stuck USB drive) never let the box's disk fill to the point where recording pauses.
         var mainHardMaximumBytes: UInt64
+        /// Files on the archive that are kept (`KeptRecordings`): never candidates, but they take room there.
+        var keptBytes: UInt64 = 0
     }
 
     /// What one pass of retention does with an archive drive.
@@ -109,7 +111,7 @@ enum RetentionPlanner {
         }
 
         // 2. The archive's own maximum.
-        var archiveUsed = archived.reduce(0) { $0 + $1.bytes }
+        var archiveUsed = archived.reduce(archive.keptBytes) { $0 + $1.bytes }
         var free = archive.freeBytes
         for file in result.archiveDeletions { free = free.addingReportingOverflow(file.bytes).partialValue }
         while archiveUsed > archive.maximumBytes, !archived.isEmpty {

@@ -49,6 +49,8 @@ struct VideoDepacketizer: Sendable {
     let hevcDONPresent: Bool
     private(set) var format: VideoFormat?
     private(set) var droppedAccessUnits = 0
+    /// RTP packets that never came (the sum of the sequence gaps).
+    private(set) var lostPackets = 0
 
     private var vps: Data?
     private var sps: Data?
@@ -78,6 +80,9 @@ struct VideoDepacketizer: Sendable {
     private var loggedOversize = false
     /// The session's (tagged with its camera).
     private let log: Log
+
+    /// Output waits for a keyframe (at the start, and after a loss until the next one).
+    var isWaitingForKeyframe: Bool { waitingForKeyframe }
 
     /// Bytes held for the access unit in progress.
     var bufferedByteCount: Int { pendingSize + (fragment?.count ?? 0) }
@@ -110,6 +115,7 @@ struct VideoDepacketizer: Sendable {
             } else if gap < 0 {
                 return []   // duplicate or late packet
             } else if gap > 0 {
+                lostPackets += Int(gap)
                 markLoss()
             }
         }

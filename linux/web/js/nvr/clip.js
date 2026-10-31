@@ -5,14 +5,20 @@ import { get } from '../api.js';
 import { h, replace } from '../dom.js';
 import { icon } from '../icons.js';
 import { bytes } from '../format.js';
+import { bridgeZone } from '../store.js';
+import { sameZonedDay, zonedFormat } from '../zone.js';
 import { CLIP_LENGTHS, DEFAULT_LENGTH_MS, MAX_CLIP_MS, defaultRange, lengthLabel, moveEdge, rangeCheck } from './clip-range.js';
 import { LAPSE_SPEEDS, speedLabel } from './speed.js';
+import { KEEP_TEXT, MAX_NOTE, keepEach, keptSentence } from './kept.js';
 
 export const MINIMUM_MS = 1000;
 const PLAN_DELAY_MS = 350;
 const DOWNLOAD_GAP_MS = 900;
-const timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-const dayFormat = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
+// Times are the bridge's (store.js bridgeZone), the zone the label burned into the clip and its files' names use.
+const TIME = { hour: '2-digit', minute: '2-digit', second: '2-digit' };
+const DAY = { day: 'numeric', month: 'short' };
+const timeText = (ms, zone) => zonedFormat(TIME, zone).format(ms);
+const dayText = (ms, zone) => zonedFormat(DAY, zone).format(ms);
 
 export const WORDS = {
   tooShort: 'Move the end at least 1 second from the start.',
@@ -22,11 +28,11 @@ export const WORDS = {
   tooLong: `A clip can be at most ${MAX_CLIP_MS / 3_600_000} hours for each camera. Drag an edge in or choose a shorter length.`,
 };
 
-/** "14:20:01 to 14:25:12", the end naming its date only when it is on another day. */
-export function rangeText(fromMs, toMs) {
-  const sameDay = new Date(fromMs).toDateString() === new Date(toMs).toDateString();
-  const from = `${dayFormat.format(fromMs)}, ${timeFormat.format(fromMs)}`;
-  return `${from} to ${sameDay ? timeFormat.format(toMs) : `${dayFormat.format(toMs)}, ${timeFormat.format(toMs)}`}`;
+/** "31 Oct, 14:20:01 to 14:25:12" in `zone` (the bridge's when omitted), the end naming its date only when it is on another day. */
+export function rangeText(fromMs, toMs, zone = bridgeZone()) {
+  const sameDay = sameZonedDay(fromMs, toMs, zone);
+  const from = `${dayText(fromMs, zone)}, ${timeText(fromMs, zone)}`;
+  return `${from} to ${sameDay ? timeText(toMs, zone) : `${dayText(toMs, zone)}, ${timeText(toMs, zone)}`}`;
 }
 
 export function durationText(ms) {
@@ -62,20 +68,24 @@ function straightened(camera) {
 }
 
 /**
- * createClip({ cameras, endMs, footage, timeline, onChange, download })
+ * createClip({ cameras, endMs, footage, timeline, onChange, download, keep, onKept })
  *   cameras()   -> [{ id, name, pictureCorrection }]: every camera a clip can be made of, in order
  *   endMs()     -> the playhead in epoch ms (the newest recorded moment while live)
  *   footage()   -> { oldestMs, newestMs } of the cameras on offer, or null (clip-range.js footageOf)
  *   timeline    -> the timeline that shows the range (view.js setClipRange(range | null, onEdge)), or null
  *   onChange()  -> called when the bar or the tile marks need drawing again
  *   download(url) -> starts one download (default: a hidden link)
- * -> { el, button, choosing, begin(), cancel(), toggle(id), includes(id), setLength(ms), moveEdge(edge, ms), range(), exportClip(), key(event),
- *      tick(), destroy() }
+ *   keep(body)  -> POST nvr/kept { cameraID, from, to, note? } (nvr/kept.js); onKept() after something was kept
+ * -> { el, button, choosing, begin(), cancel(), toggle(id), includes(id), setLength(ms), moveEdge(edge, ms), range(), exportClip(), keepRange(),
+ *      key(event), tick(), destroy() }
+ * Keep, beside Export, keeps the range of each camera of the clip that recorded it from retention (one request each), with the note typed beside it.
  * Save clip shows a range on the timeline that ends at the playhead and covers the chosen length before it (clip-range.js): the bar's lengths
  * set it again around the same anchor, the red handles on the timeline move either end, and Export saves that range.
  */
-export function createClip({ cameras, endMs, footage = () => null, timeline = null, onChange = () => {}, download = startDownload }) {
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+export function createClip({ cameras, endMs, footage = () => null, timeline = null, onChange = () => {}, download = startDownload, zone: zoneOf = bridgeZone,
+  keep = undefined, onKept = () => {} }) {
+  // The files are named in the bridge's zone (`tz=`), as the label burned into them is, whichever zone this browser is in.
+  const zone = () => zoneOf();
   let startMs = null;            // the anchor: the playhead when Save clip was pressed (null: not choosing)
   let span = null;               // { fromMs, toMs }: the range the clip covers
   let lengthMs = DEFAULT_LENGTH_MS;   // the length chosen in the bar, null after a drag (a length of its own)
@@ -91,6 +101,8 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
   const button = h('button', { class: 'btn small', type: 'button', onclick: () => begin(), dataset: { nvr: 'save-clip' }, title: 'Start a clip at the playhead (C)' },
     icon('scissors'), 'Save clip');
   const el = h('div', { class: 'nvr-clipbar', role: 'group', 'aria-label': 'Save a clip', hidden: true });
+  // The note kept with a kept stretch: one field for the life of the bar (the bar is drawn again often; what is typed stays).
+  const noteInput = h('input', { type: 'text', class: 'nvr-clip-note', maxlength: String(MAX_NOTE), placeholder: KEEP_TEXT.noteLabel, 'aria-label': 'Note for the kept recording (optional)', autocomplete: 'off' });
 
   // The bridge's label (name, date and time) burned into the saved clip: on by default; off saves the camera's video untouched (faster).
   let labels = readChoice('cb.clip.labels');
@@ -170,6 +182,7 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
     if (!selected().length) { if (planKey !== 'none') { planKey = 'none'; plans = new Map(); draw(); } return; }
     const key = `${Math.round(r.from / 1000)}:${Math.round(r.to / 1000)}:${selected().map((camera) => camera.id).join(',')}`;
     if (key === planKey) return;
+    if (status?.kind === 'failed') status = null;
     planKey = key;
     clearTimeout(planTimer);
     const token = ++planToken;
@@ -177,17 +190,23 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
     draw();
   }
 
-  async function planAll(token, r, cams) {
+  /** The plan of each of `cams` for the range `r`: camera id -> { ok, plan } or { ok: false, message, status }. */
+  async function planEach(r, cams, stillWanted = () => true) {
     const next = new Map();
     for (const camera of cams) {
-      if (token !== planToken || destroyed) return;
+      if (!stillWanted()) return null;
       try {
-        next.set(camera.id, { ok: true, plan: await get(`nvr/cameras/${camera.id}/clip-plan?from=${Math.round(r.from)}&to=${Math.round(r.to)}&tz=${encodeURIComponent(zone)}`) });
+        next.set(camera.id, { ok: true, plan: await get(`nvr/cameras/${camera.id}/clip-plan?from=${Math.round(r.from)}&to=${Math.round(r.to)}&tz=${encodeURIComponent(zone())}`) });
       } catch (error) {
         next.set(camera.id, { ok: false, message: error.message || 'The clip can’t be planned.', status: error.status });
       }
     }
-    if (token !== planToken || destroyed) return;
+    return next;
+  }
+
+  async function planAll(token, r, cams) {
+    const next = await planEach(r, cams, () => token === planToken && !destroyed);
+    if (!next || token !== planToken || destroyed) return;
     plans = next;
     draw();
   }
@@ -203,8 +222,8 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
       if (planned.plan.soundOmitted) notes.push(WORDS.sound);
       for (const gap of planned.plan.gaps) {
         notes.push(gap.held
-          ? `${camera.name}: the picture stays still from ${timeFormat.format(gap.from)} to ${timeFormat.format(gap.to)} (nothing was recorded).`
-          : `${camera.name} had no recording from ${timeFormat.format(gap.from)} to ${timeFormat.format(gap.to)}; the clip skips it.`);
+          ? `${camera.name}: the picture stays still from ${timeText(gap.from, zone())} to ${timeText(gap.to, zone())} (nothing was recorded).`
+          : `${camera.name} had no recording from ${timeText(gap.from, zone())} to ${timeText(gap.to, zone())}; the clip skips it.`);
       }
     }
     return { size, parts, problems, notes: [...new Set(notes)], quiet };
@@ -212,10 +231,21 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
 
   function draw() {
     if (destroyed) return;
+    // The note field is put back into the new bar: give it back the keyboard and the caret when it had them.
+    const typing = typeof document !== 'undefined' && document.activeElement === noteInput;
+    const caret = typing ? [noteInput.selectionStart, noteInput.selectionEnd] : null;
+    drawBar();
+    if (typing && noteInput.isConnected) {
+      noteInput.focus();
+      try { noteInput.setSelectionRange(...caret); } catch { /* not a text field any more */ }
+    }
+  }
+
+  function drawBar() {
     button.setAttribute('aria-pressed', String(choosing()));
     if (!choosing() && !status) { el.hidden = true; replace(el); return; }
     el.hidden = false;
-    if (status && !choosing()) { replace(el, h('span', { class: status.kind === 'failed' ? 'nvr-clip-failed' : '' }, status.text), h('button', { class: 'btn small', type: 'button', onclick: () => { status = null; draw(); } }, 'OK')); return; }
+    if (status && !choosing()) { replace(el, h('span', { class: status.kind === 'failed' ? 'nvr-clip-failed' : status.kind === 'kept' ? 'nvr-clip-kept' : '' }, status.text), h('button', { class: 'btn small', type: 'button', onclick: () => { status = null; draw(); } }, 'OK')); return; }
     const r = range();
     const check = rangeCheck({ fromMs: r.from, toMs: r.to });
     const short = check.tooShort;
@@ -225,6 +255,7 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
     const none = selected().length === 0;
     const waiting = !short && !long && !none && plans.size === 0;
     const canExport = !short && !long && !lapseTooShort && !none && !waiting && t.parts > 0 && status?.kind !== 'saving';
+    const canKeep = !short && !long && !none && !waiting && t.parts > 0 && status?.kind !== 'saving';
     const cams = list();
     const lines = [];
     if (short) lines.push(WORDS.tooShort);
@@ -253,7 +284,7 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
     replace(el,
       h('div', { class: 'nvr-clip-main' },
         icon('scissors'),
-        h('strong', { dataset: { nvr: 'clip-range' } }, rangeText(r.from, r.to)),
+        h('strong', { dataset: { nvr: 'clip-range' } }, rangeText(r.from, r.to, zone())),
         h('span', { class: 'muted' }, durationText(r.to - r.from)),
         t.size > 0 ? h('span', { class: 'muted' }, bytes(t.size)) : null,
         h('span', { class: 'nvr-clip-spacer' }),
@@ -267,6 +298,10 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
         lapseSelect,
         h('button', { class: 'btn small', type: 'button', onclick: cancel, title: 'Stop choosing a clip (Esc)' }, 'Cancel'),
         h('button', { class: 'btn small primary', type: 'button', disabled: !canExport, onclick: exportClip, title: 'Save the clip (Return)' }, 'Export clip')),
+      h('div', { class: 'nvr-clip-keep', role: 'group', 'aria-label': 'Keep this recording' },
+        noteInput,
+        h('button', { class: 'btn small', type: 'button', disabled: !canKeep, onclick: keepRange,
+          title: 'Keep this range of each camera so retention never deletes it. It still counts toward the room for recordings.' }, icon('lock'), 'Keep')),
       cams.length > 1 ? h('div', { class: 'nvr-clip-cams', role: 'group', 'aria-label': 'Cameras in the clip' },
         cams.map((camera) => h('label', { class: 'nvr-clip-cam' },
           h('input', { type: 'checkbox', checked: chosen.has(camera.id), onchange: () => toggle(camera.id) }), ` ${camera.name}`)),
@@ -277,27 +312,75 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
       status ? h('p', { class: 'small nvr-clip-line' }, status.text) : null);
   }
 
+  /**
+   * Export: the plans are asked for again first (retention may have removed the start of the range since, the archive drive may be away, the
+   * bridge may be busy), and a problem is said in the bar, which stays open, instead of a download the browser would save as a small error
+   * file. The downloads themselves are the browser's: the bar says so, and to try again if one fails.
+   */
   async function exportClip() {
     const r = range();
     if (!r || r.to - r.from < MINIMUM_MS || r.to - r.from > MAX_CLIP_MS || (speed > 0 && (r.to - r.from) / speed < 1000) || status?.kind === 'saving') return;
+    if (![...plans.values()].some((planned) => planned.ok && planned.plan.parts.length > 0)) return;
+    const cams = selected();
+    status = { kind: 'saving', text: 'Checking the recordings…' };
+    draw();
+    const fresh = await planEach(r, cams, () => !destroyed);
+    if (!fresh || destroyed) return;
+    plans = fresh;
+    planKey = `${Math.round(r.from / 1000)}:${Math.round(r.to / 1000)}:${cams.map((camera) => camera.id).join(',')}`;
+    const problems = cams.filter((camera) => !fresh.get(camera.id)?.ok && fresh.get(camera.id)?.status !== 404)
+      .map((camera) => `${camera.name}: ${fresh.get(camera.id).message}`);
     const files = [];
-    for (const camera of selected()) {
-      const planned = plans.get(camera.id);
+    for (const camera of cams) {
+      const planned = fresh.get(camera.id);
       if (!planned?.ok) continue;
-      for (const part of planned.plan.parts) files.push(clipUrl(camera.id, r.from, r.to, part.index, zone, labels, straighten && straightened(camera), speed));
+      for (const part of planned.plan.parts) files.push(clipUrl(camera.id, r.from, r.to, part.index, zone(), labels, straighten && straightened(camera), speed));
     }
-    if (files.length === 0) return;
-    status = { kind: 'saving', text: files.length === 1 ? 'Saving the clip. Your browser shows the download.' : `Saving ${files.length} clips. Your browser may ask to allow several downloads.` };
+    if (problems.length || files.length === 0) {
+      status = { kind: 'failed', text: problems.length ? `The clip wasn’t saved. ${problems.join(' ')}` : `The clip wasn’t saved. ${WORDS.nothing}` };
+      draw();                  // Export can be tried again; the sentence goes when the range or the cameras change
+      return;
+    }
+    status = { kind: 'saving', text: files.length === 1 ? 'Saving the clip. Your browser shows the download.' : `Saving ${files.length} files. Your browser may ask to allow several downloads.` };
     draw();
     for (const [index, url] of files.entries()) {
       if (destroyed) return;
       download(url);
       if (index < files.length - 1) await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_GAP_MS));
     }
-    status = { kind: 'saved', text: files.length === 1 ? 'The clip is being saved by your browser.' : `${files.length} clips are being saved by your browser.` };
+    status = { kind: 'saved', text: files.length === 1
+      ? 'Your browser is downloading the clip. If the download fails, try again.'
+      : `Your browser is downloading ${files.length} files. If one fails, try again.` };
     startMs = null;
     span = null;
     changed();
+  }
+
+  /**
+   * Keep: the range of each camera of the clip that recorded it is kept from retention (POST nvr/kept, one each, with the note). What was kept
+   * is said with its size and the bar closes; when nothing could be kept the bridge's sentence is said and the bar stays, to try again.
+   */
+  async function keepRange() {
+    const r = range();
+    if (!r || r.to - r.from < MINIMUM_MS || r.to - r.from > MAX_CLIP_MS || status?.kind === 'saving') return;
+    const cams = selected().filter((camera) => { const planned = plans.get(camera.id); return planned?.ok && planned.plan.parts.length > 0; });
+    if (!cams.length) return;
+    status = { kind: 'saving', text: 'Keeping…' };
+    draw();
+    const result = await keepEach(cams.map((camera) => ({ id: camera.id, name: camera.name })), { from: r.from, to: r.to, note: noteInput.value }, { send: keep });
+    if (destroyed) return;
+    const said = keptSentence(result, { many: selected().length > 1 });
+    if (!said.ok) {
+      status = { kind: 'failed', text: `It wasn’t kept. ${said.text}` };
+      draw();
+      return;
+    }
+    noteInput.value = '';
+    status = { kind: 'kept', text: said.text };
+    startMs = null;
+    span = null;
+    changed();
+    onKept(result);
   }
 
   /** C, Esc and Return; true when the key was used. `event.target` buttons keep their own Return. */
@@ -314,7 +397,7 @@ export function createClip({ cameras, endMs, footage = () => null, timeline = nu
   function destroy() { destroyed = true; clearTimeout(planTimer); planToken += 1; timeline?.setClipRange(null, null); }
 
   draw();
-  return { el, button, choosing, begin, cancel, toggle, includes, setLength, moveEdge: dragEdge, range, exportClip, key, tick, destroy };
+  return { el, button, choosing, begin, cancel, toggle, includes, setLength, moveEdge: dragEdge, range, exportClip, keepRange, key, tick, destroy };
 }
 
 function startDownload(url) {

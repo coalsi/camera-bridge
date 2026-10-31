@@ -1,5 +1,6 @@
 import BridgeSupport
 import Foundation
+import Synchronization
 
 /// One request, as the server hands it to the application: parsed, size-limited, with the peer's address.
 public struct HTTPRequest: Sendable {
@@ -76,7 +77,8 @@ public struct HTTPRequest: Sendable {
 }
 
 /// What a handler answers. A buffered body is sent with `Content-Length`; a stream is sent chunked until its closure returns
-/// (server-sent events, multipart JPEG) and the connection closes after it.
+/// (server-sent events, multipart JPEG) and the connection closes after it. A stream that throws ends without the last chunk, so a
+/// download that failed half way is not taken for a finished one.
 public struct HTTPResponse: Sendable {
     public enum Body: Sendable {
         case data(Data)
@@ -86,6 +88,10 @@ public struct HTTPResponse: Sendable {
     public var status: Int
     public var headers: HTTPHeaders
     public var body: Body
+    /// Runs when the server does not run a stream's body after all: a HEAD request, a head that could not be sent, a connection that
+    /// ended first. A handler that took something for the body (a live or event slot, an archive slot) gives it back here as well as in
+    /// the body's own `defer`, through one `ReleaseOnce`, so it is given back exactly once whichever way the answer goes.
+    public var onDiscard: (@Sendable () -> Void)?
 
     public init(status: Int, headers: HTTPHeaders = HTTPHeaders(), body: Body = .data(Data())) {
         self.status = status
@@ -107,10 +113,14 @@ public struct HTTPResponse: Sendable {
         HTTPResponse(status: status)
     }
 
-    public static func stream(status: Int = 200, contentType: String, headers: HTTPHeaders = HTTPHeaders(),
+    /// A streaming answer. With `contentLength` (a clip, whose size is known before the first byte) it is sent with that
+    /// `Content-Length` instead of chunked: the body must write exactly that many bytes. A write past it throws, and a body that ends
+    /// short leaves the download short, which the browser sees as failed.
+    public static func stream(status: Int = 200, contentType: String, headers: HTTPHeaders = HTTPHeaders(), contentLength: Int64? = nil,
                               _ body: @escaping @Sendable (ResponseStream) async throws -> Void) -> HTTPResponse {
         var headers = headers
         headers["Content-Type"] = contentType
+        headers["Content-Length"] = contentLength.map { String(max(0, $0)) }
         return HTTPResponse(status: status, headers: headers, body: .stream(body))
     }
 
@@ -137,5 +147,22 @@ public final class ResponseStream: Sendable {
 
     public func write(_ text: String) async throws {
         try await write(Data(text.utf8))
+    }
+}
+
+/// Something to give back once (a stream slot), whichever of a stream's body and its `HTTPResponse.onDiscard` gets there first.
+public final class ReleaseOnce: Sendable {
+    private let action: Mutex<(@Sendable () -> Void)?>
+
+    public init(_ action: @escaping @Sendable () -> Void) {
+        self.action = Mutex(action)
+    }
+
+    public func callAsFunction() {
+        let run = action.withLock { action -> (@Sendable () -> Void)? in
+            defer { action = nil }
+            return action
+        }
+        run?()
     }
 }

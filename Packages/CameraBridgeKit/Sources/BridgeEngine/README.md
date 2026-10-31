@@ -236,10 +236,12 @@ WebhookServer (engine) ───────────────────
   retried for 1 s first (a listener closed just before lets it go asynchronously). The webhook asks the router about
   each event's camera (`EventRouter.webhookCameraState`, the rule `handle` drops events by): 404 for an ID no configured
   camera has, 409 for a disabled camera, 204 only for events the router takes (W4 CameraAdapters review, round 3). A
-  damaged `config.json` set aside at load is published as `configurationRecoveredFrom` until
-  `acknowledgeConfigurationRecovery()` (the app's banner and menu bar), also across launches: `loadOrRecover()` saves
-  the backup's name as `config.recovered` next to `config.json`, `init` reads it, and the acknowledgement removes it
-  (the configuration saved after a recovery loads normally, so without it a relaunch forgot the notice).
+  damaged `config.json` set aside at load is published as `configurationRecovery` (`ConfigurationRecovery`: where it went,
+  and whether the copy kept before the last save, `config.json.bak`, took its place; `configurationRecoveredFrom` is its
+  URL) until `acknowledgeConfigurationRecovery()` (the web page's dismissable notice), also across launches:
+  `loadOrRecover()` saves the backup's name (and "restored") as `config.recovered` next to `config.json`, `init` reads
+  it, and the acknowledgement removes it (the configuration saved after a recovery loads normally, so without it a
+  relaunch forgot the notice).
   `updateSettings(_ change:)` applies a change to the settings as they are when its turn in the queue comes (the app's
   settings controls: two changes made while the engine is busy both stick; an unchanged result saves nothing). State
   strings the app shows as they are — `.failed`'s reason (`startFailure`), a camera whose accessory could not start,
@@ -316,7 +318,9 @@ apply); `RuntimeStatus.motionShadow` carries it from the runtime. The diagnostic
 `EngineTuning.networkSettle` after the last, at most `networkSettleCap` (15 s) after the first of a burst that keeps flapping) refreshes
 each camera in this order: the accessory (`AccessoryServer.relistenNow()`, then the Bonjour record registered again, cameras
 `advertisingStagger` apart), then the main and sub streams (a stream that delivered video within `healthyIngestWindow` (2 s) is left
-connected after a network change; a wake always reconnects), then the event channel. Each camera's refresh has
+connected after a network change; a wake always reconnects), then the event channel. A main stream that comes back after it was offline
+at least 15 s (`VideoOutage`, 2026-10-31: a camera that lost power and booted again; not an on-demand camera) tells the event channel
+(`CameraEventSource.videoResumed(downSince:)`), which reconnects a connection older than the outage (Hikvision's alertStream). Each camera's refresh has
 `runtimeRefreshDeadline` (20 s): one that hangs is logged and left behind, the engine's operations and the other cameras go on
 (`IngestSupervisor.close()` waits for a closing connection at most `sourceStopLimit` + `closeGrace`). `systemWillSleep()` (the app
 forwards `NSWorkspace.willSleepNotification`) logs the sleep and times it; the wake logs "The Mac woke up after …", closes the HAP
@@ -411,7 +415,9 @@ round 3: a damaged configuration replaced by the defaults was only logged); `loc
 Review W4 round 4 (App findings): `SensorsBridgeStatus.publishedSensors` (`[UUID: [BridgedSensor]]`, `init` parameter
 defaulted to `[:]`: the Sensors Bridge page lists the engine's own list instead of a copy of its rule),
 `BridgeEngine.readableReason(_:)` is public (one wording for errors on screen), and
-`acknowledgeConfigurationRecovery()` is `async` (it removes the saved notice off the main actor).
+`acknowledgeConfigurationRecovery()` is `async` (it removes the saved notice off the main actor). Oct 31 review:
+`ConfigurationRecovery` and `BridgeEngine.configurationRecovery` (engine-core F4), `BridgeEngine.operationHeldFor`
+(`nonisolated`: how long the operation under way has held the engine's queue; the daemon's watchdog, engine-core F2).
 
 Per-camera live view / HKSV stream and quality controls (2026-10-01, see `docs/CONTRACT_CHANGES.md`):
 `CameraConfiguration.liveStreamMode`/`.liveQualityMode`/`.liveMaxBitrateOverride`/`.recordingStreamMode`/
@@ -503,12 +509,15 @@ Internal: `EngineTuning` (`Runtime/EngineTuning.swift`; `afterSensorsBridgeStatu
 
 ## Invariants
 
-- `config.json`: `{"schemaVersion": 1, "settings", "cameras"}`, atomic 0600 writes, directory created 0700 (BridgeSupport
-  `PrivateFiles`, shared with the HAP store; an existing directory is left as it is). Older files
+- `config.json`: `{"schemaVersion": 1, "settings", "cameras"}`, atomic, synced 0600 writes, directory created 0700 (BridgeSupport
+  `PrivateFiles`, shared with the HAP store; an existing directory is left as it is); every save keeps the file it replaces
+  as `config.json.bak`. Older files
   run through `migrations[n]` (n → n+1), are rewritten and keep `config.json.v<n>.bak`; newer files, and older ones
-  without a migration, are never read nor overwritten (`unsupportedSchemaVersion`). `loadOrRecover()` moves a corrupt
+  without a migration, are never read nor overwritten (`unsupportedSchemaVersion`), except that `loadOrRecover()` reads a
+  newer file's `config.json.v<current>.bak` (an update the A/B image rolled back), read only. `loadOrRecover()` moves a corrupt
   file (not JSON, no version, `settings` not an object, `cameras` not a list, failing migration) to
-  `config.corrupt-<UTC>.json` — use it at startup, since `save` overwrites a corrupt file. Cameras decode one entry at
+  `config.corrupt-<UTC>.json` and puts `config.json.bak` back in its place when that one can be read (else the
+  defaults: `ConfigurationRecovery.restoredPrevious`) — use it at startup, since `save` overwrites a corrupt file. Cameras decode one entry at
   a time: an entry this build cannot read (unknown `vendor`/`kind`, no `id`, …) is skipped with a warning and written
   back unchanged by `save` (use one store, and load before saving); missing or unreadable optional keys take the
   `init` defaults, logged by key name (`id`, `name`, `kind`, `vendor`, `endpoint` required); stream URLs are saved
@@ -716,8 +725,10 @@ service is chosen until the person chooses one (`BridgeSettings.ai`), and each c
   reported and the event's local time in the bridge's zone ("Sunday 18 October 2026, 9:19 PM"); a network error or a 5xx is tried once more after
   2 s unless the event is stale by then, nothing else is. The description goes into the event log (its `at` to the whole millisecond); a failure
   becomes the last error, unless the service or key it came from was replaced since. A refused key pauses describing until the service or the
-  key changes, or Try it works again (which also clears the refusal): one error, one log line.
-  Each event sent counts once toward the day (`AIUsage`, `<data>/ai/usage.json`, 0600: the counts of the last 8 days by the day's name in the
+  key changes, or Try it works again (which also clears the refusal): one error, one log line. After 3 events in a row the service could not
+  take (not reached, a 5xx, a 429) nothing is gathered or sent until a wait is over (`AIStatus.retryAt`: 1 minute, doubled after each further
+  failure, at most 15; engine-events review F2); a send that works, Try it's too, or a change of the settings, service or key ends it.
+  Each event sent counts once toward the day, except a send the service could not take, which is given back (`AIUsage`, `<data>/ai/usage.json`, 0600: the counts of the last 8 days by the day's name in the
   bridge's zone, so a 25-hour day is one day and a restart keeps the count). The engine gives it its service whenever the settings or the key change
   (`AnthropicVision`, which needs a key, or `OpenAICompatibleVision`, over `URLSessionAITransport`; tests replace the transport and the clock with
   `EngineTuning.aiTransport` and `aiNow`), and every change of the AI settings (a new model or limit too), the service or the key starts a new generation: a pause ends, the last
@@ -762,7 +773,8 @@ MediaHub (per camera) ─► recorder ─► <recordings>/<camera folder>/<yyyy-
 
 A second drive where older recordings move when the recordings drive fills, instead of being deleted (archive-tier brief). Additive API:
 `BridgeEnvironment.archiveDriveFolder` (the host names the folder; nil keeps today's behaviour exactly), `ArchivePlatformPolicy.isSameVolume` and
-`ArchivePlatformPolicy.lowerThreadPriority` (both optional, set by the daemon), `ArchiveReading.awaySpan(camera:containing:)` (a requirement with a default
+`ArchivePlatformPolicy.lowerThreadPriority` and `ArchivePlatformPolicy.dropCachedPages` (all optional, set by the daemon; the last makes the move's read-back
+read the drive, not the copy's pages in memory), `ArchiveReading.awaySpan(camera:containing:)` (a requirement with a default
 that answers nil), `ArchiveActivity.Bin.away`, `ArchiveStorageStatus.archive`, `ArchiveStorageStatus.hardMaximumBytes` and `ArchiveDriveStatus` (`State`: `connected`,
 `notConnected`, `notAnswering`, `failing`, `refused`; `Move`; `usedBytes`, `freeBytes`, `totalBytes`, `floorBytes`, `oldest`, `newest`, `moving`, `waitingFiles`, `waitingBytes`,
 `movedFiles`, `movedBytes`). Internal: `StorageTier`, `CatalogFile.tier`, `CatalogState.archiveAway`, `ArchiveDriveState`, `ArchiveDriveMeasurement`, `ArchiveDriveIndex`,
@@ -800,9 +812,9 @@ that answers nil), `ArchiveActivity.Bin.away`, `ArchiveStorageStatus.archive`, `
 
 ## Additions beyond the contract: the bridge's time zone (2026-10-14, docs/CONTRACT_CHANGES.md)
 
-`BridgeSettings.timeZone` (an IANA identifier; nil: the system's) becomes the process's time zone when the settings are saved (`TZ` and
-Foundation's default, so the timestamp overlay and ffmpeg children follow it until the next launch); at launch the engine leaves the
-process's zone as it is (the recorder names its folders in the zone it starts with, and the overlay draws that zone until a save). It is the
+`BridgeSettings.timeZone` (an IANA identifier; nil: the system's) never becomes the process's time zone (since 2026-10-31, engine-core review
+F8: a save used to set `TZ` and Foundation's default until the next launch): the process keeps the zone it started with (the recorder names
+its folders in it, and the janitor's "today" agrees), and the timestamp overlay and clip labels pass the bridge's zone themselves. It is the
 zone of every clock time the engine words for people ("Camera Bridge waits until 9:19 AM", `readableReason`) and of the internet guard's
 "today", from the start: `BridgeTime` (BridgeSupport), set when the configuration loads and when the setting changes (2026-10-18).
 `BridgeEngine.setCameraTimeZone(cameraID:)` sets a camera's clock to it through ONVIF `SetSystemDateAndTime` (a POSIX string from
@@ -826,7 +838,9 @@ video it reads as online, even if that wake ended in a stall (2026-10-16); a wak
 
 Pan and tilt (2026-10-16): `BridgeEngine.panTilt(cameraID:pan:tilt:)` moves a camera whose driver has `CameraDriver.makePanTilt()`; a move stops
 by itself 1.5 s after the last ask. `CameraStatus.panTilt` says whether a camera pans and tilts. Motion detection asks for
-`MediaCodecs.makeMotionDecoder(format:)` (default `makeVideoDecoder`), which may hand back smaller pictures decoded on the GPU.
+`MediaCodecs.makeMotionDecoder(format:)` (default `makeVideoDecoder`), which may hand back smaller pictures decoded on the GPU. Since 2026-10-31 it asks
+for `makeMotionDecoder(format:keepEvery:)` with a picture of every Nth frame only, never fewer than four a second once the stream's rate is known
+(`SoftMotionMonitor.keepEvery(frameRate:)`; made again at a keyframe when the rate becomes known or falls), and keeps its four-a-second gate.
 `CameraStatus.zoom` and `BridgeEngine.panTilt(cameraID:pan:tilt:zoom:)`: the runtime asks the control what it can do when the camera starts.
 
 Battery (2026-10-16): `CameraStatus.battery` (`BatteryStatus`, nil without one). The runtime asks `CameraDriver.batteryStatus()` at the start and
@@ -923,7 +937,8 @@ Reolink backup an earlier build saved with less than a run now changes is comple
 changes the step (`mergedSetupBackup`): a time zone kept as the daylight-saving switch alone (before 2026-10-18; that build changed only
 the switch) gets the camera's `timeZone` and `Dst` rule, with the old switch as `Dst.enable` (`completedReolinkTimeZone`), and a time
 source saved through ONVIF that names no server gets the camera's own server, port and interval (`completedReolinkTimeSource`), so Restore
-puts back everything the run writes. Steps run
+puts back everything the run writes. Restore stops at the first refused login, as a run does (2026-10-31): the steps after it are not run
+and say why, since each would cost another failed login and a Hikvision locks every login after about seven. Steps run
 in order (time zone, time from the bridge, clean picture, streams, UPnP, cloud, video password, extra services, watch its internet); a refusal stops the run, the steps before it stay done, and only "Watch its internet" may still run after it (below); a step refused only because the account Camera Bridge uses may not make the change stops nothing (2026-10-18, below). The
 streams step is the HomeKit optimizer's plan (`plannedEncoderFixes`, shared with `optimizeForHomeKit`), made from the codec the bridge really
 receives (`CameraRuntime.readinessFacts`, counted only when the measured picture size is the stream's) as well as the camera's settings: a
@@ -1135,8 +1150,10 @@ one table, `InternetGuardText` (`name`, `watch`, `seal`, `watchStep` "Watch its 
   counts in the camera's favour (`CameraSecurity.guardFinding`: it never lowers the level; gold still needs a full day watched and a lookup
   seen, and a blocked one is one). `BridgeEngine.internetGuardAlerts` (`InternetGuardAlert`: `cameraID`, `cameraName`, `kind`, `date`) holds
   what needs the person: `.firstTry` (a watched camera the box has seen ask for an outside name, now or in its last 7 days: "Patio New tried
-  to reach the internet", "Camera Bridge blocked it. Nothing got out.", once per camera: the web layer's notification log never logs the same
-  event twice) and `.stoppedAsking` (a camera the guard watched at the last report and does not now: a warning, until it is watched again).
+  to reach the internet", "Camera Bridge blocked its lookup. A camera can still try an address it already knows, which the guard can’t see.", once per camera: the web layer's notification log never logs the same
+  event twice) and `.stoppedAsking` (a camera the guard watched at the last report and does not now: a warning, until it is watched again;
+  a state notice, told again each time it comes back, and not raised when the owner's Restore ended the watch). Since 2026-10-31 nothing
+  says "Nothing got out" (engine-events review F1): the guard sees lookups, not a connection to an address the camera already knows.
   `CameraGuardActivity.last7d` is the 7-day total behind "Blocked 12 attempts today, 340 in the last 7 days. Nothing got out." A lookup the
   guard did not block is not raised: the box's report does not say.
 - Tests: `EngineTuning.guardCameraAddress` stands a loopback fake camera for one at 192.168.77.x; nothing else of the guard runs unless the
@@ -1252,7 +1269,9 @@ status without `lenses` or `note` decodes with none). Internal:
 - `SkyAimStore.swift`: `<data>/sky/<camera-uuid>/aim.json` and `matches.jsonl` (0600 in 0700; a line that does not parse is skipped). They
   stay on the box: the matched directions with their times tell where the box is, so they are never logged, sent or exported. One pass of
   an aircraft (its samples in one `add`) keeps at most 12 samples, each 1° from the others; the latest 2,000 matches of each source are
-  kept, planes for 30 days; a refit happens at most once per 10 new matches or per hour. 10 plane matches in a row each more than 3 × the
+  kept, planes for 30 days; a refit happens at most once per 10 new matches or per hour (2026-10-31: once the aim is good or precise and fitted from
+  50 planes or more, once per 10 passes or 100 matches or per hour, and the matches file over its cap is appended to and written whole again only
+  after 500 stale lines, `staleLinesBeforeRewrite`; it is read back trimmed). 10 plane matches in a row each more than 3 × the
   fit's plane RMS and half their lens's match tolerance off (one aircraft's samples counting once) start the aim again; a fit with no plane
   matches judges none. A fit runs on a thread of its own, outside the cooperative pool, while the store answers with the aim it had.
 - `SkyCameraModel.Lens.undistortedRadius` falls back to a bracketed search where Newton's ten steps do not settle (steep or wavy terms far
@@ -1332,7 +1351,9 @@ live transport is the existing `AuthenticatingHTTPClient`). Public: `SkyLabel` (
   `speed`; read in the newer shape only, every aircraft of such a feed was lost). The height is the geometric altitude, else the barometric
   one; an aircraft on the ground, with a position older than 30 s (`seen_pos`), with a place or height that is
   not one, or with no `seen_pos` is left out. **The position's time is the box's receive time less `seen_pos`; the feed's own `now` is never
-  read**, since a feed host's clock can be minutes out. A body over 4 MiB is not read, at most 5,000 aircraft come out, and a document nested
+  read**, since a feed host's clock can be minutes out. The receive time is the middle of the request (2026-10-31: its end added the whole
+  transfer to every position's age), and `FlightHistory` keeps the last report's first time when the same place and height come again within
+  2 s (the feed's file fetched twice before it was written again: two times made the plane stop and jump). A body over 4 MiB is not read, at most 5,000 aircraft come out, and a document nested
   more than 16 levels deep is not read (on macOS, Apple's reader overflows a 512 KB thread stack at about 480 levels of objects, which is a crash).
   `FlightFeedPoller` polls a feed once a second (each request bounded to 5 s and 4 MiB) into a `FlightHistory`; `problem` says in plain
   words what is wrong ("The flight feed answered 404.") and `lastAnswer` when the last good answer came; `stop()` returns when polling has
@@ -1427,7 +1448,9 @@ Internal:
   from the sunrise of D to the sunrise of D+1. The detector files with `logName(for:)`, not with `SkyNight.name(containing:)` (which names, in the day, the night
   that ended that morning). Where the Sun does not set or rise there is no night, and a day is the local day.
 - `ArchiveStore.skyRead(_:)` runs a read of the log on the store's read queue with its deadline (a drive that is away is `ArchiveUnavailable.folderMissing`, one that
-  does not answer `ArchiveError.timedOut`); `BridgeEngine.skyLog`, `BridgeEngine.skyFolder` and `BridgeEngine.skyStatus(of:)` (the camera's aim and learning for a
+  does not answer `ArchiveError.timedOut`). A night is read through it as bytes only (`SkyLogStore.rawNight`, `BridgeEngine.readNight(_:from:camera:night:folder:)`,
+  2026-10-31) and parsed after, off the queue: a parse is CPU work, and under the deadline a slow one marked the drive's reads stalled and failed
+  playback. `BridgeEngine.skyLog`, `BridgeEngine.skyFolder` and `BridgeEngine.skyStatus(of:)` (the camera's aim and learning for a
   log, which the detector's task fills in) are the engine's hooks.
 - Tests: `SkySettingsTests`, `SkyLogStoreTests`, `SkyFilingTests` and `SkyNightLogEngineTests`.
 
@@ -1451,13 +1474,16 @@ The pictures the sky detector looks at, in `Runtime/` (`SkyStream.swift`, `SkyMo
   reasons. After a gap, and after a decoder that failed, the decoder starts again at the next keyframe. On a format change the monitor tells the sink and **ends**
   (`isFinished`): its choice is for the old format, and the runtime chooses again. Stopping returns once nothing more can reach the sink.
 - `CameraRuntime.startSky(sink:)` (false: an on-demand camera, which sleeps, or a camera that is not running), `stopSky()`, `skyStream` (the choice in use, nil before a
-  picture to choose from), `skyDecoding` (`gpu`, `software`, or nil), `skyStill(around:)`. The main stream always runs. The sub stream's size is learned first: if the
+  picture to choose from), `skyDecoding` (`gpu`, `software`, or nil), `skyStill(around:within:maxWidth:)`. The main stream always runs. The sub stream's size is learned first: if the
   hub does not remember it (or its rate, when it is wide enough) the runtime holds the sub stream (`acquireSub`) until it shows a picture, `subStreamStartWait` at most
   (it goes offline: the main stream); a sub stream under 1280 is given back at once (`releaseSub`, the idle stop), and one that is watched is held for as long as the sky
   runs (one user, shown by `subStreamUsers`). A look every 250 ms starts the monitor when there is a picture and a rate, replaces one that ended, and otherwise leaves
   a running monitor alone; the sub stream is looked at again only then (when the sky starts and after a format change). The camera's `stop()` ends the sky; its detector
-  starts it again when the camera runs again. `skyStill(around:)` is the JPEG (full size, quality 0.8, the camera's own picture, no correction) of the main ring's keyframe
-  nearest a time, with that keyframe's wall clock (the same clock as `SkyFrame.wallClock`), on a decoder of its own, one at a time; the ring holds at least the last 12 s.
+  starts it again when the camera runs again. `skyStill(around:within:maxWidth:)` is the JPEG (quality 0.8, the camera's own picture, no correction; the log's are made
+  1920 wide in the one encode) of the main ring's keyframe nearest a time, with that keyframe's wall clock (the same clock as `SkyFrame.wallClock`), on a decoder of its
+  own, one at a time; the ring holds at least the last 12 s. Since 2026-10-31 nothing is decoded when the nearest keyframe is further from the time than the light's
+  reach (`SkyLightFilter.stillReach(of:)`: a quarter of the light, at least 4 s): the middle of a long light is older than the ring, and its picture comes from the
+  recording.
 - The decoder: `Codecs/README.md` of PlatformLinux. A stream the GPU's decoder cannot take (H.264 over 4096 wide or tall) or fails on is decoded in software, and
   `skyDecoding` says so. Tests: `RuntimeSkyTests` (the choice, the monitor with fake codecs, the runtime on the demo camera) and PlatformLinux's `SkyDecoderTests`.
 
@@ -1521,7 +1547,8 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   flare; never a flight's plane or an orbit's named satellite) asks for its still, and its small one is made once it is written (`Context.stillWritten`). **The pictures stay off a full drive** (Rulings S27
   and S31): one is taken only while the recordings drive has its floor and 1 GiB more free (`SkyLightFilter.stillsHaveRoom`, from `nvr.storageStatus()`; below the
   floor every camera's recording pauses, and the size rule never counts what the sky log keeps; it was twice the floor, which a full recorder, kept by retention at
-  about twice its floor free, almost never had), a picture that cannot be made 1920 wide is not kept at full size (`BridgeEngine.skyStillJPEG`), and each camera's
+  about twice its floor free, almost never had), a picture is made 1920 wide in the one decode and encode, never kept at full size (2026-10-31: it was made full
+  size and shrunk by a second ffmpeg run), and each camera's
   pictures stay under 2 GiB, the oldest nights' folders going first (`SkyLogStore.pruneStills`, from the retention janitor every 10 minutes; never the logs or the
   recordings, never the newest night, no link followed; an entry whose picture went answers "There is no picture of it"). **Pictures made later**
   (`Sky/SkyStillBackfill.swift`): a light logged without one (no room then, a long track whose middle had left the camera's ring, an older build's 30 an hour, the
@@ -1553,6 +1580,8 @@ the Sky Watcher is off for the camera) and `BridgeSettings.skyPluginOn` (the Sky
   whole engine ten seconds, so a stop is quick. The lights that wait in the queue are dropped, none takes a picture once the detector is told to stop, and the light the
   queue is at work on gets one second (a keyframe's decode can stall for ten) and no longer; what it leaves unfinished can write nothing of the aim (`SkyAimStore.close`).
   `SkyService` stops its detectors together, `stopAllSky` is bounded to 2 s, and `stopServices` closes the recordings (`nvr.detachAll`) before it stops the sky.
+  A light turned away while 200 wait (`maximumPending`, the box is behind) is counted with the hour's lights that were not logged, so the page's line for the
+  hour shows it, and the journal's line for the hour says how many were turned away (2026-10-31); "is behind" is said again after the queue has emptied.
 - **Kept per camera** in `<data>/sky/<camera-uuid>/` (`SkyService.directory(of:in:)`, beside the aim's `aim.json` and `matches.jsonl`): `detector.json` (0600) with the
   visibility's memory, the open conditions span, the planes learned and the card the search found with the card it was found for, `clutter.json` (0600) with the
   busy spots (tiles, scores and times), and `baseline.json` (0600) with what the camera learned of its sky (`SkyBaseline`). No place is in them; nothing logged names the
@@ -1769,8 +1798,10 @@ kept; the three are in `SkyEntry.init` with defaults. Internal:
 - **Older logs** (`SkyStitch.joined`, first in `BridgeEngine.skyNightLog`: then the lights logged before the rules are sorted, a joined light of them as
   one, so that `sortedLater`, the rules' word and the guide are the joined light's (`SkySortLater`, above), and then the lights that moved together are
   grouped; the log is not written): the moving lights of the view, in the order they began, joined by the same rule (by day where the Sun was at −6° or
-  above at the box's place), in the camera's picture as the joining reads it (`BridgeEngine.skyStitchPicture`: the analysed size from the camera's main
-  stream or the night's pictures, at most 1,920 wide; the seam when the camera has two lenses side by side, as set or 2:1 and wider). A joined light is one
+  above at the box's place), in the camera's picture as the joining reads it (`BridgeEngine.skyStitchPicture`: its running detector's, the size it
+  analyses and its seam, `SkyCameraDetector.stitchPicture`, since 2026-10-31, so a camera watched on its sub stream is joined as live; else the analysed
+  size from the camera's main stream or the night's pictures, at most 1,920 wide; the seam when the camera has two lenses side by side, as set or 2:1 and
+  wider). A joined light is one
   entry in the place of its first part (`SkyStitch.entry(of:entries:picture:corrected:)`): the first part's id and camera, `parts`, `pieces` the sum of
   its parts'; from the first part's start to the last one's end; its path the spine's, at most 64 points evenly picked; its measures put together from
   the parts' (`measures(of:)`: from where the first was first seen to where the last was last seen, the path the parts' own and the sky crossed in each
@@ -1790,3 +1821,12 @@ kept; the three are in `SkyEntry.init` with defaults. Internal:
   contrail by day only, the hold's wait, bound and flush, flash chains, older logs, a joined light's measures and label, the lines as they were),
   `SkyStitchDetectorTests` (a light in pieces logged once with one picture of its middle, a picture the ring no longer holds, a gap and the stop, a light
   that fades twice end to end), `SkyStitchNightLogTests` (older logs read as one light and not written, a word on a joined light, a light across sunset).
+
+## Additions beyond the contract: kept recordings ("Keep this", 2026-10-31)
+
+`ArchiveReading.keptRecordings()`, `keep(camera:start:end:note:)` and `forgetKept(id:)`, requirements with defaults (none kept; keeping refuses with
+`.noFolder`, forgetting with `.unknown`), and the types `KeptRecording`, `KeptRecordingStatus` and `KeptRecordingError` (a `LocalizedError` with the
+sentence for the person). `ArchiveStore` keeps them in `<recordings>/.kept.json`; retention never deletes or moves a file a kept stretch overlaps and
+counts its bytes, the archive's planner counts kept bytes there (`RetentionPlanner.ArchiveInput.keptBytes`), and `ArchiveEventLog.prune` keeps the
+event days they touch (`keep:`). At most 24 hours a stretch, 200 stretches, and a quarter of the box's limit in all.
+

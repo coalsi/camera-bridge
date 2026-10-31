@@ -5,8 +5,9 @@ import Foundation
 /// repair (hardening plan WS-C 9, audit 3 part D). Every `interval` it checks three things:
 ///
 /// 1. **The listener answers.** An unauthenticated request over loopback must be refused as HAP refuses it within
-///    `probeTimeout`. A listener that accepts but never answers (a wedged accept loop) is restarted; the controllers see such a
-///    camera only as "No Response".
+///    `probeTimeout`. A listener that accepts but never answers (a wedged accept loop) is restarted after `listenerMissesBeforeRestart`
+///    checks in a row that got no answer; the controllers see such a camera only as "No Response". One miss is not enough: a busy box
+///    can stall the answer for a second, and a restart withdraws the camera from Bonjour while it registers again.
 /// 2. **Bonjour shows the advertisement.** Browsing `_hap._tcp` the way a controller does must find the accessory with the `id`,
 ///    `c#` and `sf` it registered. After `bonjourMissesBeforeRestart` checks in a row that do not, it registers again (a
 ///    registration mDNSResponder lost, a stale TXT record). A browse that cannot run (no Local Network access) counts for nothing.
@@ -22,15 +23,17 @@ public actor HAPHealthMonitor {
         public var probeTimeout: Duration
         public var browseTimeout: Duration
         public var bonjourMissesBeforeRestart: Int
+        public var listenerMissesBeforeRestart: Int
         public var controllerSilence: Duration
 
-        /// 30 s between passes, a 1 s loopback answer, a 3 s browse, 2 misses, 10 minutes without a controller.
-        public init(interval: Duration = .seconds(30), probeTimeout: Duration = .seconds(1), browseTimeout: Duration = .seconds(3),
-                    bonjourMissesBeforeRestart: Int = 2, controllerSilence: Duration = .seconds(600)) {
+        /// 30 s between passes, a 3 s loopback answer, a 3 s browse, 2 misses of each, 10 minutes without a controller.
+        public init(interval: Duration = .seconds(30), probeTimeout: Duration = .seconds(3), browseTimeout: Duration = .seconds(3),
+                    bonjourMissesBeforeRestart: Int = 2, listenerMissesBeforeRestart: Int = 2, controllerSilence: Duration = .seconds(600)) {
             self.interval = interval
             self.probeTimeout = probeTimeout
             self.browseTimeout = browseTimeout
             self.bonjourMissesBeforeRestart = bonjourMissesBeforeRestart
+            self.listenerMissesBeforeRestart = listenerMissesBeforeRestart
             self.controllerSilence = controllerSilence
         }
     }
@@ -44,6 +47,7 @@ public actor HAPHealthMonitor {
 
     private var loop: Task<Void, Never>?
     private var bonjourMisses = 0
+    private var listenerMisses = 0
     private var bonjourUnavailableLogged = false
     private var lastControllerSeen: ContinuousClock.Instant
     private var reAdvertisedForSilence = false
@@ -99,6 +103,7 @@ public actor HAPHealthMonitor {
         reAdvertisedForSilence = false
         controllerSilenceNote = nil
         bonjourMisses = 0
+        listenerMisses = 0
     }
 
     /// One pass of the three checks.
@@ -115,8 +120,14 @@ public actor HAPHealthMonitor {
     private func checkListener() async {
         switch await server.probeListener(timeout: timing.probeTimeout) {
         case .answered, .notListening:
-            break   // not listening: the server is stopped or listening again by itself (`relistenNow`), nothing to add
+            listenerMisses = 0   // not listening: the server is stopped or listening again by itself (`relistenNow`), nothing to add
         case .failed(let reason):
+            listenerMisses += 1
+            guard listenerMisses >= max(1, timing.listenerMissesBeforeRestart) else {
+                log.info("The HAP listener of \(name) did not answer a check over loopback (\(reason)); checking again before restarting it")
+                return
+            }
+            listenerMisses = 0
             listenerRestarts += 1
             log.error("The HAP listener of \(name) did not answer a check over loopback (\(reason)); restarting it")
             await server.restartListener(because: "it did not answer a loopback check")

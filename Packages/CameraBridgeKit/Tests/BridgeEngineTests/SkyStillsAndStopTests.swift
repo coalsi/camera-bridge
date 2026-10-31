@@ -66,21 +66,6 @@ extension SkyDetectorTests {
         await rig.detector.stop()
     }
 
-    // MARK: A picture that could not be made smaller
-
-    @Test func aPictureThatCouldNotBeMadeSmallerIsNotKeptAtFullSize() async throws {
-        let codecs = SkyFakeCodecs()
-        let full = Data("a 4256-wide picture".utf8)
-        let resized = await BridgeEngine.skyStillJPEG(full, codecs: codecs)
-        #expect(resized == full, "the fake resize answers the picture it was given")
-        codecs.resizeFails.set(true)
-        let failed = await BridgeEngine.skyStillJPEG(full, codecs: codecs)
-        #expect(failed == nil, "no picture rather than the full-size one")
-        codecs.resizeFails.set(false)
-        let empty = await BridgeEngine.skyStillJPEG(Data(), codecs: codecs)
-        #expect(empty == nil, "an empty answer is no picture")
-        #expect(BridgeEngine.skyStillWidth == 1920)
-    }
 
     // MARK: Stopping
 
@@ -108,6 +93,37 @@ extension SkyDetectorTests {
         #expect(rig.stillsAsked.value.count == asked, "no picture is taken after the stop")
         let entries = await rig.logged().entries
         #expect(entries.count < 10, "the lights that waited are dropped, not logged: \(entries.count)")
+    }
+
+    /// Review Oct 31 (sky F1): lights dropped because the queue was full left no trace but one journal line per detector. They are counted with
+    /// the hour's lights that were not logged, so the page's line for the hour shows them.
+    @Test func lightsDroppedWhileTheQueueIsFullAreCountedForTheHour() async throws {
+        let rig = try SkyDetectorRig(settings: Self.dualCard, pictureWidth: 4256, pictureHeight: 1888, stillDelay: .seconds(2))
+        defer { rig.remove() }
+        await rig.detector.start()
+        for track in Self.lights(SkyCameraDetector.maximumPending + 6) {
+            await rig.detector.receive(track, analysisWidth: 640, analysisHeight: 284, pictureWidth: 4256)
+        }
+        #expect(await eventually(timeout: .seconds(30)) { rig.stillsAsked.value.count >= 1 })
+        await rig.detector.stop()
+        await rig.log.flush()
+        let capped = rig.log.contents(camera: SkyDetectorRig.camera, night: rig.night(SkyFixtures.aimEpoch), folder: rig.recordings.url).capped
+        let counted = capped.reduce(0) { $0 + $1.count }
+        #expect(counted >= 5, "the lights the full queue turned away (and those the stop dropped are not counted): \(capped)")
+    }
+
+    /// Review Oct 31 (sky F1): the ring's nearest keyframe was decoded however far it was from the light's middle, and then thrown away: every
+    /// light longer than about half a minute cost a full-size decode and two ffmpeg runs for nothing. Too far, nothing is chosen.
+    @Test func theRingsKeyframeIsUsedOnlyWithinTheLightsReach() {
+        let format = VideoFormat(codec: .h264, width: 640, height: 360, parameterSets: [])
+        let now = Date()
+        let ring = [-12.0, -8, -4, 0].map { offset in
+            EncodedVideoFrame(format: format, nalUnits: [Data([0x65])], isKeyframe: true, pts: MediaTime(value: 0, timescale: 90_000),
+                              wallClock: now.addingTimeInterval(offset))
+        }
+        #expect(CameraRuntime.nearestKeyframe(ring, to: now.addingTimeInterval(-9), within: 4)?.wallClock == now.addingTimeInterval(-8))
+        #expect(CameraRuntime.nearestKeyframe(ring, to: now.addingTimeInterval(-30), within: 15) == nil, "the middle of a long light the ring no longer holds")
+        #expect(CameraRuntime.nearestKeyframe([], to: now, within: 4) == nil)
     }
 
     @Test func stoppingDoesNotWaitForALightWhosePictureIsStuck() async throws {
@@ -285,7 +301,7 @@ extension SkyServiceTests {
         let context = SkyCameraDetector.Context(cameraID: id, cameraName: "North Sky", settings: SkyDetectorSettings(enabled: true, facing: 330, tilt: 15),
                                                 observer: SkyFixtures.observer, zone: SkyDetectorRig.zone, pictureWidth: 4256, pictureHeight: 1888,
                                                 folder: { recordings.url },
-                                                still: { date in
+                                                still: { date, _ in
                                                     asked.update { $0 += 1 }
                                                     try? await Task.sleep(for: .milliseconds(300))
                                                     return (SkyLogStoreTests.jpeg("still"), date)
@@ -352,7 +368,13 @@ extension SkyEngineTests {
         #expect(await fixture.waitFor(.seconds(30)) { fixture.status(camera.id)?.sky?.running == true })
         #expect(await fixture.until(.seconds(30)) { fixture.engine.skyStillsHaveRoom() }, "the drive has room, once it has been measured")
         let detector = try #require(fixture.engine.skyDetectors[camera.id])
-        for track in SkyDetectorTests.lights(200) { await detector.receive(track, analysisWidth: 640, analysisHeight: 360, pictureWidth: 640) }
+        // Lights of the last seconds: their pictures are in the camera's ring (one further off is not decoded at all). They cross the middle of the
+        // picture: the test runs at the real time of day, and a light along the edge nearest the Sun is skipped as glare, with no picture.
+        let now = Date()
+        let lights = (0..<200).map {
+            SkyDetectorTests.straightTrack(from: (280, 60 + Double($0 % 20) * 8), pixelsPerSecond: 5, seconds: 4.8, at: now.addingTimeInterval(-5))
+        }
+        for track in lights { await detector.receive(track, analysisWidth: 640, analysisHeight: 360, pictureWidth: 640) }
         #expect(await fixture.until(.seconds(30)) { codecs.otherDecoders.value >= 1 }, "a light's picture is being made")
 
         // The camera's Sky Watcher goes off: the engine holds its operations lock while the detector stops, and the next operation is not held up.

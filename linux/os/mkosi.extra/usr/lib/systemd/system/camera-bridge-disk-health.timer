@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily check of the box's drives
+
+[Timer]
+# /run is empty after a restart: check soon after boot, then every day.
+OnBootSec=10min
+OnUnitActiveSec=1d
+RandomizedDelaySec=30min
+AccuracySec=10min
+
+[Install]
+WantedBy=timers.target

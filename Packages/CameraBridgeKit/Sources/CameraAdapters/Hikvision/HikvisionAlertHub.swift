@@ -17,6 +17,10 @@ import Synchronization
 /// many channels share the stream, and none when a camera merely joins. Not after rejected credentials: the long
 /// retry delay protects the device's login lockout.
 ///
+/// The camera's video coming back after an outage (`reconnect(endpoint:credentials:ifStartedBefore:)`, from
+/// `CameraEventSource.videoResumed(downSince:)`) reconnects the same way when the connection attempt began before the outage: a camera
+/// that lost power leaves the stream half-open (the box never writes to it), and only the idle watchdog would notice, minutes later.
+///
 /// The stream belongs to no one camera, so what the hub logs (the stream failing, rejected credentials, reconnects)
 /// goes to every subscribed camera's log: one entry per camera, tagged with its ID and naming the device (W4 review
 /// round 4); untagged only while no subscriber names a camera.
@@ -33,6 +37,13 @@ final class HikvisionAlertHub: Sendable {
         var port: Int
         var useHTTPS: Bool
         var credentials: HTTPCredentials?
+
+        init(endpoint: CameraEndpoint, credentials: HTTPCredentials?) {
+            host = endpoint.host.lowercased()
+            port = endpoint.httpPort
+            useHTTPS = endpoint.useHTTPS
+            self.credentials = credentials
+        }
     }
 
     private struct User {
@@ -91,7 +102,7 @@ final class HikvisionAlertHub: Sendable {
     /// event source before), see the type documentation.
     static func acquire(endpoint: CameraEndpoint, credentials: HTTPCredentials?, timing: HikvisionEventTiming, cameraID: UUID? = nil,
                         resubscribing: Bool = false) -> Subscription {
-        let key = Key(host: endpoint.host.lowercased(), port: endpoint.httpPort, useHTTPS: endpoint.useHTTPS, credentials: credentials)
+        let key = Key(endpoint: endpoint, credentials: credentials)
         let (subscription, reconnecting) = hubs.withLock { hubs in
             let hub = hubs[key] ?? HikvisionAlertHub(key: key, endpoint: endpoint, credentials: credentials, timing: timing)
             hubs[key] = hub
@@ -115,18 +126,38 @@ final class HikvisionAlertHub: Sendable {
                 state.task = Task { await self.run() }
             } else if resubscribing, !state.credentialsRejected, let started = state.attemptStarted,
                       state.users.values.allSatisfy({ $0.since > started }) {
-                // Every subscriber re-subscribed since this connection attempt began: reconnect now. The new run starts
-                // after the old one ended, so subscribers see its disconnect before the new connection.
-                let previous = state.task
-                previous?.cancel()
-                state.attemptStarted = nil
-                state.task = Task {
-                    await previous?.value
-                    await self.run()
-                }
+                // Every subscriber re-subscribed since this connection attempt began: reconnect now.
+                restart(&state)
                 return (id, true)
             }
             return (id, false)
+        }
+    }
+
+    /// Drops the connection (or its retry wait) and connects again at once. The new run starts after the old one ended, so subscribers
+    /// see its disconnect before the new connection.
+    private func restart(_ state: inout State) {
+        let previous = state.task
+        previous?.cancel()
+        state.attemptStarted = nil
+        state.task = Task {
+            await previous?.value
+            await self.run()
+        }
+    }
+
+    /// The camera's video came back after it was down since `downSince`: its hub reconnects at once when its connection attempt began
+    /// before then (it may be half-open). Not after rejected credentials (the long retry delay protects the login lockout), and not when
+    /// the attempt began since (it is new, or one is under way).
+    static func reconnect(endpoint: CameraEndpoint, credentials: HTTPCredentials?, ifStartedBefore downSince: ContinuousClock.Instant) {
+        guard let hub = hubs.withLock({ $0[Key(endpoint: endpoint, credentials: credentials)] }) else { return }
+        let restarted = hub.state.withLock { state -> Bool in
+            guard state.task != nil, !state.credentialsRejected, let started = state.attemptStarted, started < downSince else { return false }
+            hub.restart(&state)
+            return true
+        }
+        if restarted {
+            hub.log(.info, "Hikvision \(endpoint.host): the camera's video came back after it was down; reconnecting the alertStream, which may have died with it")
         }
     }
 

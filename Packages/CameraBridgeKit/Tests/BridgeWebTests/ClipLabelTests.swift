@@ -149,12 +149,15 @@ import Testing
         return rig
     }
 
-    private func clip(_ rig: NVRRig, _ extra: String) async throws -> (response: HTTPResponse, body: Data) {
+    /// `converterMayFail`: the fixture's pictures are not real H.264, so a conversion fails (and its stream throws, as a failed download must).
+    private func clip(_ rig: NVRRig, _ extra: String, converterMayFail: Bool = false) async throws -> (response: HTTPResponse, body: Data) {
         let response = await rig.harness.raw("GET", "/api/v1/nvr/cameras/\(rig.cameraID)/clip?from=\(rig.ms(1_500))&to=\(rig.ms(6_000))&tz=UTC&part=1" + extra,
                                              cookie: rig.session.cookie)
         guard case .stream(let body) = response.body else { return (response, Data()) }
         let collected = Box(Data())
-        try await body(ResponseStream { data in collected.update { $0.append(data) } })
+        do {
+            try await body(ResponseStream { data in collected.update { $0.append(data) } })
+        } catch where converterMayFail {}
         return (response, collected.value)
     }
 
@@ -174,8 +177,8 @@ import Testing
         let rig = try await rig("Backyard", correction: PictureCorrection(straighten: 0.4, level: 0.15))
         let log = LogCapture()
         defer { log.stop() }
-        let (alone, _) = try await clip(rig, "&straighten=1")
-        let (both, _) = try await clip(rig, "&straighten=1&labels=1")
+        let (alone, _) = try await clip(rig, "&straighten=1", converterMayFail: true)
+        let (both, _) = try await clip(rig, "&straighten=1&labels=1", converterMayFail: true)
         guard WebApp.ffmpegPath() != nil else {
             #expect(alone.status == 501 && both.status == 501, "no converter on this machine")
             return
@@ -188,6 +191,19 @@ import Testing
         let (copy, file) = try await clip(rig, "")
         #expect(copy.status == 200 && Array(file.prefix(8).suffix(4)) == Array("ftyp".utf8))
         #expect(log.text.contains { $0.hasSuffix(": a clip of Backyard is being sent") })
+    }
+
+    @Test func convertedClipsArePreparedOnTheDataDriveAndALeftoverIsClearedAtStart() throws {
+        let data = try TemporaryDirectory(prefix: "cb-clip-work")
+        defer { data.remove() }
+        let work = WebApp.clipWorkFolder(dataDirectory: data.url)
+        #expect(work.deletingLastPathComponent().standardizedFileURL == data.url.standardizedFileURL, "on the data drive, not in /tmp (memory on the box)")
+        let leftover = work.appendingPathComponent("clip-12345678/clip.mp4")
+        try FileManager.default.createDirectory(at: leftover.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(count: 1_024).write(to: leftover)
+        WebApp.clearClipWork(dataDirectory: data.url)
+        #expect(!FileManager.default.fileExists(atPath: work.path(percentEncoded: false)))
+        #expect(WebApp.freeBytes(at: data.url).map { $0 > 0 } == true)
     }
 
     @Test func thePictureSizeIsTheRecordingsOwn() async throws {

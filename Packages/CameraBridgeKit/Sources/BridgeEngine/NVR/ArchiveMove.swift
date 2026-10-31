@@ -52,6 +52,8 @@ enum ArchiveMove {
         /// The archive's free space and floor now; nil when it cannot be read (the copy then relies on the write failing).
         var room: @Sendable () -> (free: UInt64, floor: UInt64)? = { nil }
         var sleep: @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+        /// Before the read-back: the copies' pages leave memory (`ArchivePlatformPolicy.dropCachedPages`).
+        var dropCachedPages: (@Sendable (URL) -> Void)?
     }
 
     enum Outcome: Sendable, Equatable {
@@ -124,6 +126,9 @@ enum ArchiveMove {
             let mp4Digest = try copy(mp4, to: partial, bytes: ticket.mp4Bytes, controls, crashHalfway: .copying)
             let sidecarDigest = try copy(sidecar, to: partialSidecar, bytes: ticket.sidecarBytes, controls, crashHalfway: nil)
             if controls.crash?(.copied) == true { return .crashed(.copied) }
+            // The read-back must read the drive: right after the copy its pages are still in memory, and a USB bridge or drive that lost or
+            // changed data on the way would pass (the box's copy is deleted after this check).
+            for copied in [partial, partialSidecar] { controls.dropCachedPages?(copied) }
             guard try digest(of: partial, controls) == mp4Digest, try digest(of: partialSidecar, controls) == sidecarDigest,
                   CatalogLoader.attributes(partial)?.size == ticket.mp4Bytes, CatalogLoader.attributes(partialSidecar)?.size == ticket.sidecarBytes else {
                 throw Failure.destination("the copy on the archive is not the same as the recording")

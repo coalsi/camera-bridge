@@ -53,7 +53,7 @@ function fakeTimers() {
 const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 const type = (input, value) => { input.value = value; input.dispatchEvent({ type: 'input', target: input }); };
 
-function cardWith(settings, { feeds = [FEED], refusals = [], geolocate, open, timers } = {}) {
+function cardWith(settings, { feeds = [FEED], refusals = [], geolocate, open, timers, aiLimit = true } = {}) {
   const calls = { saves: [], finds: 0, adopted: [] };
   const card = page.createSkySettingsCard(settings, {
     save: async (partial) => {
@@ -67,9 +67,18 @@ function cardWith(settings, { feeds = [FEED], refusals = [], geolocate, open, ti
     geolocate,
     timers,
     open,   // undefined: the card’s own rule (open until the box has a place)
+    aiLimit,   // the AI's limit is hidden on the page until Sky Watcher asks the AI; these tests keep its field working for then
   });
   return { card, calls, refusals };
 }
+
+test('the AI’s daily limit is not on the Setup panel while nothing asks the AI', () => {
+  assert.equal(page.SHOW_AI_LIMIT, false);
+  const { card } = cardWith(settingsWith({ location: PLACE, aiDailyLimit: 80 }), { open: true, aiLimit: page.SHOW_AI_LIMIT });
+  assert.doesNotMatch(shown(card.el), /Asking the AI|Most questions a day/);
+  assert.equal(field(card.el, 'limit'), undefined);
+  assert.equal(button(card.el, 'Save the limit'), undefined);
+});
 
 test('the card is the Setup panel: where the box is, the flight feed and the AI’s limit, as the bridge has them', () => {
   const { card } = cardWith(settingsWith({ location: PLACE, flightFeedURL: FEED, aiDailyLimit: 80 }), { open: true });
@@ -296,7 +305,7 @@ test('the Settings page no longer has a Sky Watcher section: its setup is on the
     screen = renderSettings({ params: [], setTitle: () => {} });
     for (let i = 0; i < 20; i += 1) await settle();
     const titles = all(screen.el, (node) => node.classList?.contains('section-title')).map((node) => node.textContent);
-    assert.deepEqual(titles, ['General', 'Video and recording', 'Apple Home and other systems', 'AI', 'Troubleshooting'], 'the sections, in order');
+    assert.deepEqual(titles, ['General', 'Security', 'Video and recording', 'Apple Home and other systems', 'AI', 'Troubleshooting'], 'the sections, in order');
     assert.equal(titles.indexOf('AI') + 1, titles.indexOf('Troubleshooting'), 'the AI section still sits right before Troubleshooting');
     assert.equal(all(screen.el, (node) => node.classList?.contains('sky-settings-card')).length, 0, 'no card of the Sky Watcher');
     assert.doesNotMatch(shown(screen.el), /Sky Watcher|Find a feed|Where the box is|Flight feed/);

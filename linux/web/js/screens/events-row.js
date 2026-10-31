@@ -2,6 +2,7 @@
 // amber dot on its sentence), "Describing…" while the words are on their way, and the Events page's row. The AI's words go in as text only
 // (never markup) and are isolated for bidirectional text by the stylesheet.
 import { h } from '../dom.js';
+import { icon } from '../icons.js';
 import { stampText } from '../stamp.js';
 import { concernWord, durationText } from './wall-events-model.js';
 
@@ -32,11 +33,19 @@ export function eventLabel(event, { recorded = true } = {}) {
   return `${event.label}, ${event.cameraName}, ${stampText(event.at)}${duration ? `, ${duration}` : ''}${recorded ? '' : ', not recorded'}${said}`;
 }
 
+/** The button beside a recorded event's row that keeps it from retention (nvr/kept.js eventKeepRange): `onKeep(event)`. */
+export function keepButton(event, onKeep, className) {
+  const label = `Keep this event: ${event.label}, ${event.cameraName}, ${stampText(event.at)}`;
+  return h('button', { class: className, type: 'button', 'aria-label': label, title: 'Keep this event: retention won’t delete its recording', onclick: (e) => { e.preventDefault(); onKeep(event); } },
+    icon('lock'), className.includes('btn') ? 'Keep' : null);
+}
+
 /**
  * One row of the Events page: `{ thumb }` is the snapshot tile (nvr/thumbs.js), `href` the Monitor's address or null when nothing was recorded,
  * `describing` whether words are on their way. A row with an address is a link, so Enter, a middle click and "open in a new tab" all work.
+ * `onKeep(event)`: a recorded event gets "Keep" beside its link (a button cannot be inside a link).
  */
-export function eventRow(event, { thumb, href, describing = false }) {
+export function eventRow(event, { thumb, href, describing = false, onKeep = null }) {
   const duration = durationText(event.endAt !== null ? event.endAt - event.at : null);
   const attrs = {
     class: 'ev-row', 'aria-label': eventLabel(event, { recorded: href !== null }),
@@ -57,5 +66,6 @@ export function eventRow(event, { thumb, href, describing = false }) {
   const says = aiSays(event.description, { describing });
   if (says) body[1].append(h('p', { class: 'ev-says' }, says));
   const row = href !== null ? h('a', { ...attrs, href: `#${href}` }, body) : h('div', attrs, body);
-  return h('li', { class: 'ev-item', dataset: { concern: event.description?.concern ?? '', recorded: String(href !== null) } }, row);
+  return h('li', { class: 'ev-item', dataset: { concern: event.description?.concern ?? '', recorded: String(href !== null) } }, row,
+    onKeep && href !== null ? keepButton(event, onKeep, 'btn small ev-keep') : null);
 }

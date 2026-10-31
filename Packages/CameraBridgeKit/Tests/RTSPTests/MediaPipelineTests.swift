@@ -317,3 +317,118 @@ private final class StalledConnection: TCPConnection {
         #expect(throws: TransportError.closed) { try connection.send(Data(count: 1)) }
     }
 }
+
+/// Review Oct 31 (homekit-media F1): many cameras stamp audio by sample count and video by their system timer. Over a session that lasts
+/// days the two drift apart (10 ppm is 0.9 s a day), and nothing re-aligned them after the first packets: Home's clips went silent, and
+/// every NVR file carried the offset. The pipeline now eases the audio back onto the video's clock.
+@Suite struct AudioDriftTests {
+    @Test func theTrackerEasesALongDriftBackInSmallSteps() {
+        let start = Date()
+        var drift = AudioDriftTracker()
+        var origin = 0.0
+        var steps: [Double] = []
+        // 30 minutes; the audio clock runs 300 ppm fast. A sample every 100 ms, arriving on time (plus a little jitter).
+        for tenth in 0..<18_000 {
+            let t = Double(tenth) / 10
+            let jitter = Double(tenth % 7) * 0.003
+            drift.noteVideo(pts: t, arrival: start.addingTimeInterval(t + 0.02 + jitter))
+            if let step = drift.noteAudio(pts: t * 1.0003 + origin, arrival: start.addingTimeInterval(t + 0.05 + jitter)) {
+                origin += step
+                steps.append(step)
+            }
+        }
+        #expect(!steps.isEmpty)
+        #expect(steps.allSatisfy { abs($0) <= AudioDriftTracker.maximumStep + 1e-9 }, "never an audible jump")
+        #expect(steps.allSatisfy { $0 < 0 }, "the audio ran ahead: it is moved back")
+        let left = 1800 * 0.0003 + origin
+        // Eased once it passes the threshold, until it is nearly gone: what is left is at most a minute's drift past the threshold.
+        #expect(abs(left) < AudioDriftTracker.threshold + 0.03, "\(left) s left of 0.54 s")
+    }
+
+    @Test func aSteadyOffsetOrJitterIsLeftAlone() {
+        let start = Date()
+        var drift = AudioDriftTracker()
+        for tenth in 0..<12_000 {
+            let t = Double(tenth) / 10
+            let jitter = Double((tenth * 37) % 11) * 0.01   // up to 100 ms of network jitter
+            drift.noteVideo(pts: t, arrival: start.addingTimeInterval(t + jitter))
+            // Audio always 0.3 s behind arrival: a constant offset the session started with is not drift.
+            #expect(drift.noteAudio(pts: t - 0.3, arrival: start.addingTimeInterval(t + jitter)) == nil)
+        }
+    }
+
+    @Test func aPipelineKeepsTheAudioOnTheVideosClock() async throws {
+        let camera = OffsetCamera(offset: 0)
+        var events: [(TimeInterval, UInt8, Data)] = []
+        // 20 minutes: video at 5 fps (a keyframe every 2 s), audio every 100 ms whose clock runs 300 ppm fast.
+        for frame in 0..<6000 {
+            let t = Double(frame) / 5
+            events.append((t, 0, RTPPacket(marker: true, payloadType: 96, sequenceNumber: UInt16(truncatingIfNeeded: frame),
+                                           timestamp: UInt32(truncatingIfNeeded: OffsetCamera.videoBase + Int64(frame) * 18_000), ssrc: 1,
+                                           payload: h264NAL(type: frame % 10 == 0 ? 5 : 1, size: 40)).serialized()))
+        }
+        for packet in 0..<12_000 {
+            let t = Double(packet) / 10
+            let stamp = OffsetCamera.audioBase + Int64((Double(packet) * 800 * 1.0003).rounded())
+            events.append((t + 0.01, 2, RTPPacket(marker: true, payloadType: 0, sequenceNumber: UInt16(truncatingIfNeeded: packet),
+                                                  timestamp: UInt32(truncatingIfNeeded: stamp), ssrc: 2, payload: filler(800)).serialized()))
+        }
+        let (video, audio) = try await camera.allPTS(events)
+        let lastVideo = try #require(video.last), lastAudio = try #require(audio.last)
+        // The last video frame arrived at 1199.8 s, the last audio packet at 1199.91 s: on one clock they are 0.11 s apart.
+        let skew = (lastAudio - lastVideo) - 0.11
+        #expect(abs(skew) < AudioDriftTracker.threshold + 0.03, "audio \(skew) s off the video after 20 minutes (0.36 s without the easing)")
+    }
+}
+
+/// Review Oct 31 (homekit-media F2): one lost packet froze the picture until the next keyframe, and nothing said so. The stretch is now
+/// counted and logged (the first at once, then at most a summary every 5 minutes), and a slow consumer that starts dropping again later is
+/// warned about again.
+@Suite struct StreamHealthTests {
+    final class Lines: LogSink {
+        let category: String
+        let lines = Mutex<[String]>([])
+        init(_ category: String) { self.category = category }
+        func record(_ entry: LogEntry) { if entry.category == category { lines.withLock { $0.append(entry.message) } } }
+    }
+
+    @Test func aLostPacketsFrozenStretchIsCountedAndLogged() async throws {
+        let sink = Lines("FreezeTest")
+        let token = LogHub.addSink(sink)
+        defer { LogHub.removeSink(token) }
+        let (stream, continuation) = AsyncThrowingStream.makeStream(of: MediaSample.self)
+        let pipeline = MediaPipeline(plans: [MediaPipeline.TrackPlan(track: videoTrack, rtpChannel: 0, rtcpChannel: 1, videoFormat: h264Format, audioFormat: nil)],
+                                     continuation: continuation, log: Log(category: "FreezeTest"))
+        let start = Date()
+        // Frames every 200 ms, keyframes at 0, 10, 20; frame 12's packet is lost: 13…19 cannot be decoded.
+        for frame in 0..<25 where frame != 12 {
+            pipeline.handle(channel: 0, payload: videoPacket(frame), arrival: start.addingTimeInterval(Double(frame) * 0.2))
+        }
+        let health = pipeline.health
+        #expect(health.lostPackets == 1)
+        #expect(health.freezes == 1)
+        #expect(abs(health.frozenSeconds - 1.4) < 0.01, "from frame 13 (2.6 s) to keyframe 20 (4.0 s): \(health.frozenSeconds)")
+        #expect(health.droppedAccessUnits == 7)
+        let lines = sink.lines.withLock { $0 }
+        #expect(lines.contains { $0.contains("froze for 1.4 s") && $0.contains("1 lost packet") }, "\(lines)")
+        pipeline.finish(throwing: nil)
+        withExtendedLifetime(stream) {}
+    }
+
+    @Test func aSlowConsumerIsWarnedAboutAgainAfterAQuietSpell() {
+        let sink = Lines("DeliveryTest")
+        let token = LogHub.addSink(sink)
+        defer { LogHub.removeSink(token) }
+        let (stream, continuation) = AsyncThrowingStream.makeStream(of: MediaSample.self, bufferingPolicy: .bufferingOldest(1))
+        var delivery = SampleDelivery(log: Log(category: "DeliveryTest"), quietPeriod: .milliseconds(50))
+        let frame = EncodedVideoFrame(format: h264Format, nalUnits: [Data([0x65, 0x88])], isKeyframe: true, pts: MediaTime(value: 0, timescale: 90_000),
+                                     wallClock: Date())
+        for _ in 0..<3 { delivery.deliver(.video(frame), to: continuation) }
+        #expect(sink.lines.withLock { $0.count } == 1, "one warning for the first spell")
+        Thread.sleep(forTimeInterval: 0.1)
+        delivery.deliver(.video(frame), to: continuation)
+        let lines = sink.lines.withLock { $0 }
+        #expect(lines.count == 2 && lines[1].contains("3 samples dropped"), "\(lines)")
+        withExtendedLifetime(stream) {}
+    }
+}

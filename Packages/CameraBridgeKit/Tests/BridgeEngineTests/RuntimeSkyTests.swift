@@ -105,6 +105,8 @@ final class SkyFakeCodecs: MediaCodecs {
     let jpegs = Box<[String]>([])
     /// `resizeJPEG` throws while this is set (ffmpeg gone, a picture it cannot read).
     let resizeFails = Box(false)
+    /// `jpeg(from:…)` throws while this is set (a picture the encoder cannot make).
+    let jpegFails = Box(false)
     private let honoursKeepEvery: Bool
     private let lateBy: Int
     private let failFirstDecoderFrom: Int?
@@ -172,6 +174,7 @@ final class SkyFakeCodecs: MediaCodecs {
     }
 
     func jpeg(from frame: any DecodedVideoFrame, maxWidth: Int?, maxHeight: Int?, quality: Double) throws -> Data {
+        if jpegFails.value { throw MediaCodecError.unsupported("not in this test") }
         let line = "JPEG pts=\(frame.pts.value) q=\(quality) w=\(maxWidth.map(String.init) ?? "nil") h=\(maxHeight.map(String.init) ?? "nil")"
         jpegs.update { $0.append(line) }
         return Data(line.utf8)

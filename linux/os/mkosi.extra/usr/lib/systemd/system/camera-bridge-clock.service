@@ -1,0 +1,21 @@
+[Unit]
+Description=Keep the clock from going back in time (the last time the box knew, on the data partition)
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/linux/os/README.md
+# Early at boot a clock that is behind the last time the box knew (a flat clock battery) is set forward to it, before the time server, the
+# cameras and the engine see it; at shutdown the time is kept for the next boot (and once an hour by camera-bridge-housekeeping).
+DefaultDependencies=no
+Requires=srv.mount
+After=srv.mount camera-bridge-datadirs.service
+Before=time-set.target chrony.service camerabridged.service sysinit.target
+Wants=time-set.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/cb-system clock-restore
+ExecStop=/usr/sbin/cb-system clock-save
+
+[Install]
+WantedBy=sysinit.target

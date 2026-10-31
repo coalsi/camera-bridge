@@ -64,6 +64,8 @@ struct ArchiveStoreTuning: Sendable {
     var archiveReadWidth = 4
     /// The janitor waits at most this long for the archive's own deletions of one pass (a drive that hangs never holds up the box's retention).
     var archiveDeletionDeadline: Duration = .seconds(30)
+    /// How long the box deletes only over its hard limit while an archive drive that is there is still being read (`awaitsArchiveLoad`).
+    var archiveLoadGrace: Duration = .seconds(15 * 60)
     /// The box's copy of a moved file that could not be deleted, or whose drive went away first, is tried again after this long.
     var mainRemovalRetry: Duration = .seconds(60)
     /// Tests: true stops a move after this step as if the box lost power there; the mover then stops for good.
@@ -110,6 +112,8 @@ struct ArchiveStoreState: Sendable {
     var eventSizeCutoffMs: Int64?
     /// When the cameras' pictures of the sky were last measured (`pruneEvents`).
     var skyStillsPrunedAt: Date?
+    /// The stretches the person chose to keep (`KeptRecordings`), read with the catalog.
+    var kept: [KeptRecording] = []
 
     var pause: ArchivePause?
     var space: VolumeMonitor.Space?
@@ -150,6 +154,7 @@ struct ArchiveStoreState: Sendable {
         keyIntervals = [:]
         eventSizeCutoffMs = nil
         skyStillsPrunedAt = nil
+        kept = []
         isReady = folder == nil
         isSettled = false
         reloadWhenFolderReturns = false

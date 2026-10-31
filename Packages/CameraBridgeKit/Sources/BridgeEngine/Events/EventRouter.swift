@@ -68,6 +68,12 @@ struct HeldSignal: Sendable, Equatable {
     }
 }
 
+/// Which runtime of a camera writes its state (`EventRouter.claim(_:)`).
+struct RouterClaim: Sendable, Equatable {
+    let cameraID: UUID
+    let number: UInt64
+}
+
 /// Turns each camera's `CameraEvent`s into debounced state (spec §3.3/§3.4, integration brief §3–§5):
 ///
 /// - motion: on while an origin that reports ends (camera event channel, soft motion, stream) reports it, and for
@@ -94,7 +100,8 @@ struct HeldSignal: Sendable, Equatable {
 /// `states`) also apply expired holds, so a manual test clock needs no waiting. Motion, doorbell and detection
 /// transitions are logged under category "Events" with the camera's id; connection and credential changes and dropped
 /// alarm inputs under "Camera".
-/// Events for unknown or disabled cameras are ignored.
+/// Events for unknown or disabled cameras are ignored. A camera's runtime names its claim in its writes (`claim(_:)`): a runtime that was
+/// replaced changes nothing any more.
 public actor EventRouter {
     public static let objectHold: Duration = .seconds(60)
     public static let ringDedupe: Duration = .seconds(3)
@@ -210,6 +217,9 @@ public actor EventRouter {
     private var handler: (@Sendable (EventRouterOutput) -> Void)?
     private var edgeHandler: (@Sendable ([EventEdge]) -> Void)?
     private var cameras: [UUID: Camera] = [:]
+    /// The runtime that writes each camera's state now (`claim(_:)`), by its claim's number.
+    private var claims: [UUID: UInt64] = [:]
+    private var claimCount: UInt64 = 0
 
     /// `clock` drives hold timers (a manual clock in tests); `date` stamps `lastEventDate` / `lastRingDate`.
     public init(clock: any Clock<Duration> = ContinuousClock(), date: @escaping @Sendable () -> Date = { Date() }) {
@@ -257,6 +267,7 @@ public actor EventRouter {
 
     /// Forgets a camera (its motion ends).
     public func unregister(cameraID: UUID) {
+        claims[cameraID] = nil
         guard let camera = cameras.removeValue(forKey: cameraID) else { return }
         camera.timer?.task.cancel()
         let ending = camera.published.map(Self.activeKinds) ?? []
@@ -375,6 +386,41 @@ public actor EventRouter {
         if origin == .stream { camera.rejectedBy.remove(.stream) }
         cameras[cameraID] = camera
         publish(cameraID)
+    }
+
+    // MARK: - Claims
+
+    /// A runtime of the camera begins: from now on the writes that name a claim (`setStreamConnection(_:claim:)`, `resetOrigin(_:claim:)`,
+    /// `handle(_:claim:origin:)`) change the camera's state only with this one. A runtime the engine replaced while its stop was still under
+    /// way (the stop outlived the engine's wait) cannot set the new runtime's camera idle, nor end its event channel, when that stop finally
+    /// ends. Writes without a claim (the engine's own, the webhook's, soft motion's) always count.
+    func claim(_ cameraID: UUID) -> RouterClaim {
+        claimCount &+= 1
+        claims[cameraID] = claimCount
+        return RouterClaim(cameraID: cameraID, number: claimCount)
+    }
+
+    /// `claim` is the camera's current one.
+    private func holds(_ claim: RouterClaim) -> Bool {
+        claims[claim.cameraID] == claim.number
+    }
+
+    /// `setStreamConnection(_:for:)` from the runtime that holds `claim` (else nothing).
+    func setStreamConnection(_ state: ConnectionState, claim: RouterClaim) {
+        guard holds(claim) else { return }
+        setStreamConnection(state, for: claim.cameraID)
+    }
+
+    /// `resetOrigin(_:for:)` from the runtime that holds `claim` (else nothing).
+    func resetOrigin(_ origin: EventOrigin, claim: RouterClaim) {
+        guard holds(claim) else { return }
+        resetOrigin(origin, for: claim.cameraID)
+    }
+
+    /// `handle(_:for:origin:)` from the runtime that holds `claim` (else nothing).
+    func handle(_ event: CameraEvent, claim: RouterClaim, origin: EventOrigin) {
+        guard holds(claim) else { return }
+        handle(event, for: claim.cameraID, origin: origin)
     }
 
     /// The camera's current state (expired holds applied first); nil for an unknown camera.

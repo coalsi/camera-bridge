@@ -59,16 +59,24 @@ test('an OpenAI-compatible service away from home is named by its host', async (
   assert.deepEqual(lines(await cardFor(camera(), home('https://llm.example.test:8443/v1'))), [LINE('llm.example.test')], 'the host, not the port');
 });
 
-test('what counts as the home network: private, loopback and link-local IPv4, and .local and .lan names', () => {
+test('what counts as the home network is the engine’s rule (AIDescriptionSettings.isHomeNetworkHost), case by case', () => {
   const homeHosts = ['10.0.0.5', '10.255.255.255', '172.16.0.1', '172.31.255.254', '192.168.1.1', '192.168.77.10', '127.0.0.1', '127.8.9.10', '169.254.3.4',
-    'ollama.local', 'NAS.LAN', 'studio.example.local', 'localhost', '[::1]', '[fe80::1]'];
-  const awayHosts = ['172.15.0.1', '172.32.0.1', '11.0.0.1', '8.8.8.8', '192.0.2.1', '100.64.0.1', 'api.openai.com', '10.example.com', '192.168.1.1.example.com',
-    'local.example.com', 'notlocal', '[2001:db8::1]'];
+    '100.64.0.1', '100.101.102.103', '100.127.255.254', '010.0.0.1',
+    'ollama.local', 'NAS.LAN', 'studio.example.local', 'box.home.arpa', 'llm.internal', 'localhost', 'ollama', 'notlocal',
+    '[::1]', '[fe80::1]', '[FE80::1]', '[febf::1]', '[fd00::1]', '[fc00::1]', '[fdff:1:2::3]'];
+  const awayHosts = ['172.15.0.1', '172.32.0.1', '11.0.0.1', '8.8.8.8', '192.0.2.1', '100.63.255.255', '100.128.0.1', '256.1.1.1', '10..0.1', '1.2.3.',
+    'api.openai.com', '10.example.com', '192.168.1.1.example.com', 'local.example.com', 'home.arpa.example.com', 'internal.example.com', 'nas.', '',
+    '[2001:db8::1]', '[fe7f::1]', '[fec0::1]', '[fe00::1]', '[fbff::1]', '[::ffff:192.0.2.1]', '[::]'];
   for (const host of homeHosts) assert.equal(sec.isHomeNetworkHost(host), true, host);
   for (const host of awayHosts) assert.equal(sec.isHomeNetworkHost(host), false, host);
   // Written another way, an address is still the same address.
   assert.equal(sec.picturesGoTo({ provider: 'openAICompatible', baseURL: 'http://0x7f.1/v1' }), null);
   assert.equal(sec.picturesGoTo({ provider: 'openAICompatible', baseURL: 'http://3232235786/v1' }), null, '192.168.0.10 as one number');
+  // The addresses the engine's own test lets through on plain http (AISettingsTests) stay at home here too.
+  for (const baseURL of ['http://100.101.102.103/v1', 'http://[fd00::1]:8080/v1', 'http://[fe80::1]/v1', 'http://box.home.arpa/v1', 'http://ollama:11434/v1',
+    'http://gpu.lan/v1', 'https://llm.example.internal/v1']) {
+    assert.equal(sec.picturesGoTo({ provider: 'openAICompatible', baseURL }), null, baseURL);
+  }
 });
 
 test('no service, no address, or settings that could not be read: no line', async () => {

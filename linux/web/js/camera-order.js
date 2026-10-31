@@ -1,6 +1,8 @@
 // The order of the cameras on every page: the order the person gave (saved on the box as `cameraOrder`), else by name. No DOM: Node tests run it.
 
-const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+// One collator for every sort (a new one per comparison, as localeCompare with options makes, is slow on a wall tablet).
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+const byName = (a, b) => collator.compare(a.name, b.name);
 
 /** `cameras` in the saved `order` (camera ids): the listed ones first, then the others by name. Unknown and repeated ids are ignored. */
 export function orderCameras(cameras, order) {

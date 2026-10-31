@@ -41,6 +41,64 @@ import TestSupport
         #expect(json["streamingHelperInstalled"] as? Bool == true)
     }
 
+    /// Review finding (engine-core F4): a damaged configuration was set aside with one log line; `status.configurationRecovered` was never
+    /// shown, and nothing could dismiss it. It is a notice now (in the banner list, the notification log and a toast), with a Dismiss.
+    @Test func aRecoveredConfigurationIsANoticeTheOwnerCanDismiss() async throws {
+        let backend = FakeBackend()
+        backend.write { $0.configurationRecovery = ConfigurationRecovery(setAside: URL(fileURLWithPath: "/data/config.corrupt-1.json"), restoredPrevious: true) }
+        let harness = try Harness(backend: backend)
+        let session = try await harness.signIn()
+        let json = await session.get("/api/v1/status").json
+        #expect(json["configurationRecovered"] as? Bool == true)
+        let notice = try #require((json["notices"] as? [[String: Any]])?.first)
+        #expect(notice["id"] as? String == "configuration-recovered" && notice["kind"] as? String == "configurationRecovered")
+        #expect(notice["title"] as? String == "Settings Restored From a Backup" && notice["severity"] as? String == "warning")
+        #expect(notice["action"] as? String == "dismiss" && notice["category"] as? String == "system")
+
+        backend.write { $0.configurationRecovery?.restoredPrevious = false }
+        let lost = try #require((await session.get("/api/v1/status").json["notices"] as? [[String: Any]])?.first)
+        #expect(lost["title"] as? String == "Settings Could Not Be Read")
+        #expect((lost["detail"] as? String)?.contains("without cameras") == true)
+
+        // Only a notice that stays until it is dismissed can be dismissed.
+        #expect(await session.send("POST", "/api/v1/notifications/dismiss", json: ["id": "nvr-storage"]).status == 400)
+        #expect(await session.send("POST", "/api/v1/notifications/dismiss", json: ["id": "configuration-recovered"]).status == 200)
+        #expect(backend.read { $0.calls }.contains("acknowledgeConfigurationRecovery"))
+        let after = await session.get("/api/v1/status").json
+        #expect((after["notices"] as? [[String: Any]])?.isEmpty == true && after["configurationRecovered"] as? Bool == false)
+    }
+
+    /// Improvement (engine-core I2, engine-events I1): "Camera X is offline", the most basic NVR alert, was no notification at all. A camera
+    /// offline for 5 minutes is a warning (a state: told again at its next outage), saying whether its recording has a gap.
+    @Test func aCameraOfflineForFiveMinutesIsANotice() throws {
+        let now = Date(timeIntervalSince1970: 1_792_224_000)
+        var porch = CameraConfiguration(name: "Porch", kind: .camera, vendor: .onvif, endpoint: CameraEndpoint(host: "192.0.2.20"), username: "admin")
+        porch.nvrEnabled = true
+        let yard = CameraConfiguration(name: "Yard", kind: .camera, vendor: .onvif, endpoint: CameraEndpoint(host: "192.0.2.21"), username: "admin")
+        func overview(_ porchSince: Date?, yardSince: Date? = nil) -> BridgeOverview {
+            var down = CameraStatus(id: porch.id, name: "Porch", kind: .camera, vendor: .onvif, connection: .offline("the camera did not answer"))
+            down.offlineSince = porchSince
+            var other = CameraStatus(id: yard.id, name: "Yard", kind: .camera, vendor: .onvif, connection: .offline("the connection was refused"))
+            other.offlineSince = yardSince
+            return BridgeOverview(state: .running, cameras: [down, other], configurations: [porch, yard])
+        }
+        func offline(_ overview: BridgeOverview) -> [NoticeResource] {
+            NoticeResource.resources(for: overview, now: now).filter { $0.kind == "cameraOffline" }   // (no folder chosen: a storage notice too)
+        }
+        #expect(offline(overview(now.addingTimeInterval(-120))).isEmpty, "a short drop is no notice")
+        let notices = offline(overview(now.addingTimeInterval(-301), yardSince: now.addingTimeInterval(-600)))
+        #expect(notices.map(\.id) == ["camera-offline-\(porch.id.uuidString)", "camera-offline-\(yard.id.uuidString)"])
+        let notice = try #require(notices.first)
+        #expect(notice.kind == "cameraOffline" && notice.category == "cameras" && notice.severity == "warning" && notice.action == "open-camera")
+        #expect(notice.title == "Porch Is Offline" && notice.cameraID == porch.id && notice.cameraName == "Porch")
+        #expect(notice.detail.hasPrefix("Camera Bridge hasn’t reached Porch since ") && notice.detail.contains("the camera did not answer"))
+        #expect(notice.detail.hasSuffix("Its recording has a gap until it is back."))
+        #expect(!(notices[1].detail.contains("recording")), "a camera that doesn't record says nothing about it")
+        var off = overview(now.addingTimeInterval(-600))
+        off.configurations[0].isEnabled = false
+        #expect(!offline(off).contains { $0.cameraID == porch.id }, "a camera turned off is not offline")
+    }
+
     @Test func healthFollowsTheBridgeState() async throws {
         let backend = FakeBackend()
         let harness = try Harness(backend: backend)
@@ -291,9 +349,18 @@ import TestSupport
         #expect(stream.events("camera").contains { ($0["status"] as? [String: Any])?["motion"] as? Bool == true })
         backend.write {
             $0.statusOverrides[id] = CameraStatus(id: id, name: "Front Door", kind: .camera, vendor: .onvif, connection: .online, isPaired: true,
-                                                  lastEvent: "Doorbell ring", lastEventDate: Date().addingTimeInterval(5))
+                                                  lastEvent: "Doorbell ring", lastEventDate: Date().addingTimeInterval(5),
+                                                  lastRingDate: Date().addingTimeInterval(5))
         }
         #expect(await stream.wait { $0.contains("event: doorbell") })
+        // Review finding (engine-events F8): a ring followed within the hub's half second by another event (the doorbell's Person) was
+        // never announced, since the ring was read from `lastEvent`. The ring's own date says it.
+        let rang = Date().addingTimeInterval(10)
+        backend.write {
+            $0.statusOverrides[id] = CameraStatus(id: id, name: "Front Door", kind: .camera, vendor: .onvif, connection: .online, isPaired: true,
+                                                  lastEvent: "Person", lastEventDate: rang.addingTimeInterval(0.3), lastRingDate: rang)
+        }
+        #expect(await stream.wait { $0.components(separatedBy: "event: doorbell").count == 3 }, "the second ring is announced too")
         backend.write { $0.state = .paused }
         #expect(await stream.wait { $0.contains("\"state\":\"paused\"") })
         backend.write { $0.configurations.removeAll() }
@@ -339,7 +406,23 @@ import TestSupport
 
     @Test func serverEventsAreFormattedForEventSource() {
         #expect(ServerEvent(name: "camera", data: "{\"a\":1}").text == "event: camera\ndata: {\"a\":1}\n\n")
-        #expect(ServerEvent.ping.text == ": ping\n\n")
+        #expect(ServerEvent.ping.text == "event: ping\ndata: {}\n\n", "a named event the page can see: a comment never reaches EventSource's listeners")
+    }
+
+    @Test func theEventStreamSendsAPingWhileNothingChanges() async throws {
+        let hub = EventHub(backend: FakeBackend(), interval: .milliseconds(10), pingInterval: .milliseconds(50))
+        hub.start()
+        defer { hub.stop() }
+        let events = hub.subscribe()
+        let pings = Box(0)
+        let reader = Task {
+            for await event in events where event.name == "ping" {
+                #expect(event.data == "{}")
+                pings.update { $0 += 1 }
+            }
+        }
+        defer { reader.cancel() }
+        #expect(await eventually { pings.value >= 2 }, "a ping every interval, so the page can tell a quiet bridge from a lost connection")
     }
 }
 
@@ -355,6 +438,13 @@ import TestSupport
         #expect(json["canManage"] as? Bool == true)
         #expect(json["sshEnabled"] as? Bool == false)
         #expect(json["automaticUpdates"] as? Bool == true)
+        // The drives' health, the clock and the network link, for the System page's health card.
+        let health = try #require(json["driveHealth"] as? [String: Any])
+        #expect(health["state"] as? String == "warning")
+        let drives = try #require(health["drives"] as? [[String: Any]])
+        #expect(drives.first?["role"] as? String == "recording" && drives.first?["percentUsed"] as? Int == 95)
+        #expect((json["clock"] as? [String: Any])?["synchronized"] as? Bool == false)
+        #expect((json["networkLink"] as? [String: Any])?["speedMbps"] as? Int == 100)
     }
 
     @Test func updatesAreCheckedAndApplied() async throws {
@@ -394,10 +484,11 @@ import TestSupport
         #expect(await session.send("POST", "/api/v1/system/install", json: ["targetID": "nvme0n1", "confirm": true]).status == 400, "a tick box is not the sentence")
         #expect(await session.send("POST", "/api/v1/system/install", json: ["targetID": "nvme0n1", "phrase": ""]).status == 400)
         #expect(harness.system.calls.value.isEmpty)
-        let started = await session.send("POST", "/api/v1/system/install", json: ["targetID": "nvme0n1", "phrase": "ERASE ALL DATA ON nvme0n1", "copyData": false])
+        let started = await session.send("POST", "/api/v1/system/install", json: ["targetID": "nvme0n1", "phrase": "ERASE ALL DATA ON nvme0n1", "copyData": false,
+                                                                               "password": "correct horse"])
         #expect(started.status == 202)
         #expect(harness.system.calls.value == ["install:nvme0n1:ERASE ALL DATA ON nvme0n1:false"])
-        let refused = await session.send("POST", "/api/v1/system/install", json: ["targetID": "bad", "phrase": "x"])
+        let refused = await session.send("POST", "/api/v1/system/install", json: ["targetID": "bad", "phrase": "x", "password": "correct horse"])
         #expect(refused.status == 409)
         #expect(refused.json["message"] as? String == "That disk can’t be used.")
     }
@@ -412,10 +503,10 @@ import TestSupport
         #expect(await session.send("POST", "/api/v1/system/recording-drive", json: ["targetID": "sdb"]).status == 400, "erasing needs the sentence")
         #expect(await session.send("POST", "/api/v1/system/recording-drive", json: ["targetID": "sdb", "confirm": true]).status == 400)
         #expect(harness.system.calls.value.isEmpty)
-        #expect(await session.send("POST", "/api/v1/system/recording-drive", json: ["targetID": "sdb", "phrase": "ERASE ALL DATA ON sdb"]).status == 202)
+        #expect(await session.send("POST", "/api/v1/system/recording-drive", json: ["targetID": "sdb", "phrase": "ERASE ALL DATA ON sdb", "password": "correct horse"]).status == 202)
         #expect(await session.send("POST", "/api/v1/system/recording-drive", json: ["targetID": "sdb", "keepData": true]).status == 202)
         #expect(harness.system.calls.value == ["drive:sdb:ERASE ALL DATA ON sdb:false", "drive:sdb::true"])
-        #expect(await session.send("POST", "/api/v1/system/recording-drive", json: ["targetID": "bad", "phrase": "x"]).status == 409)
+        #expect(await session.send("POST", "/api/v1/system/recording-drive", json: ["targetID": "bad", "phrase": "x", "password": "correct horse"]).status == 409)
         #expect(await session.send("POST", "/api/v1/system/recording-drive/forget", json: [:]).status == 400, "going back needs the confirmation")
         #expect(await session.send("POST", "/api/v1/system/recording-drive/forget", json: ["confirm": true]).status == 202)
         #expect(harness.system.calls.value.last == "drive-forget")
@@ -431,10 +522,10 @@ import TestSupport
         #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["phrase": "ERASE ALL DATA ON sdb"]).status == 400)
         #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "sdb"]).status == 400, "erasing needs the sentence")
         #expect(harness.system.calls.value.isEmpty)
-        #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "sdb", "phrase": "ERASE ALL DATA ON sdb"]).status == 202)
+        #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "sdb", "phrase": "ERASE ALL DATA ON sdb", "password": "correct horse"]).status == 202)
         #expect(await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "sdb", "keepData": true]).status == 202)
         #expect(harness.system.calls.value == ["archive:sdb:ERASE ALL DATA ON sdb:false", "archive:sdb::true"])
-        let refused = await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "bad", "phrase": "x"])
+        let refused = await session.send("POST", "/api/v1/system/archive-drive", json: ["targetID": "bad", "phrase": "x", "password": "correct horse"])
         #expect(refused.status == 409 && refused.json["message"] as? String == "That disk can’t be used.")
         #expect(await session.send("POST", "/api/v1/system/archive-drive/forget", json: [:]).status == 400, "letting go needs the confirmation")
         #expect(await session.send("POST", "/api/v1/system/archive-drive/forget", json: ["confirm": true]).status == 202)
@@ -450,8 +541,44 @@ import TestSupport
         #expect(await session.send("POST", "/api/v1/system/factory-reset", json: ["confirm": "reset"]).status == 400)
         #expect(harness.system.calls.value.isEmpty)
         #expect(await session.send("POST", "/api/v1/system/poweroff", json: ["confirm": true]).status == 202)
-        #expect(await session.send("POST", "/api/v1/system/factory-reset", json: ["confirm": "RESET"]).status == 202)
+        #expect(await session.send("POST", "/api/v1/system/factory-reset", json: ["confirm": "RESET", "password": "correct horse"]).status == 202)
         #expect(harness.system.calls.value == ["poweroff", "factory-reset"])
+    }
+
+    @Test func rootLevelActionsAskForThePasswordAgain() async throws {
+        let harness = try Harness()
+        let session = try await harness.signIn(password: "correct horse")
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE me@example"
+        // What gives root or erases: the session cookie alone crosses the network in clear text on the plain-HTTP address.
+        let actions: [(path: String, body: [String: Any])] = [
+            ("/api/v1/system/ssh", ["enabled": true, "authorizedKeys": key]),
+            ("/api/v1/system/factory-reset", ["confirm": "RESET"]),
+            ("/api/v1/system/install", ["targetID": "nvme0n1", "phrase": "ERASE ALL DATA ON nvme0n1"]),
+            ("/api/v1/system/recording-drive", ["targetID": "sdb", "phrase": "ERASE ALL DATA ON sdb"]),
+            ("/api/v1/system/archive-drive", ["targetID": "sdb", "phrase": "ERASE ALL DATA ON sdb"]),
+        ]
+        for (path, body) in actions {
+            let missing = await session.send("POST", path, json: body)
+            #expect(missing.status == 403 && missing.json["code"] as? String == "password_required" && missing.json["error"] as? String == "password_required", "\(path)")
+            #expect((missing.json["message"] as? String)?.isEmpty == false && missing.json["field"] as? String == "password")
+            var wrong = body
+            wrong["password"] = "wrong horse"
+            let refused = await session.send("POST", path, json: wrong)
+            #expect(refused.status == 403 && refused.json["code"] as? String == "wrong_password", "\(path)")
+            #expect(refused.json["field"] as? String == "password")
+        }
+        #expect(harness.system.calls.value.isEmpty, "nothing was done")
+        // Five wrong passwords from this address: the next try waits, even with the right password, like a sign-in.
+        var right = actions[1].body
+        right["password"] = "correct horse"
+        let locked = await session.send("POST", actions[1].path, json: right)
+        #expect(locked.status == 429 && locked.json["code"] as? String == "too_many_attempts")
+        // Turning SSH off, and choosing a drive whose recordings are kept, need no password.
+        #expect(await session.send("POST", "/api/v1/system/ssh", json: ["enabled": false]).status == 200)
+        #expect(await session.send("POST", "/api/v1/system/recording-drive", json: ["targetID": "sdb", "keepData": true]).status == 202)
+        let elsewhere = await harness.send("POST", actions[1].path, json: right, cookie: session.cookie, csrf: session.csrf, from: "192.0.2.99")
+        #expect(elsewhere.status == 202)
+        #expect(harness.system.calls.value == ["ssh:false:0", "drive:sdb::true", "factory-reset"])
     }
 
     @Test func sshAndAutomaticUpdatesAreSwitchedFromTheInterface() async throws {
@@ -464,7 +591,7 @@ import TestSupport
         let withOptions = await session.send("POST", "/api/v1/system/ssh", json: ["enabled": true, "authorizedKeys": "command=\"rm -rf /\" " + key])
         #expect(withOptions.status == 400, "only plain public keys")
         #expect(harness.system.calls.value.isEmpty)
-        let on = await session.send("POST", "/api/v1/system/ssh", json: ["enabled": true, "authorizedKeys": "# mine\n" + key + "\n\n"])
+        let on = await session.send("POST", "/api/v1/system/ssh", json: ["enabled": true, "authorizedKeys": "# mine\n" + key + "\n\n", "password": "correct horse"])
         #expect(on.status == 200)
         #expect(await session.send("POST", "/api/v1/system/ssh", json: ["enabled": false]).status == 200)
         #expect(await session.send("POST", "/api/v1/system/auto-update", json: [String: String]()).status == 400)
@@ -497,7 +624,8 @@ import TestSupport
         #expect(disks.status == 409)
         let poweroff = await plain.handle(harness.request("POST", "/api/v1/system/poweroff", json: ["confirm": true], cookie: session.cookie, csrf: session.csrf))
         #expect(poweroff.status == 409)
-        let reset = await plain.handle(harness.request("POST", "/api/v1/system/factory-reset", json: ["confirm": "RESET"], cookie: session.cookie, csrf: session.csrf))
+        let reset = await plain.handle(harness.request("POST", "/api/v1/system/factory-reset", json: ["confirm": "RESET", "password": "correct horse"],
+                                                         cookie: session.cookie, csrf: session.csrf))
         #expect(reset.status == 409)
         let auto = await plain.handle(harness.request("POST", "/api/v1/system/auto-update", json: ["enabled": true], cookie: session.cookie, csrf: session.csrf))
         #expect(auto.status == 409)

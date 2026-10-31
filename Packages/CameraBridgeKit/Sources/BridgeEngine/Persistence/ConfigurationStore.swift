@@ -22,12 +22,27 @@ public enum ConfigurationStoreError: Error, Equatable, Sendable {
     case corrupt(String)
 }
 
+/// What `ConfigurationStore.loadOrRecover()` did with a `config.json` it could not read.
+public struct ConfigurationRecovery: Sendable, Equatable {
+    /// Where the damaged file was set aside (`config.corrupt-<UTC time>.json`).
+    public var setAside: URL
+    /// The copy the last save replaced (`config.json.bak`) could be read and is in use (it is `config.json` again); false: nothing could
+    /// be read and the bridge started with the defaults, without cameras.
+    public var restoredPrevious: Bool
+
+    public init(setAside: URL, restoredPrevious: Bool) {
+        self.setAside = setAside
+        self.restoredPrevious = restoredPrevious
+    }
+}
+
 /// Upgrades the JSON object of schema version `n` (the dictionary key) to version `n + 1` in place. The store sets
 /// `schemaVersion` after each step.
 public typealias ConfigurationMigration = @Sendable (inout [String: Any]) throws -> Void
 
 /// `config.json` in the engine's data directory: `{"schemaVersion": 1, "settings": {…}, "cameras": […]}`, written
-/// atomically with mode 0600 (the directory is created 0700). Older files pass through `migrations` (one step per
+/// atomically and synced with mode 0600 (the directory is created 0700); every save keeps the file it replaces as
+/// `config.json.bak`, which `loadOrRecover()` falls back to. Older files pass through `migrations` (one step per
 /// version) and are rewritten in the current version after the original is kept as `config.json.v<n>.bak`.
 ///
 /// Cameras are read one entry at a time: an entry this build cannot read (an unknown `vendor` or `kind` from a newer
@@ -66,25 +81,55 @@ public final class ConfigurationStore: Sendable {
         try unreadableCameras.withLock { unreadable in try loadLocked(&unreadable) }
     }
 
-    /// Like `load()`, but a missing file gives the defaults, and a corrupt file (also one whose migration fails) is
-    /// renamed to `config.corrupt-<UTC timestamp>.json` (returned as `recoveredFrom`) and replaced by the defaults in
-    /// memory. Files from a newer version, or older ones without a migration, still throw `unsupportedSchemaVersion`.
-    public func loadOrRecover() throws -> (configuration: BridgeConfiguration, recoveredFrom: URL?) {
+    /// Like `load()`, but a missing file gives the defaults, and a corrupt file (also one whose migration fails) is renamed to
+    /// `config.corrupt-<UTC timestamp>.json` and replaced by the copy the last save replaced (`config.json.bak`) when that one can be read
+    /// (it becomes `config.json` again), else by the defaults in memory; `recovery` says which. A file from a newer version (an update the
+    /// A/B system rolled back) is read from the copy its migration kept of this version (`config.json.v<current>.bak`), read only: the
+    /// newer file is never written over, so `save` still refuses. Without that copy, and for older files without a migration, it still
+    /// throws `unsupportedSchemaVersion`.
+    public func loadOrRecover() throws -> (configuration: BridgeConfiguration, recovery: ConfigurationRecovery?) {
         try unreadableCameras.withLock { unreadable in
             do {
                 return (try loadLocked(&unreadable) ?? BridgeConfiguration(), nil)
+            } catch ConfigurationStoreError.unsupportedSchemaVersion(let version) where version > Self.currentSchemaVersion {
+                let kept = directory.appending(path: "\(Self.fileName).v\(Self.currentSchemaVersion).bak", directoryHint: .notDirectory)
+                guard let read = try? Self.read(kept, migrations: migrations), read.version == Self.currentSchemaVersion else {
+                    throw ConfigurationStoreError.unsupportedSchemaVersion(version)
+                }
+                unreadable = read.skipped
+                Self.log.error("config.json was saved by a newer version of Camera Bridge (\(version)); using the copy that version kept of this "
+                               + "one, \(kept.lastPathComponent). Changes can't be saved until Camera Bridge is updated again")
+                return (read.configuration, nil)
             } catch ConfigurationStoreError.corrupt(let reason) {
                 unreadable = []
                 let stamp = Self.timestamp(Date())
                 let backup = PrivateFiles.unusedURL(in: directory) { $0 == 0 ? "config.corrupt-\(stamp).json" : "config.corrupt-\(stamp)-\($0).json" }
                 try FileManager.default.moveItem(at: fileURL, to: backup)
-                Self.log.error("config.json could not be read (\(reason)); it was moved to \(backup.lastPathComponent) and the defaults are used")
+                var configuration = BridgeConfiguration()
+                var restored = false
+                if let previous = try? Self.read(PrivateFiles.previousURL(of: fileURL), migrations: migrations) {
+                    do {
+                        try PrivateFiles.write(try Self.encode(previous.configuration, appending: previous.skipped), to: fileURL)
+                        configuration = previous.configuration
+                        unreadable = previous.skipped
+                        restored = true
+                    } catch {
+                        Self.log.error("The copy of config.json kept before the last save could not be put back: \(error)")
+                    }
+                }
+                if restored {
+                    Self.log.error("config.json could not be read (\(reason)); it was moved to \(backup.lastPathComponent) and the copy kept before "
+                                   + "the last save is used")
+                } else {
+                    Self.log.error("config.json could not be read (\(reason)); it was moved to \(backup.lastPathComponent) and the defaults are used")
+                }
+                let recovery = ConfigurationRecovery(setAside: backup, restoredPrevious: restored)
                 do {
-                    try PrivateFiles.write(Data(backup.lastPathComponent.utf8), to: recoveryNoticeURL)
+                    try PrivateFiles.write(Data((backup.lastPathComponent + (restored ? "\n\(Self.restoredMark)" : "")).utf8), to: recoveryNoticeURL)
                 } catch {
                     Self.log.error("The notice about \(backup.lastPathComponent) could not be saved: \(error)")
                 }
-                return (BridgeConfiguration(), backup)
+                return (configuration, recovery)
             }
         }
     }
@@ -96,12 +141,16 @@ public final class ConfigurationStore: Sendable {
 
     var recoveryNoticeURL: URL { directory.appending(path: Self.recoveryNoticeFileName, directoryHint: .notDirectory) }
 
-    /// The damaged file a recovery set aside that nobody has dismissed yet, or nil.
-    func recoveryNotice() -> URL? {
-        guard let data = try? Data(contentsOf: recoveryNoticeURL),
-              let name = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              name.hasPrefix("config.corrupt-"), !name.contains("/") else { return nil }
-        return directory.appending(path: name, directoryHint: .notDirectory)
+    /// The notice's second line when the copy kept before the last save was put back.
+    private static let restoredMark = "restored"
+
+    /// The recovery nobody has dismissed yet, or nil.
+    func recoveryNotice() -> ConfigurationRecovery? {
+        guard let data = try? Data(contentsOf: recoveryNoticeURL), let text = String(data: data, encoding: .utf8) else { return nil }
+        let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let name = lines.first, name.hasPrefix("config.corrupt-"), !name.contains("/") else { return nil }
+        return ConfigurationRecovery(setAside: directory.appending(path: name, directoryHint: .notDirectory),
+                                     restoredPrevious: lines.dropFirst().contains(Self.restoredMark))
     }
 
     /// The person saw the notice: `recoveryNotice()` is nil from now on (the damaged file itself stays).
@@ -123,7 +172,7 @@ public final class ConfigurationStore: Sendable {
                 try keepBackup(of: Data(contentsOf: fileURL), version: version)
             }
             try PrivateFiles.prepareDirectory(directory)
-            try PrivateFiles.write(try Self.encode(configuration, appending: unreadable), to: fileURL)
+            try PrivateFiles.write(try Self.encode(configuration, appending: unreadable), to: fileURL, keepingPrevious: true)
         }
     }
 
@@ -140,16 +189,30 @@ public final class ConfigurationStore: Sendable {
             unreadable = []
             return nil
         }
-        let original = try Data(contentsOf: fileURL)
+        let read = try Self.read(fileURL, migrations: migrations)
+        unreadable = read.skipped
+        if read.version < Self.currentSchemaVersion {
+            try keepBackup(of: read.original, version: read.version)
+            try PrivateFiles.write(try Self.encode(read.configuration, appending: read.skipped), to: fileURL)
+            Self.log.notice("config.json was upgraded from version \(read.version) to \(Self.currentSchemaVersion)")
+        }
+        return read.configuration
+    }
+
+    /// The configuration in `url` (migrated to the current version in memory), the camera entries this build cannot read, the file's own
+    /// version and its bytes. Throws like `load()`.
+    private static func read(_ url: URL, migrations: [Int: ConfigurationMigration])
+        throws -> (configuration: BridgeConfiguration, skipped: [UnreadableCamera], version: Int, original: Data) {
+        let original = try Data(contentsOf: url)
         guard var object = (try? JSONSerialization.jsonObject(with: original)) as? [String: Any] else {
             throw ConfigurationStoreError.corrupt("not a JSON object")
         }
-        guard let version = Self.schemaVersion(in: object), version >= 0 else {
+        guard let version = schemaVersion(in: object), version >= 0 else {
             throw ConfigurationStoreError.corrupt("no valid schemaVersion")
         }
-        guard version <= Self.currentSchemaVersion else { throw ConfigurationStoreError.unsupportedSchemaVersion(version) }
+        guard version <= currentSchemaVersion else { throw ConfigurationStoreError.unsupportedSchemaVersion(version) }
         var current = version
-        while current < Self.currentSchemaVersion {
+        while current < currentSchemaVersion {
             guard let migration = migrations[current] else { throw ConfigurationStoreError.unsupportedSchemaVersion(current) }
             do {
                 try migration(&object)
@@ -159,14 +222,8 @@ public final class ConfigurationStore: Sendable {
             current += 1
             object["schemaVersion"] = current
         }
-        let (configuration, skipped) = try Self.decode(object)
-        unreadable = skipped
-        if version < Self.currentSchemaVersion {
-            try keepBackup(of: original, version: version)
-            try PrivateFiles.write(try Self.encode(configuration, appending: skipped), to: fileURL)
-            Self.log.notice("config.json was upgraded from version \(version) to \(Self.currentSchemaVersion)")
-        }
-        return configuration
+        let (configuration, skipped) = try decode(object)
+        return (configuration, skipped, version, original)
     }
 
     /// Settings and cameras from the (current-version) JSON object; camera entries that do not decode are returned

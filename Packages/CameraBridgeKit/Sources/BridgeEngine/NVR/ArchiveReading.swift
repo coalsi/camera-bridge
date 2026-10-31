@@ -28,6 +28,14 @@ public protocol ArchiveReading: Sendable {
     /// The stretch of `camera`'s recordings around `time` that is on the archive drive while that drive is not connected (it plays again when it is
     /// plugged back in): what a player shows instead of a gap there. Memory only; nil anywhere else. The default has none.
     func awaySpan(camera: UUID, containing time: Date) -> DateInterval?
+    /// The stretches the person chose to keep from retention ("Keep this", `KeptRecording`), newest first, with what each holds now. The
+    /// default has none.
+    func keptRecordings() async -> [KeptRecordingStatus]
+    /// Keeps `camera`'s recordings from `start` to `end` (at most a day) from retention, with the person's `note`. Throws `KeptRecordingError`;
+    /// the default refuses (`.noFolder`).
+    func keep(camera: UUID, start: Date, end: Date, note: String) async throws -> KeptRecordingStatus
+    /// Lets retention have a kept stretch again. Throws `KeptRecordingError`; the default refuses (`.unknown`).
+    func forgetKept(id: String) async throws
 }
 
 extension ArchiveReading {
@@ -36,6 +44,12 @@ extension ArchiveReading {
     }
 
     public func awaySpan(camera: UUID, containing time: Date) -> DateInterval? { nil }
+
+    public func keptRecordings() async -> [KeptRecordingStatus] { [] }
+
+    public func keep(camera: UUID, start: Date, end: Date, note: String) async throws -> KeptRecordingStatus { throw KeptRecordingError.noFolder }
+
+    public func forgetKept(id: String) async throws { throw KeptRecordingError.unknown }
 }
 
 /// One event of a camera as the archive's event log keeps it.

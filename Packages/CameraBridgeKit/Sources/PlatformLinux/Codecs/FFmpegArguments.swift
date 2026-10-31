@@ -48,6 +48,9 @@ struct VideoPipelineSpec: Equatable, Sendable {
     var keyframeRequestsByTimestamp = true
     /// Straighten the picture with these maps (the transcoder only; nil: the picture as the camera sent it).
     var correction: RemapStage?
+    /// Decode and scale on this VA-API render node (`scale_vaapi`), copying only the scaled picture back for the label; nil: decode and
+    /// scale on the CPU. The transcoder sets it only without a correction, for streams the GPU's decoder takes (`FFmpegVideoDecoder.fitsHardware`).
+    var decodeDevice: String?
 }
 
 enum FFmpegArguments {
@@ -68,6 +71,9 @@ enum FFmpegArguments {
         // -copyts: ffmpeg would otherwise subtract the stream's first timestamp (decided while probing, so it varies); the
         // transcoder maps output timestamps back by their exact millisecond value and needs them unchanged.
         arguments += ["-copyts"]
+        if let device = spec.decodeDevice, spec.correction == nil {
+            arguments += ["-hwaccel", "vaapi", "-hwaccel_device", device, "-hwaccel_output_format", "vaapi"]
+        }
         arguments += lowLatencyInput
         if let correction = spec.correction {
             arguments += ["-f", "flv", "-i", "pipe:0"] + remapInputs(correction)
@@ -131,12 +137,24 @@ enum FFmpegArguments {
     static let keyframeRequestExpression = "mod(round(t*1000),2)"
 
     /// The filter chain of a pipeline without a correction (`spec.correction` is not looked at).
+    ///
+    /// On the CPU the downscale is `flags=area`: a third cheaper than bicubic for a 4K camera going to 1080p, and sharper (bicubic aliases
+    /// when it shrinks by two or more). With `decodeDevice` the pictures stay on the GPU until `scale_vaapi` has made them the fitted size
+    /// (even, as `fittedSize` makes it), and only that is copied back for the bars and the label: a fifth of the CPU of decoding a 4K H.264
+    /// camera in software (measured on an N150, 2026-10-31).
     static func videoFilters(_ spec: VideoPipelineSpec) -> String {
         var filters: [String] = []
         if let select = selectFilter(spec) { filters.append(select) }
         let width = spec.settings.width, height = spec.settings.height
-        if spec.sourceWidth != width || spec.sourceHeight != height {
-            filters.append("scale=\(width):\(height):force_original_aspect_ratio=decrease:flags=bicubic")
+        let scaled = spec.sourceWidth != width || spec.sourceHeight != height
+        if spec.decodeDevice != nil {
+            let fitted = fittedSize(sourceWidth: spec.sourceWidth, sourceHeight: spec.sourceHeight, width: width, height: height)
+            if scaled { filters.append("scale_vaapi=w=\(fitted.width):h=\(fitted.height):format=nv12") }
+            filters += ["hwdownload", "format=nv12"]
+            if fitted.width != width || fitted.height != height { filters.append("pad=\(width):\(height):(ow-iw)/2:(oh-ih)/2") }
+            if scaled { filters.append("setsar=1") }
+        } else if scaled {
+            filters.append("scale=\(width):\(height):force_original_aspect_ratio=decrease:flags=area")
             filters.append("pad=\(width):\(height):(ow-iw)/2:(oh-ih)/2")
             filters.append("setsar=1")
         }
@@ -226,11 +244,19 @@ enum FFmpegArguments {
             + ":fontcolor=white:box=1:boxcolor=black@0.42:boxborderw=\(border):shadowcolor=black@0.5:shadowx=1:shadowy=1:x=\(x):y=\(y)"
     }
 
-    /// A string as a filter option value: as it is when it holds only letters, digits and `/ . _ - + @`, otherwise in single quotes
-    /// (the filter graph parser takes everything in them literally; a quote inside becomes `'\''`).
+    /// A string as a filter option value: as it is when it holds only letters, digits and `/ . _ - + @`, otherwise escaped for both levels
+    /// ffmpeg reads it at. The filter graph parser takes the outer single quotes away (a quote inside is written `'\''`), and then the filter's
+    /// own option parser splits at `:` and reads `\` and `'` again, so those three get a backslash first. Quoting only once broke the
+    /// "Camera off" picture of a camera named "Garage: East", and drew "Kid's room" in black at the top left.
     static func optionValue(_ text: String) -> String {
         let plain = !text.isEmpty && text.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || "/._-+@".unicodeScalars.contains($0) }
-        return plain ? text : "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        guard !plain else { return text }
+        var escaped = ""
+        for character in text {
+            if character == "\\" || character == "'" || character == ":" { escaped.append("\\") }
+            escaped.append(character)
+        }
+        return "'" + escaped.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Whether a path can be given to a filter at all (no line breaks or NULs).

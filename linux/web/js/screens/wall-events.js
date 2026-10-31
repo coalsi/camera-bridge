@@ -9,9 +9,9 @@ import { icon } from '../icons.js';
 import { stampText } from '../stamp.js';
 import { cameraList, store, subscribe } from '../store.js';
 import { createThumbnails } from '../nvr/thumbs.js';
-import { aiChip, aiSays, eventLabel } from './events-row.js';
+import { aiChip, aiSays, eventLabel, keepButton } from './events-row.js';
 import { isDescribing } from './events-model.js';
-import { PAGE_ROWS, createEventArchive, durationText, gatherEvents, isRecorded, sameEvent, visibleEvents } from './wall-events-model.js';
+import { PAGE_ROWS, createEventArchive, durationText, eventNear, gatherEvents, isRecorded, sameEvent, visibleEvents } from './wall-events-model.js';
 
 const BANNER_MS = 9_000;
 const HISTORY_MAX = 200;
@@ -38,9 +38,11 @@ function playMark() {
  *   now()                     the server's clock (live events are stamped with it, like the bridge's own)
  *   loadEvents(query)         GET nvr/events ({ cameras, fromMs, toMs, limit } -> its answer); without it the list has no archive
  *   thumbs                    the snapshot tiles (nvr/thumbs.js createThumbnails); a row shows the picture at its start, loaded when it is on screen
+ *   onKeep(event)             "Keep this event" beside a recorded row (a small button); none without it
  * update({ cameraIds, range: { fromMs, toMs }, extentOf(id) }) draws the list for the cameras on the wall and the timeline's range.
  */
-export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChange = () => {}, now = () => Date.now(), loadEvents = null, thumbs = createThumbnails() } = {}) {
+export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChange = () => {}, now = () => Date.now(), loadEvents = null, thumbs = createThumbnails(),
+  onKeep = null } = {}) {
   let destroyed = false;
   let tiles = [];               // the snapshot tiles of the rows drawn
   const archive = loadEvents ? createEventArchive({ load: loadEvents, now, onChange: () => { if (!destroyed) { signature = ''; onChange(); } } }) : null;
@@ -54,6 +56,8 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
   let signature = '';
   let rows = [];                // the events drawn, in order (the buttons' index)
   let focusRow = null;          // after "Show more": the index of the first new row, which the keyboard goes on from once it is drawn
+  let liveRevision = 0;         // +1 whenever the live history changes
+  let gathered = { key: null, all: [] };   // every event, merged, while the cameras, the history and the archive stay as they were
 
   const soundButton = h('button', { class: 'btn small', type: 'button', onclick: () => setSound(!soundOn) });
   const banners = h('div', { class: 'mon-banners', role: 'status', 'aria-live': 'polite' });
@@ -127,14 +131,14 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
     aiChip(described),
     says,
     recorded ? playMark() : h('span', { class: 'mon-event-note' }, 'Not recorded'));
-    return h('li', { class: 'mon-item' }, button);
+    return h('li', { class: 'mon-item' }, button, onKeep && recorded ? keepButton(event, onKeep, 'mon-keep') : null);
   }
 
   function draw({ fromMore = false } = {}) {
     if (destroyed || !context) return;
     const extentOf = context.extentOf ?? (() => null);
     archive?.want({ cameraIds: context.cameraIds ?? [], fromMs: context.range?.fromMs, toMs: context.range?.toMs });
-    const all = gatherEvents({ cameras: cameraList(), live: history, archived: archive?.events() ?? [] });
+    const all = gatherAll();
     const visible = visibleEvents(all, { cameraIds: context.cameraIds ?? [], ...(context.range ?? {}) });
     const older = archive?.hasOlder() === true;
     const drawn = visible.slice(0, shownRows);
@@ -201,7 +205,18 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
 
   function changed() {
     if (destroyed) return;
+    liveRevision += 1;
     onChange();
+  }
+
+  /** gatherEvents of the cameras, the live history and the archive, merged again only when one of them changed (the wall draws often). */
+  function gatherAll() {
+    const cameras = cameraList();
+    const key = `${liveRevision}|${archive?.revision() ?? 0}|${history.length}`;
+    if (gathered.key !== key || gathered.cameras !== cameras) {
+      gathered = { key, cameras, all: gatherEvents({ cameras, live: history, archived: archive?.events() ?? [] }) };
+    }
+    return gathered.all;
   }
 
   /** Something happened at camera `id`. The same words twice within 4 s are one event. */
@@ -269,6 +284,14 @@ export function createWallEvents({ onAlert = () => {}, onPick = () => {}, onChan
       // One camera on its own: its events on the Events page (the same address for the wall is every camera's).
       allLink.setAttribute('href', next?.cameraIds?.length === 1 ? `#/events?cameras=${next.cameraIds[0]}` : '#/events');
       draw();
+    },
+    /**
+     * The event of the cameras on the wall to step to from `ms` (`direction` -1: the one before, +1: the one after), among those the list has
+     * loaded (the timeline's range), or null. wall-events-model.js eventNear.
+     */
+    near(ms, direction) {
+      if (!context) return null;
+      return eventNear(gatherAll(), { cameraIds: context.cameraIds ?? [], ms, direction, extentOf: context.extentOf ?? (() => null) });
     },
     /** Marks `event` as the chosen one (null: none). */
     select(event) {

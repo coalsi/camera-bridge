@@ -43,19 +43,20 @@ extension ONVIFClient {
     }
 
     /// `ContinuousMove` at a velocity (-1…1; pan right, tilt up and zoom in positive). Only the axes asked for are sent: some cameras
-    /// refuse a zoom velocity when they have no zoom.
-    func continuousMove(profileToken: String, pan: Double?, tilt: Double?, zoom: Double?) async throws {
-        _ = try await call(await ptzServiceURL(), body: Self.continuousMoveBody(profileToken: profileToken, pan: pan, tilt: tilt, zoom: zoom),
+    /// refuse a zoom velocity when they have no zoom. With `timeout`, the move carries `Timeout` PT1S: the camera stops by itself after a
+    /// second, even when the `Stop` after it is lost.
+    func continuousMove(profileToken: String, pan: Double?, tilt: Double?, zoom: Double?, timeout: Bool = true) async throws {
+        _ = try await call(await ptzServiceURL(), body: Self.continuousMoveBody(profileToken: profileToken, pan: pan, tilt: tilt, zoom: zoom, timeout: timeout),
                        action: "\(Self.ptzNamespace)/ContinuousMove")
     }
 
-    static func continuousMoveBody(profileToken: String, pan: Double?, tilt: Double?, zoom: Double?) -> String {
+    static func continuousMoveBody(profileToken: String, pan: Double?, tilt: Double?, zoom: Double?, timeout: Bool = true) -> String {
         func number(_ value: Double) -> String { String(format: "%.2f", min(max(value, -1), 1)) }
         var velocity = ""
         if pan != nil || tilt != nil { velocity += "<tt:PanTilt x=\"\(number(pan ?? 0))\" y=\"\(number(tilt ?? 0))\"/>" }
         if let zoom { velocity += "<tt:Zoom x=\"\(number(zoom))\"/>" }
         return "<tptz:ContinuousMove xmlns:tptz=\"\(ptzNamespace)\"><tptz:ProfileToken>\(XMLTree.escape(profileToken))</tptz:ProfileToken>"
-            + "<tptz:Velocity>\(velocity)</tptz:Velocity></tptz:ContinuousMove>"
+            + "<tptz:Velocity>\(velocity)</tptz:Velocity>\(timeout ? "<tptz:Timeout>PT1S</tptz:Timeout>" : "")</tptz:ContinuousMove>"
     }
 
     /// The video source tokens (`GetVideoSources`), for the imaging service.
@@ -73,8 +74,10 @@ extension ONVIFClient {
 }
 
 /// Pan, tilt and zoom of an ONVIF camera in steps: every move is `ContinuousMove` for `step`, then `Stop`, so one tap turns the camera a
-/// little and nothing leaves it turning (a camera on a cable must not spin). Steps never overlap: a move that comes while one runs waits
-/// for it; the bridge repeats a move while a button is held.
+/// little and nothing leaves it turning (a camera on a cable must not spin). The move also carries `Timeout` PT1S, and a `Stop` is sent
+/// after any move that may have reached the camera, even one whose answer was lost, and once more when the `Stop` itself got no answer.
+/// Steps never overlap: a move that comes while one runs waits for it, and only one waits (a newer move takes its place, so a held button
+/// on a slow camera builds no backlog); `stop()` drops the one waiting. The bridge repeats a move while a button is held.
 actor ONVIFPanTilt: PanTiltControl {
     static let step: Duration = .milliseconds(400)
     static let speed = 0.5
@@ -83,8 +86,9 @@ actor ONVIFPanTilt: PanTiltControl {
     private let log: Log
     private var profileToken: String?
     private var known: PanTiltCapabilities?
-    private var busy = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private let steps = PanTiltSteps()
+    /// The camera refused a move with a `Timeout` (some take none, or another range): moves go without it.
+    private var noTimeout = false
 
     init(client: ONVIFClient, log: Log) {
         self.client = client
@@ -133,22 +137,42 @@ actor ONVIFPanTilt: PanTiltControl {
     }
 
     func stop() async throws {
+        await steps.dropWaiting()   // a step still waiting never starts: the button was let go
         guard let profileToken else { return }
-        try await client.stopPTZ(profileToken: profileToken)
+        try await Self.sendStop(client, profileToken: profileToken)
     }
 
     private func stepping(pan: Double?, tilt: Double?, zoom: Double?) async throws {
         _ = try await capabilities()
         guard let profileToken else { throw CameraAdapterError.unsupported("this camera has no PTZ profile") }
-        while busy { await withCheckedContinuation { waiters.append($0) } }
-        busy = true
-        defer {
-            busy = false
-            if !waiters.isEmpty { waiters.removeFirst().resume() }
+        try await steps.run { try await self.step(profileToken: profileToken, pan: pan, tilt: tilt, zoom: zoom) }
+    }
+
+    private func step(profileToken: String, pan: Double?, tilt: Double?, zoom: Double?) async throws {
+        do {
+            try await move(profileToken: profileToken, pan: pan, tilt: tilt, zoom: zoom)
+        } catch {
+            // A move the camera may have acted on (its answer was lost or unreadable) is stopped all the same; a refusal moved nothing.
+            if !PanTiltSteps.isRefusal(error) { try? await Self.sendStop(client, profileToken: profileToken) }
+            throw error
         }
-        try await client.continuousMove(profileToken: profileToken, pan: pan, tilt: tilt, zoom: zoom)
         try? await Task.sleep(for: Self.step)
-        // Stopped whatever happens to the wait: a cancelled request must not leave the camera turning.
-        try await client.stopPTZ(profileToken: profileToken)
+        try await Self.sendStop(client, profileToken: profileToken)
+    }
+
+    private func move(profileToken: String, pan: Double?, tilt: Double?, zoom: Double?) async throws {
+        do {
+            try await client.continuousMove(profileToken: profileToken, pan: pan, tilt: tilt, zoom: zoom, timeout: !noTimeout)
+        } catch CameraAdapterError.soapFault(let fault) where !noTimeout {
+            // A camera that refuses the `Timeout` (some take none, or only another range) is asked without it, now and from now on.
+            log.info("ONVIF PTZ: the camera refused a move with a timeout (\(fault)); moving without it")
+            noTimeout = true
+            try await client.continuousMove(profileToken: profileToken, pan: pan, tilt: tilt, zoom: zoom, timeout: false)
+        }
+    }
+
+    /// `Stop`, as `PanTiltSteps.stop` sends one.
+    private static func sendStop(_ client: ONVIFClient, profileToken: String) async throws {
+        try await PanTiltSteps.stop { try await client.stopPTZ(profileToken: profileToken) }
     }
 }

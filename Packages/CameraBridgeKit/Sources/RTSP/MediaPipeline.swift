@@ -14,11 +14,15 @@ struct SampleDelivery: Sendable {
     static let bufferingPolicy = AsyncThrowingStream<MediaSample, any Error>.Continuation.BufferingPolicy.bufferingOldest(bufferLimit)
 
     private let log: Log
+    /// Drops this long after the last one are warned about again (a consumer that fell behind once, days ago, says nothing of now).
+    private let quietPeriod: Duration
     private var videoNeedsKeyframe = false
     private(set) var droppedCount = 0
+    private var lastDrop: ContinuousClock.Instant?
 
-    init(log: Log) {
+    init(log: Log, quietPeriod: Duration = .seconds(60)) {
         self.log = log
+        self.quietPeriod = quietPeriod
     }
 
     mutating func deliver(_ sample: MediaSample, to continuation: AsyncThrowingStream<MediaSample, any Error>.Continuation) {
@@ -34,7 +38,14 @@ struct SampleDelivery: Sendable {
         case .enqueued:
             if isVideo { videoNeedsKeyframe = false }
         case .dropped:
-            if droppedCount == 0 { log.warning("Sample consumer is too slow; dropping samples (video resumes at the next keyframe)") }
+            let now = ContinuousClock.now
+            if droppedCount == 0 {
+                log.warning("Sample consumer is too slow; dropping samples (video resumes at the next keyframe)")
+            } else if let lastDrop, now - lastDrop >= quietPeriod {
+                log.warning("Sample consumer is too slow again; dropping samples (\(droppedCount + 1) samples dropped this session; video resumes at the "
+                            + "next keyframe)")
+            }
+            lastDrop = now
             droppedCount += 1
             if isVideo { videoNeedsKeyframe = true }
         case .terminated:
@@ -59,6 +70,10 @@ struct SampleDelivery: Sendable {
 /// RTP timestamp are separate units with separate, increasing times. Video times use 90 kHz, audio
 /// pts the sample rate. Wall clock: `TrackWallClock` (RTCP sender report mapping when plausible, else arrival).
 /// Samples reach the stream through `SampleDelivery` (bounded buffer).
+///
+/// Over a long session the audio is kept on the video's clock (`AudioDriftTracker`: a camera's audio and video clocks drift apart, and the
+/// tracks are otherwise aligned only by their first units): its origin is eased by at most 40 ms a minute. The video's frozen stretches
+/// (a loss holds the picture until the next keyframe) are counted and logged (`FreezeLog`); `health` has the session's counts.
 final class MediaPipeline: Sendable {
     struct TrackPlan: Sendable {
         var track: RTSPTrack
@@ -104,6 +119,11 @@ final class MediaPipeline: Sendable {
         var hasVideo = false
         var delivery: SampleDelivery
         var finished = false
+        var hasAudio = false
+        var audioDrift = AudioDriftTracker()
+        var loggedDrift: Date?
+        var freezes = FreezeLog()
+        var health = StreamHealth()
     }
 
     private let state: Mutex<State>
@@ -128,6 +148,7 @@ final class MediaPipeline: Sendable {
                 initial.hasVideo = true
             case .audio:
                 track.audio = AudioDepacketizer(track: plan.track)
+                initial.hasAudio = true
             case .backchannel:
                 continue
             }
@@ -141,6 +162,24 @@ final class MediaPipeline: Sendable {
 
     /// Samples the consumer was too slow to take (see `SampleDelivery`).
     var droppedSampleCount: Int { state.withLock { $0.delivery.droppedCount } }
+
+    /// What this session counted of its stream's troubles so far.
+    var health: StreamHealth {
+        state.withLock { s in
+            var health = s.health
+            health.lostPackets = 0
+            health.droppedAccessUnits = 0
+            health.retimedSteps = 0
+            for track in s.tracks.values {
+                health.lostPackets += track.video?.lostPackets ?? 0
+                health.droppedAccessUnits += track.video?.droppedAccessUnits ?? 0
+                health.retimedSteps += track.smoother.retimedCount
+            }
+            health.consumerDrops = s.delivery.droppedCount
+            health.audioEased = s.audioDrift.eased
+            return health
+        }
+    }
 
     func handle(channel: UInt8, payload: Data, arrival: Date) {
         state.withLock { s in
@@ -167,7 +206,17 @@ final class MediaPipeline: Sendable {
             }
             var samples: [MediaSample] = []
             if var depacketizer = track.video {
-                for unit in depacketizer.push(packet) {
+                let wasDelivering = !depacketizer.isWaitingForKeyframe
+                let lostBefore = depacketizer.lostPackets
+                let units = depacketizer.push(packet)
+                if wasDelivering, depacketizer.isWaitingForKeyframe, units.isEmpty {
+                    s.freezes.froze(at: arrival, lostBefore: lostBefore)
+                }
+                if !units.isEmpty, let seconds = s.freezes.delivered(at: arrival, lost: depacketizer.lostPackets, log: log) {
+                    s.health.freezes += 1
+                    s.health.frozenSeconds += seconds
+                }
+                for unit in units {
                     let (ticks, decodeTicks, wall) = timing(&track, channel: channel, rtpTimestamp: unit.rtpTimestamp, isKeyframe: unit.isKeyframe,
                                                             isIDR: unit.isIDR, arrival: arrival, state: &s)
                     let clockRate = Int32(clamping: track.smoother.clockRate)
@@ -175,6 +224,7 @@ final class MediaPipeline: Sendable {
                     let dts = MediaTime(value: decodeTicks, timescale: clockRate).converted(to: 90_000)
                     samples.append(.video(EncodedVideoFrame(format: unit.format, nalUnits: unit.nalUnits, isKeyframe: unit.isKeyframe, pts: pts,
                                                             dts: dts == pts ? nil : dts, wallClock: wall)))
+                    if s.hasAudio { s.audioDrift.noteVideo(pts: Double(decodeTicks) / Double(clockRate), arrival: arrival) }
                 }
                 if !samples.isEmpty { s.progress.videoFrame = now }
                 track.video = depacketizer
@@ -182,6 +232,11 @@ final class MediaPipeline: Sendable {
                 for unit in depacketizer.push(packet) {
                     let (ticks, wall) = timing(&track, channel: channel, rtpTimestamp: unit.rtpTimestamp, arrival: arrival, state: &s)
                     let clockRate = Int32(clamping: track.smoother.clockRate)
+                    if s.hasVideo, let step = s.audioDrift.noteAudio(pts: Double(ticks) / Double(clockRate), arrival: arrival) {
+                        // Applies from the next unit on: this one keeps its time, the step is at most 40 ms.
+                        track.originTicks = (track.originTicks ?? 0).clampedAdding(Int64(saturating: step * Double(clockRate)))
+                        logDrift(&s, arrival: arrival)
+                    }
                     var pts = MediaTime(value: ticks, timescale: clockRate)
                     if format.sampleRate > 0, Int32(clamping: format.sampleRate) != clockRate {
                         pts = pts.converted(to: Int32(clamping: format.sampleRate))
@@ -197,10 +252,21 @@ final class MediaPipeline: Sendable {
         }
     }
 
+    /// The audio is being eased onto the video's clock: said once an hour at most, with how far it drifted and how far it was moved in all.
+    private func logDrift(_ s: inout State, arrival: Date) {
+        guard s.loggedDrift.map({ arrival.timeIntervalSince($0) >= 3600 }) ?? true else { return }
+        s.loggedDrift = arrival
+        let drift = s.audioDrift.drift
+        log.notice("RTSP: the camera's audio drifted \(Int((abs(drift) * 1000).rounded())) ms \(drift < 0 ? "ahead of" : "behind") its video during this "
+                   + "session (its audio and video clocks run apart); easing the audio back, at most 40 ms a minute "
+                   + "(\(Int((abs(s.audioDrift.eased) * 1000).rounded())) ms so far)")
+    }
+
     /// Ends the sample stream (normally when `error` is nil). Later calls and packets are ignored.
     func finish(throwing error: (any Error)?) {
         let first = state.withLock { s in
             defer { s.finished = true }
+            if !s.finished { s.freezes.flush(at: Date(), log: log) }
             return !s.finished
         }
         guard first else { return }

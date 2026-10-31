@@ -2005,13 +2005,13 @@ test('the Setup panel is at the top of the page, open until the box has a place'
   const flat = all(el, () => true);
   assert.ok(flat.indexOf(panel) < flat.indexOf(byClass(el, 'sky-toolbar')[0]), 'above the toolbar and the log');
   assert.ok(flat.indexOf(panel) < flat.indexOf(byClass(el, 'sky-summary')[0]));
-  // The box’s settings that moved here: where the box is, the flight feed with its Find button, the AI’s daily limit.
+  // The box’s settings that moved here: where the box is, the flight feed with its Find button (the AI’s daily limit waits until Sky Watcher asks the AI).
   const text = shown(panel);
   assert.match(text, /Where the box is/);
   assert.match(text, /Flight feed/);
   assert.ok(button(panel, 'Find a feed'));
   assert.ok(button(panel, 'Use this browser’s location'));
-  assert.ok(all(panel, (node) => node.dataset?.field === 'limit')[0], 'the AI’s daily limit');
+  assert.equal(all(panel, (node) => node.dataset?.field === 'limit')[0], undefined, 'no AI limit while nothing uses it');
   page.destroy();
 });
 

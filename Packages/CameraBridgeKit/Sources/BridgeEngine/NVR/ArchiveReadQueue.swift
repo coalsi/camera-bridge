@@ -237,7 +237,10 @@ final class ArchiveHandleCache: Sendable {
     }
 }
 
-/// Recently read fragment bytes, at most `capacity` bytes in all, least recently used out first (the 64 MB cache of Mac spec 7).
+/// Recently read fragment bytes, at most `capacity` bytes in all, least recently used out first (the 64 MB cache of Mac spec 7). Every
+/// operation is constant time (amortized): it runs under the store's lock, which the recorders take for every fragment they write, and finding
+/// the least recently used entry by scanning all of them made planning a long clip (thousands of small header parts, then 1 MB fragments, each
+/// evicting a thousand) hold that lock for tens of millions of comparisons.
 struct ArchiveBlockCache: Sendable {
     struct Key: Hashable, Sendable {
         var segment: String
@@ -246,6 +249,12 @@ struct ArchiveBlockCache: Sendable {
     }
 
     private var entries: [Key: (data: Data, used: UInt64)] = [:]
+    /// The entries by the tick they were last used at. Ticks only count up, so the least recently used entry is the one at the lowest tick still
+    /// here: `oldest` walks up to it, past ticks whose entries were used again or removed (each tick is passed once).
+    private var byUse: [UInt64: Key] = [:]
+    private var oldest: UInt64 = 1
+    /// The keys of each segment (`remove(segment:)`).
+    private var bySegment: [String: Set<Key>] = [:]
     private var tick: UInt64 = 0
     private(set) var bytes = 0
     let capacity: Int
@@ -256,35 +265,59 @@ struct ArchiveBlockCache: Sendable {
 
     mutating func data(for key: Key) -> Data? {
         guard var entry = entries[key] else { return nil }
+        byUse[entry.used] = nil
         tick &+= 1
         entry.used = tick
         entries[key] = entry
+        byUse[tick] = key
         return entry.data
     }
 
     mutating func insert(_ data: Data, for key: Key) {
         guard data.count <= capacity else { return }
-        if let old = entries[key] { bytes -= old.data.count }
+        if let old = entries[key] {
+            bytes -= old.data.count
+            byUse[old.used] = nil
+        }
         tick &+= 1
         entries[key] = (data, tick)
+        byUse[tick] = key
+        bySegment[key.segment, default: []].insert(key)
         bytes += data.count
-        while bytes > capacity, let oldest = entries.min(by: { $0.value.used < $1.value.used })?.key {
-            bytes -= entries[oldest]?.data.count ?? 0
-            entries[oldest] = nil
-        }
+        while bytes > capacity, let victim = takeLeastRecentlyUsed() { drop(victim) }
     }
 
     /// Forgets everything cached for `segment`.
     mutating func remove(segment: String) {
-        for key in entries.keys where key.segment == segment {
-            bytes -= entries[key]?.data.count ?? 0
-            entries[key] = nil
+        guard let keys = bySegment.removeValue(forKey: segment) else { return }
+        for key in keys {
+            guard let entry = entries.removeValue(forKey: key) else { continue }
+            byUse[entry.used] = nil
+            bytes -= entry.data.count
         }
     }
 
     mutating func removeAll() {
         entries = [:]
+        byUse = [:]
+        bySegment = [:]
+        oldest = tick &+ 1
         bytes = 0
+    }
+
+    private mutating func takeLeastRecentlyUsed() -> Key? {
+        while oldest <= tick {
+            defer { oldest += 1 }
+            if let key = byUse.removeValue(forKey: oldest) { return key }
+        }
+        return nil
+    }
+
+    private mutating func drop(_ key: Key) {
+        guard let entry = entries.removeValue(forKey: key) else { return }
+        bytes -= entry.data.count
+        bySegment[key.segment]?.remove(key)
+        if bySegment[key.segment]?.isEmpty == true { bySegment[key.segment] = nil }
     }
 }
 

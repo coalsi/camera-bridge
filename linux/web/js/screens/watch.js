@@ -3,7 +3,7 @@
 import { get, getBytes } from '../api.js';
 import { h, replace, toast } from '../dom.js';
 import { icon } from '../icons.js';
-import { store, subscribe } from '../store.js';
+import { bridgeZone, store, subscribe } from '../store.js';
 import { createStraightenedView, isOn } from '../live/straighten.js';
 import { createCatalog } from '../nvr/catalog.js';
 import { createCell } from '../nvr/cell.js';
@@ -54,7 +54,7 @@ export function renderWatch({ params, navigate, setTitle, player = {} }) {
   ensureStylesheet();
   setTitle(`${camera.name}: recordings`);
 
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const zone = bridgeZone();      // the bridge's time zone, as on every page (store.js)
   const format = makeTimeFormatter({ timeZone: zone });
   const mountedAt = performance.now();
   let destroyed = false;

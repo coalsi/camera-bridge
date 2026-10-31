@@ -164,6 +164,7 @@ check "cb-system allows and handles the tls-obtain request" bash -c "grep -q '^A
 check "a factory reset removes the certificate and the key" grep -q 'rm -rf "\$CB_SYSTEM/tls"' "$X/usr/sbin/cb-system"
 check "the TLS front listens on 443, passes to the daemon on 127.0.0.1:80 and buffers nothing" bash -c "c='$X/etc/nginx/nginx.conf'; grep -q 'listen 443 ssl' \$c && grep -q 'proxy_pass http://127.0.0.1:80;' \$c && grep -q 'proxy_buffering off;' \$c && grep -q 'proxy_request_buffering off;' \$c && grep -q 'client_max_body_size 0;' \$c"
 check "the TLS front sets the forwarded headers itself" bash -c "c='$X/etc/nginx/nginx.conf'; grep -q 'proxy_set_header X-Forwarded-For \$remote_addr;' \$c && grep -q 'proxy_set_header X-Forwarded-Proto https;' \$c"
+check "a new certificate reloads the TLS front (open live views and downloads go on), it is not restarted" bash -c "grep -q 'systemctl reload-or-restart nginx.service' '$X/usr/sbin/cb-tls' && ! grep -q 'systemctl restart nginx' '$X/usr/sbin/cb-tls'"
 check "nginx is inactive until a certificate exists" grep -q '^ConditionPathExists=/srv/system/tls/fullchain.pem' "$X/usr/lib/systemd/system/nginx.service.d/10-camera-bridge.conf"
 check "the image has lego and nginx" bash -c "grep -Eq '^ +lego$' '$HERE/mkosi.conf' && grep -Eq '^ +nginx$' '$HERE/mkosi.conf'"
 

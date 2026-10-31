@@ -98,7 +98,8 @@ test('the card is Sky Watcher: its switch, what it does, and what leaves the box
   const text = shown(card.el);
   assert.match(text, /Watch the sky/);
   assert.match(text, /For a camera that looks at the sky\. Camera Bridge logs everything that crosses it — planes, satellites, meteors, bugs and birds — and tells you only about what it can’t explain\. One camera can’t tell how far away something is, so it compares how things move across the sky; it never guesses a real size or speed\./);
-  assert.match(text, /It works without the internet\. When the internet is there, Camera Bridge can also download satellite orbits once a day and ask free online services for flights and weather in a wide area around you, never your exact spot\. Still pictures of what it can’t explain go to your AI service if you set one up\. Nothing leaves the box while it’s off\./);
+  assert.match(text, /Works without the internet: planes come from a flight receiver on your network\. Nothing leaves the box\./);
+  assert.doesNotMatch(text, /orbits|online|weather/, 'nothing it does not fetch (the box’s plugin note says the same)');
   assert.doesNotMatch(card.el.textContent, /Sky detector/i);
   assert.equal(theSwitch(card.el).checked, false);
   assert.equal(visible(byClass(card.el, 'sky-setup')[0]), false, 'the questions wait for the switch');

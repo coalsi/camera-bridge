@@ -520,6 +520,44 @@ final class ScriptedVideoFFmpeg: @unchecked Sendable {
         #expect(transcoder.diagnostics.encoderIsHardware == false)
     }
 
+    /// A hardware rig: the probe encode works, the transcoder's children say nothing unless a test scripts them.
+    private func silentHardwareRig(now: @escaping @Sendable () -> Date = { Date() }) -> (FakeFFmpegLauncher, FFmpegMediaCodecs) {
+        let launcher = FakeFFmpegLauncher()
+        let codecs = FFmpegMediaCodecs.fake(launcher, configuration: FFmpegCodecsConfiguration(fontFile: TestFonts.path), deviceExists: { _ in true }, now: now)
+        let probe = launcher.onLaunch
+        launcher.onLaunch = { child in
+            probe?(child)
+            if child.arguments.contains("-t"), child.arguments.contains("h264_vaapi") { child.exit(status: 0) }
+        }
+        return (launcher, codecs)
+    }
+
+    @Test func aFailedHardwareEncoderIsTriedAgainAfterTenMinutesAndLeavesDecodingOnTheGPU() throws {
+        let clock = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
+        let (_, codecs) = silentHardwareRig(now: { clock.withLock { $0 } })
+        let runtime = codecs.runtime
+        #expect(try runtime.videoBackend().isHardware)
+        runtime.disableVAAPI(reason: "a test")
+        #expect(try !runtime.videoBackend().isHardware)
+        #expect(runtime.hardwareDecodeDevice() != nil, "an encoder that failed leaves decoding on the GPU")
+        clock.withLock { $0 = $0.addingTimeInterval(599) }
+        #expect(try !runtime.videoBackend().isHardware)
+        clock.withLock { $0 = $0.addingTimeInterval(2) }
+        #expect(try runtime.videoBackend().isHardware, "tried again after ten minutes")
+    }
+
+    @Test func aWriteThatFailsWhileTheHardwareChildRunsNeverTurnsTheGPUOff() async throws {
+        let (launcher, codecs) = silentHardwareRig()
+        let transcoder = try codecs.makeVideoTranscoder(output: settings())
+        defer { transcoder.invalidate() }
+        _ = try await transcoder.transcode(TestFormats.frame(0, key: true))   // the child starts and has said nothing yet
+        let child = try #require(launcher.children.first { $0.spec.label == "video transcoder" })
+        #expect(child.arguments.contains("h264_vaapi"))
+        child.failWrites = true
+        _ = try? await transcoder.transcode(TestFormats.frame(1, key: false))
+        #expect(try codecs.runtime.videoBackend().isHardware, "a failed write is not the GPU's failure")
+    }
+
     @Test func vaapiIsProbedWithTheLowPowerEncoderWhenTheDefaultOneFails() async throws {
         // Alder Lake-N and newer offer H.264 encoding only through the fixed-function (low power) entrypoint.
         let launcher = FakeFFmpegLauncher()

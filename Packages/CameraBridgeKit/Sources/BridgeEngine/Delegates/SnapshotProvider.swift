@@ -11,7 +11,9 @@ import MediaCore
 /// same size; event snapshots are always fresh. A picture is decoded at most once: asked again while the hub holds no newer
 /// frame (a camera that is paused, or whose stream is idle) the provider hands out the JPEG it made without decoding.
 /// The decoding goes through one decoder session kept for `decoderIdleLifetime` after its last use
-/// (`SnapshotDecoderPool`), not a new VideoToolbox session per snapshot. Concurrent requests share one fetch from the camera
+/// (`SnapshotDecoderPool`), not a new VideoToolbox session per snapshot, one decode at a time (requests of two sizes take
+/// turns on it: one GOP is never fed to it twice at once). The JPEG work (an encode, a resize: a blocking ffmpeg one-shot on
+/// Linux) runs on a thread of its own (`CodecOffload`), never on a cooperative one. Concurrent requests share one fetch from the camera
 /// (a Hikvision camera answers 503 to parallel snapshot requests) and one decode. An event snapshot finishes within 3 s and
 /// any other within 4 s (hubs warn at 8 s and fail at 25 s, and a request that waits holds up the accessory's events): past the
 /// budget the last picture made is served instead, when it is not older than `maximumStaleAge` (5 min); a camera API that fails is skipped for 30 s, one
@@ -58,7 +60,7 @@ actor SnapshotProvider {
     }
 
     typealias CameraSnapshot = @Sendable () async throws -> Data?
-    typealias Resize = @Sendable (_ jpeg: Data, _ maxWidth: Int?, _ maxHeight: Int?) throws -> Data
+    typealias Resize = @Sendable (_ jpeg: Data, _ maxWidth: Int?, _ maxHeight: Int?) async throws -> Data
     typealias KeyframeJPEG = @Sendable (_ keyframe: EncodedVideoFrame, _ maxWidth: Int?, _ maxHeight: Int?) async throws -> Data
     /// The newest picture of a GOP (a keyframe and the frames after it) as JPEG, decoding no later than `until` (the keyframe always).
     typealias NewestJPEG = @Sendable (_ gop: [EncodedVideoFrame], _ maxWidth: Int?, _ maxHeight: Int?, _ until: ContinuousClock.Instant) async throws -> Data
@@ -77,6 +79,8 @@ actor SnapshotProvider {
     /// The JPEG last made from a keyframe, and which keyframe (and size) it was made from.
     private var keyframeCache: (keyframe: KeyframeIdentity, width: Int?, height: Int?, jpeg: Data)?
     private var cameraAPIRetryAt: ContinuousClock.Instant?
+    /// One decode at a time: the decoder walks one GOP for one request (`SnapshotDecoderPool` keeps where it is in it).
+    private let decoding = AsyncSerialLock()
 
     /// `newestJPEG`: decodes forward through a GOP (nil: the newest keyframe is decoded alone, as the test doubles do).
     init(cameraSnapshot: CameraSnapshot?, resize: @escaping Resize, keyframeJPEG: @escaping KeyframeJPEG, newestJPEG: NewestJPEG? = nil, hub: MediaHub,
@@ -95,8 +99,11 @@ actor SnapshotProvider {
 
     init(cameraSnapshot: CameraSnapshot?, codecs: any MediaCodecs, hub: MediaHub, timing: Timing = Timing(), log: Log,
          isOffline: @escaping @Sendable () -> Bool = { false }, now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
-        let decoders = SnapshotDecoderPool(codecs: codecs, idleLifetime: timing.decoderIdleLifetime)
-        self.init(cameraSnapshot: cameraSnapshot, resize: { try codecs.resizeJPEG($0, maxWidth: $1, maxHeight: $2) },
+        // The JPEG work runs off the cooperative pool: Home asks for every tile at once, and each is an ffmpeg child on Linux.
+        let decoders = SnapshotDecoderPool(codecs: codecs, idleLifetime: timing.decoderIdleLifetime, blockingWork: SnapshotDecoderPool.offCooperativePool)
+        self.init(cameraSnapshot: cameraSnapshot, resize: { jpeg, maxWidth, maxHeight in
+                      try await SnapshotDecoderPool.offCooperativePool { try codecs.resizeJPEG(jpeg, maxWidth: maxWidth, maxHeight: maxHeight) }
+                  },
                   keyframeJPEG: { try await decoders.jpeg(fromKeyframe: $0, maxWidth: $1, maxHeight: $2) },
                   newestJPEG: { try await decoders.jpeg(fromGOP: $0, maxWidth: $1, maxHeight: $2, until: $3) }, hub: hub, timing: timing, log: log,
                   isOffline: isOffline, now: now)
@@ -154,7 +161,7 @@ actor SnapshotProvider {
             // at once (resized to the request), up to `maximumStaleAge`; a picture older than that would pass for the camera's
             // view of now, so the request fails instead (Home shows the camera as not responding).
             guard now() - cache.at <= timing.maximumStaleAge else { throw Failure.stale }
-            return stale(cache, width: width, height: height)
+            return await stale(cache, width: width, height: height)
         }
         let started = now()
         let budget = timing.limit(for: request.reason)
@@ -188,7 +195,7 @@ actor SnapshotProvider {
                 lastStaleLog = now()
                 log.info("A snapshot took more than \(MediaFit.seconds(budget)) s; serving the last picture (\(MediaFit.seconds(age)) s old)")
             }
-            return stale(cache, width: width, height: height)
+            return await stale(cache, width: width, height: height)
         }
     }
 
@@ -211,9 +218,9 @@ actor SnapshotProvider {
         productions[key] = nil
     }
 
-    private func stale(_ cache: (width: Int, height: Int, jpeg: Data, at: ContinuousClock.Instant), width: Int, height: Int) -> Data {
+    private func stale(_ cache: (width: Int, height: Int, jpeg: Data, at: ContinuousClock.Instant), width: Int, height: Int) async -> Data {
         if cache.width == width && cache.height == height { return cache.jpeg }
-        if let resized = try? resize(cache.jpeg, width > 0 ? width : nil, height > 0 ? height : nil) { return resized }
+        if let resized = try? await resize(cache.jpeg, width > 0 ? width : nil, height > 0 ? height : nil) { return resized }
         return cache.jpeg
     }
 
@@ -225,7 +232,7 @@ actor SnapshotProvider {
         if let cameraSnapshot, cameraAPIRetryAt.map({ now() >= $0 }) ?? true {
             let limit = min(timing.cameraAPITimeout, budget - (now() - started))
             switch await fetchFromCamera(cameraSnapshot, limit: limit) {
-            case .jpeg(let jpeg): return try resize(jpeg, maxWidth, maxHeight)
+            case .jpeg(let jpeg): return try await resize(jpeg, maxWidth, maxHeight)
             case .unsupported, .unavailable: break
             }
         }
@@ -240,12 +247,12 @@ actor SnapshotProvider {
            !keyframeCache.jpeg.isEmpty {
             return keyframeCache.jpeg
         }
-        let jpeg: Data
-        if let newestJPEG {
-            let left = max(.zero, budget - (now() - started) - .milliseconds(400))
-            jpeg = try await newestJPEG(gop, maxWidth, maxHeight, ContinuousClock.now + left)
-        } else {
-            jpeg = try await keyframeJPEG(gop[0], maxWidth, maxHeight)
+        let jpeg: Data = try await decoding.withLock {
+            if let newestJPEG {
+                let left = max(.zero, budget - (now() - started) - .milliseconds(400))
+                return try await newestJPEG(gop, maxWidth, maxHeight, ContinuousClock.now + left)
+            }
+            return try await keyframeJPEG(gop[0], maxWidth, maxHeight)
         }
         keyframeCache = (identity, maxWidth, maxHeight, jpeg)
         return jpeg

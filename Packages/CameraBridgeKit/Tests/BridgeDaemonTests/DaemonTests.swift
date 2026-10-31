@@ -153,7 +153,8 @@ import TestSupport
         #expect(check.status == 200, "\(String(decoding: check.data, as: UTF8.self))")
         #expect(client.object(check.data)["latest"] as? String == "0.2" && client.object(check.data)["available"] as? Bool == true)
         #expect(rig.helper?.names() == ["update-check"], "the request reached the root side, as a request file")
-        #expect(try await client.send("POST", "/api/v1/system/ssh", json: ["enabled": true, "authorizedKeys": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE"]).status == 200)
+        #expect(try await client.send("POST", "/api/v1/system/ssh", json: ["enabled": true, "authorizedKeys": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE",
+                                                                                 "password": "daemon test password"]).status == 200)
         #expect(client.object(try await client.send("GET", "/api/v1/system").data)["sshEnabled"] as? Bool == true)
         #expect(try await client.send("POST", "/api/v1/system/reboot", json: ["confirm": true]).status == 202)
         #expect(rig.helper?.names().last == "reboot")
@@ -171,6 +172,22 @@ import TestSupport
         let refused = try await client.send("POST", "/api/v1/system/update", json: ["action": "check"])
         #expect(refused.status == 409)
         #expect(!FileManager.default.fileExists(atPath: directory.file("no-such-run-folder").path), "nothing was created")
+        await daemon.stop()
+    }
+
+    /// A config saved by a newer version (an update that was rolled back) fails the engine: the daemon stays up to say why for ten minutes
+    /// before the watchdog may restart it once, instead of being killed every 35 s.
+    @Test @MainActor func aFailedEngineKeepsTheWatchdogFedForTenMinutes() async throws {
+        let directory = try TemporaryDirectory(prefix: "cb-daemon")
+        defer { directory.remove() }
+        try Data(#"{"schemaVersion": 999, "settings": {}, "cameras": []}"#.utf8).write(to: directory.file("config.json"))
+        let daemon = try makeDaemon(directory: directory)
+        _ = try await daemon.start()
+        #expect(await eventually(timeout: .seconds(10)) { if case .failed = daemon.engineState { true } else { false } })
+        let now = ContinuousClock.now
+        #expect(await daemon.isHealthy(now: now))
+        #expect(await daemon.isHealthy(now: now + .seconds(599)))
+        #expect(!(await daemon.isHealthy(now: now + .seconds(601))), "then one restart may try again")
         await daemon.stop()
     }
 

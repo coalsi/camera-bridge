@@ -50,6 +50,8 @@ public final class Daemon {
     private var tokens: [LogSinkToken] = []
     private var logFeed = LogFeed()
     private var started = false
+    /// When the engine was first seen failed (`isHealthy`).
+    private var failedSince: ContinuousClock.Instant?
     /// What the web interface talks to (the engine, wrapped for `--preview` and `--fake-discovery`); nil before `start()` and after `stop()`.
     private(set) var backend: (any BridgeBackend)?
     /// The places the web interface offers for recordings (`WebConfiguration.archiveLocations`); empty for `--preview`.
@@ -101,7 +103,9 @@ public final class Daemon {
         self.engine = engine
         if options.preview == nil { await engine.start() }
 
-        var backend: any BridgeBackend = EngineBackend(engine: engine)
+        // A drive the system reports failing or worn out is a notice like the engine's own.
+        let systemNotices: (@Sendable () async -> [SystemNotice])? = system.isAvailable ? { @Sendable in system.driveHealthNotices() } : nil
+        var backend: any BridgeBackend = EngineBackend(engine: engine, systemNotices: systemNotices)
         if options.preview != nil { backend = NoArchiveBackend(wrapping: backend) }
         if options.fakeDiscovery { backend = DemoDiscoveryBackend(wrapping: backend) }
         self.backend = backend
@@ -162,15 +166,43 @@ public final class Daemon {
         removeLogging()
     }
 
-    /// Whether the bridge is in a state worth telling the watchdog about: the engine runs (or was paused on purpose) and the web
-    /// interface still listens.
-    public func isHealthy() async -> Bool {
+    /// An engine operation under way this long is stuck (the longest real ones, a camera setup or a HomeKit optimization, take a minute
+    /// or two): the bridge is no longer healthy, so systemd's watchdog restarts it.
+    static let stuckOperationLimit: Duration = .seconds(600)
+    /// The stuck operation was logged (once until the restart).
+    private var reportedStuckOperation = false
+
+    /// Whether the bridge is in a state worth telling the watchdog about: the engine runs (or was paused on purpose), no operation of
+    /// its has been stuck for `stuckOperationLimit`, and the web interface still listens. An engine that failed to start (a config it cannot
+    /// read, a refused instance lock) counts as alive for `failedRestartAfter`: the page then says why, and only after that does a restart get
+    /// its chance (a lock held by a process that was still exiting). It used to stop the pings at once, and systemd killed and restarted the
+    /// daemon every 35 s for good, which fixed nothing and kept the page that explains the failure down most of the time. A version whose
+    /// engine fails is rolled back by the boot's health check (`/api/v1/health`), not by the watchdog.
+    public func isHealthy(now: ContinuousClock.Instant = .now) async -> Bool {
+        if let held = engine?.operationHeldFor, held > Self.stuckOperationLimit {
+            if !reportedStuckOperation {
+                reportedStuckOperation = true
+                log.error("A change to the bridge has been under way for \(Int(held.timeInterval / 60)) minutes and is stuck; the watchdog restarts Camera Bridge")
+            }
+            return false
+        }
         guard started, let web, await web.boundPort != nil, let state = engineState else { return false }
         switch state {
-        case .running, .paused, .starting: return true
-        case .stopped, .failed: return options.preview != nil
+        case .running, .paused, .starting:
+            failedSince = nil
+            return true
+        case .stopped:
+            return options.preview != nil
+        case .failed:
+            if options.preview != nil { return true }
+            let since = failedSince ?? now
+            failedSince = since
+            return now - since < Self.failedRestartAfter
         }
     }
+
+    /// How long a failed engine keeps the watchdog fed before the daemon is restarted once more.
+    static let failedRestartAfter: Duration = .seconds(600)
 
     // MARK: Engine
 

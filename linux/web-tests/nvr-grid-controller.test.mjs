@@ -146,6 +146,23 @@ test('a catalog that never answers ends in "unreachable" after the timeout, and 
   t.controller.destroy();
 });
 
+test('a catalog that answers after the wait (a box still loading its recordings) makes the page ready by itself, with no Try again', async () => {
+  const t = setup({ catalogTimeoutMs: 3000 });
+  t.catalog.phase = 'loading';
+  const started = t.controller.start();
+  t.time.advance(3000);
+  await started;
+  assert.equal(t.controller.view().phase, 'unreachable');
+  assert.equal(t.controller.view().catalogLoading, true, 'the wall says the recordings are loading, not that they can’t be reached');
+  t.catalog.phase = 'ready';
+  t.catalog.answer();
+  await settle();
+  assert.equal(t.controller.view().phase, 'ready');
+  assert.equal(t.controller.view().catalogLoading, false);
+  assert.equal(t.controller.view().transport.canPlay, true);
+  t.controller.destroy();
+});
+
 test('a catalog whose time base is still 0 or NaN has not answered yet', async () => {
   const t = setup({ catalogTimeoutMs: 2000 });
   t.catalog.baseMs = 0;

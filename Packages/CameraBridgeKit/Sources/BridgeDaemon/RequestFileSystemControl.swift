@@ -2,6 +2,7 @@ import BridgeEngine
 import BridgeSupport
 import BridgeWeb
 import Foundation
+import Synchronization
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Musl)
@@ -17,11 +18,14 @@ import Darwin
 /// systemd path unit) validates it again, deletes it and does the work, and publishes how it goes as JSON files in `<status>`:
 ///
 ///     status/<name>.json            {state: queued | running | ok | failed, message, updatedAt}   for every request
-///     status/update.json            {state: checking | available | current | downloading | installing | installed | failed,
-///                                    current, latest, updateAvailable, notes, checkedAt, rebootRequired, message, updatedAt}
+///     status/update.json            {state: checking | available | current | downloading | installing | installed | failed | rolled-back,
+///                                    current, latest, updateAvailable, notes, checkedAt, rebootRequired, failedVersion, message, updatedAt}
 ///     status/install-candidates.json  {disks: [{name, path, model, sizeBytes, partitions, eligible, problems, phrase, ...}]}
 ///     status/install-to-disk.json   {state, step, device, message, updatedAt}
-///     status/system.json            {version, sshEnabled, autoUpdate, bootEntry, updatedAt}
+///     status/system.json            {version, sshEnabled, autoUpdate, bootEntry, clock: {synchronized, source, offsetSeconds, lastSync} | null,
+///                                    link: {interface, wired, speedMbps, duplex} | null, updatedAt}
+///     status/disk-health.json       {state: ok | warning | failing | unknown, message, updatedAt, drives: [{role, name, model, state, message,
+///                                    percentUsed, temperatureCelsius, powerOnHours, mediaErrors, reallocatedSectors, pendingSectors, ...}]}
 ///     status/tls.json               {state: none | working | ready | failed, message, host, notAfter, updatedAt}
 ///     status/guard.json             {available, running, timeZone, todayStart, cameras: [{address, level, since, today, last24h, names: [...], local}], updatedAt}
 ///
@@ -61,6 +65,7 @@ public struct RequestFileSystemControl: SystemControlling {
     private enum StatusFile {
         case job(Request)
         case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, archiveDrive, wifi, wifiNetworks, internetGuard, tls
+        case diskHealth
 
         var name: String {
             switch self {
@@ -76,6 +81,7 @@ public struct RequestFileSystemControl: SystemControlling {
             case .wifiNetworks: "wifi-networks.json"
             case .internetGuard: "guard.json"
             case .tls: "tls.json"
+            case .diskHealth: "disk-health.json"
             }
         }
     }
@@ -154,6 +160,13 @@ public struct RequestFileSystemControl: SystemControlling {
     /// The image's TLS helper; where it is missing the system has no TLS front (an older image).
     private let tlsHelper: String
     private let log = Log(category: "system")
+    /// The notices of the drives' health as last read, and the file's modification date then (the event stream asks twice a second; the file
+    /// changes once a day).
+    private let healthCache = HealthCache()
+
+    private final class HealthCache: Sendable {
+        let state = Mutex<(modified: Date?, notices: [SystemNotice])?>(nil)
+    }
 
     public init(requestDirectory: URL, statusDirectory: URL, product: String, version: String, build: String,
                 facts: HostFacts = .current(), timing: Timing = Timing(), now: @escaping @Sendable () -> Date = { Date() },
@@ -181,7 +194,11 @@ public struct RequestFileSystemControl: SystemControlling {
         return SystemInfo(product: product, version: system?.version.flatMap { $0.isEmpty ? nil : $0 } ?? version, build: build, mode: "installed",
                           osName: facts.osName, hostname: facts.hostname, hardware: facts.hardware, architecture: facts.architecture,
                           canUpdate: true, canReboot: true, canInstall: true, update: currentUpdate(), canManage: true, runningFromUSB: facts.runningFromUSB,
-                          sshEnabled: system?.sshEnabled, automaticUpdates: system?.autoUpdate, install: installProgress())
+                          sshEnabled: system?.sshEnabled, automaticUpdates: system?.autoUpdate, install: installProgress(), driveHealth: driveHealth(),
+                          clock: system?.clock.map { ClockStatus(synchronized: $0.synchronized ?? false, source: $0.source.flatMap { $0.isEmpty ? nil : Self.sentence($0) },
+                                                                 offsetSeconds: $0.offsetSeconds, lastSync: JobFile.parse($0.lastSync)) },
+                          networkLink: system?.link.flatMap { link in
+                              link.interface.map { NetworkLink(interface: Self.sentence($0), wired: link.wired ?? false, speedMbps: link.speedMbps, duplex: link.duplex) } })
     }
 
     private struct SystemFile: Decodable {
@@ -189,6 +206,86 @@ public struct RequestFileSystemControl: SystemControlling {
         var sshEnabled: Bool?
         var autoUpdate: Bool?
         var updatedAt: String?
+        var clock: ClockFile?
+        var link: LinkFile?
+    }
+
+    private struct ClockFile: Decodable {
+        var synchronized: Bool?
+        var source: String?
+        var offsetSeconds: Double?
+        var lastSync: String?
+    }
+
+    private struct LinkFile: Decodable {
+        var interface: String?
+        var wired: Bool?
+        var speedMbps: Int?
+        var duplex: String?
+    }
+
+    // MARK: The drives' health
+
+    /// What `cb-disk-health` writes to `status/disk-health.json`.
+    private struct DiskHealthFile: Decodable {
+        var state: String?
+        var message: String?
+        var updatedAt: String?
+        var drives: [Drive]?
+
+        struct Drive: Decodable {
+            var role: String?
+            var name: String?
+            var model: String?
+            var state: String?
+            var message: String?
+            var percentUsed: Int?
+            var temperatureCelsius: Int?
+            var powerOnHours: Int?
+            var mediaErrors: Int?
+            var reallocatedSectors: Int?
+            var pendingSectors: Int?
+            var fileSystemErrors: Int?
+        }
+    }
+
+    private func driveHealth() -> DriveHealthReport? {
+        guard let file: DiskHealthFile = read(.diskHealth), let state = file.state else { return nil }
+        let drives = (file.drives ?? []).compactMap { drive -> DriveHealth? in
+            guard let role = drive.role, ["system", "recording", "archive"].contains(role) else { return nil }
+            return DriveHealth(role: role, name: drive.name.map(Self.sentence), model: drive.model.map(Self.sentence), state: drive.state ?? "unknown",
+                               message: Self.sentence(drive.message ?? ""), percentUsed: drive.percentUsed, temperatureCelsius: drive.temperatureCelsius,
+                               powerOnHours: drive.powerOnHours, mediaErrors: drive.mediaErrors, reallocatedSectors: drive.reallocatedSectors,
+                               pendingSectors: drive.pendingSectors, fileSystemErrors: drive.fileSystemErrors)
+        }
+        return DriveHealthReport(state: state, message: Self.sentence(file.message ?? ""), checked: JobFile.parse(file.updatedAt), drives: drives)
+    }
+
+    /// A notice for each drive that is failing or has used more than 90% of its rated life. The file is read again only when it changed.
+    public func driveHealthNotices() -> [SystemNotice] {
+        guard isAvailable else { return [] }
+        let modified = modificationDate(.diskHealth)
+        if let cached = healthCache.state.withLock({ $0 }), cached.modified == modified { return cached.notices }
+        let notices = driveHealth().map(Self.notices(for:)) ?? []
+        healthCache.state.withLock { $0 = (modified, notices) }
+        return notices
+    }
+
+    /// "The Recording Drive Is Failing", "The Box’s Disk Is Wearing Out": dated by the check, so the notice does not change between checks.
+    static func notices(for report: DriveHealthReport) -> [SystemNotice] {
+        report.drives.filter(\.needsReplacing).map { drive in
+            let name = switch drive.role {
+            case "recording": "The Recording Drive"
+            case "archive": "The Archive Drive"
+            default: "The Box’s Disk"
+            }
+            let it = drive.model ?? "It"
+            let failing = drive.state == "failing"
+            let detail = failing ? "\(it) reports that it is failing. Copy the recordings you want to keep and replace it soon."
+                : "\(it) has used \(drive.percentUsed ?? 0)% of its rated life. Plan to replace it before it fails."
+            return SystemNotice(id: "drive-health-\(drive.role)", kind: "driveHealth", severity: "warning",
+                                title: "\(name) Is \(failing ? "Failing" : "Wearing Out")", detail: detail, date: report.checked ?? .distantPast)
+        }
     }
 
     private struct JobFile: Decodable {
@@ -213,6 +310,8 @@ public struct RequestFileSystemControl: SystemControlling {
         var notes: String?
         var checkedAt: String?
         var rebootRequired: Bool?
+        /// With "rolled-back": the newer version that did not start.
+        var failedVersion: String?
     }
 
     /// `update.json` as the web interface's `UpdateStatus`, with the running `update-apply` job taken into account (the file may
@@ -227,7 +326,7 @@ public struct RequestFileSystemControl: SystemControlling {
         var state: String
         switch file.state ?? "" {
         case "checking": state = "checking"
-        case "available", "current": state = "idle"
+        case "available", "current", "rolled-back": state = "idle"
         case "downloading", "installing": state = "downloading"
         case "installed": state = "ready"
         case "failed": state = "error"
@@ -242,7 +341,8 @@ public struct RequestFileSystemControl: SystemControlling {
         let message = (state == "downloading" && applyRunning && file.state != "downloading" && file.state != "installing") ? apply?.message : file.message
         return UpdateStatus(state: state, available: available, current: file.current ?? version, latest: file.latest, notes: file.notes,
                             checked: JobFile.parse(file.checkedAt) ?? JobFile.parse(file.updatedAt), message: message.map(Self.sentence),
-                            rebootRequired: file.rebootRequired ?? (file.state == "installed"))
+                            rebootRequired: file.rebootRequired ?? (file.state == "installed"),
+                            failedVersion: file.state == "rolled-back" ? file.failedVersion.flatMap { $0.isEmpty ? nil : $0 } : nil)
     }
 
     private struct InstallFile: Decodable {
@@ -272,7 +372,7 @@ public struct RequestFileSystemControl: SystemControlling {
         var answered = false
         for _ in 0...pollCount(timing.updateCheck) {
             if let file: UpdateFile = read(.update), let at = JobFile.parse(file.updatedAt), at >= since,
-               ["available", "current", "failed"].contains(file.state ?? "") {
+               ["available", "current", "installed", "rolled-back", "failed"].contains(file.state ?? "") {
                 if file.state == "failed" { throw SystemError(Self.sentence(file.message ?? "The check for updates failed.")) }
                 answered = true; break
             }

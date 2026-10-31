@@ -13,7 +13,8 @@ import TestSupport
     private let expected = [
         "GET nvr/storage", "GET nvr/storage/locations", "PATCH nvr/storage", "PATCH cameras/:id/nvr", "GET nvr/cameras", "GET nvr/activity", "GET nvr/events",
         "GET nvr/cameras/:id/fragments", "GET nvr/cameras/:id/fragments/:fid", "GET nvr/cameras/:id/fragments/:fid/init", "GET nvr/cameras/:id/keyframe",
-        "GET nvr/cameras/:id/clip-plan", "GET nvr/cameras/:id/clip", "POST cameras/:id/optimize", "POST cameras/:id/optimize/undo",
+        "GET nvr/cameras/:id/clip-plan", "GET nvr/cameras/:id/clip", "GET nvr/kept", "POST nvr/kept", "DELETE nvr/kept/:kid",
+        "POST cameras/:id/optimize", "POST cameras/:id/optimize/undo",
     ]
 
     private func name(_ route: Route) -> String { "\(route.method) \(route.pattern.joined(separator: "/"))" }

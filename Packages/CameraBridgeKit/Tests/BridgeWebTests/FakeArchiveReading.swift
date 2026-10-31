@@ -141,6 +141,7 @@ final class FakeArchiveReading: ArchiveReading {
         var eventsFailure: (any Error & Sendable)?
         var eventCalls: [(cameras: [UUID], range: Range<Date>, limit: Int)] = []
         var away: [UUID: DateInterval] = [:]
+        var kept: [KeptRecordingStatus] = []
     }
 
     private let state = Mutex(State())
@@ -232,6 +233,29 @@ final class FakeArchiveReading: ArchiveReading {
             return ArchiveActivity.Bin(coverage: min(1, covered / width), level: covered > 0 ? 1_000 : 0, peak: covered > 0 ? 2_000 : 0)
         }
         return ArchiveActivity(start: range.lowerBound, binDuration: width, bins: bins, typical: 1_000, isComplete: true)
+    }
+
+    func keptRecordings() async -> [KeptRecordingStatus] { state.withLock { $0.kept } }
+
+    /// Keeps any stretch of a camera that has a file overlapping it; the rules beyond that are the store's (`KeptRecordingsTests`).
+    func keep(camera: UUID, start: Date, end: Date, note: String) async throws -> KeptRecordingStatus {
+        try state.withLock { state in
+            let overlaps = state.files.contains { file in
+                file.camera == camera && file.fragments.contains { $0.start < end && start < $0.end }
+            }
+            guard overlaps else { throw KeptRecordingError.nothingRecorded }
+            let status = KeptRecordingStatus(kept: KeptRecording(id: String(format: "%016x", state.kept.count + 1), camera: camera, start: start, end: end,
+                                                                 note: note, created: Date()), bytes: 1_234, hasVideo: true)
+            state.kept.append(status)
+            return status
+        }
+    }
+
+    func forgetKept(id: String) async throws {
+        try state.withLock { state in
+            guard state.kept.contains(where: { $0.kept.id == id }) else { throw KeptRecordingError.unknown }
+            state.kept.removeAll { $0.kept.id == id }
+        }
     }
 
     func events(cameras: [UUID], range: Range<Date>, limit: Int) async throws -> ArchiveEventPage {

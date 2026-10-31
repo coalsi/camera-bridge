@@ -1,0 +1,19 @@
+[Unit]
+Description=Tell the firewall which prefixes the box's own network is on
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/linux/os/README.md
+# Fills the firewall's sets onlink4/onlink6 from the routing table and follows its changes. Loading the firewall again empties its sets, so a
+# restart or reload of nftables.service fills them again.
+After=nftables.service
+Wants=nftables.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/camera-bridge/cb-lan-prefixes --watch
+ExecReload=/usr/lib/camera-bridge/cb-lan-prefixes
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

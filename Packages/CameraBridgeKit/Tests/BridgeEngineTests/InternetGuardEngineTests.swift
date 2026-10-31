@@ -165,11 +165,18 @@ import Testing
         #expect(again.steps.first { $0.id == .internetWatch }?.status == .alreadyRight)
         #expect(stored(fixture, configuration.id)?.setupBackup?.internetWatch?.servers == ["8.8.8.8", "1.1.1.1"], "the original servers stay saved")
 
+        box.report.set(self.report([GuardReport.Camera(address: Self.cameraAddress, level: .watch, today: 0, last24h: 0, names: [])]))
+        await fixture.engine.pollGuardReport()
+        #expect(fixture.engine.internetGuardAlerts.isEmpty)
+
         let restored = try await fixture.engine.restoreCameraSetup(cameraID: configuration.id)
         #expect(restored.steps.first { $0.id == .internetWatch }?.status == .restored)
         #expect(camera.documents.value[Self.ipAddressPath] == Self.ipAddress(), "the camera's own servers are back")
         #expect(await fixture.waitFor { box.last == [] }, "and the box no longer watches it")
         #expect(stored(fixture, configuration.id).map(BridgeEngine.internetWatchDone) == false)
+        // Review finding (engine-events F7): the owner's Restore raised "The Internet guard can't watch …": a warning about what they asked for.
+        await fixture.engine.pollGuardReport()
+        #expect(fixture.engine.internetGuardAlerts.isEmpty, "the owner ended the watch: no warning")
     }
 
     /// A Hikvision on DHCP would give its DNS back to the router at the next renewal: the setup does not point it at the bridge, says why, and

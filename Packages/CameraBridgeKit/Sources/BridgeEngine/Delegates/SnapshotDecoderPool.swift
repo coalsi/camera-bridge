@@ -10,7 +10,8 @@ import Synchronization
 /// next snapshot starts from a clean session.
 ///
 /// The JPEG work (an encode or a resize: a blocking ffmpeg one-shot on Linux, CoreImage or ImageIO on the Mac) runs through `blockingWork`:
-/// inline for Home's snapshots, as it always has, or on a thread of its own (`offCooperativePool`) for the pictures of an AI description.
+/// on a thread of its own (`offCooperativePool`) for Home's and the web's snapshots, the pictures of an AI description and the sky's stills,
+/// or inline (tests).
 final class SnapshotDecoderPool: Sendable {
     /// Runs one piece of the pool's blocking JPEG work and hands back what it made.
     typealias BlockingWork = @Sendable (_ work: @escaping @Sendable () throws -> Data) async throws -> Data

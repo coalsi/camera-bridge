@@ -31,6 +31,8 @@ final class FakeBackend: BridgeBackend {
         /// What `portAnswer` says for "host:port" (default `.silent`).
         var ports: [String: PortAnswer] = [:]
         var webhookProblem: String?
+        /// A damaged configuration the engine set aside (`BridgeEngine.configurationRecovery`), until it is dismissed.
+        var configurationRecovery: ConfigurationRecovery?
         var notices: [NetworkNotice] = []
         var helperInstalled = true
         var discovered: [DiscoveredCamera] = []
@@ -117,7 +119,9 @@ final class FakeBackend: BridgeBackend {
         box.withLock { state in
             BridgeOverview(state: state.state, cameras: state.configurations.map { status(for: $0, in: state) }, configurations: state.configurations,
                            sensorsBridge: state.sensorsBridge, localNetworkAccess: .granted, networkNotices: state.notices, settings: state.settings,
-                           webhookProblem: state.webhookProblem, streamingHelperInstalled: state.helperInstalled, nvrStorage: state.nvrStorage)
+                           webhookProblem: state.webhookProblem, configurationRecovered: state.configurationRecovery != nil,
+                           configurationRestoredPrevious: state.configurationRecovery?.restoredPrevious ?? false,
+                           streamingHelperInstalled: state.helperInstalled, nvrStorage: state.nvrStorage)
         }
     }
 
@@ -205,6 +209,13 @@ final class FakeBackend: BridgeBackend {
     func localIPv4Addresses() async -> [String] { read { $0.localAddresses } }
     func triggerTestMotion(cameraID: UUID) async { write { $0.calls.append("motion") } }
     func pause() async { write { $0.state = .paused } }
+
+    func acknowledgeConfigurationRecovery() async {
+        write {
+            $0.configurationRecovery = nil
+            $0.calls.append("acknowledgeConfigurationRecovery")
+        }
+    }
     func resume() async { write { $0.state = .running } }
 
     func diagnosticsReport(context: DiagnosticsContext) async -> String {
@@ -341,7 +352,10 @@ final class FakeSystem: SystemControlling {
 
     func info() async -> SystemInfo {
         SystemInfo(product: "Camera Bridge OS", version: "0.1", build: "test", mode: mode, hostname: "camera-bridge", canUpdate: true, canReboot: true,
-                   canInstall: true, update: UpdateStatus(current: "0.1"), canManage: true, sshEnabled: false, automaticUpdates: true)
+                   canInstall: true, update: UpdateStatus(current: "0.1"), canManage: true, sshEnabled: false, automaticUpdates: true,
+                   driveHealth: DriveHealthReport(state: "warning", message: "The recording drive needs attention.", drives: [
+                       DriveHealth(role: "recording", name: "sdb", state: "warning", message: "It has used 95% of its rated life. Plan to replace it.", percentUsed: 95)]),
+                   clock: ClockStatus(synchronized: false), networkLink: NetworkLink(interface: "enp1s0", wired: true, speedMbps: 100, duplex: "full"))
     }
 
     func checkForUpdate() async throws -> UpdateStatus {
@@ -399,7 +413,13 @@ final class FakeSystem: SystemControlling {
 
     func forgetWifi(ssid: String) async throws { calls.update { $0.append("wifi-forget:\(ssid)") } }
 
-    func setupHotspot() -> SetupHotspot? { hotspot.value }
+    /// How often the setup hotspot was asked about (it is a file read on the box).
+    let hotspotAsks = Box(0)
+
+    func setupHotspot() -> SetupHotspot? {
+        hotspotAsks.update { $0 += 1 }
+        return hotspot.value
+    }
 
     func install(targetID: String, phrase: String, copyData: Bool) async throws {
         calls.update { $0.append("install:\(targetID):\(phrase):\(copyData)") }

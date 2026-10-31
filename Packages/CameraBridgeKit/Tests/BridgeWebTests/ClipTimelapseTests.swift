@@ -68,7 +68,8 @@ import Testing
     private func clip(_ rig: NVRRig, _ extra: String) async throws -> HTTPResponse {
         let response = await rig.harness.raw("GET", "/api/v1/nvr/cameras/\(rig.cameraID)/clip?from=\(rig.ms(1_500))&to=\(rig.ms(6_000))&tz=UTC&part=1" + extra,
                                              cookie: rig.session.cookie)
-        if case .stream(let body) = response.body { try await body(ResponseStream { _ in }) }
+        // The fixture's pictures are not real H.264: the conversion fails, and its stream throws, as a failed download must.
+        if case .stream(let body) = response.body { try? await body(ResponseStream { _ in }) }
         return response
     }
 

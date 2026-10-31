@@ -111,10 +111,6 @@ export function chooseWaveformCameras(cameras, extentOf, max = MAX_WAVEFORM_CAME
   return { ids: withFootage.slice(0, max), truncated: withFootage.length > max };
 }
 
-export function sameLocalDay(a, b) {
-  return new Date(a).toDateString() === new Date(b).toDateString();
-}
-
 // MARK: What a tile says
 
 /** The Record chip of a tile: the camera's `status.nvr.state` (T00 C.6), or what `nvrEnabled` implies when the status has none yet. */
@@ -501,7 +497,7 @@ export function whenKnown(isKnown, { subscribe = () => () => {}, timeoutMs = 100
 /**
  * The Monitor's keys (the page's key map, KEY_MAP below): Space play or pause; ← and → one picture back or forward while paused, a second
  * while playing; Shift + ← → a minute; Alt + ← → ten seconds (on a focused tile Alt + arrow moves the tile instead: nvr.js); , and . slower
- * and faster; L live. Never while typing, never with ctrl or cmd.
+ * and faster; L live ([ and ], the event before or after, are nvr.js's own). Never while typing, never with ctrl or cmd.
  */
 export function keyAction(event, { typing = false, activatable = false } = {}) {
   if (typing || event.defaultPrevented || event.ctrlKey || event.metaKey) return null;
@@ -529,5 +525,6 @@ export const KEY_MAP = Object.freeze([
   ['Alt + ← →', '10 seconds back or forward (on a focused camera: move it)'],
   [', .', 'Slower, faster'],
   ['L', 'Live'],
+  ['[ ]', 'The event before or after'],
   ['C', 'Save a clip (Esc cancels, Return saves)'],
 ]);

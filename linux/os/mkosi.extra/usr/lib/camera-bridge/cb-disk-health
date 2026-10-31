@@ -1,0 +1,141 @@
+#!/bin/bash
+# The health of the box's drives, in /run/camera-bridge/status/disk-health.json (cb-system disk-health, daily: camera-bridge-disk-health.timer):
+# the box's own disk, the recording drive and the archive drive (when they are attached), from their own reports (SMART through smartctl:
+# NVMe, SATA, and the USB enclosures that pass it through) and the errors their ext4 file systems recorded. A 24/7 recorder wears its drives
+# out; this warns before writes start failing.
+#
+#   {state: ok | warning | failing | unknown, message, updatedAt,
+#    drives: [{role: system | recording | archive, name, model, state, message, smartAvailable, passed, percentUsed, mediaErrors,
+#              reallocatedSectors, pendingSectors, uncorrectableSectors, temperatureCelsius, powerOnHours, fileSystemErrors}]}
+#
+#   cb-disk-health              check and write the status file
+#   cb-disk-health --summary    (tests) read smartctl's JSON on stdin, print one drive's entry; FS_ERRORS and ROLE come from the environment
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export CB_TAG=cb-disk-health
+# shellcheck source=lib.sh
+. /usr/lib/camera-bridge/lib.sh
+
+SYSFS=${CB_SYSFS:-/sys}
+
+# What smartctl -j reports, as one drive's entry. The wear is NVMe's "percentage used", ATA's device statistics, or else the vendor attribute
+# that counts the life left (231 SSD_Life_Left, 233 Media_Wearout_Indicator, 177 Wear_Leveling_Count, 202 Percent_Lifetime_Remain).
+# Failing: the drive says so (its overall check failed, or NVMe's critical warning about spare, reliability or read-only). Warning: more than 90%
+# worn, damaged or pending sectors, media errors, too hot, or errors the file system recorded.
+# shellcheck disable=SC2016
+SUMMARY='
+def attr($id): [.ata_smart_attributes.table[]? | select(.id == $id)] | first;
+def lifeleft($id): attr($id) | if . != null and .value != null and .value <= 100 then 100 - .value else null end;
+def bit($n): if . == null then false else ((. / $n | floor) % 2 == 1) end;
+def plural($n; $one; $many): if $n == 1 then "1 \($one)" else "\($n) \($many)" end;
+(.nvme_smart_health_information_log // {}) as $nvme
+| {
+    role: $role,
+    name: ($name | if . == "" then null else . end),
+    model: (.model_name // .scsi_model_name // null),
+    smartAvailable: (.smart_status.passed != null),
+    passed: .smart_status.passed,
+    percentUsed: ($nvme.percentage_used
+        // ([.ata_device_statistics.pages[]?.table[]? | select(.name == "Percentage Used Endurance Indicator") | .value] | first)
+        // lifeleft(231) // lifeleft(233) // lifeleft(177) // lifeleft(202)),
+    mediaErrors: $nvme.media_errors,
+    criticalWarning: $nvme.critical_warning,
+    reallocatedSectors: attr(5).raw.value,
+    pendingSectors: attr(197).raw.value,
+    uncorrectableSectors: attr(198).raw.value,
+    temperatureCelsius: .temperature.current,
+    powerOnHours: .power_on_time.hours,
+    fileSystemErrors: ($fs | tonumber? // null)
+  }
+| ((.passed == false) or (.criticalWarning | bit(1)) or (.criticalWarning | bit(4)) or (.criticalWarning | bit(8))) as $failing
+| [ (if .passed == false then "It reports that it is failing." else empty end),
+    (if (.criticalWarning | bit(1)) then "Its spare space is almost used up." else empty end),
+    (if (.criticalWarning | bit(4)) or (.criticalWarning | bit(8)) then "It reports that it is no longer reliable." else empty end),
+    (if (.percentUsed // 0) > 90 then "It has used \(.percentUsed)% of its rated life." else empty end),
+    (if (.reallocatedSectors // 0) > 0 then "It has replaced \(plural(.reallocatedSectors; "damaged sector"; "damaged sectors"))." else empty end),
+    (if (.pendingSectors // 0) > 0 or (.uncorrectableSectors // 0) > 0
+        then "\(plural([.pendingSectors // 0, .uncorrectableSectors // 0] | max; "sector"; "sectors")) could not be read." else empty end),
+    (if (.mediaErrors // 0) > 0 then "It reports \(plural(.mediaErrors; "read or write error"; "read or write errors"))." else empty end),
+    (if (.criticalWarning | bit(2)) then "It is running too hot\(if .temperatureCelsius then " (\(.temperatureCelsius) °C)" else "" end)." else empty end),
+    (if (.fileSystemErrors // 0) > 0 then "Its file system recorded \(plural(.fileSystemErrors; "error"; "errors"))." else empty end)
+  ] as $problems
+| .state = (if $failing then "failing" elif ($problems | length) > 0 then "warning" elif .smartAvailable then "ok" else "unknown" end)
+| .message = (if $failing then ($problems | join(" ")) + " Copy the recordings you want to keep and replace it soon."
+              elif ($problems | length) > 0 then ($problems | join(" ")) + " Plan to replace it."
+              elif .smartAvailable then "Healthy\(if .percentUsed != null then ", \(.percentUsed)% of its rated life used" else "" end)."
+              else "This drive does not report its health (many USB enclosures do not)." end)
+| del(.criticalWarning)
+'
+
+summary() { jq -c --arg role "${ROLE:-system}" --arg name "${NAME:-}" --arg fs "${FS_ERRORS:-}" "$SUMMARY"; }
+
+# partition ROLE: the file system the role is on: the data partition (/srv) for the box's own disk, the chosen drive's (by its UUID) otherwise;
+# nothing when that drive is not attached or none is chosen.
+partition() {
+    local uuid
+    case $1 in
+        system) findmnt -n -o SOURCE --mountpoint /srv 2>/dev/null | head -1 | sed 's/\[.*//' ;;
+        recording|archive)
+            uuid=$(tr -d '[:space:]' <"$CB_SYSTEM/$1-drive" 2>/dev/null || true)
+            [ -n "$uuid" ] || return 0
+            blkid -U "$uuid" 2>/dev/null || true ;;
+    esac
+}
+
+# disk_of PARTITION: the whole disk it is on ("nvme0n1", "sda").
+disk_of() {
+    local parent
+    parent=$(lsblk -dno PKNAME "$1" 2>/dev/null || true)
+    if [ -n "$parent" ]; then printf '%s' "$parent"; else lsblk -dno KNAME "$1" 2>/dev/null || true; fi
+}
+
+# fs_errors PARTITION: the errors its ext4 file system recorded (the kernel's count for a mounted one, else the superblock's); nothing when unknown.
+fs_errors() {
+    local name
+    name=$(basename "$(readlink -f "$1")")
+    if [ -r "$SYSFS/fs/ext4/$name/errors_count" ]; then cat "$SYSFS/fs/ext4/$name/errors_count"; return 0; fi
+    dumpe2fs -h "$1" 2>/dev/null | awk -F: '/^Filesystem magic number/ {seen = 1} /^FS Error count/ {gsub(/ /, "", $2); n = $2} END {if (seen) print n + 0}'
+}
+
+# smart DISK: smartctl's JSON (a USB enclosure that hides the drive gets a second try through SAT pass-through).
+smart() {
+    local out
+    out=$(smartctl -j -a "/dev/$1" 2>/dev/null || true)
+    if ! jq -e '.smart_status.passed != null' >/dev/null 2>&1 <<<"$out"; then
+        out=$(smartctl -j -a -d sat "/dev/$1" 2>/dev/null || true)
+    fi
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$out" && printf '%s' "$out" || echo '{}'
+}
+
+check() {
+    local role part disk drives="[]" entry seen=" "
+    for role in system recording archive; do
+        part=$(partition "$role")
+        if [ -z "$part" ] || [ ! -b "$part" ]; then continue; fi
+        disk=$(disk_of "$part")
+        [ -n "$disk" ] || continue
+        case $seen in *" $disk "*) continue ;; esac
+        seen="$seen$disk "
+        entry=$(smart "$disk" | ROLE=$role NAME=$disk FS_ERRORS=$(fs_errors "$part") summary) || continue
+        drives=$(jq -c --argjson e "$entry" '. + [$e]' <<<"$drives")
+    done
+    # (the curly apostrophe is text for the page)
+    # shellcheck disable=SC1112
+    cb_status disk-health "$(jq -r 'if any(.state == "failing") then "failing" elif any(.state == "warning") then "warning"
+                                     elif any(.state == "ok") then "ok" else "unknown" end' <<<"$drives")" \
+        "$(jq -r 'map(select(.state == "failing" or .state == "warning")) as $bad
+                  | if length == 0 then "No drive to check."
+                    elif ($bad | length) > 0 then ($bad | map({system: "The box’s own disk", recording: "The recording drive", archive: "The archive drive"}[.role])
+                         | join(" and ")) + " " + (if ($bad | length) > 1 then "need" else "needs" end) + " attention."
+                    elif any(.state == "ok") then "The drives are healthy."
+                    else "The drives do not report their health." end' <<<"$drives")" \
+        "$(jq -c '{drives: .}' <<<"$drives")"
+    cb_log "drive health: $(jq -r 'map("\(.role) \(.name) \(.state)") | join(", ")' <<<"$drives")"
+}
+
+[ "$(id -u)" -eq 0 ] || [ "${1:-}" = --summary ] || cb_die "run as root"
+case ${1:-} in
+    '') check ;;
+    --summary) summary ;;
+    *) cb_die "usage: cb-disk-health [--summary]" ;;
+esac

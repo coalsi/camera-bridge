@@ -364,7 +364,8 @@ extension BridgeEngine {
     }
 
     /// Writes back every value the setup saved, newest change first, each read back; a value the camera takes back leaves the backup, so a
-    /// failed restore can be tried again. When everything is back the setup's record is cleared.
+    /// failed restore can be tried again. When everything is back the setup's record is cleared. A refused login stops it, as it stops a run:
+    /// the steps after it are not run (each would cost another failed login, and a Hikvision locks every login after about seven).
     public func restoreCameraSetup(cameraID: UUID) async throws -> CameraSetupReport {
         guard !isPreview else { throw EngineError.cameraNotRunning }
         return try await operations.withLock {
@@ -374,8 +375,15 @@ extension BridgeEngine {
             }
             var steps: [CameraSetupStep] = []
             var streamChanged = false
+            var loginRefusedAt: CameraSetupStepID?
             for id in CameraSetupStepID.allCases.reversed() where backup.holds(id) {
+                if let loginRefusedAt {
+                    let detail = Self.watchHeld(by: .loginRefused(nil), at: loginRefusedAt, watch: nil) ?? Self.refusedLogin
+                    steps.append(CameraSetupStep(id: id, title: Self.cameraSetupTitle(id), status: .notRun, detail: detail))
+                    continue
+                }
                 let outcome = await restoreStep(id, backup: backup, service: service, camera: camera)
+                if !outcome.succeeded, outcome.detail == Self.refusedLogin { loginRefusedAt = id }
                 if outcome.succeeded {
                     backup = backup.clearing(id)
                     if id == .streams { streamChanged = true }
@@ -389,6 +397,12 @@ extension BridgeEngine {
                             configuration.setupState?.watchedServer = nil
                             configuration.dnsWatch = nil
                         }
+                    }
+                    if id == .internetWatch {
+                        // The owner ended the watch: "The Internet guard can't watch …" is for a camera whose DNS changed under it.
+                        internetGuard.watchedBefore.remove(cameraID)
+                        internetGuard.stoppedAsking[cameraID] = nil
+                        refreshInternetGuardAlerts(now: Date())
                     }
                 }
                 log.info("\(camera.name): camera setup, \(Self.cameraSetupTitle(id).lowercased()) \(outcome.succeeded ? "restored" : "not restored") (\(outcome.detail))")

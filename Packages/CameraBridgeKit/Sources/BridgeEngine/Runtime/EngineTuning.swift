@@ -156,6 +156,12 @@ struct EngineTuning: Sendable {
     var removedPairingSweepInterval: Duration = .seconds(86_400)
     var runtimeHeartbeatDeadline: Duration = .seconds(3)
     var runtimeHeartbeatStrikes = 3
+    /// The longest the engine waits for a camera's runtime to stop (an edit's restart, a removal, a pause): a stop that hangs is left to end
+    /// on its own, so one camera never holds the engine's operations, and with them every save and edit, for good. The heartbeat's restart
+    /// of a runtime that stopped answering waits at most 5 s of it.
+    var runtimeStopLimit: Duration = .seconds(15)
+    /// Called (tests) in a runtime's stop once the camera-facing parts are stopped, before the accessory's (a hung accessory server).
+    var beforeAccessoryStop: (@Sendable (_ cameraID: UUID) async -> Void)?
     /// Called (tests) at the start of a camera's reconnect after a network change or wake.
     var beforeRuntimeRefresh: (@Sendable (_ cameraID: UUID) async -> Void)?
     /// Replaces a runtime's heartbeat (tests: a runtime that does not answer).

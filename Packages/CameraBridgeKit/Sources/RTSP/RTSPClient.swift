@@ -79,6 +79,9 @@ public actor RTSPClient {
         self.init(configuration: configuration, transport: transport, videoFrameTimeout: nil)
     }
 
+    /// What the playing session counted of its stream's troubles (nil before `play()`).
+    public var health: StreamHealth? { pipeline?.health }
+
     /// `videoFrameTimeout`: see the type documentation (nil: the default). `downgradeGuard`: shared by the sessions of
     /// one camera (`RTSPMediaSource`), so a reconnect does not answer Basic after Digest either.
     init(configuration: RTSPConfiguration, transport: any NetworkTransport, videoFrameTimeout: Duration?,

@@ -4,7 +4,7 @@
 #
 #   linux/os/test-static.sh            (from the repository root or anywhere)
 #
-# Checks: shellcheck + bash -n on every script, the recording and archive drive script (test-recording-drive.sh), the go2rtc pins (fetch-go2rtc.sh), the pins of our helpers (linux/helpers),
+# Checks: shellcheck + bash -n on every script, the recording and archive drive script (test-recording-drive.sh), the update safety net (test-update.sh), the go2rtc pins (fetch-go2rtc.sh), the pins of our helpers (linux/helpers),
 # the nftables ruleset (nft -c), every systemd unit (systemd-analyze verify), sysusers/tmpfiles/repart definitions, the mkosi
 # configuration (mkosi summary), the stub daemon's syntax, the internet guard's DNS configuration (dnsmasq --test), the secure address's scripts and TLS front (test-tls.sh, nginx -t).
 # What this does NOT prove: that the image boots (see test-vm.sh) or works on real hardware (docs/linux/BUILDING.md).
@@ -36,7 +36,7 @@ helper_scripts=(../helpers/wyze-lake/build.sh ../helpers/wyze-lake/test/run.sh
                 ../helpers/eufy-bridge/test/integration/go2rtc.sh)
 scripts=(build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken
          mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk mkosi.extra/usr/sbin/cb-guard mkosi.extra/usr/sbin/cb-tls mkosi.extra/usr/sbin/cb-wifi
-         mkosi.extra/usr/sbin/cb-recording-drive test-tls.sh test-wifi.sh test-recording-drive.sh
+         mkosi.extra/usr/sbin/cb-recording-drive test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh
          mkosi.extra/usr/lib/camera-bridge/lib.sh "${helper_scripts[@]}")
 while IFS= read -r f; do scripts+=("$f"); done < <(find mkosi.extra/usr/lib/camera-bridge -name 'cb-*' -type f | sort)
 
@@ -44,7 +44,7 @@ for f in "${scripts[@]}"; do [ -f "$f" ] || continue; check "bash -n $f" bash -n
 # (C.UTF-8: shellcheck cannot print the non-ASCII characters some scripts contain in the C locale)
 check "shellcheck (all scripts)" env LC_ALL=C.UTF-8 shellcheck -x "${scripts[@]}"
 check "stub daemon parses" python3 -c "import ast; ast.parse(open('stub/camerabridged-stub').read())"
-check "scripts are executable" bash -c 'for f in build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh '"${helper_scripts[*]}"' test-static.sh test-vm.sh test-tls.sh test-wifi.sh test-recording-drive.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
+check "scripts are executable" bash -c 'for f in build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh '"${helper_scripts[*]}"' test-static.sh test-vm.sh test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
 
 # --- the go2rtc helper: a pinned commit, toolchain digest and checksums; installed where the engine looks ---------------------
 check "fetch-go2rtc.sh pins a full commit hash" grep -Eq '^GO2RTC_COMMIT="[0-9a-f]{40}"' fetch-go2rtc.sh
@@ -74,7 +74,8 @@ check "sysupdate definitions are in place" test -f mkosi.extra/usr/lib/sysupdate
 check "nftables ruleset parses (nft -c)" nft -c -f mkosi.extra/etc/nftables.conf
 check "ruleset is default-deny inbound" grep -q 'policy drop' mkosi.extra/etc/nftables.conf
 # The box is the cameras' time server: NTP (UDP 123) only from local/private addresses, in the firewall and in chrony.
-check "firewall lets NTP in from local addresses only" bash -c 'f=mkosi.extra/etc/nftables.conf; grep -q "ip saddr @lan4 udp dport 123 accept" "$f" && grep -q "ip6 saddr @lan6 udp dport 123 accept" "$f" && ! grep -E "dport[^#]*\b123\b" "$f" | grep -vq "saddr @lan[46]"'
+# Only the local network reaches what the box offers (the web page, HomeKit, NTP, SSH, the media ports), IPv6 included; the on-link prefixes.
+check "the firewall offers its services to the local network only (test-firewall.sh)" bash test-firewall.sh
 # The internet guard (Watch): DNS (port 53) only from the setup hotspot and from the watched cameras' sets, so the box is never a resolver
 # for the house; nothing is logged or forwarded yet (Seal, the next stage, adds that).
 check "firewall has the sets of watched cameras" bash -c 'f=mkosi.extra/etc/nftables.conf; grep -Pzq "set guarded4 \\{\\s*type ipv4_addr\\s*\\}" "$f" && grep -Pzq "set guarded6 \\{\\s*type ipv6_addr\\s*\\}" "$f"'
@@ -100,7 +101,7 @@ useradd -r -s /usr/sbin/nologin _chrony 2>/dev/null || true
 for g in video render; do getent group "$g" >/dev/null || groupadd -r "$g"; done
 
 units=()
-while IFS= read -r u; do units+=("$u"); done < <(cd /usr/lib/systemd/system && ls camerabridged.service camera-bridge-*.service camera-bridge-*.timer camera-bridge-*.path var-log-journal.mount 'var-lib-camera\x2dbridge.mount')
+while IFS= read -r u; do units+=("$u"); done < <(cd /usr/lib/systemd/system && ls camerabridged.service camera-bridge-*.service camera-bridge-*.timer camera-bridge-*.path var-log-journal.mount var-lib-chrony.mount 'var-lib-camera\x2dbridge.mount')
 for u in "${units[@]}"; do
     case $u in camera-bridge-job@.service) target="camera-bridge-job@test.service"; cp "/usr/lib/systemd/system/$u" "/usr/lib/systemd/system/$target" ;; *) target=$u ;; esac
     # Missing units that only exist on a booted system (srv.mount from gpt-auto, efi.mount) are expected and are not errors here.
@@ -141,6 +142,8 @@ check "the guard's log is read in a folder only root can change" bash -c 'grep -
 check "the secure address's scripts pass their self-test (test-tls.sh)" bash test-tls.sh
 check "the 5 GHz preference passes its self-test (test-wifi.sh)" bash test-wifi.sh
 check "the recording and archive drives pass their self-test (test-recording-drive.sh)" bash test-recording-drive.sh
+check "the request dispatcher and the jobs pass their self-test (test-system.sh)" bash test-system.sh
+check "the update safety net passes its self-test (test-update.sh: the boot health check, a rollback remembered, the job lock)" bash test-update.sh
 check "the TLS front's configuration is valid (nginx -t, with a throw-away certificate)" bash -c '
     d=$(mktemp -d) && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout $d/k.pem -out $d/c.pem -days 1 -subj /CN=t 2>/dev/null &&
     sed -e "s|/srv/system/tls/fullchain.pem|$d/c.pem|; s|/srv/system/tls/privkey.pem|$d/k.pem|; s|^pid .*|pid $d/nginx.pid;|" mkosi.extra/etc/nginx/nginx.conf >$d/nginx.conf &&
@@ -159,6 +162,7 @@ fake=$(mktemp -d); mkdir -p "$fake/boot" "$fake/efi"
 check "image repart definitions are valid" systemd-repart --root="$fake" --definitions="$rendered" --dry-run=yes --empty=create --size=8G --seed=random "$tmp/image.img"
 
 # --- mkosi ---------------------------------------------------------------------------------------------------------------
+check "a damaged data partition is repaired at boot (fsck.repair=yes), never left to emergency mode" grep -Eq '^ +fsck\.repair=yes$' mkosi.conf
 check "mkosi parses the configuration (x86-64)" mkosi --directory "$OS" --architecture x86-64 --image-version 0.1 summary
 check "mkosi parses the configuration (arm64)" mkosi --directory "$OS" --architecture arm64 --image-version 0.1 summary
 

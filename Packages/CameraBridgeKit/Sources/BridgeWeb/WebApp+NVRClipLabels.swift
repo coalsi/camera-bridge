@@ -169,7 +169,9 @@ extension WebApp {
     }
 
     /// The clip of `part` of `plan` re-encoded and streamed: with the bridge's label burned in (`labels`), straightened by `correction` (the
-    /// camera's, when it is on and the person asked for it), or both. The archive slot is the caller's: `release` runs once the answer ended.
+    /// camera's, when it is on and the person asked for it), or both. The archive slot is the caller's: `release` runs once the answer ended, or
+    /// was never sent (it may run more than once: the caller's is a `ReleaseOnce`). A conversion that fails throws out of the stream, so the
+    /// download is not taken for a finished one.
     func processedClip(plan: ClipPlan, part: Int, exporter: ClipExporter, cameraID: UUID, name: String, labels: Bool, correction: PictureCorrection?,
                        speed: Int? = nil, release: @escaping @Sendable () -> Void) async throws -> HTTPResponse {
         guard let ffmpeg = Self.ffmpegPath() else {
@@ -183,7 +185,14 @@ extension WebApp {
         let style = labels ? (configuration?.timestampOverlay ?? TimestampOverlaySettings()) : nil
         let clipPart = plan.parts[part - 1]
         let runs = Self.labelRuns(part: clipPart, gaps: plan.gaps)
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("camera-bridge-clip-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        // The clip is copied to the data drive to be converted, not to /tmp: that is memory on the box (a 2-hour 4K part is several GB), and
+        // a big export failed there while squeezing everything else out of RAM.
+        let work = Self.clipWorkFolder(dataDirectory: self.configuration.dataDirectory)
+        if let free = Self.freeBytes(at: self.configuration.dataDirectory), free < UInt64(max(0, clipPart.byteCount)) + Self.clipWorkMargin {
+            release()
+            throw APIError(status: 507, code: "no_room", message: "There isn’t room on the box to prepare this clip. Save a shorter one, or save it without the label or time-lapse.")
+        }
+        let folder = work.appendingPathComponent("clip-\(UUID().uuidString.prefix(8))", isDirectory: true)
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
         headers["Content-Disposition"] = Self.attachment(speed.map { Self.timelapseFileName(clipPart.fileName, speed: $0) } ?? clipPart.fileName)
@@ -191,7 +200,7 @@ extension WebApp {
         let how = [speed.map { "as a \($0)x time-lapse" }, correction == nil ? nil : "straightened", labels ? "with its label" : nil]
             .compactMap { $0 }.joined(separator: ", ")
         log.notice("a clip of \(name) is being sent \(how)")
-        return HTTPResponse.stream(contentType: "video/mp4", headers: headers) { stream in
+        var response = HTTPResponse.stream(contentType: "video/mp4", headers: headers) { stream in
             defer {
                 release()
                 try? FileManager.default.removeItem(at: folder)
@@ -228,10 +237,32 @@ extension WebApp {
                 }
             } catch where Task.isCancelled || error is ClipDownloadStopped {
                 self.log.notice("a clip download was stopped")
+                throw error
             } catch {
                 self.log.warning("sending a converted clip failed: \(Redact.string(String(describing: error)))")
+                throw error
             }
         }
+        response.onDiscard = release
+        return response
+    }
+
+    /// Where converted clips are prepared: `clip-work` in the data directory (emptied at start, `clearClipWork`).
+    static func clipWorkFolder(dataDirectory: URL) -> URL {
+        dataDirectory.appendingPathComponent("clip-work", isDirectory: true)
+    }
+
+    /// What must stay free beyond the clip itself while one is prepared.
+    static let clipWorkMargin: UInt64 = 2 << 30
+
+    /// Removes what a converted clip left behind when the daemon stopped in the middle of one.
+    static func clearClipWork(dataDirectory: URL) {
+        try? FileManager.default.removeItem(at: clipWorkFolder(dataDirectory: dataDirectory))
+    }
+
+    static func freeBytes(at url: URL) -> UInt64? {
+        let attributes = try? FileManager.default.attributesOfFileSystem(forPath: url.path(percentEncoded: false))
+        return (attributes?[.systemFreeSize] as? NSNumber)?.uint64Value
     }
 
     /// `work` on a thread of its own (it would hold a thread of Swift's small cooperative pool for its whole run).

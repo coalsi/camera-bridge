@@ -5,7 +5,8 @@ import Foundation
 
 /// The Wyze plugin: the Wyze account (its session kept in the `SecretStore` as `plugin.wyze`, never the password), the account's cameras
 /// with where each one is on the local network now and how it can be added, and a background sync every six hours that keeps the session
-/// alive and moves an added camera to its new address when the camera's address changes.
+/// alive and moves an added camera to its new address when the camera's address changes. Its switch (`PluginState.enabled`) is honoured: off,
+/// nothing in the background talks to Wyze or sweeps the network, and the helpers are refused.
 ///
 /// How a camera is added (best first): its own RTSP (Wyze Cam v4 4.52.17+, v3 4.36.16.5654+, Pan v3 4.50.16.5654+, switched on in the Wyze
 /// app), else the local Wyze connection through go2rtc (TUTK cameras with DTLS firmware), else not at all (Gwell models, cloud-only ones).
@@ -94,6 +95,29 @@ actor WyzePlugin {
         return session != nil
     }
 
+    /// Whether the plugin's switch is on.
+    private func isOn() async -> Bool {
+        await backend.overview().settings.plugins[Self.id]?.enabled ?? false
+    }
+
+    /// The plugin's switch (`PATCH plugins/wyze`). Off stops the six-hourly sync; on starts it again when signed in and looks once now, so a
+    /// camera that moved while the plugin was off is followed.
+    func setEnabled(_ on: Bool) async {
+        guard on else {
+            syncTask?.cancel()
+            syncTask = nil
+            log.notice("the Wyze plugin was turned off; its background sync stopped")
+            return
+        }
+        await loadSession()
+        guard session != nil else { return }
+        startSync()
+        Task { await self.backgroundSync() }
+    }
+
+    /// Whether the six-hourly sync is scheduled (the tests read it).
+    var syncScheduled: Bool { syncTask != nil }
+
     // MARK: Signing in
 
     func signIn(email: String, password: String, keys: WyzeAPIKeys) async throws -> SignInAnswer {
@@ -171,6 +195,7 @@ actor WyzePlugin {
     }
 
     func helperEnvironment(_ request: WyzeHelpers.Request) async throws -> [String: String] {
+        guard await isOn() else { throw PluginProblem(description: "The Wyze plugin is off. Turn it on in Plugins to use this camera.") }
         await loadSession()
         guard var current = session else { throw PluginProblem(description: "The Wyze plugin isn’t signed in. Open Plugins, Wyze, and sign in.") }
         if current.phoneID == nil {
@@ -381,43 +406,44 @@ actor WyzePlugin {
     func start() async {
         registerHelpers()
         await loadSession()
-        guard session != nil else { return }
+        guard session != nil, await isOn() else { return }
         startSync()
         await backgroundSync()
     }
 
     private func backgroundSync() async {
-        guard (try? await sync()) != nil else { return }
+        guard await isOn(), (try? await sync()) != nil else { return }
         await followAddresses()
     }
 
-    /// An added camera whose address changed is updated: an RTSP camera's address and stream addresses, a local one's go2rtc source. (Not
-    /// private: the tests call it.)
+    /// An added camera whose address changed is updated: an RTSP camera's address and stream addresses, a local one's go2rtc source and
+    /// the address it was made for (`IntegrationSettings.Key.wyzeAddress`). A camera whose address is the same is left alone: each write
+    /// restarts the camera. (Not private: the tests call it.)
     func followAddresses() async {
         let overview = await backend.overview()
         for config in overview.configurations where config.integration?.service == .wyze {
             guard let mac = config.integration?.details[IntegrationSettings.Key.wyzeMAC], let device = device(mac: mac),
                   let address = addresses[Self.normalized(mac)] else { continue }
-            var next = config
+            // Each write ahead of this one can restart a camera, which takes a while, and the owner may have changed this camera meanwhile
+            // (its name, its AI descriptions, its Sky Watcher): the change is made to the camera as it is now. A camera removed meanwhile is
+            // left alone.
+            guard var next = await backend.overview().configurations.first(where: { $0.id == config.id }) else { continue }
             var password: String?
-            switch config.integration?.details[IntegrationSettings.Key.wyzeWay] {
+            switch next.integration?.details[IntegrationSettings.Key.wyzeWay] {
             case "rtsp":
-                guard config.endpoint.host != address else { continue }
+                guard next.endpoint.host != address else { continue }
                 next.endpoint.host = address
                 next.mainStreamURL = Self.rtspURL(host: address, path: "/stream0")
                 next.subStreamURL = Self.rtspURL(host: address, path: "/stream1")
             case "local":
-                guard let source = try? Go2RTCSource.wyze(device, host: address, hd: true) else { continue }
+                // A camera added before the address was kept is written once, to keep it.
+                guard next.integration?.details[IntegrationSettings.Key.wyzeAddress] != address,
+                      let source = try? Go2RTCSource.wyze(device, host: address, hd: true) else { continue }
                 password = source.url
+                next.integration?.details[IntegrationSettings.Key.wyzeAddress] = address
             default:
                 continue
             }
-            // `config` was read before the writes of the cameras ahead of this one (each can restart a camera), and the owner may have turned
-            // the camera's AI descriptions off meanwhile, or its Sky Watcher: the write keeps the switches the configuration has now. (Only
-            // these fields are taken from the fresh copy; a camera removed meanwhile is left alone.)
-            guard let current = await backend.overview().configurations.first(where: { $0.id == config.id }) else { continue }
-            next.aiDescriptions = current.aiDescriptions
-            next.skyDetector = current.skyDetector
             do {
                 try await backend.updateCamera(next, password: password)
                 log.notice("a Wyze camera moved to a new address; updated")

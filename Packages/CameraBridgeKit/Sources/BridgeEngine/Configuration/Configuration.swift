@@ -284,9 +284,9 @@ public struct BridgeSettings: Sendable, Codable, Equatable {
     public var nvrMaxSizeGB: Int
     /// The bridge's time zone (an IANA identifier, "America/Phoenix"); nil: the system's (on Camera Bridge OS that is UTC, so the web page sets
     /// it from the browser that signs in first). From launch it is the zone of every clock time Camera Bridge words for people ("waits until
-    /// 9:19 AM") and of the internet guard's "today" (`BridgeTime`, set when the configuration loads and when this changes), and cameras are
-    /// set to it. The process's own zone, which the timestamp overlay draws, becomes it only when the settings are saved, until the next
-    /// launch; the recorder names its folders in the zone the process started with.
+    /// 9:19 AM"), of the timestamp overlay and of the internet guard's "today" (`BridgeTime`, set when the configuration loads and when this
+    /// changes), and cameras are set to it. The process's own zone is never changed: the recorder names its folders in the zone the process
+    /// started with.
     public var timeZone: String?
     /// The plugins' own settings by plugin id ("wyze"): switched on, the account shown, the last sync. Secrets are not here: they are in the
     /// platform `SecretStore` (`BridgeEngine.pluginSecret(id:)`).

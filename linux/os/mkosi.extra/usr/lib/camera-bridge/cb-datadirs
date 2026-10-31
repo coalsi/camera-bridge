@@ -2,7 +2,7 @@
 # Creates the directory layout on the data partition (/srv) before it is bound into /var. Idempotent, fast.
 #   /srv/camera-bridge   the daemon's data       (bound to /var/lib/camera-bridge, owned by camerabridge)
 #   /srv/journal         persistent journal       (bound to /var/log/journal)
-#   /srv/system          root-owned state: SSH keys and flags
+#   /srv/system          root-owned state: SSH keys and flags; chrony/ is chrony's (bound to /var/lib/chrony: the clock's drift)
 #   /srv/update          update download cache (cbupdate) and the root-only staging area
 set -euo pipefail
 export CB_TAG=camera-bridge-datadirs
@@ -17,6 +17,7 @@ install -d -m 2755 /srv/journal
 install -d -m 0755 /srv/system
 install -d -m 0700 /srv/system/ssh
 install -d -m 0700 /srv/system/network-connections
+install -d -m 0750 -o _chrony -g _chrony /srv/system/chrony
 install -d -m 0755 /srv/update
 install -d -m 0700 -o cbupdate -g cbupdate /srv/update/cache
 install -d -m 0700 /srv/update/stage

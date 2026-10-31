@@ -43,8 +43,10 @@ Foundation (+ FoundationNetworking / os under `#if canImport`), Synchronization 
 - Bytes: `Data(hex:)`, `Data.hexString`, `ByteReader`, `ByteWriter`, `ByteError`.
 - `NTPTime` (RTCP 32.32 timestamps), `AsyncBroadcaster` (multi-subscriber AsyncStream fan-out).
 - `PrivateFiles` — the one writer for persisted private files (HAP `state.json`, the engine's `config.json` and
-  backups): `write` (atomic: 0600 temporary file, then replace/move; the result is 0600), `prepareDirectory` (every
-  missing level created 0700; an existing directory is never changed), `exists`, `unusedURL(in:_:)`.
+  backups): `write` (atomic and durable: 0600 temporary file written and synced, then replace/move, then the folder
+  synced; the result is 0600; `keepingPrevious: true` keeps the file it replaces, unless empty, as `<name>.bak`,
+  `previousURL(of:)`), `prepareDirectory` (every missing level created 0700; an existing directory is never changed),
+  `exists`, `unusedURL(in:_:)`.
 
 ## Additions beyond the contract
 
@@ -61,7 +63,8 @@ when none answers the camera is `offline`: one probe on a 2 s to 60 s backoff, `
 `DigestChallenge.init`, `DigestAuthenticator.init(credentials:cnonce:)` (deterministic cnonce for vectors),
 `DigestAuthenticator.authorization(for:method:uri:body:)` (qop=auth-int; the contract overload uses an empty body),
 `LogSinkToken` / `LogHub.removeSink(_:)` (approved, docs/CONTRACT_CHANGES.md), `PrivateFiles` (+ `PrivateFiles.Failure`;
-moved from BridgeEngine so HAP shares it, W4 review), `PowerManaging.endBackgroundActivity()` (W4 review; a requirement
+moved from BridgeEngine so HAP shares it, W4 review; `write(_:to:keepingPrevious:)` and `previousURL(of:)`, Oct 31 review),
+`AsyncSerialLock.heldFor` (package: how long the current body has held it, for the daemon's watchdog), `PowerManaging.endBackgroundActivity()` (W4 review; a requirement
 with a default no-op in a protocol extension, so conformers written to the contract compile unchanged),
 `HTTPClientError.bodyTooLarge(limit:)`, `AuthenticatingHTTPClient.init(credentials:timeout:allowSelfSignedTLS:maximumBodySize:)`
 and `AuthenticatingHTTPClient.defaultMaximumBodySize`, `URL.removingUserInfo` (`URLUserInfo.swift`; W4 review),

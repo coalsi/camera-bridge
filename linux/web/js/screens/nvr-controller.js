@@ -173,17 +173,24 @@ export function createGridController(deps) {
     syncAddress();
   }
 
+  // The catalog's time base (first server time minus 400 days) exists once it has answered; before that it is undefined, NaN or 0.
+  const baseKnown = () => Number.isFinite(catalog.baseMs) && catalog.baseMs >= EPOCH_MIN_MS;
+
   async function connect() {
     phase = 'connecting';
     schedule();
     try {
-      // The catalog's time base (first server time minus 400 days) exists once it has answered; before that it is undefined, NaN or 0.
-      await whenKnown(() => Number.isFinite(catalog.baseMs) && catalog.baseMs >= EPOCH_MIN_MS, { subscribe: (fn) => catalog.onChange(fn), timeoutMs: catalogTimeoutMs, setTimer, clearTimer });
+      await whenKnown(baseKnown, { subscribe: (fn) => catalog.onChange(fn), timeoutMs: catalogTimeoutMs, setTimer, clearTimer });
     } catch {
-      if (!destroyed) { phase = 'unreachable'; schedule(); }
-      return;
+      // Not given up for good: the catalog keeps asking, and its first answer makes the page ready (a box loading a big archive after a start
+      // takes longer than the wait). Try again only asks at once.
+      if (!destroyed && !baseKnown()) { phase = 'unreachable'; schedule(); return; }
     }
-    if (destroyed) return;
+    becomeReady();
+  }
+
+  function becomeReady() {
+    if (destroyed || phase === 'ready') return;
     phase = 'ready';
     refreshWaveform();
     if (initialMs !== null && !started) session.scrub(initialMs);     // paused there: the cells fetch exact pictures
@@ -212,6 +219,7 @@ export function createGridController(deps) {
     const [start, end] = ranges[clampTo(page)];
     return {
       phase, playable, noCameras: total === 0,
+      catalogLoading: catalog.phase === 'loading',     // the box answers that its recordings are still loading
       page, pages: ranges.length, perPage, total,
       first: total === 0 ? 0 : start + 1, last: Math.min(total, end),
       tiles,
@@ -244,7 +252,11 @@ export function createGridController(deps) {
     async start() {
       applyPage();
       unsubscribers.push(subscribeCameras(() => { applyPage(); refreshWaveform(); schedule(); }));
-      unsubscribers.push(catalog.onChange(() => { refreshWaveform(); schedule(); }));
+      unsubscribers.push(catalog.onChange(() => {
+        if (phase === 'unreachable' && baseKnown()) { becomeReady(); return; }
+        refreshWaveform();
+        schedule();
+      }));
       tickTimer = setTick(onTick, TICK_MS);
       schedule();
       await connect();

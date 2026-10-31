@@ -9,9 +9,10 @@
 #                                             use a disk that already is a Camera Bridge recording drive, without erasing it
 #                                             (after a new install, or a drive moved from another box)
 #   cb-recording-drive --forget               go back to the box's own disk (the drive and its recordings are left untouched)
-#   cb-recording-drive --apply [--restart]    what the boot and the plugging in of the drive run: mount it (or, with a drive
-#                                             chosen but not plugged in, a read-only placeholder so nothing is written to the
-#                                             box's own disk by mistake); --restart then restarts the engine if that changed
+#   cb-recording-drive --apply [--restart]    what the boot and the plugging in of the drive run: check its file system and mount it
+#                                             (or, with a drive chosen but not plugged in, or one that cannot be used, a read-only
+#                                             placeholder so nothing is written to the box's own disk by mistake); --restart then
+#                                             restarts the engine if that changed
 #   cb-recording-drive --archive FORM         the same forms (--list, --device ... --confirm, --device ... --keep, --forget, --apply)
 #                                             for the archive drive: label CBARCHIVE, mounted on /var/lib/camera-bridge/archive,
 #                                             chosen in /srv/system/archive-drive. Older recordings move there when the recordings
@@ -35,6 +36,8 @@ RECORDINGS_TARGET=$CB_DATA/recordings
 ARCHIVE_TARGET=$CB_DATA/archive
 # The archive drive's marker: the engine writes to the archive's folder only while it holds this (so never to the box's own disk).
 MARKER=.camera-bridge-archive
+# The longest check of a drive's file system before it is mounted (one that never stops must not keep the engine from starting).
+FSCK_SECONDS=${CB_FSCK_SECONDS:-600}
 
 device="" confirm="" keep=0 list=0 json=0 forget=0 apply=0 restart=0 archive=0
 
@@ -52,6 +55,14 @@ die() {
     cb_log "error: $*"
     drive_status failed "$*" 2>/dev/null || true
     exit 1
+}
+
+# unusable MESSAGE: the drive is attached but cannot be used (the placeholder is in place): says so and fails, without ending the script, so a
+# caller that stopped the engine still starts it again.
+unusable() {
+    cb_log "error: $*"
+    drive_status failed "$*" 2>/dev/null || true
+    return 1
 }
 
 lsblk_json() { lsblk -J -b -o NAME,KNAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,RO,FSTYPE,LABEL,UUID,PARTLABEL,MOUNTPOINTS,PKNAME; }
@@ -163,8 +174,41 @@ prepare_target() {
     install -d -m 0700 -o camerabridge -g camerabridge "$TARGET"
 }
 
+# mount_drive DEVICE: checks the drive's file system and mounts it on the drive's folder; on failure MOUNT_PROBLEM says why. A drive that lost
+# power or was pulled out is checked and repaired first (e2fsck -p, then -y for what preening leaves: nobody can answer fsck's questions on
+# this box), at most FSCK_SECONDS. errors=remount-ro: a drive that starts failing turns read-only (the engine reports that it cannot write)
+# instead of being written into further.
+mount_drive() {
+    local dev=$1 rc=0
+    MOUNT_PROBLEM=""
+    timeout "$FSCK_SECONDS" e2fsck -p "$dev" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 124 ] && [ $((rc & 4)) -ne 0 ] && [ $((rc & 8)) -eq 0 ]; then
+        cb_log "the $KIND has file system errors that need more than a quick repair; repairing them"
+        rc=0
+        timeout "$FSCK_SECONDS" e2fsck -y "$dev" >/dev/null 2>&1 || rc=$?
+    fi
+    if [ "$rc" -eq 124 ]; then
+        cb_log "checking the $KIND took longer than $FSCK_SECONDS s; it is mounted as it is"
+    elif [ $((rc & 8)) -ne 0 ] || [ "$rc" -ge 16 ]; then
+        cb_log "the $KIND could not be checked (e2fsck exit $rc); it is mounted as it is"
+    elif [ $((rc & 4)) -ne 0 ]; then
+        MOUNT_PROBLEM="its file system has errors that could not be repaired"
+        return 1
+    elif [ "$rc" -ne 0 ]; then
+        cb_log "the $KIND's file system was repaired"
+    fi
+    mount -t ext4 -o nodev,nosuid,noexec,noatime,errors=remount-ro "$dev" "$TARGET" || { MOUNT_PROBLEM="it could not be mounted"; return 1; }
+}
+
+# mount_placeholder NAME: a read-only, empty file system on the drive's folder, so nothing is written to the box's own disk meanwhile.
+mount_placeholder() {
+    while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
+    prepare_target
+    mount -t tmpfs -o ro,size=64k,mode=0555,nodev,nosuid,noexec "$1" "$TARGET"
+}
+
 do_apply() {
-    local uuid dev before after
+    local uuid dev before after problem=""
     before=$(mounted_source)
     uuid=$(current_uuid)
     if [ -z "$uuid" ]; then
@@ -182,17 +226,21 @@ do_apply() {
         fi
         while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
         prepare_target
-        mount -t ext4 -o nodev,nosuid,noexec,noatime "$dev" "$TARGET" || die "the recording drive could not be mounted"
-        # A freshly made file system is owned by root.
-        chown camerabridge:camerabridge "$TARGET"
-        chmod 0700 "$TARGET"
-        drive_status mounted "Recording to the attached drive." "$(jq -n --arg uuid "$uuid" '{uuid: $uuid}')"
+        if mount_drive "$dev"; then
+            # A freshly made file system is owned by root.
+            chown camerabridge:camerabridge "$TARGET"
+            chmod 0700 "$TARGET"
+            drive_status mounted "Recording to the attached drive." "$(jq -n --arg uuid "$uuid" '{uuid: $uuid}')"
+        else
+            # Present but unusable: the placeholder, as for a drive that is away (the engine would otherwise record to the box's own disk,
+            # and those recordings would be hidden under the drive once it mounts).
+            problem="The recording drive is attached but can't be used: $MOUNT_PROBLEM. Recording waits until it works again (or choose another drive)."
+            mount_placeholder cb-recording-drive-missing
+        fi
     else
         [ "$before" != "cb-recording-drive-missing" ] || { drive_status missing "The recording drive is not attached."; return 0; }
-        while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
-        prepare_target
         # Nothing may be written to the box's own disk meanwhile: a read-only, empty placeholder.
-        mount -t tmpfs -o ro,size=64k,mode=0555,nodev,nosuid,noexec cb-recording-drive-missing "$TARGET"
+        mount_placeholder cb-recording-drive-missing
         drive_status missing "The recording drive is not attached."
     fi
     after=$(mounted_source)
@@ -200,6 +248,7 @@ do_apply() {
         cb_log "the recording drive changed; restarting the engine"
         systemctl restart camerabridged.service || true
     fi
+    [ -z "$problem" ] || unusable "$problem"
 }
 
 # archive_marker UUID: the marker at the top of the mounted archive drive, written when it is missing or names another drive. The drive's root is
@@ -230,7 +279,12 @@ apply_archive() {
         if [ "$before" != "$dev" ]; then
             while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
             prepare_target
-            mount -t ext4 -o nodev,nosuid,noexec,noatime "$dev" "$TARGET" || die "the archive drive could not be mounted"
+            if ! mount_drive "$dev"; then
+                # Present but unusable: the placeholder (no marker, so the engine never writes there), as for a drive that is away.
+                mount_placeholder cb-archive-drive-missing
+                unusable "The archive drive is attached but can't be used: $MOUNT_PROBLEM. Older recordings are deleted as before until it works again."
+                return 1
+            fi
         fi
         # The engine's, whoever made the file system (a fresh one is owned by root).
         chown camerabridge:camerabridge "$TARGET"
@@ -239,10 +293,8 @@ apply_archive() {
         drive_status mounted "Older recordings move to the archive drive." "$(jq -n --arg uuid "$uuid" '{uuid: $uuid}')"
     else
         [ "$before" != "cb-archive-drive-missing" ] || { drive_status missing "The archive drive is not attached."; return 0; }
-        while mountpoint -q "$TARGET"; do umount -l "$TARGET" || break; done
-        prepare_target
         # Nothing may be written to the box's own disk meanwhile: a read-only, empty placeholder (no marker, so the engine never writes there).
-        mount -t tmpfs -o ro,size=64k,mode=0555,nodev,nosuid,noexec cb-archive-drive-missing "$TARGET"
+        mount_placeholder cb-archive-drive-missing
         drive_status missing "The archive drive is not attached."
     fi
 }
@@ -252,7 +304,7 @@ apply() { if [ "$archive" -eq 1 ]; then apply_archive; else do_apply; fi; }
 # --- choosing a drive -------------------------------------------------------------------------------------------------
 
 use_drive() {
-    local k part uuid problems other stopped=0
+    local k part uuid problems other stopped=0 applied=0
     [[ $device =~ $DEVICE_RE ]] || die "that is not a disk this system can use ($device)"
     k=${device#/dev/}
     drive_status working "Looking at the disk."
@@ -290,13 +342,15 @@ use_drive() {
     mv -f "$CONFIG.new" "$CONFIG"
     restart=0
     if [ "$archive" -eq 1 ]; then
-        apply_archive
+        apply_archive || applied=$?
         [ "$stopped" -eq 0 ] || systemctl start camerabridged.service || true
+        [ "$applied" -eq 0 ] || exit 1
         cb_log "older recordings move to $part ($uuid)"
     else
         systemctl stop camerabridged.service || true
-        do_apply
+        do_apply || applied=$?
         systemctl start camerabridged.service || true
+        [ "$applied" -eq 0 ] || exit 1
         cb_log "recording to $part ($uuid)"
     fi
 }

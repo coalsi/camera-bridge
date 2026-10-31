@@ -160,13 +160,16 @@ enum CatalogLoader {
         var type: FileAttributeType
         var size: UInt64
         var modified: Date
+        /// The file's inode: a file deleted and made again under its name has another one.
+        var fileNumber: UInt64? = nil
     }
 
     static func attributes(_ url: URL) -> Attributes? {
         guard let values = try? FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false)),
               let type = values[.type] as? FileAttributeType else { return nil }
         let size = (values[.size] as? NSNumber)?.uint64Value ?? 0
-        return Attributes(type: type, size: size, modified: values[.modificationDate] as? Date ?? .distantPast)
+        return Attributes(type: type, size: size, modified: values[.modificationDate] as? Date ?? .distantPast,
+                          fileNumber: (values[.systemFileNumber] as? NSNumber)?.uint64Value)
     }
 
     static func isSymbolicLink(_ url: URL) -> Bool { attributes(url)?.type == .typeSymbolicLink }

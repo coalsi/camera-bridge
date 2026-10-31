@@ -9,10 +9,17 @@ libsystemd), a journald-friendly log sink (`StdoutLogSink`), the operating syste
 
 ## Additions beyond the contract
 
+The box's health and the update rollback (2026-10-31, docs/CONTRACT_CHANGES.md): `RequestFileSystemControl` reads `status/disk-health.json` (the drives' daily check) and
+`system.json`'s `clock` and `link` into `SystemInfo.driveHealth`, `SystemInfo.clock` and `SystemInfo.networkLink`, maps `update.json`'s `rolled-back` to `idle` with
+`UpdateStatus.failedVersion`, and takes a check that ends `installed` or `rolled-back` as answered. `RequestFileSystemControl.driveHealthNotices()` makes a warning
+notice of each drive that is failing or more than 90% worn (`RequestFileSystemControl.notices(for:)`), reading the file again only when it changed; the daemon hands it to
+`EngineBackend` as its `systemNotices`.
+
 The archive drive (2026-10-25, docs/CONTRACT_CHANGES.md): `DaemonOptions.archiveDirectory` (`--archive-dir`, `CAMERABRIDGE_ARCHIVE_DIR`, a full path) and
 `DaemonOptions.effectiveArchiveDirectory(dataDirectory:systemAvailable:)`: the option, else `archive` inside the data directory where Camera Bridge OS is underneath (its
 request folders exist), else none, and never for `--preview`; the daemon gives it to the engine as `BridgeEnvironment.archiveDriveFolder`. `DaemonArchivePolicy` sets
-`ArchivePlatformPolicy.isSameVolume` (`st_dev`; what cannot be measured counts as the same) and `ArchivePlatformPolicy.lowerThreadPriority`
+`ArchivePlatformPolicy.isSameVolume` (`st_dev`; what cannot be measured counts as the same), `ArchivePlatformPolicy.dropCachedPages`
+(`posix_fadvise(POSIX_FADV_DONTNEED)` on a moved copy before it is read back) and `ArchivePlatformPolicy.lowerThreadPriority`
 (`DaemonArchivePolicy.lowerThisThread`: `setpriority` 19 for the calling thread, and util-linux's `ionice -c 3 -p <thread id>` for the idle I/O class, the thread id read
 from `/proc/thread-self`, `DaemonArchivePolicy.threadID(fromThreadSelf:)`). `RequestFileSystemControl.archiveDrives()` asks `drive-list` (the recording drive's list) and
 gives each disk the archive's view (`archiveEligible`, `archiveProblems`, `isArchiveDrive`, `archiveInUse`; a script without them: the recording drive's view; the

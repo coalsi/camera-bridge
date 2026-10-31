@@ -25,9 +25,12 @@ public struct AIStatus: Sendable, Equatable {
     public var lastError: String?
     public var lastErrorAt: Date?
     public var needsRecordingsFolder: Bool
+    /// The service could not take three events in a row (not reached, failing, limiting requests): no event is described before this
+    /// ("trying again at 9:40 PM"); nil when it is not waiting.
+    public var retryAt: Date?
 
     public init(today: Int = 0, last7Days: Int = 0, limitReached: Bool = false, paused: Bool = false, lastError: String? = nil,
-                lastErrorAt: Date? = nil, needsRecordingsFolder: Bool = false) {
+                lastErrorAt: Date? = nil, needsRecordingsFolder: Bool = false, retryAt: Date? = nil) {
         self.today = today
         self.last7Days = last7Days
         self.limitReached = limitReached
@@ -35,6 +38,7 @@ public struct AIStatus: Sendable, Equatable {
         self.lastError = lastError
         self.lastErrorAt = lastErrorAt
         self.needsRecordingsFolder = needsRecordingsFolder
+        self.retryAt = retryAt
     }
 }
 
@@ -68,7 +72,9 @@ public enum AIDescriberError: Error, Equatable, Sendable {
 /// - **Which events.** `eventsStarted` gets the events the event log began (none while no recordings folder is chosen) from the engine's edge
 ///   handler and returns at once. An event is described when a service is set (`setService`), describing is not paused, today's limit is not
 ///   reached, its camera runs with its switch on, and its camera had no event described in the last `Timing.perCamera` (60 s). Of the events
-///   of one camera that start together, only the most specific is (`kindOrder`); other kinds (tamper, sound, alarm inputs) never are. A skipped
+///   of one camera that start together, only the most specific is (`kindOrder`); other kinds (tamper, sound, alarm inputs) never are. A
+///   doorbell ring is described within its camera's minute too (the ring that follows the person who walked up), once `Timing.ringAfter`
+///   (10 s) has passed since the camera's last admitted event. A skipped
 ///   event costs nothing: no picture is gathered. A more specific kind that starts on the camera within `Timing.upgradeWithin` (2 s) of the
 ///   admitted event, while that one's frames are still gathered or it still waits, takes its place: the frames are its, and the description
 ///   goes to its row (the camera's minute is still counted from the first).
@@ -81,11 +87,15 @@ public enum AIDescriberError: Error, Equatable, Sendable {
 ///   A network error or a 5xx is tried once more after `Timing.retryDelay`, unless the event is stale by then; any other failure is not. The
 ///   description is handed to `record` (the event log), the failure is kept as `AIStatus.lastError`. A refused key (401) pauses describing
 ///   until the AI settings or the key change (`setService` with `fresh`) or Try it works again: one error, not one per event.
+/// - **An outage.** After `Timing.outageAfter` (3) events in a row the service could not take (not reached, a 5xx, a 429), no event is
+///   gathered or sent until a wait is over (`AIStatus.retryAt`: 1 minute, doubled after each further failure, at most 15); a send that works,
+///   Try it's too, or a change of the settings, service or key ends it. A day's limit is not used up by a service that is down.
 /// - **Looked at again before every send.** The pictures take a moment, and a failing call takes longer. Right before the first send and
 ///   again right before the retry, the camera's switch is read once more and the service must be the one the event's turn began with (a new
 ///   `serviceGeneration` means the owner changed the settings, the service or the key, or chose Off): if either changed, nothing is sent. An
 ///   event dropped before its first send is not counted; one dropped before its retry was counted for its first send only.
-/// - **The count.** Each event sent counts once toward the day, retry or not; skipped and dropped events never do. Days are the bridge's
+/// - **The count.** Each event sent counts once toward the day, retry or not; skipped and dropped events never do, and neither does a send the
+///   service could not take (not reached, a 5xx, a 429: such calls are not billed). Days are the bridge's
 ///   (`timeZone`) and the counts are kept in `usageFile` (`AIUsage`), so the limit holds across a restart.
 /// - **Try it** (`tryNow`) describes the pictures around now of any running camera, its switch on or off (the person asked for it), counts
 ///   toward the day, and stores nothing; one at a time.
@@ -111,6 +121,14 @@ actor EventDescriber {
         /// A more specific kind that starts this soon after an admitted event of its camera takes its place, while that one has not had its
         /// turn yet.
         var upgradeWithin: TimeInterval = 2
+        /// A doorbell ring is described within its camera's `perCamera` too (the ring that follows the person who walked up), once this
+        /// long has passed since the camera's last admitted event (sooner, its pictures would be that event's).
+        var ringAfter: TimeInterval = 10
+        /// Events in a row the service could not take before describing waits (`outageWait`).
+        var outageAfter = 3
+        /// The first wait of an outage, doubled after each further failure up to `outageWaitCap`.
+        var outageWait: TimeInterval = 60
+        var outageWaitCap: TimeInterval = 900
     }
 
     /// The running cameras among `ids`; one that does not run is left out.
@@ -120,6 +138,8 @@ actor EventDescriber {
 
     /// The kinds that are described, the most specific first: of several that start together on one camera, the first in this list is.
     static let kindOrder = ["Person", "Package", "Vehicle", "Animal", "Face", "Doorbell ring", "Motion"]
+    /// The doorbell's ring, as the event log names it.
+    static let ringKind = "Doorbell ring"
     /// What Try it says the camera reported: nothing, it is a test.
     static let tryKind = "None (a test)"
 
@@ -142,6 +162,10 @@ actor EventDescriber {
         var paused = false
         var usage = AIUsage()
         var lastError: (error: AIProviderError, at: Date)?
+        /// Events in a row whose send the service could not take (`isOutage`).
+        var outageStreak = 0
+        /// While the service is out: no event is described before this.
+        var outageUntil: Date?
         /// Where `eventsStarted` hands events over; nil while stopped.
         var admissions: AsyncStream<[StartedEvent]>.Continuation?
         /// Handed over and not taken in yet.
@@ -239,6 +263,8 @@ actor EventDescriber {
                 gate.serviceGeneration &+= 1
                 gate.paused = false
                 gate.lastError = nil
+                gate.outageStreak = 0
+                gate.outageUntil = nil
             }
         }
     }
@@ -300,8 +326,9 @@ actor EventDescriber {
                 guard self.running, let camera = running[event.cameraID], camera.describes,
                       gate.withLock({ Self.mayDescribe($0, at: now(), in: timeZone()) }) else { continue }
                 if let last = lastAdmitted[event.cameraID], abs(event.date.timeIntervalSince(last)) < timing.perCamera {
-                    takeThePlaceOfTheWaitingEvent(event)
-                    continue
+                    // A doorbell ring that did not take the waiting event's place is described anyway, `ringAfter` after the last one.
+                    guard !takeThePlaceOfTheWaitingEvent(event), event.kind == Self.ringKind,
+                          abs(event.date.timeIntervalSince(last)) >= timing.ringAfter else { continue }
                 }
                 lastAdmitted[event.cameraID] = event.date
                 let number = nextGather
@@ -318,14 +345,17 @@ actor EventDescriber {
     /// `event` takes the place of its camera's admitted event that has not had its turn yet, when it is of a more specific kind and started
     /// within `Timing.upgradeWithin` after the event that was admitted ("Motion", then "Person" a second later): the frames gathered for that
     /// one are its. The time is counted from the admitted event, so places are not taken one after another for longer.
-    private func takeThePlaceOfTheWaitingEvent(_ event: StartedEvent) {
+    /// Whether it took the place.
+    @discardableResult
+    private func takeThePlaceOfTheWaitingEvent(_ event: StartedEvent) -> Bool {
         guard let waiting = awaiting[event.cameraID], let admitted = lastAdmitted[event.cameraID],
               let rank = Self.kindOrder.firstIndex(of: event.kind), let waitingRank = Self.kindOrder.firstIndex(of: waiting.event.kind),
-              rank < waitingRank else { return }
+              rank < waitingRank else { return false }
         let after = event.date.timeIntervalSince(admitted)
-        guard after >= 0, after <= timing.upgradeWithin else { return }
+        guard after >= 0, after <= timing.upgradeWithin else { return false }
         awaiting[event.cameraID] = (waiting.number, event)
         if let index = queue.firstIndex(where: { $0.number == waiting.number }) { queue[index].event = event }
+        return true
     }
 
     private func enqueue(_ job: Job) {
@@ -394,9 +424,17 @@ actor EventDescriber {
 
     // MARK: Asking the service
 
-    /// Whether events may be described now: a service, no pause, and today's limit not reached.
+    /// Whether events may be described now: a service, no pause, no outage wait, and today's limit not reached.
     private static func mayDescribe(_ gate: Gate, at now: Date, in zone: TimeZone) -> Bool {
-        gate.service != nil && !gate.paused && gate.usage.count(on: now, in: zone) < gate.dailyLimit
+        gate.service != nil && !gate.paused && (gate.outageUntil.map { now >= $0 } ?? true) && gate.usage.count(on: now, in: zone) < gate.dailyLimit
+    }
+
+    /// The service did not take the request (not reached, a 5xx, a 429): not billed, so not counted, and three events in a row are an outage.
+    private static func isOutage(_ error: AIProviderError) -> Bool {
+        switch error {
+        case .unreachable, .serviceFailed, .rateLimited: true
+        default: false
+        }
     }
 
     /// What an event's send depends on: its camera's switch, and the generation of the settings, service and key its turn began with.
@@ -443,8 +481,9 @@ actor EventDescriber {
         let (service, generation) = try chosen.get()
         saveUsage()
         do {
+            let description: EventDescription
             do {
-                return try await service.describe(request)
+                description = try await service.describe(request)
             } catch let error as AIProviderError where Self.isTriedAgain(error) {
                 guard eventDate.map({ now().timeIntervalSince($0) <= timing.staleAfter }) ?? true else { throw error }
                 try await Task.sleep(for: timing.retryDelay)
@@ -453,12 +492,23 @@ actor EventDescriber {
                 if let sending, !(await cameraStillDescribes(sending.cameraID)) { throw error }
                 let stillTheSame = gate.withLock { $0.service != nil && $0.serviceGeneration == generation && (ignoringPause || !$0.paused) }
                 guard stillTheSame, !Task.isCancelled else { throw error }
-                return try await service.describe(request)
+                description = try await service.describe(request)
             }
+            let ended = gate.withLock { gate -> Bool in
+                guard gate.serviceGeneration == generation else { return false }
+                defer { gate.outageStreak = 0; gate.outageUntil = nil }
+                return gate.outageStreak >= timing.outageAfter
+            }
+            if ended { log.notice("The AI service answers again; events are described again") }
+            return description
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             let failure = error as? AIProviderError ?? .badAnswer
+            if Self.isOutage(failure) {
+                gate.withLock { $0.usage.remove(at: at, in: zone) }
+                saveUsage()
+            }
             note(failure, of: request.cameraName, generation: generation, trying: eventDate == nil)
             throw failure
         }
@@ -475,18 +525,37 @@ actor EventDescriber {
     /// describing. `trying`: it was Try it's.
     private func note(_ failure: AIProviderError, of camera: String, generation: Int, trying: Bool) {
         let at = now()
-        let (current, paused) = gate.withLock { gate -> (Bool, Bool) in
-            guard gate.serviceGeneration == generation else { return (false, false) }
+        let (current, paused, waitUntil) = gate.withLock { gate -> (Bool, Bool, Date?) in
+            guard gate.serviceGeneration == generation else { return (false, false, nil) }
             gate.lastError = (failure, at)
-            guard failure == .keyRefused, !gate.paused else { return (true, false) }
+            var waitUntil: Date?
+            if !trying {
+                if Self.isOutage(failure) {
+                    gate.outageStreak += 1
+                    let extra = gate.outageStreak - timing.outageAfter
+                    if extra >= 0 {
+                        let wait = min(timing.outageWaitCap, timing.outageWait * pow(2, Double(min(extra, 16))))
+                        gate.outageUntil = at.addingTimeInterval(wait)
+                        waitUntil = gate.outageUntil
+                    }
+                } else {
+                    gate.outageStreak = 0   // the service answered
+                    gate.outageUntil = nil
+                }
+            }
+            guard failure == .keyRefused, !gate.paused else { return (true, false, waitUntil) }
             gate.paused = true
-            return (true, true)
+            return (true, true, waitUntil)
         }
         guard current else {
             log.debug("A failure of the AI service or key that was replaced since is not kept: \(failure.sentence)")
             return
         }
         if paused { log.warning("The AI service refused the key; no event is described until the key or the service is changed") }
+        if let waitUntil {
+            log.warning("The AI service could not take \(timing.outageAfter) events in a row (\(failure.sentence)); no event is described before "
+                        + "\(BridgeTime.clock(waitUntil, in: timeZone()))")
+        }
         if trying {
             log.info("Try it for \(camera) failed: \(failure.sentence)")
         } else if failure != .keyRefused {
@@ -536,7 +605,8 @@ actor EventDescriber {
         return gate.withLock { gate in
             let today = gate.usage.count(on: at, in: zone)
             return AIStatus(today: today, last7Days: gate.usage.lastSevenDays(at, in: zone), limitReached: today >= gate.dailyLimit,
-                            paused: gate.paused, lastError: gate.lastError?.error.sentence, lastErrorAt: gate.lastError?.at)
+                            paused: gate.paused, lastError: gate.lastError?.error.sentence, lastErrorAt: gate.lastError?.at,
+                            retryAt: gate.outageUntil.flatMap { $0 > at ? $0 : nil })
         }
     }
 

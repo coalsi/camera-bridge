@@ -36,6 +36,18 @@ import TestSupport
         return entry
     }
 
+    /// Review Oct 31 (sky F6): paths were served at full double precision (about 70 bytes a point, 64 points a light), several MB for a busy
+    /// night. A point is served to a hundred-thousandth of the picture and a millisecond.
+    @Test func aLightsPathIsServedRoundedToWhatThePageCanShow() throws {
+        var light = Self.entry("r-1", camera: UUID(), at: 0)
+        light.path = [SkyPathPoint(t: 1.234_567_89, x: 0.512_345_678_901_234_56, y: 0.333_333_333_333_333_31)]
+        let data = try JSONEncoder().encode(SkyEntryResource(light))
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let point = try #require((json["path"] as? [[String: Any]])?.first)
+        #expect(point["t"] as? Double == 1.235 && point["x"] as? Double == 0.51235 && point["y"] as? Double == 0.33333)
+        #expect(!String(decoding: data, as: UTF8.self).contains("0.5123456"))
+    }
+
     private func addCamera(_ session: Harness.Session, host: String = "192.168.77.30") async throws -> UUID {
         let answer = await session.send("POST", "/api/v1/cameras", json: ["type": "automatic", "host": host, "username": "viewer", "password": "pw", "name": "North Sky"])
         return try #require(UUID(uuidString: answer.json["id"] as? String ?? ""), "\(answer.text)")
@@ -643,6 +655,8 @@ import TestSupport
         #expect(off["name"] as? String == "Sky Watcher" && off["enabled"] as? Bool == false)
         #expect(off["summary"] as? String == "Watches the sky with a camera pointed up and keeps a log of planes, satellites, meteors and anything it can’t explain.")
         #expect(!(off["needs"] as? String ?? "").isEmpty, "what it needs, in a sentence")
+        // Review Oct 31 (sky F9): it told of satellite orbits and online flights and weather, which Camera Bridge does not fetch.
+        #expect(off["internetNote"] as? String == "Works without the internet: planes come from a flight receiver on your network. Nothing leaves the box.")
         #expect(off["account"] == nil && off["lastSync"] == nil && off["lastError"] == nil, "no account, no sign-in and no sync")
 
         let on = await session.send("PATCH", "/api/v1/plugins/sky", json: ["enabled": true])

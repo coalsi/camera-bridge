@@ -194,6 +194,7 @@ enum CameraSetup {
                     throw SetupProblem(message: "This camera can’t use the local Wyze connection.", field: "wyze")
                 }
                 details[IntegrationSettings.Key.wyzeWay] = "local"
+                details[IntegrationSettings.Key.wyzeAddress] = address
                 return PreparedCamera(spec: spec, vendor: .go2rtc, endpoint: CameraEndpoint(host: "127.0.0.1"), username: "", password: "", mainStreamURL: nil,
                                       subStreamURL: nil, integration: IntegrationSettings(service: .wyze, details: details), secret: source.url, source: source)
             case "cloud", "gwell":
@@ -405,11 +406,12 @@ enum CameraSetup {
         return url
     }
 
-    /// User info pasted into a stream URL moves to the credential fields.
+    /// User info pasted into a stream URL moves to the credential fields (`URLComponents.user` and `.password` are decoded already: decoded again,
+    /// a password with `%` and two hex digits would be saved wrong).
     private static func moveCredentials(from text: inout String, username: inout String, password: inout String) {
         guard let components = URLComponents(string: text), components.user != nil || components.password != nil, let url = URL(string: text) else { return }
-        if username.isEmpty, let user = components.user, !user.isEmpty { username = user.removingPercentEncoding ?? user }
-        if password.isEmpty, let secret = components.password { password = secret.removingPercentEncoding ?? secret }
+        if username.isEmpty, let user = components.user, !user.isEmpty { username = user }
+        if password.isEmpty, let secret = components.password { password = secret }
         text = url.removingUserInfo.absoluteString
     }
 }

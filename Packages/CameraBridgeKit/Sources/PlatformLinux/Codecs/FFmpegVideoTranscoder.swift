@@ -222,8 +222,8 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
 
     var diagnostics: TranscoderDiagnostics {
         var diagnostics = TranscoderDiagnostics()
-        let (backend, bytes, size) = state.withLock { ($0.backend, $0.lastKeyframeBytes, $0.lastKeyframeSize) }
-        diagnostics.decoderIsHardware = false
+        let (backend, bytes, size, gpuDecode) = state.withLock { ($0.backend, $0.lastKeyframeBytes, $0.lastKeyframeSize, $0.run?.spec.decodeDevice != nil) }
+        diagnostics.decoderIsHardware = gpuDecode
         diagnostics.encoderIsHardware = backend.isHardware
         diagnostics.lastKeyframeBytes = bytes
         diagnostics.lastKeyframeWidth = size?.width
@@ -366,14 +366,27 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
 
     /// The child ended by itself: forget it, and wait for a keyframe to start another.
     private func handleEnd(of run: Run, state: inout State) {
-        if run.produced == 0, run.spec.backend.isHardware {
-            runtime.disableVAAPI(reason: run.session.exit?.summary ?? "no output")
-            state.backend = (try? runtime.videoBackend()) ?? state.backend
+        // Only a child that ended by itself says something about the GPU: one this transcoder (or `invalidate`) ended, or a write that failed
+        // while it still ran, does not.
+        if run.produced == 0, let exit = run.session.exit, !run.session.isTerminatedByOwner {
+            noteHardwareFailure(of: run.spec, sourceFormat: run.sourceFormat, exit: exit, state: &state)
         }
         run.session.terminate()
         live.withLock { $0 = nil }
         state.run = nil
         state.awaitingKeyframe = true
+    }
+
+    /// A child that ended before its first picture, on the GPU: when it decoded there, streams like this one are decoded in software for a
+    /// while (`FFmpegRuntime.noteHardwareDecodeFailure`) and the encoder stays; otherwise the hardware encoder is what failed, and the next
+    /// child encodes in software.
+    private func noteHardwareFailure(of spec: VideoPipelineSpec, sourceFormat: VideoFormat, exit: FFmpegExit?, state: inout State) {
+        if spec.decodeDevice != nil {
+            runtime.noteHardwareDecodeFailure(sourceFormat, reason: exit?.stderrTail.last)
+        } else if spec.backend.isHardware {
+            runtime.disableVAAPI(reason: exit?.summary ?? "no output")
+            state.backend = (try? runtime.videoBackend()) ?? state.backend
+        }
     }
 
     private func noteKeyframes(_ frames: [EncodedVideoFrame], state: inout State) {
@@ -439,6 +452,10 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
         // Half a millisecond before the newest picture's timestamp, so rounding never skips it.
         spec.skipBeforeSeconds = skipMs.map { (Double($0) - 0.5) / 1000 }
         spec.correction = remap
+        // A big picture is decoded and scaled on the GPU when it fits there (the warp of a correction needs it on the CPU).
+        if remap == nil, FFmpegVideoDecoder.isHeavy(sourceFormat), FFmpegVideoDecoder.fitsHardware(sourceFormat) {
+            spec.decodeDevice = runtime.hardwareDecodeDevice(for: sourceFormat)
+        }
         let arguments = FFmpegArguments.transcoder(spec)
         let process = FFmpegProcessSpec(executable: executable, arguments: arguments, label: "video transcoder")
         let session = try FFmpegSession(launcher: runtime.launcher, spec: process)
@@ -449,11 +466,8 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
         } catch {
             let ended = session.exit
             let failure = ended != nil ? session.failure : error
-            if let ended, spec.backend.isHardware {
-                // The hardware encoder did not even start: the next child encodes in software.
-                runtime.disableVAAPI(reason: ended.summary)
-                state.backend = (try? runtime.videoBackend()) ?? state.backend
-            }
+            // The child did not even start: the GPU's decoder or encoder refused, and the next child does that part in software.
+            if ended != nil, !session.isTerminatedByOwner { noteHardwareFailure(of: spec, sourceFormat: sourceFormat, exit: ended, state: &state) }
             session.terminate()
             throw failure
         }
@@ -461,6 +475,7 @@ final class FFmpegVideoTranscoder: VideoTranscoding, @unchecked Sendable {
         live.withLock { $0 = session }
         log.info("ffmpeg video transcoder started: \(sourceFormat.codec.rawValue) \(sourceFormat.width)×\(sourceFormat.height) → H.264 "
                  + "\(settings.width)×\(settings.height) @ \(settings.fps) fps, \(spec.bitrateKbps) kbit/s, \(spec.backend.description)"
+                 + (spec.decodeDevice == nil ? "" : ", decoded on the GPU")
                  + (remap == nil ? "" : ", straightened") + (drawText == nil ? "" : ", timestamp overlay")
                  + (skipMs == nil ? "" : ", caught up on \(frames.count) frames"))
     }

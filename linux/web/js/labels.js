@@ -2,16 +2,15 @@
 // clips (PlatformLinux/Codecs/OverlayScratch.swift `overlayLine`, MediaCore TimestampOverlay): "Front Door  |  Thu, Oct 2  7:42:15 PM", white
 // on a translucent black box, in the corner and size the camera's style says (`camera.timestampOverlay`). One look everywhere.
 
-const MAX_NAME = 28;
-const dateFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
-const timeFormats = new Map();
+// The time is the bridge's (store.js bridgeZone), as in the label it burns.
+import { bridgeZone } from './store.js';
+import { zonedFormat } from './zone.js';
 
-function timeFormat(seconds, hour24) {
-  const key = `${seconds}|${hour24}`;
-  if (!timeFormats.has(key)) {
-    timeFormats.set(key, new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), hour12: !hour24 }));
-  }
-  return timeFormats.get(key);
+const MAX_NAME = 28;
+const DATE = { weekday: 'short', month: 'short', day: 'numeric' };
+
+function timeFormat(seconds, hour24, zone) {
+  return zonedFormat({ hour: 'numeric', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), hour12: !hour24 }, zone);
 }
 
 /** The style of `camera`'s label (its timestamp overlay settings, with the bridge's defaults). */
@@ -23,11 +22,11 @@ export function labelStyle(camera) {
   };
 }
 
-/** The label's words for `camera` at `ms` (epoch milliseconds). */
-export function labelLine(camera, ms) {
+/** The label's words for `camera` at `ms` (epoch milliseconds), in `zone` (the bridge's when omitted). */
+export function labelLine(camera, ms, zone = bridgeZone()) {
   const style = labelStyle(camera);
-  let clock = timeFormat(style.showSeconds, style.use24Hour).format(ms).replace(/ /g, ' ');
-  if (style.showDate) clock = `${dateFormat.format(ms)}  ${clock}`;
+  let clock = timeFormat(style.showSeconds, style.use24Hour, zone).format(ms).replace(/ /g, ' ');
+  if (style.showDate) clock = `${zonedFormat(DATE, zone).format(ms)}  ${clock}`;
   const name = (camera?.name ?? '').trim();
   if (!style.showCameraName || !name) return clock;
   return `${name.length > MAX_NAME ? `${name.slice(0, MAX_NAME - 1)}…` : name}  |  ${clock}`;

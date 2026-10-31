@@ -119,7 +119,7 @@ public struct InternetGuardAlert: Sendable, Equatable {
     }
     public var detail: String {
         switch kind {
-        case .firstTry: "Camera Bridge blocked it. Nothing got out."
+        case .firstTry: "Camera Bridge blocked its lookup. A camera can still try an address it already knows, which the guard can’t see."
         case .stoppedAsking: "\(cameraName) no longer asks Camera Bridge for its lookups. Run Set up for Camera Bridge again to watch it."
         }
     }

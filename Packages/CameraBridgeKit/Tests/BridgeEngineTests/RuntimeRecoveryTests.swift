@@ -255,6 +255,148 @@ final class FakeInstanceLock: InstanceLocking {
         await fixture.tearDown()
     }
 
+    /// Review finding (engine-core F1): the heartbeat's restart gave up on the old runtime's stop after 5 s and started the new one, but
+    /// the old stop shut the accessory server before the camera's streams (a hung server left both RTSP sessions connected beside the new
+    /// runtime's), and when it finally ended it set the camera idle under the new runtime: Home showed no live view until the stream changed
+    /// state again. The streams now close first, and the late stop changes nothing.
+    @MainActor @Test(.timeLimit(.minutes(1))) func aRestartWhoseOldStopHangsLeavesNoStreamBehindAndKeepsTheNewRuntimeOnline() async throws {
+        let heartbeats = Gate(), accessoryStop = Gate()
+        let camera = EngineFixture.demoCamera(name: "Slow")
+        var tuning = Self.tuning
+        tuning.runtimeHeartbeatDeadline = .milliseconds(150)
+        tuning.runtimeStopLimit = .milliseconds(300)
+        let answering = Box(false), firstStop = Box(true)
+        tuning.runtimeHeartbeat = { _ in if !answering.value { await heartbeats.wait() } }
+        tuning.beforeAccessoryStop = { _ in
+            guard firstStop.value else { return }
+            firstStop.set(false)
+            await accessoryStop.wait()
+        }
+        let fixture = try await EngineFixture(tuning: tuning)
+        let engine = fixture.engine
+        try await engine.addCamera(camera, password: nil)
+        await engine.start()
+        #expect(await fixture.waitFor { fixture.status(camera.id)?.connection == .online && fixture.status(camera.id)?.hapPort != nil })
+        let old = try #require(engine.runtimes[camera.id])
+
+        for _ in 0..<3 { await engine.heartbeatRound() }
+        answering.set(true)
+        heartbeats.open()
+        let new = try #require(engine.runtimes[camera.id])
+        #expect(new !== old, "restarted")
+        let mainRunning = await old.isMainStreamRunning, subRunning = await old.isSubStreamRunning
+        #expect(!mainRunning && !subRunning, "the old runtime's streams closed before its accessory")
+        #expect(await fixture.waitFor { fixture.status(camera.id)?.connection == .online })
+
+        // The old stop ends now: the new runtime's camera stays online.
+        accessoryStop.open()
+        #expect(await fixture.waitFor { engine.recentLogs.contains { $0.message == "Stopped Slow" } })
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(fixture.status(camera.id)?.connection == .online)
+        #expect(await engine.router.state(for: camera.id)?.streamConnection == .online)
+        await fixture.tearDown()
+    }
+
+    /// Review finding (engine-core F1): a bridge frozen or too busy for every camera to answer in time restarted them all at once, which
+    /// only added to its load. A round most cameras missed counts for none.
+    @MainActor @Test(.timeLimit(.minutes(1))) func aRoundMostCamerasMissIsTheBridgesStallAndRestartsNone() async throws {
+        let gate = Gate()
+        var tuning = Self.tuning
+        tuning.runtimeHeartbeatDeadline = .milliseconds(150)
+        tuning.runtimeHeartbeat = { _ in await gate.wait() }
+        let fixture = try await EngineFixture(tuning: tuning)
+        let engine = fixture.engine
+        let cameras = ["One", "Two", "Three"].map { EngineFixture.demoCamera(name: $0) }
+        for camera in cameras { try await engine.addCamera(camera, password: nil) }
+        await engine.start()
+        #expect(await fixture.waitFor { cameras.allSatisfy { fixture.status($0.id)?.hapPort != nil } })
+        let before = cameras.map { engine.runtimes[$0.id] }
+
+        for _ in 0..<4 { await engine.heartbeatRound() }
+        #expect(zip(cameras, before).allSatisfy { engine.runtimes[$0.id] === $1 }, "none restarted")
+        #expect(engine.recentLogs.contains { $0.message.contains("3 of 3 cameras did not answer") && $0.message.contains("too busy") })
+        gate.open()
+        await fixture.tearDown()
+    }
+
+    /// Review finding (engine-core F2): only the heartbeat bounded a runtime's stop. A stop that never returned, under a camera edit or a
+    /// pause, held the engine's operations for good: every later save, edit and reconnect waited forever, and nothing restarted the daemon.
+    @MainActor @Test(.timeLimit(.minutes(1))) func aStopThatNeverReturnsHoldsNoOperationForGood() async throws {
+        let never = Gate()
+        let camera = EngineFixture.demoCamera(name: "Hung")
+        var tuning = Self.tuning
+        tuning.runtimeStopLimit = .milliseconds(300)
+        tuning.beforeAccessoryStop = { _ in await never.wait() }
+        let fixture = try await EngineFixture(tuning: tuning)
+        let engine = fixture.engine
+        try await engine.addCamera(camera, password: nil)
+        await engine.start()
+        #expect(await fixture.waitFor { fixture.status(camera.id)?.connection == .online })
+
+        // An edit that restarts the camera.
+        var edited = try #require(engine.configurations.first)
+        edited.endpoint.httpPort = 8081
+        let started = ContinuousClock.now
+        try await engine.updateCamera(edited, password: "new")
+        #expect(ContinuousClock.now - started < .seconds(5))
+        #expect(engine.recentLogs.contains { $0.level == .warning && $0.message.contains("Hung did not finish stopping") })
+        try await engine.updateSettings { $0.logLevel = .debug }   // the next operation runs
+        #expect(engine.settings.logLevel == .debug)
+
+        // A pause stops every camera within the limit too.
+        let pausing = ContinuousClock.now
+        await engine.pause()
+        #expect(engine.state == .paused)
+        #expect(ContinuousClock.now - pausing < .seconds(5))
+        never.open()
+        await fixture.tearDown()
+    }
+
+    /// Review finding (engine-core F10): a paired camera that was renamed (in place: a restart would close its recording) kept its old name in
+    /// its own log ("Front main stream offline …") until the next restart. The running camera takes the new name in place.
+    @MainActor @Test(.timeLimit(.minutes(1))) func aRenamedPairedCameraLogsUnderItsNewNameWithoutARestart() async throws {
+        let fixture = try await EngineFixture(tuning: Self.tuning)
+        let engine = fixture.engine
+        try await engine.addCamera(EngineFixture.demoCamera(name: "Front"), password: nil)
+        await engine.start()
+        let id = try #require(engine.configurations.first?.id)
+        #expect(await fixture.waitFor { fixture.status(id)?.connection == .online && fixture.status(id)?.hapPort != nil })
+        let status = try #require(fixture.status(id))
+        let controller = try await HAPTestController.paired(port: try #require(status.hapPort), setupCode: status.setupCode)
+        #expect(await fixture.waitFor { fixture.status(id)?.isPaired == true })
+        let runtime = try #require(engine.runtimes[id])
+        try await engine.updateCamera(id: id, password: nil) { $0.name = "Driveway" }
+        #expect(engine.runtimes[id] === runtime, "not restarted")
+        #expect(runtime.name == "Driveway")
+        #expect(await runtime.streamNames.main == "Driveway main stream")
+        await controller.close()
+        await fixture.tearDown()
+    }
+
+    /// Improvement (engine-core I2, engine-events I1): an offline camera was visible only to someone who opened the Monitor. Its status says
+    /// since when it is offline, for the "camera is offline" notice; the time is kept while it stays offline and cleared once it is back.
+    @MainActor @Test(.timeLimit(.minutes(1))) func anOfflineCameraSaysSinceWhen() async throws {
+        let fixture = try await EngineFixture(tuning: Self.tuning)
+        let engine = fixture.engine
+        try await engine.addCamera(EngineFixture.demoCamera(name: "Porch"), password: nil)
+        await engine.start()
+        let id = try #require(engine.configurations.first?.id)
+        #expect(await fixture.waitFor { fixture.status(id)?.connection == .online })
+        #expect(fixture.status(id)?.offlineSince == nil)
+        let before = Date()
+        await engine.router.setStreamConnection(.offline("the camera did not answer"), for: id)
+        await engine.refreshStatus()
+        let since = try #require(fixture.status(id)?.offlineSince)
+        #expect(since >= before.addingTimeInterval(-1))
+        await engine.router.setStreamConnection(.offline("the connection was refused"), for: id)
+        await engine.refreshStatus()
+        #expect(fixture.status(id)?.offlineSince == since, "still the same outage")
+        await engine.router.setStreamConnection(.online, for: id)
+        await engine.refreshStatus()
+        #expect(fixture.status(id)?.offlineSince == nil)
+        await fixture.tearDown()
+    }
+
     // MARK: - New install defaults
 
     private func power(hasBattery: Bool) -> RecordingPowerManager {

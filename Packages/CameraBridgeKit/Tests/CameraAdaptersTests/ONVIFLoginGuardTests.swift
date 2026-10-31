@@ -1,6 +1,7 @@
 import BridgeSupport
 import Foundation
 import Testing
+import TestSupport
 @testable import CameraAdapters
 
 @Suite struct ONVIFLoginGuardTests {
@@ -118,6 +119,66 @@ import Testing
             if case CameraAdapterError.loginsPaused = error { true } else { false }
         }
         #expect(camera.server.requests.count == sent, "nothing is sent while the logins are paused")
+    }
+}
+
+/// Review Oct 31 (adapters F3): the driver's long-lived client measured the camera's clock once. After the camera's clock moved (Camera
+/// Bridge's own "Time from the bridge", or a drift), every WS-Security `Created` it sent was off, the camera answered `NotAuthorized`, and
+/// that counted as a wrong password: logins paused for 2 minutes and the event channel stopped. The clock is measured again every 10 minutes,
+/// and before a refusal counts; a real wrong password still costs exactly one attempt.
+@Suite(.timeLimit(.minutes(1))) struct ONVIFClockStepTests {
+    private func started() async throws -> (MockONVIFCamera, URL, String) {
+        let camera = try await MockONVIFCamera.start(clockOffset: 600)   // ten minutes fast
+        camera.createdTolerance.set(300)
+        let host = "127.0.0.1:\(camera.server.port)"
+        ONVIFLoginGuard.shared.clear(host: host)
+        return (camera, try #require(ONVIFClient.deviceServiceURL(for: camera.endpoint)), host)
+    }
+
+    private func count(_ camera: MockONVIFCamera, _ action: String) -> Int { camera.actions.value.filter { $0 == action }.count }
+
+    @Test func aCameraWhoseClockWasSetIsAskedForItsTimeBeforeTheRefusalCounts() async throws {
+        let (camera, url, host) = try await started()
+        defer { camera.stop(); ONVIFLoginGuard.shared.clear(host: host) }
+        let now = Box(Date())
+        let client = ONVIFClient(deviceServiceURL: url, credentials: HTTPCredentials(username: MockONVIFCamera.username, password: MockONVIFCamera.password),
+                                 now: { now.value })
+        _ = try await client.systemDateAndTime()
+        _ = try await client.deviceInformation()
+        // The camera's clock is set right (ten minutes back) a while later.
+        camera.clockShift.set(-600)
+        now.set(now.value.addingTimeInterval(120))
+        _ = try await client.deviceInformation()
+        #expect(count(camera, "GetSystemDateAndTime") == 2, "asked once more, before the refusal counted")
+        #expect(count(camera, "GetDeviceInformation") == 3, "and the call was made again with the camera's time")
+        #expect(ONVIFLoginGuard.shared.pause(host: host) == nil, "no wrong password: nothing pauses")
+    }
+
+    @Test func aWrongPasswordStillCostsOneAttempt() async throws {
+        let (camera, url, host) = try await started()
+        defer { camera.stop(); ONVIFLoginGuard.shared.clear(host: host) }
+        let now = Box(Date())
+        let client = ONVIFClient(deviceServiceURL: url, credentials: HTTPCredentials(username: MockONVIFCamera.username, password: "wrong"), now: { now.value })
+        _ = try await client.systemDateAndTime()
+        now.set(now.value.addingTimeInterval(120))
+        await #expect(throws: CameraAdapterError.unauthorized) { try await client.deviceInformation() }
+        #expect(count(camera, "GetDeviceInformation") == 1, "the clock did not move: no second attempt")
+        #expect(ONVIFLoginGuard.shared.pause(host: host) != nil)
+    }
+
+    @Test func theDriversClientKeepsTheCameraClockInStep() async throws {
+        let (camera, url, host) = try await started()
+        defer { camera.stop(); ONVIFLoginGuard.shared.clear(host: host) }
+        let now = Box(Date())
+        let client = ONVIFClient(deviceServiceURL: url, credentials: HTTPCredentials(username: MockONVIFCamera.username, password: MockONVIFCamera.password),
+                                 keepsClockInStep: true, now: { now.value })
+        _ = try await client.deviceInformation()
+        #expect(camera.actions.value.prefix(2) == ["GetSystemDateAndTime", "GetDeviceInformation"], "its first call measures the clock")
+        _ = try await client.deviceInformation()
+        #expect(count(camera, "GetSystemDateAndTime") == 1)
+        now.set(now.value.addingTimeInterval(11 * 60))
+        _ = try await client.deviceInformation()
+        #expect(count(camera, "GetSystemDateAndTime") == 2, "measured again after ten minutes")
     }
 }
 #endif

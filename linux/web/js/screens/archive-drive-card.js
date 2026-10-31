@@ -3,7 +3,7 @@
 // GET nvr/storage (`archive`). The System page owns the requests; this only builds the card.
 import { h, spinner } from '../dom.js';
 import { icon } from '../icons.js';
-import { bytes, sizeText } from '../format.js';
+import { bytes, dateTime, sizeText } from '../format.js';
 
 // MARK: The words (the Recording card in Settings says the same)
 
@@ -51,8 +51,6 @@ export const ARCHIVE_STATES = {
   failed: 'The last attempt did not work.',
 };
 
-const when = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-
 /** The sentence a person types to erase a disk for the archive: the same as for the recording drive and the installer. */
 export function archivePhrase(disk) { return disk.phrase || `ERASE ALL DATA ON ${disk.name}`; }
 
@@ -61,7 +59,7 @@ export function archivePhrase(disk) { return disk.phrase || `ERASE ALL DATA ON $
  * `busy`: the page's running action; `cameraName(id)`; `load()`, `use(disk, keepData)`, `forget()`: the page's actions.
  */
 export function archiveCardFor({ archives = null, storage = null, busy = '', cameraName = () => null, load, use, forget }) {
-  const view = describeArchive(storage?.archive ?? null, { when: (ms) => when.format(new Date(ms)), cameraName: (move) => move.cameraName || cameraName(move.cameraID) });
+  const view = describeArchive(storage?.archive ?? null, { when: (ms) => dateTime(ms), cameraName: (move) => move.cameraName || cameraName(move.cameraID) });
   const chosen = archives && (archives.state === 'mounted' || archives.state === 'missing');
   const row = (k, v) => (v ? [h('dt', null, k), h('dd', null, v)] : null);
   return h('div', { class: 'card archive-drive' }, h('h2', null, 'Archive drive'),

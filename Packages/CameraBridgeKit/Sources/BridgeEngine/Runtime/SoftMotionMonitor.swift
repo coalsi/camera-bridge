@@ -110,19 +110,38 @@ actor SoftMotionMonitor {
         }
     }
 
+    /// The decoder makes a picture of every `keepEvery(frameRate:)`th frame: about `analysisInterval`'s four a second and never fewer (1 while
+    /// the stream's rate is not known; `analysisInterval` stays the gate).
+    static func keepEvery(frameRate: Double?) -> Int {
+        guard let frameRate, frameRate.isFinite, frameRate > 0 else { return 1 }
+        let perSecond = 1 / analysisInterval.timeInterval
+        return max(1, Int((frameRate / perSecond).rounded(.down)))
+    }
+
     private func run() async {
         let subscription = await hub.subscribe(from: .nextKeyframe, bufferLimit: 120)
         defer { subscription.cancel() }
         var decoder: (any VideoDecoding)?
         var decoderFormat: VideoFormat?
+        var decoderKeepEvery = 1
         var warned = false
         for await sample in subscription.samples {
             guard case .video(let frame) = sample, !Task.isCancelled else { continue }
-            if decoderFormat != frame.format {
+            // A new decoder at a keyframe: for a new format, once the stream's rate is known (the first is made before it is), and when the
+            // rate fell so far that it would make fewer than four pictures a second (a camera that slows down at night). A rate that rose
+            // keeps the decoder: the time gate drops the extra pictures.
+            var keep = decoderKeepEvery
+            if frame.isKeyframe {
+                let rate = await hub.measuredFrameRate
+                let tooFew = rate.map { $0 / Double(decoderKeepEvery) < 1 / Self.analysisInterval.timeInterval } ?? false
+                if decoderFormat != frame.format || decoderKeepEvery == 1 || tooFew { keep = Self.keepEvery(frameRate: rate) }
+            }
+            if decoderFormat != frame.format || keep != decoderKeepEvery {
                 guard frame.isKeyframe else { continue }
                 decoder?.invalidate()
-                decoder = try? codecs.makeMotionDecoder(format: frame.format)
+                decoder = try? codecs.makeMotionDecoder(format: frame.format, keepEvery: keep)
                 decoderFormat = frame.format
+                decoderKeepEvery = keep
             }
             guard let decoder else { continue }
             do {

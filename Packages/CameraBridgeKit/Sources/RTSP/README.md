@@ -51,8 +51,15 @@ HTTP-FLV through `AuthenticatingHTTPClient.stream(for:)`. Owner: W1-5 (also `Tes
   (`RTSPError.timeout`: no video RTP packet for `configuration.timeout` — audio and RTCP do not count — or no
   deliverable video frame for max(3 × `timeout`, 30 s)), HTTP errors, EOF or `timeout` without data (FLV). Dropping
   or cancelling an RTSP stream closes its session. Streams buffer at most 1024 samples (`SampleDelivery`) for a slow
-  consumer: newer samples are then dropped and video resumes at the next keyframe. Backchannel audio is dropped
-  once 1 MiB waits for a camera that stopped reading.
+  consumer: newer samples are then dropped and video resumes at the next keyframe (warned once, and again when dropping starts after
+  a minute without). Backchannel audio is dropped once 1 MiB waits for a camera that stopped reading.
+- Long sessions (2026-10-31): the audio is kept on the video's clock (`AudioDriftTracker`). Each minute the floor of arrival − pts of
+  each track is compared with the first minute's; once the audio drifted more than 100 ms (a camera stamping audio by sample count
+  and video by its system timer: 10 ppm is 0.9 s a day), its origin is eased back at most 40 ms a minute until it is within 20 ms
+  (logged at most once an hour). A frozen stretch of the video (a lost packet holds the picture until the next keyframe) is logged,
+  the first at once and later ones as a summary at most every 5 minutes, and counted: `StreamHealth` (lost packets, frozen
+  stretches and seconds, pictures dropped, re-timed steps, consumer drops, the audio eased), from `RTSPClient.health` and
+  `RTSPMediaSource.health()`.
 - Backchannel: `Require: www.onvif.org/ver20/backchannel` on DESCRIBE/SETUP/PLAY (DESCRIBE retried without it on
   551); the `sendonly` audio section is set up (without the `Require`, `sendonly` audio is the camera's own audio); G.711 in ≤ 1024-byte packets, AAC as RFC 3640 AAC-hbr; RTP
   timestamps advance by samples sent; the SSRC from the SETUP `Transport` is used when given.
@@ -69,7 +76,8 @@ HTTP-FLV through `AuthenticatingHTTPClient.stream(for:)`. Owner: W1-5 (also `Tes
 
 `RTSPConfiguration.backchannelOnly`; `RTSPConfiguration.cameraID` (tags the client's log lines, depacketizers
 included, with the camera); `RTSPConfiguration.streamCredentials` (2026-10-18: the stream URLs with their query credentials, for
-the request lines); `RTSPTrack.init`; `RTSPSessionInfo.init`; `RTSPMediaSource.sessionInfo`;
+the request lines); `RTSPTrack.init`; `RTSPSessionInfo.init`; `RTSPMediaSource.sessionInfo`; `StreamHealth`, `RTSPClient.health`,
+`RTSPMediaSource.health()` (2026-10-31);
 `HTTPFLVMediaSource.init(url:credentials:displayName:timeout:cameraID:)` (`cameraID` likewise, default nil); `SDPSession.attributes`, `.control`,
 `init(media:attributes:)`; `SDPMedia.proto`, `.control`, `attributeValues(_:)`, `rtpmap(for:)`, `fmtp(for:)`;
 `SDPRTPMap`. Not supported: MP4A-LATM, Opus/L16 ingest, UDP transport, MJPEG video (`unsupportedCodec`).

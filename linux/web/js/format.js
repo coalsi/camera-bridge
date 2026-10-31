@@ -1,4 +1,6 @@
-// Words for numbers and dates.
+// Words for numbers and dates. Times of day are said in the bridge's time zone (store.js bridgeZone).
+import { bridgeZone } from './store.js';
+import { zonedFormat } from './zone.js';
 
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 
@@ -15,9 +17,25 @@ export function timeAgo(value, now = Date.now()) {
   return 'just now';
 }
 
-export function clock(value) {
-  const date = typeof value === 'string' ? new Date(value) : value;
-  return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+/** "14:02:11": the time of day of a date, an ISO text or epoch milliseconds, in `zone` (the bridge's when omitted). */
+export function clock(value, zone = bridgeZone()) {
+  const ms = typeof value === 'string' ? Date.parse(value) : value instanceof Date ? value.getTime() : value;
+  if (!Number.isFinite(ms)) return '';
+  return zonedFormat({ hour: '2-digit', minute: '2-digit', second: '2-digit' }, zone).format(ms);
+}
+
+/** "9:40 PM": the hour and minute of a date, an ISO text or epoch milliseconds, in `zone` (the bridge's when omitted); '' for one that is not a time. */
+export function timeOfDay(value, zone = bridgeZone()) {
+  const ms = typeof value === 'string' ? Date.parse(value) : value instanceof Date ? value.getTime() : value;
+  if (!Number.isFinite(ms)) return '';
+  return zonedFormat({ hour: 'numeric', minute: '2-digit' }, zone).format(ms);
+}
+
+/** "Oct 31, 2026, 2:14 PM": a date and time in `zone` (the bridge's when omitted); '' for one that is not a time. */
+export function dateTime(value, zone = bridgeZone()) {
+  const ms = typeof value === 'string' ? Date.parse(value) : value instanceof Date ? value.getTime() : value;
+  if (!Number.isFinite(ms)) return '';
+  return zonedFormat({ dateStyle: 'medium', timeStyle: 'short' }, zone).format(ms);
 }
 
 /** 93784 -> "1 day 2 hours" */

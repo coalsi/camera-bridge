@@ -304,10 +304,13 @@ final class SupervisedEventSource: CameraEventSource, Sendable {
     private let holds: EventHoldState
     private let state: Mutex<State>
     private let waker = ReconnectWaker()
+    /// `videoResumed(downSince:)`: what the source does when the camera's video came back after an outage (nil: nothing).
+    private let onVideoResumed: (@Sendable (ContinuousClock.Instant) -> Void)?
 
     init(label: String, cameraID: UUID? = nil, policy: ReconnectPolicy = ReconnectPolicy(), ringDedupe: Duration = .seconds(3),
          unreliableAfterShortSessions: Int? = nil, onStop: (@Sendable () async -> Void)? = nil, reachability: CameraReachability? = nil,
-         session: @escaping Session) {
+         onVideoResumed: (@Sendable (ContinuousClock.Instant) -> Void)? = nil, session: @escaping Session) {
+        self.onVideoResumed = onVideoResumed
         self.reachability = reachability
         self.label = label
         self.policy = policy
@@ -362,6 +365,11 @@ final class SupervisedEventSource: CameraEventSource, Sendable {
 
     func credentialsConfirmed() {
         waker.wake()
+    }
+
+    func videoResumed(downSince: ContinuousClock.Instant) {
+        guard !state.withLock({ $0.stopped }) else { return }
+        onVideoResumed?(downSince)
     }
 
     func stop() async {

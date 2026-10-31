@@ -120,6 +120,7 @@ public struct SensorState: Sendable, Equatable, Identifiable {
         status.motionActive = motion
         status.lastEvent = lastEvent
         status.lastEventDate = lastEventDate
+        status.lastRingDate = lastRingDate
         status.recentEvents = recentEvents
         status.lastError = lastError
     }

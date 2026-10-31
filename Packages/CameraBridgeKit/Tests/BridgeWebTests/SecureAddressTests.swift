@@ -233,6 +233,90 @@ final class FakeBoxServer: BoxTransport {
         #expect(SecureAddressState.load(from: rig.directory.url).redirect == false)
     }
 
+    @Test func theSecureAddressCanBeSwitchedOffAndThenCallsNobody() async throws {
+        let rig = try rig()
+        defer { rig.directory.remove() }
+        rig.system.certificate.set(CertificateStatus(state: "none"))
+        await rig.service.setEnabled(false)
+        await rig.service.tick()
+        await rig.service.retryNow()
+        #expect(rig.server.seen.value.isEmpty, "no registration, no address, no certificate while it is off")
+        #expect(rig.system.obtained.value.isEmpty)
+        var report = await rig.service.report()
+        #expect(report.enabled == false && report.state == "off" && report.redirectActive == false && report.problem == nil)
+        #expect(SecureAddressState.load(from: rig.directory.url).enabled == false, "kept across a restart")
+        await rig.service.setEnabled(true)
+        #expect(rig.server.seen.value.contains { $0.path.hasSuffix("/register") }, "switched on: it starts at once")
+        report = await rig.service.report()
+        #expect(report.enabled && report.host == "k7f2q9.box.camera-bridge.app")
+    }
+
+    @Test func whileOffAValidCertificateDoesNotRedirect() async throws {
+        let rig = try rig()
+        defer { rig.directory.remove() }
+        let host = "k7f2q9.box.camera-bridge.app"
+        rig.system.certificate.set(CertificateStatus(state: "ready", host: host, notAfter: Self.now.addingTimeInterval(60 * 86_400)))
+        await rig.service.tick()
+        #expect(rig.service.snapshot.current.redirect && rig.service.snapshot.current.certificateValid)
+        await rig.service.setEnabled(false)
+        #expect(!rig.service.snapshot.current.redirect, "the name is no longer kept up to date, so browsers are not sent to it")
+        #expect(rig.service.snapshot.current.host == host, "its own name is still allowed while the certificate lasts")
+    }
+
+    @Test func noInternetIsWaitingRatherThanAnError() async throws {
+        let rig = try rig()
+        defer { rig.directory.remove() }
+        rig.system.certificate.set(CertificateStatus(state: "none"))
+        rig.server.unreachable.set(true)
+        await rig.service.tick()
+        let report = await rig.service.report()
+        #expect(report.state == "waiting" && report.problem?.code == "no_internet")
+        #expect(report.problem?.message.hasPrefix("Waiting for the internet") == true)
+    }
+
+    @Test func aRegistrationAnswerThatIsNotABoxNameIsRefused() async throws {
+        for answer in [#"{"name":"k7f2q9","host":"evil.example"}"#, #"{"name":"K7F2Q9","host":"K7F2Q9.box.camera-bridge.app"}"#,
+                       #"{"name":"k7","host":"k7.box.camera-bridge.app"}"#, #"{"name":"k7f2q9","host":"k7f2q9.box.camera-bridge.app.evil.example"}"#,
+                       #"{"name":"k7f2q9","host":"other1.box.camera-bridge.app"}"#] {
+            let rig = try rig()
+            defer { rig.directory.remove() }
+            rig.system.certificate.set(CertificateStatus(state: "none"))
+            rig.server.registerAnswer.set((201, answer))
+            await rig.service.tick()
+            let report = await rig.service.report()
+            #expect(report.host == nil && rig.service.snapshot.current.host == nil, "never an allowed Host or the page's link: \(answer)")
+            #expect(report.problem?.code == "refused")
+            #expect(!rig.server.seen.value.contains { $0.path.hasSuffix("/address") })
+        }
+        #expect(SecureAddressRules.isBoxName("k7f2q9") && SecureAddressRules.isBoxHost("k7f2q9.box.camera-bridge.app", name: "k7f2q9"))
+    }
+
+    @Test func aSavedHostThatIsNotABoxNameIsForgotten() async throws {
+        let directory = try TemporaryDirectory(prefix: "cb-secure")
+        defer { directory.remove() }
+        SecureAddressState(name: "k7f2q9", host: "evil.example", address: "192.168.77.5").save(to: directory.url)
+        let service = SecureAddressService(backend: FakeBackend(), system: FakeSystem(), directory: directory.url)
+        #expect(service.snapshot.current.host == nil)
+        #expect(await service.report().host == nil)
+    }
+
+    @Test func twoRebindTestsAtOnceLookUpOnce() async throws {
+        let lookups = Box(0)
+        let rig = try rig(resolver: { name in
+            lookups.update { $0 += 1 }
+            try? await Task.sleep(for: .milliseconds(200))
+            return name == "k7f2q9.box.camera-bridge.app" ? ["192.168.77.5"] : []
+        })
+        defer { rig.directory.remove() }
+        rig.system.certificate.set(CertificateStatus(state: "none"))
+        await rig.service.tick()
+        async let first = rig.service.checkRebind()
+        async let second = rig.service.checkRebind()
+        let (a, b) = await (first, second)
+        #expect(a.state == "ok" && b == a)
+        #expect(lookups.value == 1, "the second page waits for the first one's answer")
+    }
+
     @Test func theRebindTestTellsARouterThatHidesTheNameFromAnOpenOne() async throws {
         let host = "k7f2q9.box.camera-bridge.app"
         for (answers, expected) in [([host: ["192.168.77.5"]], "ok"), ([host: ["192.168.77.6"]], "wrong_address"),
@@ -346,6 +430,67 @@ final class FakeBoxServer: BoxTransport {
         #expect(await setup(secure: true).hasSuffix("; Secure"))
     }
 
+    /// On HTTPS the cookie is `__Host-cb_session`: a cookie with that prefix cannot be set with a `Domain`, so a sibling under
+    /// camera-bridge.app (not on the Public Suffix List) cannot shadow it. A browser signed in before keeps its `cb_session`, and is moved over.
+    @Test func overHTTPSTheCookieCannotBeShadowedByASiblingName() async throws {
+        let harness = try Harness()
+        defer { harness.directory.remove() }
+        // A browser signed in on plain HTTP has `cb_session`.
+        let plain = try await harness.signIn()
+        let token = String(plain.cookie.dropFirst("cb_session=".count))
+        harness.system.certificate.set(CertificateStatus(state: "ready", host: "k7f2q9.box.camera-bridge.app", notAfter: Date().addingTimeInterval(40 * 86_400)))
+        SecureAddressState(name: "k7f2q9", host: "k7f2q9.box.camera-bridge.app", address: "192.168.77.5").save(to: harness.directory.url)
+        let app = WebApp(configuration: WebConfiguration(dataDirectory: harness.directory.url, port: 0, loopbackOnly: true, passwordIterations: 1_000),
+                         backend: harness.backend, system: harness.system, logs: harness.logs)
+        _ = await app.secureAddress.report()
+        func ask(_ method: String, _ path: String, cookie: String? = nil, csrf: String? = nil, json: String? = nil) async -> HTTPResponse {
+            var headers = HTTPHeaders([("Host", "k7f2q9.box.camera-bridge.app"), ("X-Forwarded-Proto", "https"), ("X-Forwarded-For", "192.168.77.20")])
+            if let cookie { headers.add("Cookie", cookie) }
+            if let csrf { headers.add("X-CSRF-Token", csrf) }
+            if json != nil { headers.add("Content-Type", "application/json"); headers.add("Origin", "https://k7f2q9.box.camera-bridge.app") }
+            return await app.handle(HTTPRequest(method: method, target: path, headers: headers, body: Data((json ?? "").utf8), remoteAddress: "127.0.0.1"))
+        }
+        // Over HTTPS, signing in sets the prefixed name.
+        let login = await ask("POST", "/api/v1/auth/login", json: #"{"password":"correct horse"}"#)
+        let set = login.headers.values(for: "Set-Cookie")
+        #expect(set.first?.hasPrefix("__Host-cb_session=") == true && set.first?.contains("Path=/") == true && set.first?.hasSuffix("; Secure") == true)
+        #expect(set.first?.contains("Domain") == false)
+        // The old name still signs in over HTTPS (a browser signed in before the change), and is moved to the new one.
+        let old = await ask("GET", "/api/v1/settings", cookie: "cb_session=\(token)")
+        #expect(old.status == 200)
+        let moved = old.headers.values(for: "Set-Cookie")
+        #expect(moved.contains { $0.hasPrefix("__Host-cb_session=\(token);") && $0.hasSuffix("; Secure") })
+        #expect(moved.contains { $0.hasPrefix("cb_session=;") && $0.contains("Max-Age=0") })
+        // A `cb_session` a sibling host set does not shadow the real one.
+        let shadowed = await ask("GET", "/api/v1/settings", cookie: "cb_session=\(Secrets.randomToken()); __Host-cb_session=\(token)")
+        #expect(shadowed.status == 200)
+        // Signing out clears both names.
+        let out = await ask("POST", "/api/v1/auth/logout", cookie: "__Host-cb_session=\(token)", csrf: plain.csrf, json: "{}")
+        #expect(out.status == 204)
+        let cleared = out.headers.values(for: "Set-Cookie")
+        #expect(cleared.contains { $0.hasPrefix("__Host-cb_session=;") } && cleared.contains { $0.hasPrefix("cb_session=;") })
+        // On plain HTTP the name stays `cb_session` (`__Host-` needs Secure).
+        #expect(await harness.send("POST", "/api/v1/auth/login", json: ["password": "correct horse"]).cookie?.hasPrefix("cb_session=") == true)
+    }
+
+    @Test func theSetupHotspotIsAskedOnlyForAPageThatCouldBeRedirected() async throws {
+        let harness = try Harness()
+        defer { harness.directory.remove() }
+        harness.system.certificate.set(CertificateStatus(state: "ready", host: "k7f2q9.box.camera-bridge.app", notAfter: Date().addingTimeInterval(40 * 86_400)))
+        SecureAddressState(name: "k7f2q9", host: "k7f2q9.box.camera-bridge.app", address: "192.168.77.5").save(to: harness.directory.url)
+        let app = WebApp(configuration: WebConfiguration(dataDirectory: harness.directory.url, port: 0, loopbackOnly: true, passwordIterations: 1_000),
+                         backend: harness.backend, system: harness.system, logs: harness.logs)
+        _ = await app.secureAddress.report()
+        harness.system.hotspotAsks.set(0)
+        for path in ["/api/v1/health", "/api/v1/status", "/app.js"] {
+            _ = await app.handle(HTTPRequest(method: "GET", target: path, headers: HTTPHeaders([("Host", "camera-bridge.local"), ("Accept", "*/*")]), remoteAddress: "192.168.77.20"))
+        }
+        #expect(harness.system.hotspotAsks.value == 0, "every fragment, picture and file read the hotspot's status file from disk before")
+        let page = await app.handle(HTTPRequest(method: "GET", target: "/", headers: HTTPHeaders([("Host", "camera-bridge.local"), ("Accept", "text/html")]),
+                                                remoteAddress: "192.168.77.20"))
+        #expect(page.status == 302 && harness.system.hotspotAsks.value == 1)
+    }
+
     @Test func theRoutesAnswerForASignedInPerson() async throws {
         let harness = try Harness()
         defer { harness.directory.remove() }
@@ -354,6 +499,8 @@ final class FakeBoxServer: BoxTransport {
         #expect(report.status == 200 && report.json["available"] as? Bool == false)
         report = await session.send("POST", "/api/v1/system/secure-address/redirect", json: ["enabled": false])
         #expect(report.status == 200 && report.json["redirect"] as? Bool == false)
+        report = await session.send("POST", "/api/v1/system/secure-address/enabled", json: ["enabled": false])
+        #expect(report.status == 200 && report.json["enabled"] as? Bool == false && report.json["state"] as? String == "off")
         let check = await session.send("POST", "/api/v1/system/secure-address/check", json: [:])
         #expect(check.status == 200 && (check.json["rebind"] as? [String: Any])?["state"] as? String == "no_internet")
         #expect(await harness.send("GET", "/api/v1/system/secure-address").status == 401)

@@ -463,7 +463,7 @@ reboot_vm() {
 }
 
 run_update_test() {
-    local v1 v2 v3="" status n versions="" ver esp before_esp c
+    local v1 v2 v3="" status n versions="" ver esp before_esp c deadline last_boot=""
     v2=$(dir_version "$update_dir") || { no "no cb-os_*_$arch.efi in $update_dir"; return; }
     if [ -n "$broken_dir" ]; then v3=$(dir_version "$broken_dir") || { no "no cb-os_*_$arch.efi in $broken_dir"; return; }; fi
     command -v python3 >/dev/null || { no "python3 is needed for the fake update server"; return; }
@@ -495,6 +495,10 @@ run_update_test() {
     ssh_run 'cb-update apply' 2>&1 | tail -3 | sed 's/^/        /' || true
     status=$(ssh_run 'cat /run/camera-bridge/status/update.json')
     if grep -q '"state": *"installed"' <<<"$status"; then ok "update $v2 installed into the idle slot"; else no "update not installed: $status"; return; fi
+    # The daily check before the restart keeps saying "restart to use it" (it used to say "available" again, and offer the same download).
+    ssh_run 'cb-update check' >/dev/null 2>&1 || true
+    ssh_has 'cat /run/camera-bridge/status/update.json' '"state": *"installed"' && ssh_has 'cat /run/camera-bridge/status/update.json' '"rebootRequired": *true' \
+        && ok "a check before the restart keeps the installed update waiting for the restart" || no "a check before the restart forgot the installed update"
     ssh_run "ls $esp/EFI/Linux" | sed 's/^/        /'
     ssh_has "ls $esp/EFI/Linux" "^cb-os_$v2\\+3(-0)?\\.efi\$" && ok "new boot entry has three tries (+3)" || no "new boot entry missing or without counter"
     ssh_has 'lsblk -nro PARTLABEL /dev/vda' "^cb-root_$v2\$" && ok "idle slot is now labelled cb-root_$v2" || no "slot label wrong"
@@ -510,28 +514,37 @@ run_update_test() {
     ssh_has "ls $esp/EFI/Linux" "^cb-os_$v2\\.efi\$" && ok "new version was blessed after a healthy boot (counter removed)" || no "new version was not blessed"
 
     if [ -n "$v3" ]; then
-        echo "  (broken update $v3: the daemon never starts; expecting automatic fallback after three tries)"
+        echo "  (broken update $v3: the daemon never starts; expecting the box to restart by itself and fall back after three tries)"
         write_api_config none "$update_dir" "$broken_dir"
         ssh_run 'cb-update apply' >/dev/null 2>&1 || true
         if ssh_has 'cat /run/camera-bridge/status/update.json' '"state": *"installed"'; then ok "broken update $v3 installed"; else no "could not install $v3"; return; fi
-        versions=""
-        for n in 1 2 3 4 5; do
-            reboot_vm
-            if wait_ssh; then
-                ver=$(ssh_run '. /etc/os-release; echo $IMAGE_VERSION')
-                versions="$versions $ver"
-                echo "        boot $n: version $ver"
-            else
-                versions="$versions ?"
-                echo "        boot $n: no ssh"
-            fi
+        # One restart by hand starts the trial; every later one is the box's own: the health check fails and restarts it (cb-health-check
+        # --after-failure), three times, and systemd-boot then starts $v2 again. Each failed boot takes the boot plus about 4 minutes of checking.
+        reboot_vm
+        versions="" ver="" n=0
+        deadline=$(($(date +%s) + 3 * (boot_timeout + 420)))
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+            ver=$(ssh_run '. /etc/os-release; echo $IMAGE_VERSION' 2>/dev/null || true)
+            if [ -z "$ver" ]; then drop_ssh_master; sleep 10; continue; fi
+            # One entry per boot: the boot id changes with every start.
+            c=$(ssh_run 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
+            if [ -n "$c" ] && [ "$c" != "${last_boot:-}" ]; then last_boot=$c; versions="$versions $ver"; n=$((n + 1)); echo "        boot $n: version $ver"; fi
+            [ "$ver" = "$v2" ] && break
+            sleep 10
         done
         case $versions in
-            *"$v3 $v3 $v3 $v2"*) ok "rolled back to $v2 after three failed boots of $v3 (sequence:$versions)" ;;
-            *) no "unexpected boot sequence:$versions" ;;
+            *"$v3"*" $v2") ok "rolled back to $v2 by itself after the failed boots of $v3, nobody restarting it (sequence:$versions)" ;;
+            *) no "the box did not come back on $v2 by itself (sequence:$versions)"; dump_serial; return ;;
         esac
         ssh_run "ls $esp/EFI/Linux" | sed 's/^/        /'
-        ssh_has "ls $esp/EFI/Linux" "^cb-os_$v3\\+0-" && ok "the bad entry is kept but marked as used up (+0-n)" || no "bad entry not marked"
+        ssh_has "ls $esp/EFI/Linux" "^cb-os_$v3\\+0-3\\.efi\$" && ok "the bad entry is kept but marked as used up after exactly three tries (+0-3)" || no "bad entry not marked +0-3"
+        # The box notices the rollback at boot, says so, and never offers the version that failed again.
+        ssh_has 'cat /srv/system/update-failed' "^$v3\$" && ok "the failed version $v3 is remembered" || no "the failed version was not remembered"
+        ssh_has 'cat /run/camera-bridge/status/update.json' '"state": *"rolled-back"' && ssh_has 'cat /run/camera-bridge/status/update.json' "\"failedVersion\": *\"$v3\"" \
+            && ok "update.json says the box went back from $v3" || no "update.json does not report the rollback"
+        ssh_run 'cb-update check' >/dev/null 2>&1 || true
+        ssh_has 'cat /run/camera-bridge/status/update.json' '"updateAvailable": *false' && ssh_has 'cat /run/camera-bridge/status/update.json' '"state": *"rolled-back"' \
+            && ok "the failed version $v3 is not offered again" || no "the failed version is offered again: $(ssh_run 'cat /run/camera-bridge/status/update.json')"
     fi
     stop_vm
 }
@@ -639,8 +652,9 @@ if selected daemon; then
         ssh_has 'systemctl show camerabridged -p NRestarts --value' '^0$' && ok "the daemon never restarted since boot" || no "the daemon restarted"
         ssh_has 'journalctl -u camerabridged --no-pager -o cat' 'web interface listening on port 80' && ok "the daemon listens on port 80 (CAMERABRIDGE_HTTP_PORT)" || no "the daemon did not report port 80"
         ssh_has 'journalctl -u camerabridged --no-pager -o cat' 'privileged requests go to /run/camera-bridge/requests' && ok "the daemon found the OS request folder" || no "the daemon did not find the request folder"
-        # The health service only runs on a boot with a try counter (an update); run it by hand, it is the same script.
-        ssh_run '/usr/lib/camera-bridge/cb-health-check' >/dev/null 2>&1 && ssh_has 'cat /run/camera-bridge/status/health.json' '"state": *"ok"' && ok "the boot health check passes with the real daemon" || no "the boot health check failed with the real daemon"
+        # The health service only runs on a boot with a try counter (an update); run it by hand, it is the same script (with a shorter wait for a
+        # restart: the NRestarts check above already covers this boot).
+        ssh_run 'CB_HEALTH_SETTLE=5 /usr/lib/camera-bridge/cb-health-check' >/dev/null 2>&1 && ssh_has 'cat /run/camera-bridge/status/health.json' '"state": *"ok"' && ok "the boot health check passes with the real daemon" || no "the boot health check failed with the real daemon"
         ssh_has 'curl -fsS http://127.0.0.1/api/v1/status' '"product" *: *"Camera Bridge OS"' && ok "GET /api/v1/status answers without sign-in" || no "/api/v1/status did not answer as the contract says"
         body=$(curl -fsS --max-time 5 "http://127.0.0.1:$http_port/" 2>/dev/null || true)
         case $body in *"<title>"*Camera*) ok "the web UI is served on port 80 (through the forwarded port)" ;; *) no "the web UI page was not served" ;; esac
@@ -927,6 +941,8 @@ if selected factory-reset; then
         elif [ "${recordings_before:-0}" -gt 0 ]; then ok "recordings exist before the factory reset ($recordings_before files)"
         else no "the nvr tests left no recordings to erase"; fi
     fi
+    # A saved Wi-Fi network (its password is in the file) and a test update source must not survive either.
+    ssh_run "printf '[connection]\\nid=Maple Cottage\\n[wifi-security]\\npsk=not-a-real-password\\n' > /srv/system/network-connections/test.nmconnection; chmod 0600 /srv/system/network-connections/test.nmconnection" >/dev/null 2>&1 || true
     ssh_run "echo keepme > /var/lib/camera-bridge/testfile; touch $esp/camera-bridge-factory-reset; sync; systemctl reboot" >/dev/null 2>&1 || true
     drop_ssh_master
     sleep 15
@@ -938,6 +954,8 @@ if selected factory-reset; then
     key_after=$(ssh_run 'sha256sum /var/lib/camera-bridge/secrets/master.key | cut -d" " -f1')
     [ "$key_before" != "$key_after" ] && ok "a new secrets key was generated" || no "secrets key unchanged"
     ssh_run 'test -e /var/lib/camera-bridge/first-run' && ok "first-run marker is back" || no "first-run marker missing after reset"
+    [ "$(ssh_run 'find /srv/system/network-connections -mindepth 1 | wc -l' | tr -d ' ')" = 0 ] && ok "the saved Wi-Fi networks (and their passwords) were erased" || no "a saved Wi-Fi network survived the factory reset"
+    [ "$(ssh_run 'journalctl --list-boots --no-pager 2>/dev/null | grep -c .' | tr -d ' ')" -le 2 ] && ok "the log of earlier boots was erased" || no "the log of earlier boots survived the factory reset"
 fi
 
 if selected wifi; then

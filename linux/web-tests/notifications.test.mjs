@@ -1,6 +1,7 @@
 // Notifications on the page: the toasts that slide in and fade away (6 s, a warning up to 10 s, paused by the pointer or the keyboard, at most
 // three, newest on top), shown once per thing that happened (the box hands each to one browser, once), the Notifications page (list,
-// filter, read), and no banner for a notice any more. In the fake browser, timers and the bridge's answers made up.
+// filter, read), Dismiss for a notice that stays until it is put away, and no banner for a notice any more. In the fake browser, timers and
+// the bridge's answers made up.
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, mock, test } from 'node:test';
 import { installFakeBrowser } from './support/fake-browser.mjs';
@@ -28,7 +29,7 @@ const PATIO = '0A1B2C3D-0000-4000-8000-000000000011';
 const NOW = Date.parse('2026-10-22T15:00:00Z');
 const entry = (overrides = {}) => ({
   id: `e-${Math.random()}`, key: 'k', noticeID: 'guard-tried', kind: 'internetGuard', category: 'security', severity: 'info',
-  title: 'Patio New tried to reach the internet', detail: 'Camera Bridge blocked it. Nothing got out.', cameraID: PATIO, cameraName: 'Patio New',
+  title: 'Patio New tried to reach the internet', detail: 'Camera Bridge blocked its lookup. A camera can still try an address it already knows, which the guard can’t see.', cameraID: PATIO, cameraName: 'Patio New',
   action: 'open-camera', date: new Date(NOW).toISOString(), read: false, toasted: false, ...overrides,
 });
 
@@ -156,6 +157,24 @@ test('nothing is claimed while the page is hidden; it is claimed when it is show
   assert.equal(shown().length, 1);
 });
 
+test('a wall display claims no toast: the notices stay for the owner’s phone or laptop', async () => {
+  const { setWallMode, wallMode } = await import('../web/js/wall-mode.js');
+  const calls = fakeBridge({ shown: [entry()] });
+  assert.equal(setWallMode(true), true);
+  try {
+    assert.equal(wallMode(), true);
+    assert.equal(localStorage.getItem('cb.monitor.wall'), '1', 'kept in this browser');
+    await notifications.checkNotifications();
+    assert.equal(calls.length, 0, 'no POST notifications/shown');
+    assert.equal(shown().length, 0);
+  } finally {
+    setWallMode(false);
+  }
+  assert.equal(localStorage.getItem('cb.monitor.wall'), null);
+  await notifications.checkNotifications();
+  assert.equal(shown().length, 1, 'an ordinary browser again');
+});
+
 test('the Notifications page lists newest first, filters by section, and opening it marks what it shows as read', async () => {
   const list = [
     entry({ id: 'a', category: 'security', title: 'Patio New tried to reach the internet' }),
@@ -180,6 +199,69 @@ test('the Notifications page lists newest first, filters by section, and opening
   await settle();
   assert.deepEqual(calls.at(-1), { path: 'notifications/read', method: 'POST', body: {} });
   screen.destroy();
+});
+
+const RECOVERED_KEY = 'configuration-recovered|Settings Restored From a Backup|';
+const recovered = (overrides = {}) => entry({
+  id: 'e-recovered', key: RECOVERED_KEY, noticeID: 'configuration-recovered', kind: 'configurationRecovered', category: 'system', severity: 'warning',
+  title: 'Settings Restored From a Backup', detail: 'Camera Bridge’s settings file was damaged, so it went back to the copy saved before your last change.',
+  cameraID: null, cameraName: null, action: 'dismiss', ...overrides,
+});
+const REFUSAL = 'This notice goes away by itself once the bridge no longer needs you.';
+
+test('a notice that stays until it is dismissed has Dismiss: it puts the notice away, and a refusal is said in the bridge’s words', async () => {
+  store.store.notices = [{ id: 'configuration-recovered', key: RECOVERED_KEY, action: 'dismiss' }];
+  try {
+    const calls = fakeBridge();
+    notifications.showToast(recovered());
+    const [toast] = shown();
+    const body = buttons(toast).find((node) => node.classList.contains('notif-body'));
+    assert.equal(byClass(body, 'notif-act')[0].textContent, 'Dismiss');
+    body.click();
+    await settle();
+    assert.deepEqual(calls.at(-1), { path: 'notifications/dismiss', method: 'POST', body: { id: 'configuration-recovered' } }, 'the notice’s id, not the log entry’s');
+    assert.ok(toast.classList.contains('leaving'), 'the toast goes');
+    assert.deepEqual(store.store.notices, [], 'and the page forgets the notice at once (the bridge sends its notices without it)');
+    assert.deepEqual(notifications.notificationActions(recovered()), [], 'a notice put away has no Dismiss any more');
+
+    store.store.notices = [{ id: 'configuration-recovered', key: RECOVERED_KEY, action: 'dismiss' }];
+    globalThis.fetch = async () => ({
+      ok: false, status: 400, headers: { get: (name) => (name.toLowerCase() === 'content-type' ? 'application/json' : null) },
+      json: async () => ({ error: 'invalid', code: 'invalid', message: REFUSAL }), text: async () => JSON.stringify({ error: 'invalid', code: 'invalid', message: REFUSAL }),
+    });
+    const [dismiss] = notifications.notificationActions(recovered());
+    assert.equal(await dismiss.run(), false);
+    assert.ok(document.getElementById('toasts').textContent.includes(REFUSAL), 'the bridge’s sentence');
+    assert.equal(store.store.notices.length, 1, 'refused: the notice stays');
+  } finally {
+    store.store.notices = [];
+  }
+});
+
+test('on the Notifications page, Dismiss is there only while the notice is the bridge’s; it goes at once and the entry stays in the log', async () => {
+  store.store.notices = [{ id: 'configuration-recovered', key: RECOVERED_KEY, action: 'dismiss' }];
+  try {
+    const list = [
+      recovered({ id: 'now', read: true }),
+      recovered({ id: 'earlier', key: 'configuration-recovered|Settings Could Not Be Read|', title: 'Settings Could Not Be Read', read: true }),
+      entry({ id: 'guard', read: true }),
+    ];
+    const calls = fakeBridge({ list });
+    const screen = page.renderNotifications({ params: [], navigate() {}, setTitle() {} });
+    await settle(); await settle();
+    const dismissButtons = () => buttons(screen.el).filter((node) => node.textContent === 'Dismiss');
+    assert.equal(dismissButtons().length, 1, 'the notice of now only: an older one of the same kind was put away already');
+    assert.match(dismissButtons()[0].parentNode.parentNode.textContent, /Settings Restored From a Backup/);
+    dismissButtons()[0].click();
+    await settle(); await settle();
+    assert.deepEqual(calls.at(-1), { path: 'notifications/dismiss', method: 'POST', body: { id: 'configuration-recovered' } });
+    assert.equal(dismissButtons().length, 0, 'the button goes at once');
+    assert.deepEqual(byClass(screen.el, 'notif-title').map((node) => node.textContent),
+      ['Settings Restored From a Backup', 'Settings Could Not Be Read', 'Patio New tried to reach the internet'], 'the log keeps every entry');
+    screen.destroy();
+  } finally {
+    store.store.notices = [];
+  }
 });
 
 test('an empty Notifications page says so', async () => {

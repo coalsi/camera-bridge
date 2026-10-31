@@ -159,6 +159,18 @@ actor ONVIFClient {
     private let http: AuthenticatingHTTPClient
     private let longPollHTTP: AuthenticatingHTTPClient
     private var clockOffset: TimeInterval = 0
+    /// When this client last asked the camera for its clock (`systemDateAndTime`), whatever the answer; nil: never.
+    private var clockCheckedAt: Date?
+    /// The driver's long-lived client: its first authenticated call measures the camera's clock, and it measures it again every
+    /// `clockRecheckInterval`. Other clients measure only when asked, and again on the same schedule once they did.
+    private let keepsClockInStep: Bool
+    /// How old the camera's clock offset may get before an authenticated call measures it again: the camera's clock moves (Camera Bridge's
+    /// own "Time from the bridge", a drift while the internet guard keeps it from its time servers), and cameras refuse a `Created` that is
+    /// minutes off with `NotAuthorized`, which would count as a wrong password.
+    static let clockRecheckInterval: TimeInterval = 600
+    /// A refusal with a clock offset at least this old is checked against the camera's clock first: when the offset moved by more than 5 s,
+    /// the call is made once more with it, and the refusal does not count. A wrong password with a clock in step costs one attempt.
+    static let clockRecheckOnRefusalAfter: TimeInterval = 60
     /// "NTP" or "Manual", as the camera reported in its last `GetSystemDateAndTime` (readable without a login).
     private(set) var dateTimeType: String?
     private var cachedCapabilities: ONVIFCapabilities?
@@ -177,9 +189,11 @@ actor ONVIFClient {
     private let now: @Sendable () -> Date
     private let log: Log
 
-    /// `cameraID`: the camera the client serves (its log lines are tagged with it). `now`: the clock a login's proof is timed by (tests).
+    /// `cameraID`: the camera the client serves (its log lines are tagged with it). `keepsClockInStep`: the driver's long-lived client
+    /// (see the property). `now`: the clock a login's proof and the clock checks are timed by (tests).
     init(deviceServiceURL: URL, credentials: HTTPCredentials?, timeout: Duration = .seconds(10), longPollTimeout: Duration = .seconds(80),
-         cameraID: UUID? = nil, now: @escaping @Sendable () -> Date = { Date() }) {
+         cameraID: UUID? = nil, keepsClockInStep: Bool = false, now: @escaping @Sendable () -> Date = { Date() }) {
+        self.keepsClockInStep = keepsClockInStep
         self.deviceServiceURL = deviceServiceURL
         self.credentials = credentials
         self.http = AuthenticatingHTTPClient(credentials: credentials, timeout: timeout)
@@ -225,12 +239,37 @@ actor ONVIFClient {
 
     /// POSTs a SOAP request and returns the response envelope. SOAP faults throw (`NotAuthorized` → `.unauthorized`, or `.notPermitted` for
     /// a write this account may not make: `refusal(host:action:)`).
+    ///
+    /// A refusal while this client's clock offset is older than `clockRecheckOnRefusalAfter` is checked against the camera's clock first:
+    /// when the offset moved by more than 5 s, the call is made once more with it and the refusal does not count.
     func call(_ url: URL, body: String, action: String? = nil, header: String = "", authenticated: Bool = true,
               longPoll: Bool = false) async throws -> XMLTree {
+        do {
+            return try await send(url, body: body, action: action, header: header, authenticated: authenticated, longPoll: longPoll, mayRecheckClock: true)
+        } catch let refused as RefusedBeforeClockCheck {
+            guard await recheckClock() else { throw refusal(host: refused.host, action: action) }
+            log.info("ONVIF \(refused.host): the camera refused the login after its clock moved; trying once more with the camera's time")
+            return try await send(url, body: body, action: action, header: header, authenticated: authenticated, longPoll: longPoll, mayRecheckClock: false)
+        }
+    }
+
+    /// A login refused while the clock offset is old enough to be checked first (`call` checks it, then counts the refusal or tries again).
+    private struct RefusedBeforeClockCheck: Error {
+        let host: String
+    }
+
+    /// `call`'s request; `mayRecheckClock`: a refusal is handed back to `call` to be checked against the camera's clock.
+    private func send(_ url: URL, body: String, action: String?, header: String, authenticated: Bool, longPoll: Bool,
+                      mayRecheckClock: Bool) async throws -> XMLTree {
         var security: String?
         let host = "\(url.host(percentEncoded: false) ?? ""):\(url.port ?? 80)"
         if authenticated, credentials != nil, let pause = ONVIFLoginGuard.shared.pause(host: host) {
             throw refusedLogin && pause.cause == .refused ? CameraAdapterError.unauthorized : pause.error
+        }
+        if authenticated, credentials != nil, clockIsStale(after: Self.clockRecheckInterval) { await recheckClock() }
+        func loginRefused() -> any Error {
+            if mayRecheckClock, clockIsStale(after: Self.clockRecheckOnRefusalAfter) { return RefusedBeforeClockCheck(host: host) }
+            return refusal(host: host, action: action)
         }
         if authenticated, let credentials {
             security = ONVIFSOAP.securityHeader(username: credentials.username, password: credentials.password,
@@ -261,13 +300,13 @@ actor ONVIFClient {
         if let envelope, let fault = ONVIFSOAP.fault(in: envelope) {
             if fault.isNotAuthorized {
                 guard authenticated else { throw CameraAdapterError.unauthorized }
-                throw refusal(host: host, action: action)
+                throw loginRefused()
             }
             throw CameraAdapterError.soapFault(fault.summary)
         }
         if response.statusCode == 401 {
             guard authenticated else { throw CameraAdapterError.unauthorized }
-            throw refusal(host: host, action: action)
+            throw loginRefused()
         }
         guard (200..<300).contains(response.statusCode) else { throw CameraAdapterError.httpStatus(response.statusCode) }
         guard let envelope, envelope.child("Body") != nil else { throw CameraAdapterError.invalidResponse("not a SOAP envelope") }
@@ -337,6 +376,7 @@ actor ONVIFClient {
     /// `GetSystemDateAndTime` (unauthenticated). Records the camera clock offset used for WS-Security `Created`.
     @discardableResult
     func systemDateAndTime() async throws -> Date? {
+        clockCheckedAt = now()
         let envelope = try await call(deviceServiceURL, body: "<tds:GetSystemDateAndTime/>",
                                       action: "http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime", authenticated: false)
         let body = try responseBody(envelope, "GetSystemDateAndTimeResponse")
@@ -350,6 +390,20 @@ actor ONVIFClient {
                      + "adjusting WS-Security timestamps")
         }
         return date
+    }
+
+    /// Whether the camera's clock was measured longer than `age` ago (never: only for a client that keeps it in step).
+    private func clockIsStale(after age: TimeInterval) -> Bool {
+        guard let checked = clockCheckedAt else { return keepsClockInStep }
+        return now().timeIntervalSince(checked) > age
+    }
+
+    /// Measures the camera's clock again; whether the offset moved by more than 5 s.
+    @discardableResult
+    private func recheckClock() async -> Bool {
+        let before = clockOffset
+        _ = try? await systemDateAndTime()
+        return abs(clockOffset - before) > 5
     }
 
     /// The `UTCDateTime` of a `GetSystemDateAndTimeResponse`; nil when missing or out of range (years 1970…2999).

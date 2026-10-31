@@ -596,6 +596,41 @@ private final class RouterHarness: Sendable {
         #expect(!state.isReachable && state.isFault && !state.isActive && state.lastError == "Connection timed out")
     }
 
+    /// Review finding (engine-core F1): a heartbeat restart started the new runtime while the old one's stop went on, and that stop, finishing
+    /// later, set the camera idle with its event channel gone, under the new runtime's feet: Home showed no live view until the stream changed
+    /// state again. Writes that name a runtime another one replaced since are dropped.
+    @Test func aReplacedRuntimesLateWritesAreDropped() async {
+        let h = await RouterHarness()
+        let old = await h.router.claim(h.cameraID)
+        await h.router.setStreamConnection(.online, claim: old)
+        await h.router.handle(.eventChannel(connected: true), claim: old, origin: .camera)
+        #expect(await h.state().connection == .online)
+
+        let new = await h.router.claim(h.cameraID)
+        await h.router.setStreamConnection(.online, claim: new)
+        await h.router.handle(.eventChannel(connected: true), claim: new, origin: .camera)
+        // The old runtime's stop finally ends.
+        await h.router.resetOrigin(.camera, claim: old)
+        await h.router.resetOrigin(.stream, claim: old)
+        await h.router.setStreamConnection(.idle, claim: old)
+        await h.router.handle(.motion(true), claim: old, origin: .camera)
+        let state = await h.state()
+        #expect(state.connection == .online && state.eventChannelConnected == true && !state.motion)
+
+        // The current runtime's writes and every unclaimed one (the engine's, the webhook's) still count.
+        await h.router.handle(.motion(true), claim: new, origin: .camera)
+        #expect(await h.state().motion)
+        await h.router.setStreamConnection(.offline("the camera ended the stream"), for: h.cameraID)
+        #expect(await h.state().connection == .offline("the camera ended the stream"))
+        await h.router.setStreamConnection(.idle, claim: new)
+        #expect(await h.state().connection == .idle)
+
+        // A camera removed and its claim with it: nothing the old runtimes send lands.
+        await h.router.unregister(cameraID: h.cameraID)
+        await h.router.setStreamConnection(.online, claim: new)
+        #expect(await h.router.state(for: h.cameraID) == nil)
+    }
+
     @Test func disabledCamerasIgnoreEventsAndAreInactive() async {
         let h = await RouterHarness()
         await h.send(.motion(true))

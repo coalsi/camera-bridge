@@ -8,9 +8,13 @@
 #   cb-wifi --join               join a network: the name and password are read from the JSON on stdin {"ssid", "password"}; saved for the
 #                                next boot (the caller restarts the box)
 #   cb-wifi --forget NAME        forget a saved network
-#   cb-wifi --watch              the service: when the box has no network about 30 s after it started (no wired address, no Wi-Fi it can
-#                                join), it opens the setup hotspot "CameraBridge-XXXX" (open, 10.42.0.1); every name a phone asks for points
-#                                at the box, so the setup page opens by itself. As soon as the box has a network again the hotspot goes.
+#   cb-wifi --watch              the service: when the box has no network (no wired address, no Wi-Fi it can join) and knows no Wi-Fi
+#                                network, about 30 s after it started, it opens the setup hotspot "CameraBridge-XXXX" (open, 10.42.0.1);
+#                                every name a phone asks for points at the box, so the setup page opens by itself. A box that knows a network
+#                                waits for it (a router restarting, a radar channel switch: NetworkManager rejoins in seconds) and opens the
+#                                hotspot only after 10 minutes without a network, or at once when the network just chosen could not be
+#                                joined. While the hotspot is open the radio goes back to the saved networks every minute when nobody is on
+#                                it. As soon as the box has a network again the hotspot goes.
 #   cb-wifi --hotspot-now        open the setup hotspot at once (tests)
 #   cb-wifi --prefer-5ghz        look for a 5 GHz access point of the network the box is on now, and move to it (tests, and by hand)
 #
@@ -28,9 +32,10 @@ export CB_TAG=cb-wifi
 . /usr/lib/camera-bridge/lib.sh
 
 GRACE=${CB_WIFI_GRACE:-30}
-RETRY=${CB_WIFI_RETRY:-300}
+RETRY=${CB_WIFI_RETRY:-60}                       # while the hotspot is open: back to the saved networks this often, when nobody is on it
+OFFLINE_LIMIT=${CB_WIFI_OFFLINE_LIMIT:-600}      # a box that knows a network opens the hotspot only after this long without one
 HOTSPOT=cb-setup-hotspot
-HOTSPOT_ADDRESS=10.42.0.1
+HOTSPOT_ADDRESS=$CB_HOTSPOT_ADDRESS
 PENDING=$CB_SYSTEM/wifi-pending
 PICK=/usr/lib/camera-bridge/cb-wifi-pick
 BAND_EVERY=${CB_WIFI_BAND_EVERY:-600}          # seconds between looks for a 5 GHz access point while the box is on 2.4 GHz
@@ -41,7 +46,15 @@ last_error=""
 
 wifi_device() { nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" {print $1; exit}'; }
 
-online() { [ -n "$(ip -4 route show default 2>/dev/null)" ]; }
+online() { cb_online; }
+
+# hotspot_due SAVED PENDING OFFLINE: whether to open the setup hotspot now. SAVED: the box knows a Wi-Fi network (1 or 0); PENDING: the network
+# just chosen could not be joined (1 or 0); OFFLINE: seconds without a network. Opening it takes the radio away from the saved networks.
+hotspot_due() {
+    [ "$1" -eq 1 ] || return 0              # nothing to join: the hotspot is the way in
+    [ "$2" -eq 0 ] || return 0              # the person who chose the network is there to correct it
+    [ "$3" -ge "$OFFLINE_LIMIT" ]           # a saved network that has been away for long
+}
 
 hotspot_active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx "$HOTSPOT"; }
 
@@ -223,12 +236,13 @@ prefer_5ghz() {
 # --- the watcher ------------------------------------------------------------------------------------------------------
 
 do_watch() {
-    local dev last_retry=0 now list
+    local dev last_retry=0 now list offline_since=0 saved pending
     write_state searching "Looking for a network."
     sleep "$GRACE"
     while true; do
         dev=$(wifi_device)
         if online && ! hotspot_active; then
+            offline_since=0
             guard_resume
             rm -f "$PENDING"
             last_error=""
@@ -238,13 +252,24 @@ do_watch() {
             continue
         fi
         if online && hotspot_active; then stop_hotspot; continue; fi
+        now=$(date +%s)
+        [ "$offline_since" -ne 0 ] || offline_since=$now
         if [ -z "$dev" ]; then write_state no-wifi "No network: plug in a network cable (this computer has no Wi-Fi the box can use)."; sleep 30; continue; fi
+        pending=0
         if [ -f "$PENDING" ]; then
             last_error="Couldn't join “$(head -1 "$PENDING")”. Check the password, and that the network is in range."
             rm -f "$PENDING"
+            pending=1
         fi
-        now=$(date +%s)
         if ! hotspot_active; then
+            saved=0
+            [ -z "$(saved_networks)" ] || saved=1
+            if ! hotspot_due "$saved" "$pending" $((now - offline_since)); then
+                # NetworkManager keeps trying the saved networks meanwhile; the radio stays theirs.
+                write_state searching "Looking for a saved network." "$dev"
+                sleep 10
+                continue
+            fi
             list=$(scan_json "$dev")
             write_networks "$list"
             if start_hotspot "$dev"; then
@@ -256,7 +281,7 @@ do_watch() {
             fi
             last_retry=$now
         elif [ $((now - last_retry)) -ge "$RETRY" ] && [ "$(stations "$dev")" -eq 0 ] && [ -n "$(saved_networks)" ]; then
-            # Nobody is on the hotspot: look for a saved network again (the radio cannot do both at once).
+            # Nobody is on the hotspot: give the radio back to the saved networks for a moment (it cannot do both at once).
             last_retry=$now
             stop_hotspot
             list=$(scan_json "$dev")

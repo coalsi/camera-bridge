@@ -5,16 +5,21 @@ import { get, patch, post } from '../api.js';
 import { confirmDialog, h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { loadNVR } from '../nvr/lite.js';
-import { cameraList, store } from '../store.js';
+import { cameraList, setBridgeZone, store } from '../store.js';
 import { createAISettingsCard } from './ai-settings.js';
 import { field, inlineError, selectField, switchRow } from './common.js';
 import { importMacCard } from './import-mac.js';
+import { monitorCardFor } from './monitor-card.js';
+import { createSessionsCard } from './sessions-card.js';
 
 export function renderSettings({ params, setTitle }) {
   const root = h('div', { class: 'settings' });
   const recordingHost = h('div', { id: 'recording' });
   const importCard = importMacCard();
   let recording = null;   // the Recording card: { el, refresh, destroy }, made once and put back by every draw()
+  let kept = null;        // the Kept recordings card under it (nvr/kept.js): { el, refresh, destroy }
+  const sessions = createSessionsCard();   // Signed-in browsers: made once (it loads its own list)
+  let monitorShown = false;               // the monitoring token is shown (Show), across the draws of Settings
   let aiCard = null;      // the AI descriptions card: { el, update }, made once (it keeps what is being typed and Try it's answer)
   let settings = null;
   let destroyed = false;
@@ -33,6 +38,7 @@ export function renderSettings({ params, setTitle }) {
   async function change(partial, message = 'Saved.') {
     try {
       settings = await patch('settings', partial);
+      if ('timeZone' in partial) setBridgeZone(settings.timeZone);   // every time on the page follows (store.js bridgeZone)
       if (partial.bridgeName) {
         store.session.bridgeName = settings.bridgeName;
         const name = document.querySelector('.brand span');
@@ -56,11 +62,8 @@ export function renderSettings({ params, setTitle }) {
   }
 
   /** One look on every camera: the bridge's label style, whether Apple Home's video carries it, and clean pictures from the cameras.
-   *  Each change is saved on every camera at once (a camera's own page can still set it differently). */
+   *  A change sends only the setting changed, to every camera: what else a camera's own page set differently stays as it is. */
   function labelsCard() {
-    const first = cameraList()[0]?.timestampOverlay ?? {};
-    const style = { enabled: first.enabled ?? false, position: first.position ?? 'topRight', size: first.size ?? 'medium',
-      showCameraName: first.showCameraName ?? true, showDate: first.showDate ?? true, showSeconds: first.showSeconds ?? true, use24Hour: first.use24Hour ?? false };
     const status = h('p', { class: 'small muted', role: 'status' });
     async function everyCamera(word, work) {
       const cameras = cameraList();
@@ -72,23 +75,11 @@ export function renderSettings({ params, setTitle }) {
       }
       status.textContent = failed.length ? `Done, except ${failed.join('; ')}` : `Saved on ${cameras.length === 1 ? 'the camera' : `all ${cameras.length} cameras`}.`;
     }
-    const apply = (partial) => { Object.assign(style, partial); everyCamera('Saving', (c) => patch(`cameras/${c.id}`, { timestampOverlay: { ...style } })); };
-    return h('div', { class: 'card' }, h('h2', null, 'Video label'),
-      h('p', { class: 'desc' }, 'The camera’s name and the date and time, the same on every camera: on the Monitor, on recordings, burned into saved clips and, if you want, into Apple Home’s video.'),
-      h('div', { class: 'inline-fields' },
-        selectField('Corner', [['topRight', 'Top right'], ['topLeft', 'Top left'], ['bottomRight', 'Bottom right'], ['bottomLeft', 'Bottom left']], style.position, (v) => apply({ position: v })),
-        selectField('Size', [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], style.size, (v) => apply({ size: v }))),
-      switchRow({ title: 'Camera name', checked: style.showCameraName, onchange: (v) => apply({ showCameraName: v }) }),
-      switchRow({ title: 'Date', checked: style.showDate, onchange: (v) => apply({ showDate: v }) }),
-      switchRow({ title: 'Seconds', checked: style.showSeconds, onchange: (v) => apply({ showSeconds: v }) }),
-      switchRow({ title: '24-hour time', checked: style.use24Hour, onchange: (v) => apply({ use24Hour: v }) }),
-      switchRow({ title: 'In Apple Home’s video', desc: 'Burns the label into what Apple Home shows and records. The bridge then converts the video instead of passing it through, which uses more of the box.',
-        checked: style.enabled, onchange: (v) => apply({ enabled: v }) }),
-      h('div', { class: 'row' },
-        h('button', { class: 'btn small', type: 'button', onclick: () => everyCamera('Turning the cameras’ own labels off', (c) => post(`cameras/${c.id}/clean-picture`, { clean: true })) },
-          'Turn off the cameras’ own labels')),
-      h('p', { class: 'small muted' }, 'Removes the clock and text each camera draws itself, so only this label shows. A camera’s page can put them back.'),
-      status);
+    return labelsCardFor(cameraList(), {
+      status,
+      apply: (partial) => everyCamera('Saving', (c) => patch(`cameras/${c.id}`, { timestampOverlay: partial })),
+      cleanPictures: () => everyCamera('Turning the cameras’ own labels off', (c) => post(`cameras/${c.id}/clean-picture`, { clean: true })),
+    });
   }
 
   /** The bridge's time zone: the timestamp it draws on video and the clocks it sets on cameras follow it. */
@@ -158,6 +149,13 @@ export function renderSettings({ params, setTitle }) {
           h('span', { class: 'hint' }, 'Send it as “Authorization: Bearer <token>”. Each camera’s page lists its URLs.'))) : null);
   }
 
+  function monitorCard() {
+    return monitorCardFor(settings, {
+      change, shown: monitorShown, setShown: (on) => { monitorShown = on; draw(); },
+      say: (result) => toast(result === 'copied' ? 'Copied.' : result === 'selected' ? 'Selected: copy it with your keyboard.' : 'Select it and copy it.'),
+    });
+  }
+
   function diagnosticsCard() {
     return h('div', { class: 'card' }, h('h2', null, 'Log and tests'),
       selectField('Log detail', [['error', 'Errors only'], ['warning', 'Warnings'], ['notice', 'Notices'], ['info', 'Normal'], ['debug', 'Everything (for troubleshooting)']], settings.logLevel,
@@ -182,8 +180,9 @@ export function renderSettings({ params, setTitle }) {
     const nvr = await loadNVR();
     if (destroyed) return;
     recording = nvr ? nvr.storageCard() : null;
+    kept = nvr?.keptCard ? nvr.keptCard() : null;
     replace(recordingHost, recording ? recording.el
-      : h('div', { class: 'card' }, h('h2', null, 'Recording'), inlineError('The recording settings could not load. Reload the page to try again.')));
+      : h('div', { class: 'card' }, h('h2', null, 'Recording'), inlineError('The recording settings could not load. Reload the page to try again.')), kept?.el);
     showWanted();
   }
 
@@ -206,9 +205,10 @@ export function renderSettings({ params, setTitle }) {
     else aiCard = createAISettingsCard(settings, { onSettings: (next) => { settings = next; } });
     replace(root,
       // Bringing cameras over from the Mac app is a first-day step: offered while the bridge has none.
-      section('General', nameCard(), timeZoneCard(), cameraList().length ? null : importCard, passwordCard(), accountCard()),
+      section('General', nameCard(), timeZoneCard(), cameraList().length ? null : importCard),
+      section('Security', passwordCard(), sessions.el, accountCard()),
       section('Video and recording', labelsCard(), recordingHost),
-      section('Apple Home and other systems', portsCard(), webhookCard()),
+      section('Apple Home and other systems', portsCard(), webhookCard(), monitorCard()),
       section('AI', aiCard.el),
       section('Troubleshooting', diagnosticsCard()));
     showWanted();
@@ -217,6 +217,58 @@ export function renderSettings({ params, setTitle }) {
   replace(root, h('div', { class: 'checking' }, spinner()));
   load();
   mountRecording();
-  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Settings')), root), destroy() { destroyed = true; recording?.destroy(); aiCard?.destroy(); } };
+  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Settings')), root), destroy() { destroyed = true; recording?.destroy(); kept?.destroy(); sessions.destroy(); aiCard?.destroy(); } };
 }
 
+const LABEL_DEFAULTS = { enabled: false, position: 'topRight', size: 'medium', showCameraName: true, showDate: true, showSeconds: true, use24Hour: false };
+
+/**
+ * The cameras' label settings as the Video label card shows them: each setting the value every camera has, or, where they differ, the one most of
+ * them have (the first camera's on a tie), with `differ` naming the settings that are not the same on every camera.
+ */
+export function sharedLabelStyle(cameras) {
+  const styles = cameras.map((camera) => ({ ...LABEL_DEFAULTS, ...Object.fromEntries(Object.entries(camera?.timestampOverlay ?? {}).filter(([, v]) => v !== undefined && v !== null)) }));
+  const style = { ...LABEL_DEFAULTS, ...(styles[0] ?? {}) };
+  const differ = new Set();
+  for (const name of Object.keys(LABEL_DEFAULTS)) {
+    const counts = new Map();
+    for (const one of styles) counts.set(one[name], (counts.get(one[name]) ?? 0) + 1);
+    if (counts.size > 1) {
+      differ.add(name);
+      let best = style[name];
+      for (const [value, count] of counts) if (count > (counts.get(best) ?? 0)) best = value;
+      style[name] = best;
+    }
+  }
+  return { style, differ };
+}
+
+/**
+ * The Video label card for `cameras`: `apply(partial)` saves the one setting changed (`{ showSeconds: false }`) on every camera, never the
+ * others, so turning on seconds does not also put the label into Apple Home's video of a camera that had it off. Where the cameras differ, the
+ * card says so beside the setting.
+ */
+export function labelsCardFor(cameras, { apply, cleanPictures = () => {}, status = h('p', { class: 'small muted', role: 'status' }) }) {
+  const { style, differ } = sharedLabelStyle(cameras);
+  const note = (name) => (differ.has(name) ? 'Not the same on every camera: a change here sets it on all of them.' : undefined);
+  const change = (name) => (value) => { style[name] = value; differ.delete(name); apply({ [name]: value }); };
+  const differs = differ.size > 0
+    ? h('p', { class: 'small muted' }, 'Your cameras don’t all have the same label. A change here sets only that setting, on every camera.')
+    : null;
+  return h('div', { class: 'card' }, h('h2', null, 'Video label'),
+    h('p', { class: 'desc' }, 'The camera’s name and the date and time, the same on every camera: on the Monitor, on recordings, burned into saved clips and, if you want, into Apple Home’s video.'),
+    differs,
+    h('div', { class: 'inline-fields' },
+      selectField('Corner', [['topRight', 'Top right'], ['topLeft', 'Top left'], ['bottomRight', 'Bottom right'], ['bottomLeft', 'Bottom left']], style.position, change('position'), { hint: note('position') }),
+      selectField('Size', [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], style.size, change('size'), { hint: note('size') })),
+    switchRow({ title: 'Camera name', desc: note('showCameraName'), checked: style.showCameraName, onchange: change('showCameraName') }),
+    switchRow({ title: 'Date', desc: note('showDate'), checked: style.showDate, onchange: change('showDate') }),
+    switchRow({ title: 'Seconds', desc: note('showSeconds'), checked: style.showSeconds, onchange: change('showSeconds') }),
+    switchRow({ title: '24-hour time', desc: note('use24Hour'), checked: style.use24Hour, onchange: change('use24Hour') }),
+    switchRow({ title: 'In Apple Home’s video', desc: [note('enabled'), 'Burns the label into what Apple Home shows and records. The bridge then converts the video instead of passing it through, which uses more of the box.'].filter(Boolean).join(' '),
+      checked: style.enabled, onchange: change('enabled') }),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn small', type: 'button', onclick: () => cleanPictures() }, 'Turn off the cameras’ own labels')),
+    h('p', { class: 'small muted' }, 'Removes the clock and text each camera draws itself, so only this label shows. A camera’s page can put them back.'),
+    status);
+}

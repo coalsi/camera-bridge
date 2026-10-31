@@ -28,6 +28,10 @@ import TestSupport
             case keyframeThenHang(pts: Int64)
             /// Audio every 50 ms (and, with `keyframeFirst`, one keyframe before it) until stopped: video never flows.
             case audioOnly(keyframeFirst: Bool)
+            /// One keyframe, then the camera ends the stream.
+            case oneKeyframeThenEnd
+            /// A keyframe every 50 ms for this long, then the camera ends the stream.
+            case videoFor(Duration)
         }
 
         let displayName = "Scripted"
@@ -55,6 +59,30 @@ import TestSupport
                 continuation.yield(.video(EncodedVideoFrame(format: VideoFormat(codec: .h264, width: 64, height: 64, parameterSets: []),
                                                             nalUnits: [Data([0x65, 0])], isKeyframe: true, pts: MediaTime(value: pts, timescale: 90_000),
                                                             wallClock: Date())))
+                self.continuation.withLock { $0 = continuation }
+                return stream
+            case .oneKeyframeThenEnd:
+                let (stream, continuation) = AsyncThrowingStream.makeStream(of: MediaSample.self)
+                continuation.yield(.video(EncodedVideoFrame(format: VideoFormat(codec: .h264, width: 64, height: 64, parameterSets: []),
+                                                            nalUnits: [Data([0x65, 0])], isKeyframe: true, pts: MediaTime(value: 0, timescale: 90_000),
+                                                            wallClock: Date())))
+                continuation.finish()
+                return stream
+            case .videoFor(let length):
+                let (stream, continuation) = AsyncThrowingStream.makeStream(of: MediaSample.self)
+                let feeder = Task {
+                    let end = ContinuousClock.now + length
+                    var pts: Int64 = 0
+                    while !Task.isCancelled, ContinuousClock.now < end {
+                        continuation.yield(.video(EncodedVideoFrame(format: VideoFormat(codec: .h264, width: 64, height: 64, parameterSets: []),
+                                                                    nalUnits: [Data([0x65, 0])], isKeyframe: true,
+                                                                    pts: MediaTime(value: pts, timescale: 90_000), wallClock: Date())))
+                        pts += 4_500
+                        try? await Task.sleep(for: .milliseconds(50))
+                    }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in feeder.cancel() }
                 self.continuation.withLock { $0 = continuation }
                 return stream
             case .audioOnly(let keyframeFirst):
@@ -347,6 +375,27 @@ import TestSupport
         #expect(await eventually(timeout: .seconds(5)) { await ingest.attempts >= 2 })
         await ingest.stop()
         await server.stop()
+    }
+
+    /// Review finding (engine-core F3): the back-off was reset by the first video frame, so a camera that ended the stream right after it
+    /// started (a Wi-Fi camera, a connection-limited one, a 5xx after PLAY) was logged into again about once a second for hours: thousands
+    /// of tiny NVR files and a flood of log lines. Only a stream that stayed up for `stableAfter` reconnects after the first step.
+    @Test(.timeLimit(.minutes(1))) func aStreamThatDropsRightAfterItStartsBacksOffAndAHealthyOneReconnectsAtOnce() async throws {
+        let calls = Box(0)
+        let starts = Box<[ContinuousClock.Instant]>([])
+        let source = IngestSupervisor.Source(label: "RTSP") {
+            starts.update { $0.append(.now) }
+            return calls.value < 4 ? ScriptedSource(.oneKeyframeThenEnd, calls: calls) : ScriptedSource(.videoFor(.milliseconds(600)), calls: calls)
+        }
+        let ingest = IngestSupervisor(name: "Main stream", hub: MediaHub(), primary: source,
+                                      timing: Self.fast { $0.maximumBackoff = .milliseconds(1_600); $0.stableAfter = .milliseconds(400) }, log: Self.log)
+        await ingest.start()
+        #expect(await eventually(timeout: .seconds(10)) { starts.value.count >= 6 })
+        await ingest.stop()
+        let gaps = zip(starts.value.dropFirst(), starts.value).map { $0 - $1 }
+        // 100, 200, 400, 800 ms (± 20 %) after the short ones, where every gap was 100 ms.
+        #expect(gaps[3] >= .milliseconds(600), "the back-off grows while the stream keeps dropping: \(gaps)")
+        #expect(gaps[4] < .milliseconds(600 + 400), "a stream that stayed up reconnects after the first step: \(gaps)")
     }
 
     @Test(.timeLimit(.minutes(1))) func watchdogReconnectsASilentStream() async throws {

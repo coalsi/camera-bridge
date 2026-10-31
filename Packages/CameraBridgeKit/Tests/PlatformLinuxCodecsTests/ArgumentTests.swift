@@ -138,8 +138,10 @@ import Testing
     @Test func unusualPathsAreQuotedForTheFilterGraph() {
         #expect(FFmpegArguments.optionValue("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf") == "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         #expect(FFmpegArguments.optionValue("/System/Library/Fonts/Supplemental/Arial Bold.ttf") == "'/System/Library/Fonts/Supplemental/Arial Bold.ttf'")
-        #expect(FFmpegArguments.optionValue("/tmp/a:b,c.ttf") == "'/tmp/a:b,c.ttf'")
-        #expect(FFmpegArguments.optionValue("/tmp/it's.ttf") == "'/tmp/it'\\''s.ttf'")
+        // Both levels: the option parser's `:`, `'` and `\` get a backslash, then the whole is quoted for the graph parser.
+        #expect(FFmpegArguments.optionValue("/tmp/a:b,c.ttf") == "'/tmp/a\\:b,c.ttf'")
+        #expect(FFmpegArguments.optionValue("/tmp/it's.ttf") == "'/tmp/it\\'\\''s.ttf'")
+        #expect(FFmpegArguments.optionValue("back\\slash") == "'back\\\\slash'")
         let overlay = DrawTextOverlay(fontFile: "/fonts/Arial Bold.ttf", textFile: "/tmp/a b/overlay.txt", position: .topLeft, size: .small)
         #expect(FFmpegArguments.drawText(overlay, outputHeight: 720).hasPrefix("drawtext=fontfile='/fonts/Arial Bold.ttf':textfile='/tmp/a b/overlay.txt':reload=1"))
         #expect(FFmpegArguments.isUsablePath("/tmp/a b"))
@@ -290,7 +292,7 @@ import Testing
             "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-copyts", "-flags", "+low_delay", "-analyzeduration", "1", "-probesize", "2048",
             "-f", "flv", "-i", "pipe:0", "-map", "0:v:0", "-an", "-sn", "-dn",
             "-vf", "select='if(gte(t,12.3455),if(gt(gte(t,ld(1)-0.033333/4)+lt(t,ld(1)-0.033333-1)+mod(round(t*1000),2),0),st(1,if(gt(between(t,ld(1)-0.033333,ld(1)+0.033333)*gt(ld(1),0),0),ld(1)+0.033333,t+0.033333))*0+1,0),0)',"
-                + "scale=1280:720:force_original_aspect_ratio=decrease:flags=bicubic,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                + "scale=1280:720:force_original_aspect_ratio=decrease:flags=area,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                 + "drawtext=fontfile=/f.ttf:textfile=/t/overlay.txt:reload=1:expansion=none:fontsize=23:fontcolor=white:box=1:boxcolor=black@0.42:boxborderw=8"
                 + ":shadowcolor=black@0.5:shadowx=1:shadowy=1:x=w-tw-29:y=29,format=yuv420p",
             "-fps_mode", "passthrough", "-enc_time_base", "1/1000", "-force_key_frames", "expr:mod(round(t*1000),2)",
@@ -308,6 +310,41 @@ import Testing
         ])
         // nil is the default.
         #expect(spec().correction == nil)
+    }
+
+    @Test func aBigPictureIsDecodedAndScaledOnTheGPU() throws {
+        var gpu = spec(width: 1920, height: 1080, backend: .vaapi(device: "/dev/dri/renderD128", lowPower: true), sourceWidth: 3840, sourceHeight: 2160,
+                       overlay: DrawTextOverlay(fontFile: "/f.ttf", textFile: "/t/overlay.txt", position: .topRight, size: .medium))
+        gpu.decodeDevice = "/dev/dri/renderD128"
+        let arguments = FFmpegArguments.transcoder(gpu)
+        // Input options: the decoder on the GPU, its pictures kept there, before the input.
+        let hwaccel = try #require(arguments.firstIndex(of: "-hwaccel"))
+        #expect(Array(arguments[hwaccel...].prefix(6)) == ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi"])
+        let input = try #require(arguments.firstIndex(of: "-i"))
+        #expect(hwaccel < input)
+        let filters = try #require(value(after: "-vf", in: arguments))
+        // Rate limit, then the GPU scales to the fitted size and only that comes back for the label, then up again for the encoder.
+        let order = ["select=", "scale_vaapi=w=1920:h=1080:format=nv12,hwdownload,format=nv12,setsar=1,drawtext=", "format=nv12,hwupload"]
+        let positions = try order.map { try #require(filters.range(of: $0)?.lowerBound, "\($0) in \(filters)") }
+        #expect(positions == positions.sorted())
+        #expect(!filters.contains("flags=area") && !filters.contains("pad="))   // 16:9 into 16:9: no bars
+        // A picture of another shape gets even fitted sizes and bars, after the copy back.
+        var doorbell = spec(width: 1920, height: 1080, backend: .vaapi(device: "/dev/dri/renderD128", lowPower: true), sourceWidth: 3632, sourceHeight: 1632)
+        doorbell.decodeDevice = "/dev/dri/renderD128"
+        #expect(FFmpegArguments.videoFilters(doorbell).hasSuffix("scale_vaapi=w=1920:h=862:format=nv12,hwdownload,format=nv12,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=nv12,hwupload"))
+        // The same size: no scaling, only the copy back.
+        var same = spec(width: 1920, height: 1080, backend: .software(preset: "veryfast"), sourceWidth: 1920, sourceHeight: 1080)
+        same.decodeDevice = "/dev/dri/renderD128"
+        #expect(FFmpegArguments.videoFilters(same).hasSuffix("hwdownload,format=nv12,format=yuv420p"))
+    }
+
+    @Test func aCorrectionKeepsDecodingOnTheCPU() throws {
+        var straightened = corrected(spec(width: 1920, height: 1080, backend: .vaapi(device: "/dev/dri/renderD128", lowPower: false), sourceWidth: 3840, sourceHeight: 2160),
+                                     width: 1920, height: 1080)
+        straightened.decodeDevice = "/dev/dri/renderD128"
+        let arguments = FFmpegArguments.transcoder(straightened)
+        #expect(!arguments.contains("-hwaccel"))
+        #expect(try #require(value(after: "-filter_complex", in: arguments)).contains("remap"))
     }
 
     @Test func vaapiStillUploadsLast() throws {

@@ -3,10 +3,12 @@
 // eventPath). Filters (cameras, type, what the AI saw, concern, described only, words, range) live in the address, so a reload or a shared link keeps
 // them. The events come from the archive (GET nvr/events, wall-events-model.js createEventArchive) plus the bridge's recent events of every camera;
 // while the page is open it asks again for the newest part, and new events wait behind a button when the person has scrolled down.
-import { get } from '../api.js';
+import { get, getBytes } from '../api.js';
+import { createFetcher } from '../nvr/fetcher.js';
 import { h, replace } from '../dom.js';
-import { createThumbnails } from '../nvr/thumbs.js';
-import { cameraList, subscribe } from '../store.js';
+import { createThumbnails, fetcherPictures } from '../nvr/thumbs.js';
+import { keepEvent } from '../nvr/kept.js';
+import { bridgeZone, cameraList, subscribe } from '../store.js';
 import {
   CONCERN_CHOICES, EVENT_RANGES, emptyFilters, eventKey, eventPath, filterEvents, filtersFromQuery, filtersToQuery, groupByDay, holdNewEvents,
   isDescribing, queryRange, typeChoices,
@@ -18,6 +20,9 @@ const PAGE_ROWS = 60;
 const REFRESH_MS = 10_000;                // "Describing…" ends and rows age on this beat
 const HOLD_SCROLL_PX = 200;               // scrolled further down than this, new events wait behind a button
 const SEARCH_WAIT_MS = 250;
+
+/** The bridge's answer for a bridge that cannot record (no archive at all): 503 archive_unavailable without a Retry-After. */
+const noRecording = (error) => error?.status === 503 && error?.code === 'archive_unavailable' && !Number.isFinite(error?.retryAfter);
 
 /** GET nvr/events for the archive. */
 function loadEvents({ cameras, fromMs, toMs, limit }) {
@@ -32,10 +37,12 @@ function loadEvents({ cameras, fromMs, toMs, limit }) {
  *   now()         this device's clock; writeAddress(query) puts the filters into the address without a page change
  *   cameras()     the camera resources (store.js cameraList()); onCameras(fn) calls fn when they change, returns the stop function
  *   scrolledDown() true when the person has read down the page
+ *   zone()        the time zone the days and times are said in (store.js bridgeZone: the bridge's)
+ *   keep(event)   "Keep this event" beside a recorded row (nvr/kept.js keepEvent)
  */
 export function createEventsPage({ query = '', load = loadEvents, thumbs = createThumbnails(), now = () => Date.now(), writeAddress = () => {},
   cameras = cameraList, onCameras = (fn) => subscribe((kind) => { if (kind === 'camera' || kind === 'removed') fn(); }),
-  scrolledDown = () => (globalThis.window?.scrollY ?? 0) > HOLD_SCROLL_PX, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (t) => clearTimeout(t) } = {}) {
+  scrolledDown = () => (globalThis.window?.scrollY ?? 0) > HOLD_SCROLL_PX, zone = bridgeZone, keep = (event) => keepEvent(event), setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (t) => clearTimeout(t) } = {}) {
   let filters = filtersFromQuery(query);
   let destroyed = false;
   let loadFailure = null;
@@ -147,11 +154,11 @@ export function createEventsPage({ query = '', load = loadEvents, thumbs = creat
     const at = now();
     const list = cameras();
     const byId = new Map(list.map((camera) => [camera.id, camera]));
-    const { fromMs, toMs } = queryRange(filters, at);
+    const { fromMs, toMs } = queryRange(filters, at, zone());
     archive.want({ cameraIds: filters.cameras.length ? filters.cameras : list.map((camera) => camera.id), fromMs, toMs });
     const all = gatherEvents({ cameras: list, archived: archive.events() }).sort((a, b) => b.at - a.at || a.cameraName.localeCompare(b.cameraName) || a.label.localeCompare(b.label));
     syncOptions(list.filter((camera) => camera.isEnabled !== false), typeChoices(all));   // a camera that is turned off is no filter; its recordings' events stay listed
-    const matching = filterEvents(all, filters, { now: at });
+    const matching = filterEvents(all, filters, { now: at, zone: zone() });
     const { shown, held } = holdNewEvents(matching, known, { hold: scrolledDown() && !holdOpen });
     holdOpen = false;                // asking to see the held events is once
     const drawn = shown.slice(0, shownRows);
@@ -170,13 +177,13 @@ export function createEventsPage({ query = '', load = loadEvents, thumbs = creat
       let row = rows.get(key);
       if (!row || row.signature !== signature) {
         const thumb = row ? row.thumb : thumbs.tile(event.cameraId, event.at);   // the picture stays when only the words changed
-        row = { signature, event, thumb, item: eventRow(event, { thumb, href: eventPath(event), describing }) };
+        row = { signature, event, thumb, item: eventRow(event, { thumb, href: eventPath(event), describing, onKeep: keep }) };
         rows.set(key, row);
       }
       items.set(key, row.item);
     }
 
-    const groups = groupByDay(drawn, at);
+    const groups = groupByDay(drawn, at, zone());
     replace(listHost, groups.map((group) => h('section', { class: 'ev-day', 'aria-label': group.label },
       h('h2', null, group.label), h('ol', { class: 'ev-items' }, group.events.map((event) => items.get(eventKey(event)))))));
     if (focusedKey && rows.get(focusedKey)) rows.get(focusedKey).item.querySelector?.('a, button')?.focus({ preventScroll: true });
@@ -192,9 +199,15 @@ export function createEventsPage({ query = '', load = loadEvents, thumbs = creat
 
   function emptyState(total, cameraCount) {
     if (loadFailure && total === 0) {
-      return h('div', { class: 'empty ev-empty' }, h('h2', null, 'No place for recordings yet'),
-        h('p', null, 'Events are kept beside the recordings, and they aren’t available right now. Choose a place for recordings in Settings, or try again in a moment.'),
-        h('a', { class: 'btn', href: '#/settings/recording' }, 'Recording settings'));
+      // Only a bridge that cannot record at all says so for good (503 with no Retry-After): every other failure is passing (the recordings
+      // still loading after a start, the drive away, a busy box, the network) and the page asks again by itself.
+      if (noRecording(loadFailure)) {
+        return h('div', { class: 'empty ev-empty' }, h('h2', null, 'No place for recordings yet'),
+          h('p', null, 'Events are kept beside the recordings, and this bridge has none. Choose a place for recordings in Settings.'),
+          h('a', { class: 'btn', href: '#/settings/recording' }, 'Recording settings'));
+      }
+      return h('div', { class: 'empty ev-empty' }, h('h2', null, 'The events can’t be read right now'),
+        h('p', null, loadFailure.message || 'The bridge didn’t answer.'), h('p', { class: 'muted', role: 'status' }, 'Trying again…'));
     }
     if (cameraCount === 0) {
       return h('div', { class: 'empty ev-empty' }, h('h2', null, 'No cameras yet'), h('p', null, 'Events appear here once a camera is added.'), h('a', { class: 'btn primary', href: '#/add' }, 'Add a camera'));
@@ -228,9 +241,13 @@ export function createEventsPage({ query = '', load = loadEvents, thumbs = creat
 export function renderEvents({ setTitle } = {}) {
   setTitle?.('Events');
   const hash = location.hash;
+  // The pictures keep to a budget of the browser's connections to the box, as the Monitor's do (nvr/fetcher.js), and are tried again after a
+  // passing failure.
+  const fetcher = createFetcher({ get, getBytes, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) });
   const page = createEventsPage({
+    thumbs: createThumbnails({ load: fetcherPictures(fetcher) }),
     query: hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : '',
     writeAddress: (text) => { try { history.replaceState(history.state, '', `#/events${text ? `?${text}` : ''}`); } catch { /* the address stays as it is */ } },
   });
-  return { el: page.el, destroy: () => page.destroy() };
+  return { el: page.el, destroy: () => { page.destroy(); fetcher.destroy(); } };
 }

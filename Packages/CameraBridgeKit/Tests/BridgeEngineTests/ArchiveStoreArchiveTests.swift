@@ -203,6 +203,20 @@ import Testing
         #expect(Self.exists(result.mp4), "perform never touches the box's copy: the store deletes it after the catalog switched")
     }
 
+    @Test func theReadBackReadsTheDriveNotTheCopysPagesInMemory() throws {
+        let source = try TemporaryDirectory(), target = try TemporaryDirectory()
+        defer { source.remove(); target.remove() }
+        let result = try ArchiveFixtureWriter.write(Self.file(0), root: source.url)
+        try ArchiveStoreHarness.writeMarker(in: target.url)
+        let dropped = Box<[String]>([])
+        var controls = ArchiveMove.Controls()
+        controls.dropCachedPages = { url in dropped.update { $0.append(url.lastPathComponent) } }
+        let ticket = ArchiveMove.Ticket(camera: Self.camera, segment: result.file.segment, mainFolder: source.url, archiveFolder: target.url,
+                                        mp4Bytes: result.index.mp4Size, sidecarBytes: UInt64(result.index.encoded().count))
+        #expect(ArchiveMove.perform(ticket, controls) == .inPlace)
+        #expect(dropped.value.count == 2 && dropped.value.allSatisfy { $0.hasSuffix(ArchiveMove.temporarySuffix) }, "both copies, before they were read back: \(dropped.value)")
+    }
+
     @Test func theSkyWatchersLogAndTheEventsStayOnTheBox() async throws {
         let (harness, results) = try Self.harness(count: 4, populate: { root in
             for path in [".sky/2026-10-10/log.jsonl", ".sky/2026-10-10/stills/a.jpg", ".events/\(Self.camera.uuidString)/2026-10-10.jsonl"] {
@@ -219,6 +233,60 @@ import Testing
         }
         let onArchive = try FileManager.default.contentsOfDirectory(atPath: harness.archiveRoot!.url.path(percentEncoded: false))
         #expect(!onArchive.contains(".sky") && !onArchive.contains(".events"))
+    }
+
+    /// The box deletes to make room while the archive drive is unplugged: the events and the Sky Watcher night of a day whose recordings are on the
+    /// archive stay (they went with the box's oldest file, which deleted three nights of the owner's Sky Watcher log, 2026-10-31).
+    @Test func eventsAndSkyNightsOfArchivedDaysStayWhenTheBoxDeletesWhileTheDriveIsAway() async throws {
+        let archivedDay = ArchiveEventLog.dayName(ms: Self.start - 3 * 86_400_000)
+        let kept = [".events/\(Self.camera.uuidString)/\(archivedDay).jsonl", ".sky/\(Self.camera.uuidString)/\(archivedDay).jsonl",
+                    ".sky/\(Self.camera.uuidString)/\(archivedDay)/still.jpg"]
+        let (harness, results) = try Self.harness(count: 4, populate: { root in
+            for path in kept {
+                let url = root.appending(path: path)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data("kept".utf8).write(to: url)
+            }
+        }, populateArchive: { root in
+            var file = ArchiveFixtureFile(camera: Self.camera, cameraDirectory: Self.camera.uuidString, date: archivedDay, baseName: "10-00-00",
+                                          startMs: Self.start - 3 * 86_400_000)
+            file.fragments = Array(repeating: ArchiveFixtureFragment(), count: 6)
+            _ = try ArchiveFixtureWriter.write(file, root: root)
+        })
+        #expect(await Self.started(harness))
+        let store = harness.store
+        // Unplugged: the folder it was mounted on stays, empty.
+        let mount = harness.archiveRoot!.url
+        try FileManager.default.moveItem(at: mount, to: mount.deletingLastPathComponent().appending(path: "unplugged-\(UUID().uuidString)"))
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: false)
+        #expect(await eventually(timeout: archiveStorePatience) { store.storageStatus?.archive?.state == .notConnected })
+        #expect(await Self.squeeze(harness, keep: 2))
+        await store.runRetention(harness.run)
+        #expect(!Self.exists(results[0].mp4) && !Self.exists(results[1].mp4), "the box made room by deleting its oldest")
+        await store.pruneEvents(harness.run)
+        for path in kept {
+            #expect(Self.exists(harness.root.url.appending(path: path)), "\(path) stays with the archived recordings")
+        }
+    }
+
+    @Test func whileTheArchiveIsBeingReadTheBoxDeletesOnlyOverItsHardLimitForAWhile() {
+        var drive = ArchiveDriveState()
+        let start = ContinuousClock.now
+        let grace = Duration.seconds(900)
+        #expect(!ArchiveStore.awaitsArchiveLoad(&drive, now: start, grace: grace), "no archive drive chosen")
+        drive.folder = URL(filePath: "/archive")
+        #expect(ArchiveStore.awaitsArchiveLoad(&drive, now: start, grace: grace), "chosen, not probed yet (a start)")
+        drive.connection = .connected
+        #expect(ArchiveStore.awaitsArchiveLoad(&drive, now: start + .seconds(600), grace: grace), "there, its files still being read")
+        #expect(!ArchiveStore.awaitsArchiveLoad(&drive, now: start + .seconds(900), grace: grace), "not for longer than the grace")
+        drive.loaded = true
+        #expect(!ArchiveStore.awaitsArchiveLoad(&drive, now: start + .seconds(901), grace: grace), "read: moves go on as usual")
+        #expect(drive.loadAwaitedSince == nil)
+        drive.loaded = false
+        drive.connection = .away
+        #expect(!ArchiveStore.awaitsArchiveLoad(&drive, now: start + .seconds(902), grace: grace), "unplugged: nothing to wait for")
+        drive.connection = .connected
+        #expect(ArchiveStore.awaitsArchiveLoad(&drive, now: start + .seconds(903), grace: grace), "plugged back in: a new wait")
     }
 
     @Test func aFileBeingWrittenNeverMoves() async throws {

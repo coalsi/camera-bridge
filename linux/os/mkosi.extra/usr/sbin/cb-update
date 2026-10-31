@@ -5,6 +5,7 @@
 #   cb-update check         look for a newer release on GitHub (os-v* tags); writes /run/camera-bridge/status/update.json
 #   cb-update apply         download, verify and write the newest release into the idle root slot + the ESP; reboot to use it
 #   cb-update auto          what the daily timer runs: does nothing unless automatic updates were enabled
+#   cb-update boot          (every boot) notice a newer version that did not start (systemd-boot went back to this one)
 #
 # How it stays safe:
 #   1. The download runs as the unprivileged user "cbupdate" in a sandbox (cb-update-fetch) and can write only its cache.
@@ -13,6 +14,9 @@
 #      them into a root-only staging folder, so the files cannot change between the check and the write.
 #   3. systemd-sysupdate writes only the idle root slot (never the running one) and a new UKI named cb-os_<v>+3.efi.
 #      systemd-boot counts the three tries; systemd-bless-boot keeps the new version only if the boot turns out healthy.
+#   4. A version whose tries ran out is remembered (/srv/system/update-failed) and never offered again; update.json says
+#      "rolled-back" with its version. Only a newer one is offered.
+#   5. Installing takes the lock of cb-system's heavy jobs: the daily run and the web page's "Update now" never write at once.
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export CB_TAG=cb-update
@@ -25,6 +29,9 @@ STAGE=/srv/update/stage
 FETCH=/usr/lib/camera-bridge/cb-update-fetch
 STATUS=update
 FORCE=0
+FAILED=$CB_SYSTEM/update-failed   # versions that were installed and did not start (one a line, the newest last)
+LOCK=$CB_RUN/jobs/.lock           # the lock of cb-system's heavy jobs (HEAVY_JOBS)
+VERSION_RE='^[0-9]+(\.[0-9]+)*$'
 
 require_root() { [ "$(id -u)" -eq 0 ] || cb_die "run as root"; }
 
@@ -57,16 +64,68 @@ status() {
 
 current_version() { cb_os_version; }
 
+# take_lock: the lock of cb-system's heavy jobs, without waiting; fails while another one runs. The web page's update job (cb-system
+# run-job update-apply) holds it already and passes it down on descriptor 9.
+take_lock() {
+    if [ "$(readlink "/proc/$$/fd/9" 2>/dev/null)" != "$LOCK" ]; then
+        mkdir -p "${LOCK%/*}"
+        exec 9>>"$LOCK"
+    fi
+    flock -n 9
+}
+
+# entry_state VERSION: what the boot partition holds of VERSION: "failed" (its tries are used up: it did not start properly),
+# "installed" (it waits for its first start, or it is a good one), or nothing.
+entry_state() {
+    local v=$1 esp f name state=""
+    [[ $v =~ $VERSION_RE ]] || return 0
+    esp=$(cb_esp) || true
+    [ -n "$esp" ] && [ -d "$esp/EFI/Linux" ] || return 0
+    for f in "$esp/EFI/Linux/cb-os_$v.efi" "$esp/EFI/Linux/cb-os_$v+"*.efi; do
+        [ -e "$f" ] || continue
+        name=${f##*/}
+        if [[ $name =~ \+0(-[0-9]+)?\.efi$ ]]; then state=failed; else state=installed; fi
+    done
+    printf '%s' "$state"
+}
+
+# failed_versions: the remembered versions that did not start, oldest first.
+failed_versions() { grep -E "$VERSION_RE" "$FAILED" 2>/dev/null || true; }
+
+is_failed() { failed_versions | grep -qxF "$1"; }
+
+# newest_failed: the newest remembered version that did not start and is newer than the running one; nothing when there is none.
+newest_failed() {
+    local current v newest=""
+    current=$(current_version)
+    [ "$current" != unknown ] || return 0
+    while IFS= read -r v; do
+        dpkg --compare-versions "$v" gt "$current" || continue
+        if [ -z "$newest" ] || dpkg --compare-versions "$v" gt "$newest"; then newest=$v; fi
+    done < <(failed_versions)
+    printf '%s' "$newest"
+}
+
+# rolled_back_status FAILED [EXTRA]: update.json for a box that went back from version FAILED (EXTRA: more fields, a JSON object).
+rolled_back_status() {
+    local failed=$1 extra=${2:-'{}'} current
+    current=$(current_version)
+    status rolled-back "Version $failed did not start properly, so the box went back to version $current by itself. It will not be offered again; a newer version will be." \
+        "$(jq -n --arg c "$current" --arg f "$failed" --argjson e "$extra" '$e + {current: $c, failedVersion: $f, updateAvailable: false, rebootRequired: false}')"
+}
+
 # A box on a beta (0.x) takes betas; from 1.0 on, only full releases. Sets CHANNEL to the fetcher's extra arguments.
 set_channel() {
     CHANNEL=()
     case "$(current_version)" in 0.*) CHANNEL=(--beta) ;; esac
 }
 
-# check: sets LATEST_JSON, LATEST, AVAILABLE
+# check: sets LATEST and AVAILABLE. A version that already did not start on this box is never available; one that is installed and
+# waits for the restart stays "installed" (the page keeps saying "restart to use it", not "install").
 do_check() {
-    local current latest_json latest available=false extra
+    local current latest_json latest available=false extra failed
     current=$(current_version)
+    failed=$(newest_failed)
     status checking "looking for updates"
     set_channel
     if ! latest_json=$(run_fetch latest "${CHANNEL[@]}"); then
@@ -75,22 +134,36 @@ do_check() {
     fi
     if [ -z "$latest_json" ]; then
         # The server answered, but no stable Camera Bridge OS version is published there yet (test versions are not offered).
-        status current "you are up to date ($current); no newer version has been published" \
-            "$(jq -n --arg c "$current" '{current: $c, updateAvailable: false, checkedAt: (now | todate)}')"
+        extra=$(jq -n --arg c "$current" '{current: $c, updateAvailable: false, checkedAt: (now | todate)}')
+        if [ -n "$failed" ]; then rolled_back_status "$failed" "$extra"; else status current "you are up to date ($current); no newer version has been published" "$extra"; fi
         LATEST=""
         AVAILABLE=false
         return 0
     fi
     latest=$(jq -r .version <<<"$latest_json")
+    if ! [[ $latest =~ $VERSION_RE ]]; then
+        status failed "the update server named an odd version" "$(jq -n --arg c "$current" '{current: $c, updateAvailable: false}')"
+        return 1
+    fi
     if [ "$current" != "unknown" ] && dpkg --compare-versions "$latest" gt "$current"; then available=true; fi
     extra=$(jq -n --arg c "$current" --argjson a "$available" --argjson r "$latest_json" \
         '{current: $c, latest: $r.version, tag: $r.tag, updateAvailable: $a, releaseUrl: $r.url, notes: $r.notes, checkedAt: (now | todate)}')
-    if [ "$available" = true ]; then
+    LATEST=$latest
+    if [ "$available" = true ] && is_failed "$latest"; then
+        cb_log "version $latest did not start on this box before; it is not offered again"
+        available=false
+        rolled_back_status "$latest" "$(jq '.updateAvailable = false' <<<"$extra")"
+    elif [ "$available" = true ] && [ "$(entry_state "$latest")" = installed ]; then
+        available=false
+        status installed "version $latest is installed; restart to use it. If it does not start properly the box returns to $current by itself." \
+            "$(jq --arg v "$latest" '. + {installedVersion: $v, updateAvailable: false, rebootRequired: true}' <<<"$extra")"
+    elif [ "$available" = true ]; then
         status available "version $latest is available (you have $current)" "$extra"
+    elif [ -n "$failed" ]; then
+        rolled_back_status "$failed" "$extra"
     else
         status current "you are up to date ($current)" "$extra"
     fi
-    LATEST=$latest
     AVAILABLE=$available
 }
 
@@ -129,7 +202,11 @@ do_apply() {
     local version avail_kb need_kb
     do_check || return 1
     if [ "$AVAILABLE" != true ] && [ "$FORCE" != 1 ]; then
-        cb_log "already up to date"
+        case $(jq -r '.state' "$CB_STATUS/$STATUS.json" 2>/dev/null) in
+            installed) cb_log "version $LATEST is installed already; restart to use it" ;;
+            rolled-back) cb_log "nothing to install: the newest version did not start on this box before" ;;
+            *) cb_log "already up to date" ;;
+        esac
         return 0
     fi
     if [ -z "$LATEST" ]; then
@@ -137,7 +214,7 @@ do_apply() {
         return 0
     fi
     version=$LATEST
-    [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]] || cb_die "odd version string"
+    [[ $version =~ $VERSION_RE ]] || cb_die "odd version string"
 
     avail_kb=$(df --output=avail -k /srv | tail -1 | tr -d ' ')
     need_kb=$((4 * 1024 * 1024))
@@ -193,6 +270,11 @@ schedule_reboot() {
 }
 
 do_auto() {
+    if ! take_lock; then
+        # The web page's "Update now" (or another heavy job) runs: its update.json is left alone, and the next daily run looks again.
+        cb_log "another system job is running; the daily update check waits for tomorrow"
+        return 0
+    fi
     if [ ! -e "$CB_SYSTEM/auto-update" ]; then
         cb_log "automatic updates are off; only checking"
         do_check || true
@@ -204,6 +286,44 @@ do_auto() {
     fi
 }
 
+# remember_failed VERSION: adds it to the versions that did not start (the last 10 are kept).
+remember_failed() {
+    local v=$1
+    is_failed "$v" && return 0
+    install -d -m 0755 "$CB_SYSTEM"
+    { failed_versions; printf '%s\n' "$v"; } | tail -n 10 >"$FAILED.new"
+    chmod 0644 "$FAILED.new"
+    mv -f "$FAILED.new" "$FAILED"
+    cb_log "version $v did not start properly, so the box went back to $(current_version); it is not offered again"
+}
+
+# boot (camera-bridge-update-boot.service, every boot): a newer version whose tries are used up (cb-os_<v>+0-<n>.efi) did not start, and
+# systemd-boot went back to this one. It is remembered and update.json says so. Versions at or below the running one are forgotten: this
+# box runs one at least as new.
+do_boot() {
+    local current esp f name v keep
+    current=$(current_version)
+    [ "$current" != unknown ] || return 0
+    esp=$(cb_esp) || true
+    if [ -n "$esp" ] && [ -d "$esp/EFI/Linux" ]; then
+        for f in "$esp"/EFI/Linux/cb-os_*+0.efi "$esp"/EFI/Linux/cb-os_*+0-*.efi; do
+            [ -e "$f" ] || continue
+            name=${f##*/}
+            v=${name#cb-os_}
+            v=${v%%+*}
+            [[ $v =~ $VERSION_RE ]] || continue
+            dpkg --compare-versions "$v" gt "$current" || continue
+            remember_failed "$v"
+        done
+    fi
+    if [ -s "$FAILED" ]; then
+        keep=$(failed_versions | while IFS= read -r v; do if dpkg --compare-versions "$v" gt "$current"; then printf '%s\n' "$v"; fi; done)
+        if [ -z "$keep" ]; then rm -f "$FAILED"; elif [ "$keep" != "$(failed_versions)" ]; then printf '%s\n' "$keep" >"$FAILED.new" && mv -f "$FAILED.new" "$FAILED"; fi
+    fi
+    v=$(newest_failed)
+    if [ -n "$v" ]; then rolled_back_status "$v"; fi
+}
+
 main() {
     local cmd=${1:-}
     shift || true
@@ -212,9 +332,10 @@ main() {
     case $cmd in
         status) cat "$CB_STATUS/$STATUS.json" 2>/dev/null || echo '{"state":"unknown"}' ;;
         check)  require_root; do_check ;;
-        apply)  require_root; do_apply ;;
+        apply)  require_root; take_lock || cb_die "another system job is running; try again when it has finished"; do_apply ;;
         auto)   require_root; do_auto ;;
-        ''|-h|--help|help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+        boot)   require_root; do_boot ;;
+        ''|-h|--help|help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
         *) cb_die "unknown command: $cmd" ;;
     esac
 }

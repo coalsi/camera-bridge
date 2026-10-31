@@ -99,13 +99,13 @@ extension WebApp {
         let input = try wifiInput(body)
         if await auth.isConfigured {
             // Anyone near the box can join an open hotspot: once the box is set up, changing its network needs its password.
-            let address = ctx.request.remoteAddress
-            if let wait = await auth.loginDelay(address: address) { throw tooManyAttempts(wait) }
-            guard await auth.verify(body.adminPassword ?? "") else {
-                await auth.recordLogin(address: address, success: false)
+            if await auth.isDamaged { throw Self.authUnreadable }
+            switch await checkPassword(body.adminPassword ?? "", ctx) {
+            case .right: break
+            case .wait(let seconds): throw tooManyAttempts(seconds)
+            case .wrong:
                 throw APIError(status: 401, code: "wrong_password", message: "That isn’t the bridge’s administrator password.", field: "adminPassword")
             }
-            await auth.recordLogin(address: address, success: true)
         }
         do {
             log.notice("joining a Wi-Fi network was requested from the setup hotspot")

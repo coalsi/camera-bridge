@@ -142,6 +142,48 @@ import TestSupport
         for index in 0..<100 { limiter.recordFailure(address: "192.0.2.\(index)", now: start.addingTimeInterval(Double(index))) }
         #expect(limiter.trackedAddressCount == 20)
     }
+
+    @Test func checksStillRunningCountAgainstTheFreeAttempts() {
+        var limiter = LoginLimiter(policy: .init(maximumInFlight: 100))
+        for _ in 0..<5 { #expect(limiter.begin(address: "192.0.2.1", now: start) == nil) }
+        #expect(limiter.begin(address: "192.0.2.1", now: start) != nil, "five checks are running: a sixth waits for them")
+        #expect(limiter.begin(address: "192.0.2.2", now: start) == nil, "another address is not affected")
+        for _ in 0..<5 { limiter.finish(address: "192.0.2.1", success: false, now: start) }
+        #expect(limiter.retryAfter(address: "192.0.2.1", now: start) == 15, "the five wrong ones lock the address out")
+        #expect(limiter.begin(address: "192.0.2.1", now: start) == 15)
+    }
+
+    @Test func atMostFourChecksRunAtOnce() {
+        var limiter = LoginLimiter()
+        for index in 0..<4 { #expect(limiter.begin(address: "192.0.2.\(index)", now: start) == nil) }
+        #expect(limiter.begin(address: "192.0.2.9", now: start) == 1, "a fifth check is refused at once rather than queued")
+        limiter.finish(address: "192.0.2.0", success: true, now: start)
+        #expect(limiter.begin(address: "192.0.2.9", now: start) == nil)
+    }
+
+    @Test func aCheckThatDidNotHappenChangesNothing() {
+        var limiter = LoginLimiter(policy: .init(maximumInFlight: 100))
+        for _ in 0..<5 {
+            #expect(limiter.begin(address: "192.0.2.1", now: start) == nil)
+            limiter.finish(address: "192.0.2.1", success: nil, now: start)
+        }
+        #expect(limiter.retryAfter(address: "192.0.2.1", now: start) == nil)
+        #expect(limiter.begin(address: "192.0.2.1", now: start) == nil)
+    }
+
+    @Test func anIPv6NetworkCountsAsOneAddress() {
+        #expect(LoginLimiter.key(for: "2001:db8:1:2:aaaa::1") == LoginLimiter.key(for: "2001:DB8:1:2::ffff"))
+        #expect(LoginLimiter.key(for: "2001:db8:1:2::1") == "2001:db8:1:2::/64")
+        #expect(LoginLimiter.key(for: "2001:db8:1:3::1") != LoginLimiter.key(for: "2001:db8:1:2::1"))
+        #expect(LoginLimiter.key(for: "fe80::1%en0") == "fe80:0:0:0::/64")
+        #expect(LoginLimiter.key(for: "::ffff:192.0.2.7") == "192.0.2.7", "an IPv4 address written as IPv6 is that IPv4 address")
+        #expect(LoginLimiter.key(for: "192.0.2.7") == "192.0.2.7")
+        #expect(LoginLimiter.key(for: "not an address") == "not an address")
+        var limiter = LoginLimiter()
+        for index in 0..<5 { limiter.recordFailure(address: "2001:db8:1:2::\(index + 1)", now: start) }
+        #expect(limiter.retryAfter(address: "2001:db8:1:2:ffff:ffff:ffff:ffff", now: start) == 15, "every address of the network waits")
+        #expect(limiter.retryAfter(address: "2001:db8:1:3::1", now: start) == nil)
+    }
 }
 
 @Suite struct AuthStoreTests {
@@ -269,14 +311,131 @@ import TestSupport
         #expect(await store.session(token: token) == nil)
     }
 
-    @Test func aCorruptFileMeansNotConfiguredRatherThanACrash() async throws {
+    /// A file that is there but cannot be read is not a new bridge: offering setup would let anyone on the network claim it. Nobody can
+    /// sign in until a factory reset (or until its backup is found, below).
+    @Test func aDamagedFileRefusesSignInsInsteadOfOfferingSetup() async throws {
+        for damage in ["{ not json", ""] {
+            let directory = try TemporaryDirectory()
+            defer { directory.remove() }
+            let folder = directory.url.appending(path: "web", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data(damage.utf8).write(to: folder.appending(path: "auth.json"))
+            let store = makeStore(directory)
+            #expect(await store.isConfigured, "not offered for setup")
+            #expect(await store.isDamaged)
+            await #expect(throws: AuthStore.Failure.unreadable) { try await store.configure(password: "a new password", bridgeName: nil) }
+            #expect(await !store.verify("a new password"))
+            #expect(try Data(contentsOf: folder.appending(path: "auth.json")) == Data(damage.utf8), "the damaged file is left as it is")
+        }
+    }
+
+    @Test func aFileThatCannotBeOpenedIsDamagedToo() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
-        let folder = directory.url.appending(path: "web", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try Data("{ not json".utf8).write(to: folder.appending(path: "auth.json"))
+        let first = makeStore(directory)
+        try await first.configure(password: "long enough", bridgeName: nil)
+        let file = directory.url.appending(path: "web/auth.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: file.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
+        guard (try? Data(contentsOf: file)) == nil else { return }   // running as root: every file can be read
+        let store = makeStore(directory)
+        #expect(await store.isConfigured)
+        #expect(await store.isDamaged)
+    }
+
+    @Test func aDamagedFileFallsBackToItsBackup() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let first = makeStore(directory)
+        try await first.configure(password: "long enough", bridgeName: "Garage")
+        let file = directory.url.appending(path: "web/auth.json")
+        try FileManager.default.copyItem(at: file, to: directory.url.appending(path: "web/auth.json.bak"))
+        try Data("{\"version\": 1, \"bridgeNa".utf8).write(to: file)   // cut short by a power cut
+        let store = makeStore(directory)
+        #expect(await store.isConfigured)
+        #expect(await !store.isDamaged)
+        #expect(await store.bridgeName == "Garage")
+        #expect(await store.verify("long enough"))
+    }
+
+    @Test func noFileAtAllIsANewBridge() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
         let store = makeStore(directory)
         #expect(await !store.isConfigured)
+        #expect(await !store.isDamaged)
+    }
+
+    @Test func aSignInWorksWhileTheFileCannotBeWritten() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let store = makeStore(directory)
+        try await store.configure(password: "long enough", bridgeName: nil)
+        let folder = directory.url.appending(path: "web").path
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder)   // the data partition went read-only
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder) }
+        guard !FileManager.default.isWritableFile(atPath: folder) else { return }   // running as root: every folder can be written
+        let (token, session) = try await store.createSession()
+        #expect(await store.session(token: token) == session, "kept in memory and saved once the disk takes it again")
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder)
+        _ = await store.session(token: token)
+        #expect(await makeStore(directory).session(token: token) != nil, "saved on the next use")
+    }
+
+    @Test func aFirstSetupThatCannotBeSavedLeavesTheBridgeNotConfigured() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.url.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.url.path) }
+        guard !FileManager.default.isWritableFile(atPath: directory.url.path) else { return }   // running as root
+        let store = makeStore(directory)
+        await #expect(throws: AuthStore.Failure.storageFailed) { try await store.configure(password: "long enough", bridgeName: "Hall") }
+        #expect(await !store.isConfigured, "not set up in memory only, to open again at the next restart")
+        #expect(await store.bridgeName == AuthStore.defaultBridgeName)
+    }
+
+    @Test func wrongPasswordBurstsAreRememberedForAQuietDay() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let clock = Box(Date(timeIntervalSince1970: 1_800_000_000))
+        let store = makeStore(directory, clock: clock)
+        try await store.configure(password: "long enough", bridgeName: nil)
+        for _ in 0..<4 { #expect(await store.checkPassword("wrong one", address: "192.0.2.40") == .wrong) }
+        #expect(await store.signInAlert() == nil)
+        #expect(await store.checkPassword("wrong one", address: "192.0.2.40") == .wrong)
+        let first = try #require(await store.signInAlert())
+        #expect(first.count == 5 && first.addresses == ["192.0.2.40"] && first.addressCount == 1 && first.since == clock.value)
+        clock.set(clock.value.addingTimeInterval(3_601))
+        #expect(await store.checkPassword("wrong two", address: "192.0.2.41") == .wrong)
+        let grown = try #require(await store.signInAlert())
+        #expect(grown.count == 6 && grown.addresses == ["192.0.2.41", "192.0.2.40"] && grown.addressCount == 2 && grown.since == first.since)
+        let counts = await store.signInCounts()
+        #expect(counts.lastHour == 1 && counts.lastDay == 6 && counts.lockedAddresses == 0 && !counts.everyoneWaits)
+        clock.set(clock.value.addingTimeInterval(86_401))
+        #expect(await store.signInAlert() == nil, "a quiet day ends it")
+        #expect(await store.signInCounts().lastDay == 0)
+    }
+
+    @Test func theMonitoringTokenIsMadeChangedAndForgotten() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let store = makeStore(directory)
+        try await store.configure(password: "long enough", bridgeName: nil)
+        #expect(await store.monitorToken == nil)
+        try await store.setMonitoring(enabled: true)
+        let token = try #require(await store.monitorToken)
+        #expect(token.count >= 43)
+        #expect(await store.isMonitorToken(token))
+        #expect(await !store.isMonitorToken(token + "x"))
+        #expect(await !store.isMonitorToken(""))
+        try await store.setMonitoring(enabled: true)
+        #expect(await store.monitorToken == token, "turning it on again keeps the token")
+        try await store.setMonitoring(enabled: true, regenerate: true)
+        #expect(await store.monitorToken != token)
+        let kept = await store.monitorToken
+        #expect(await makeStore(directory).monitorToken == kept, "kept across a restart")
+        try await store.setMonitoring(enabled: false)
+        #expect(await store.monitorToken == nil)
     }
 
     @Test func sessionCountIsBounded() async throws {

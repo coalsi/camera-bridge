@@ -620,6 +620,34 @@ import Testing
         await poller.stop()   // stopping again is fine
     }
 
+    /// Review Oct 31 (sky F7): positions were dated by when the answer finished arriving (the whole transfer added to their age), and a feed
+    /// polled twice before it wrote its file again gave the same position two times about a second apart (the plane seemed to stop and jump).
+    @Test func positionsAreDatedByTheMiddleOfTheRequestAndARepeatKeepsItsTime() async throws {
+        let http = FakeSkyHTTP(pages: [Self.feedURL.absoluteString: (200, SkyFixtures.aircraftJSON)])
+        let history = FlightHistory()
+        // The request goes out 2 s before the answer is in: the positions were current at its middle, 1 s before.
+        let calls = Box(0)
+        let poller = FlightFeedPoller(url: Self.feedURL, http: http, history: history, interval: .seconds(3600), now: {
+            calls.update { $0 += 1; return $0 } % 2 == 1 ? Self.received.addingTimeInterval(-2) : Self.received
+        })
+        await poller.start()
+        #expect(await eventually { await history.aircraftCount == 3 })
+        await poller.stop()
+        let all = await history.tracks(overlapping: Self.received.addingTimeInterval(-100)...Self.received.addingTimeInterval(100))
+        #expect(all["a0b1c2"]?.first?.positionTime == Self.received.addingTimeInterval(-1.4), "the middle of the request less seen_pos")
+
+        let report = try #require(all["a0b1c2"]?.first)
+        var again = report
+        again.positionTime = report.positionTime.addingTimeInterval(1)
+        await history.add([again])
+        let after = await history.tracks(overlapping: Self.received.addingTimeInterval(-100)...Self.received.addingTimeInterval(100))
+        #expect(after["a0b1c2"]?.map(\.positionTime) == [report.positionTime], "the same place and height again is the same report, at its first time")
+        var moved = again
+        moved.latitude += 0.001
+        await history.add([moved])
+        #expect(await history.tracks(overlapping: Self.received.addingTimeInterval(-100)...Self.received.addingTimeInterval(100))["a0b1c2"]?.count == 2)
+    }
+
     @Test func thePollerReadsTheFeedIntoTheHistory() async throws {
         let http = FakeSkyHTTP(pages: [Self.feedURL.absoluteString: (200, SkyFixtures.aircraftJSON)])
         let history = FlightHistory()

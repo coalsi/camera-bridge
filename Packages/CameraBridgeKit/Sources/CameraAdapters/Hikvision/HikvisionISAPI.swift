@@ -209,29 +209,6 @@ struct HikvisionISAPI: Sendable {
         _ = try await put(path, body: body)
     }
 
-    /// Channel `channelID`'s codec (`videoCodecType`), frame rate (`maxFrameRate` is in hundredths) and keyframe
-    /// interval in frames (`GovLength`), from `/ISAPI/Streaming/channels/<id>`.
-    func encoderSettings(channelID: String) async throws -> (codec: String?, fps: Double?, govLength: Int?) {
-        let video = try await xml("/ISAPI/Streaming/channels/\(channelID)").child("Video")
-        let fps = video?.string("maxFrameRate").flatMap { Double($0) }.map { $0 / 100 }
-        return (video?.string("videoCodecType"), fps, video?.string("GovLength").flatMap { Int($0) })
-    }
-
-    /// Sets channel `channelID`'s `GovLength` (keyframe interval, in frames) by read-modify-write of its channel
-    /// document, leaving every other setting as the camera had it. More reliable on Hikvision than ONVIF's
-    /// `SetVideoEncoderConfiguration`, which many firmwares reject (`InvalidArgVal`) for values they show as allowed.
-    func setGovLength(_ frames: Int, channelID: String) async throws {
-        let path = "/ISAPI/Streaming/channels/\(channelID)"
-        guard let document = String(data: try await get(path), encoding: .utf8) else {
-            throw CameraAdapterError.invalidResponse("\(path): not UTF-8 XML")
-        }
-        guard let replaced = Self.replacingElement("GovLength", in: document, with: String(frames)),
-              let body = replaced.data(using: .utf8) else {
-            throw CameraAdapterError.unsupported("This camera's stream settings have no keyframe interval to change")
-        }
-        _ = try await put(path, body: body)
-    }
-
     /// The video values of `/ISAPI/Streaming/channels/<channelID>`, with the document text they were read from.
     func encoderValues(channelID: String) async throws -> (document: String, values: EncoderValues) {
         let path = "/ISAPI/Streaming/channels/\(channelID)"

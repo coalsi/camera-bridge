@@ -809,6 +809,42 @@ import TestSupport
         #expect(await store.current() == fit)
     }
 
+    /// Review Oct 31 (sky F4): once 2,000 plane matches were kept, every matched plane rewrote the whole matches file (about 300 KB) and, at 12
+    /// samples a pass against a refit every 10, started a fit of a few seconds: tens an hour near an approach path. Once the aim is good the
+    /// store refits every 10 passes (or hourly), and over the cap it appends, rewriting the file only now and then.
+    @Test func aGoodAimRefitsEveryTenPassesAndAFullFileIsAppendedTo() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let clock = Box(SkyFixtures.aimEpoch.addingTimeInterval(600))
+        let store = Self.store(in: directory, clock: clock)
+        var random = SkyRandom(seed: 31)
+        let data = SkyFixtures.planeTracks(through: SkyFixtures.truthDual, perLens: 30, samples: 6, noise: Self.noise, using: &random)
+        let fit = try #require(await store.add(data))
+        #expect(fit.quality != .rough && fit.planes >= SkyAimStore.settledPlanes, "\(fit.quality) from \(fit.planes) planes")
+        let fitted = try #require(await store.lastAttempt())
+        for pass in 0..<9 {
+            clock.set(clock.value.addingTimeInterval(60))
+            _ = await store.add(Array(data[(pass * 2)..<(pass * 2 + 2)]))
+        }
+        #expect(await store.lastAttempt() == fitted, "nine passes, eighteen matches: no refit yet")
+        clock.set(clock.value.addingTimeInterval(60))
+        _ = await store.add(Array(data[18..<20]))
+        #expect(await store.lastAttempt() == clock.value, "the tenth pass refits")
+
+        // Over the cap: the new lines are appended; the file is read back trimmed.
+        func match(_ index: Int) -> AimCorrespondence {
+            AimCorrespondence(point: PixelPoint(x: 0.3, y: 0.3), direction: SkyDirection(azimuth: 300, elevation: 30), source: .star,
+                              at: clock.value.addingTimeInterval(Double(index)), object: "s\(index)")
+        }
+        _ = await store.add((0..<SkyAimStore.keptPerSource).map(match))
+        _ = await store.add((SkyAimStore.keptPerSource..<(SkyAimStore.keptPerSource + 10)).map(match))
+        let lines = try String(contentsOf: directory.file(SkyAimStore.matchesFileName), encoding: .utf8).split(separator: "\n").count
+        let kept = await store.correspondences()
+        #expect(lines > kept.count, "appended, not rewritten: \(lines) lines for \(kept.count) kept")
+        let again = Self.store(in: directory, clock: clock)
+        #expect(Set(await again.correspondences().map(\.object)) == Set(kept.map(\.object)), "the file is read back as kept")
+    }
+
     @Test func aRefitRunsOffTheStoresActor() async throws {
         // A refit of a few thousand matches takes seconds on the box. It runs on a thread of its own, outside Swift's cooperative pool: the
         // store answers meanwhile (the detector's pictures never wait for it, nor does the rest of the bridge for a thread), and an aim started

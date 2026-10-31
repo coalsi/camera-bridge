@@ -79,6 +79,9 @@
   position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); white-space: nowrap; padding: 2px 8px; border-radius: 6px;
   font: 600 0.75rem/1.4 var(--mono); color: #fff; background: #9e1b1b; box-shadow: 0 2px 8px rgb(0 0 0 / 0.4); pointer-events: none;
 }
+/* Stretches kept from retention (js/nvr/kept.js) of the cameras shown: a gold mark under the track. */
+.nvr-kept-marks { position: absolute; left: 0; right: 0; bottom: 2px; height: 5px; pointer-events: none; z-index: 2; }
+.nvr-kept-mark { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 3px; background: #e0b14a; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.35); }
 .nvr-empty { margin: 8px 0 0; }
 .nvr-problem { margin: 8px 0 0; color: var(--warning); }
 

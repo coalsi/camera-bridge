@@ -84,6 +84,21 @@ import TestSupport
         #expect(locked.status == 429)
     }
 
+    @Test func aDamagedPasswordFileRefusesSignInsWithASentence() async throws {
+        let directory = try TemporaryDirectory(prefix: "cb-web")
+        defer { directory.remove() }
+        let folder = directory.url.appending(path: "web", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("{ not json".utf8).write(to: folder.appending(path: "auth.json"))
+        let harness = try Harness { $0.dataDirectory = directory.url }
+        #expect(await harness.send("GET", "/api/v1/session").json["setupRequired"] as? Bool == false, "setup is not offered to whoever comes first")
+        for path in ["/api/v1/auth/setup", "/api/v1/auth/login"] {
+            let refused = await harness.send("POST", path, json: ["password": "anything at all"])
+            #expect(refused.status == 503 && refused.json["code"] as? String == "auth_unreadable", "\(path)")
+            #expect((refused.json["message"] as? String)?.contains("camera-bridge-factory-reset") == true)
+        }
+    }
+
     // MARK: Signing in
 
     @Test func loginAcceptsTheRightPasswordOnly() async throws {
@@ -120,6 +135,35 @@ import TestSupport
         #expect(locked.cookie == nil)
         let other = await harness.send("POST", "/api/v1/auth/login", json: ["password": "correct horse"], from: "192.0.2.99")
         #expect(other.status == 200, "another address is not affected")
+    }
+
+    @Test func wrongPasswordsSentAllAtOnceAreCheckedAtMostFiveTimes() async throws {
+        let harness = try Harness()
+        _ = try await harness.signIn()
+        let statuses = await withTaskGroup(of: Int.self) { group in
+            for _ in 0..<20 { group.addTask { await harness.send("POST", "/api/v1/auth/login", json: ["password": "wrong password"]).status } }
+            return await group.reduce(into: [Int]()) { $0.append($1) }
+        }
+        #expect(await harness.app.auth.passwordChecks <= 5, "a guess is admitted before the earlier ones are counted, so parallel guesses could get past the limit")
+        #expect(await harness.app.auth.mostChecksAtOnce <= 4)
+        #expect(statuses.filter { $0 == 401 }.count <= 5)
+        #expect(statuses.allSatisfy { $0 == 401 || $0 == 429 })
+        for _ in 0..<5 { _ = await harness.send("POST", "/api/v1/auth/login", json: ["password": "wrong password"]) }
+        #expect(await harness.app.auth.passwordChecks == 5, "five checked in all, then the address is locked out")
+        #expect(await harness.send("POST", "/api/v1/auth/login", json: ["password": "correct horse"]).status == 429)
+    }
+
+    @Test func manyAddressesAtOnceNeverQueueMoreThanFourChecks() async throws {
+        let harness = try Harness()
+        _ = try await harness.signIn()
+        let statuses = await withTaskGroup(of: Int.self) { group in
+            for index in 0..<24 {
+                group.addTask { await harness.send("POST", "/api/v1/auth/login", json: ["password": "wrong password"], from: "198.51.100.\(index)").status }
+            }
+            return await group.reduce(into: [Int]()) { $0.append($1) }
+        }
+        #expect(await harness.app.auth.mostChecksAtOnce <= 4)
+        #expect(statuses.allSatisfy { $0 == 401 || $0 == 429 })
     }
 
     @Test func aRightPasswordClearsTheCount() async throws {

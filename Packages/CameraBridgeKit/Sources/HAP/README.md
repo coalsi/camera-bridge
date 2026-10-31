@@ -12,8 +12,9 @@ advertising, persistence. Portable: depends on HAPCore and BridgeSupport only; T
 - Model: `Characteristic` (value, `update`/`sendEvent`, `onRead`/`onWrite`, observers, overrides), `Service`,
   `Accessory` (+ bridged accessories, `onIdentify`, `onResourceRequest`, `setReachable`), `HAPSessionHandle`.
 - Server: `AccessoryServer` (start/stop, setup code/URI, `events`, `resetPairings`, `configurationDidChange`, extras).
-- Stores: `InMemoryHAPStore`, `FileHAPStore` (`state.json` 0600, written through BridgeSupport `PrivateFiles`: a
-  directory it creates is 0700, an existing one is left as it is; identity incl. Ed25519 key in the `SecretStore`
+- Stores: `InMemoryHAPStore`, `FileHAPStore` (`state.json` 0600, written and synced through BridgeSupport `PrivateFiles`: a
+  directory it creates is 0700, an existing one is left as it is; each save keeps the state it replaces as
+  `state.json.bak`, which `loadState` uses, and puts back, when `state.json` cannot be read; identity incl. Ed25519 key in the `SecretStore`
   under `account`), `InMemorySecretStore` (BridgeSupport), `HAPStore.loadOrCreateIdentity()` (the server's and the
   engine's one way to get an identity; see Invariants).
 
@@ -39,7 +40,8 @@ at once, resetting the backoff: the network changed or the Mac woke), `restartLi
 does not answer and listens again after `listenerRestartSettle`, keeping the open connections), `dropStaleConnections(inactiveFor:)`
 (verified connections silent for that long, default `staleConnectionLimit` 60 s; the wake path), `probeListener(timeout:)` (an
 unauthenticated loopback `GET /accessories` must be refused with 470 in time), `advertisedTXT`, `advertisedName`.
-`HAPHealthMonitor` (public actor; one per accessory) runs the loopback check, a Bonjour check through `ServiceBrowsing` (`id`, `c#`,
+`HAPHealthMonitor` (public actor; one per accessory) runs the loopback check (an answer within 3 s; the listener is restarted after two
+checks in a row without one, `listenerMissesBeforeRestart`, 2026-10-31: one stall on a busy box withdrew the camera from Bonjour), a Bonjour check through `ServiceBrowsing` (`id`, `c#`,
 `sf` must match what was registered; two misses in a row register again; a browse that cannot run counts for nothing) and a
 controller-liveness check (a paired accessory without a verified connection for 10 minutes is advertised again once and
 `controllerSilenceNote` says so) every 30 s; `runOnce()` is one pass, tests move the clock. `c#` now also moves when the *values*

@@ -13,6 +13,10 @@ public protocol MediaCodecs: Sendable {
     /// pictures than the stream's and decode on the GPU where that pays (a 4K or HEVC camera decoded all the time). The default is
     /// `makeVideoDecoder`.
     func makeMotionDecoder(format: VideoFormat) throws -> any VideoDecoding
+    /// `makeMotionDecoder(format:)` that makes a picture of every `keepEvery`th frame it is given only (frames 0, N, 2N, … from the first, a
+    /// keyframe) and answers `nil` at once for the others, as the sky decoder does: motion detection looks at about four pictures a second.
+    /// The default is `makeMotionDecoder(format:)`, which makes a picture of every frame (the caller keeps the rate itself).
+    func makeMotionDecoder(format: VideoFormat, keepEvery: Int) throws -> any VideoDecoding
     /// A decoder for the sky detector, which looks at a luma picture at most `maxOutputWidth` wide (the shape kept) about five times a second:
     /// it makes a picture of every `keepEvery`th frame it is given (frames 0, N, 2N, … from the first, a keyframe) and answers `nil` at once
     /// for the others, dropping them where it can before they are copied back (on the GPU), scales with a good filter, never applies a
@@ -63,6 +67,8 @@ extension MediaCodecs {
     public func makeProbeDecoder(format: VideoFormat) throws -> any VideoDecoding { try makeVideoDecoder(format: format) }
 
     public func makeMotionDecoder(format: VideoFormat) throws -> any VideoDecoding { try makeVideoDecoder(format: format) }
+
+    public func makeMotionDecoder(format: VideoFormat, keepEvery: Int) throws -> any VideoDecoding { try makeMotionDecoder(format: format) }
 
     public func makeSkyDecoder(format: VideoFormat, maxOutputWidth: Int, keepEvery: Int) throws -> any VideoDecoding {
         try makeMotionDecoder(format: format)

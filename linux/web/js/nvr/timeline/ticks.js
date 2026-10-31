@@ -1,6 +1,10 @@
 // Ruler ticks for the timeline: [{ ms, label, major }], aligned to the viewer's local clock and correct on daylight-saving days.
 // Steps under an hour are aligned to the zone's own offset; hour steps keep ticks whose local hour is a multiple of the step; day
 // steps use the first instant of each local calendar day. Nothing here reads the machine's time zone: the caller passes one.
+// The zone's fields and the first instant of a day are the page's own (js/zone.js), shared with the clocks and the day groups of every page.
+import { startOfLocalDay, zonedFormat, zonedParts } from '../../zone.js';
+
+export { startOfLocalDay, zonedParts };
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -15,47 +19,13 @@ export const TICK_STEPS_MS = [
   1 * DAY, 2 * DAY, 7 * DAY,
 ];
 
-const formatters = new Map();
 function formatter(key, timeZone, locale, options) {
-  const id = `${key}|${timeZone}|${locale || ''}`;
-  let f = formatters.get(id);
-  if (!f) {
-    f = new Intl.DateTimeFormat(locale, { timeZone, ...options });
-    formatters.set(id, f);
-  }
-  return f;
-}
-
-/** The wall-clock fields of an instant in a zone. `offsetMs` is local minus UTC. */
-export function zonedParts(ms, timeZone) {
-  const parts = {};
-  for (const part of formatter('parts', timeZone, 'en-US', {
-    hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
-  }).formatToParts(ms)) {
-    if (part.type !== 'literal') parts[part.type] = Number(part.value);
-  }
-  parts.hour %= 24;
-  const wholeSecondMs = Math.floor(ms / SECOND) * SECOND;
-  parts.offsetMs = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - wholeSecondMs;
-  return parts;
+  return zonedFormat(options, timeZone, locale);
 }
 
 /** Days since 1970-01-01 of a local calendar date. */
 function dayNumber(parts) {
   return Math.floor(Date.UTC(parts.year, parts.month - 1, parts.day) / DAY);
-}
-
-/** The first instant of a local calendar day (a day that starts with a skipped hour starts at the first instant that exists). */
-export function startOfLocalDay(year, month, day, timeZone) {
-  const guess = Date.UTC(year, month - 1, day);
-  let ms = guess - zonedParts(guess, timeZone).offsetMs;
-  ms = guess - zonedParts(ms, timeZone).offsetMs;
-  for (let i = 0; i < 3; i += 1) {
-    const p = zonedParts(ms, timeZone);
-    if (p.year === year && p.month === month && p.day === day) break;
-    ms += HOUR;
-  }
-  return ms;
 }
 
 function labelFor(ms, step, major, timeZone, locale) {

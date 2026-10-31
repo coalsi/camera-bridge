@@ -12,7 +12,8 @@ Before=shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/cb-recording-drive --archive --apply
-TimeoutStartSec=60
+# The drive's file system is checked first (at most 10 minutes, cb-recording-drive).
+TimeoutStartSec=15min
 
 [Install]
 WantedBy=multi-user.target

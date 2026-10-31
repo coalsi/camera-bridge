@@ -13,7 +13,7 @@ const SUMMARIES = {
   red: 'Something on this camera can let it be reached from outside your home.',
   yellow: 'Nothing Camera Bridge read opens this camera to the outside, but something needs work.',
   green: 'Camera Bridge found no cloud turned on, but it can’t confirm everything, so a way out is still possible.',
-  gold: 'Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the Internet guard saw nothing get out in the last 24 hours.',
+  gold: 'Every outside feature Camera Bridge knows for this camera is off, its video needs a password, and the Internet guard let none of its internet lookups through in the last 24 hours.',
 };
 
 const finding = (feature, state, level, sentence, { canChange = false, linked = null, service = null } = {}) =>
@@ -23,7 +23,8 @@ const WATCHED_QUIET = finding('internetGuard', 'on', 'gold', 'The Internet guard
 const NOT_WATCHED = finding('internetGuard', 'off', 'green', 'The Internet guard doesn’t watch this camera, so Camera Bridge can’t confirm that nothing gets out.');
 const VIDEO_LOCKED = finding('unauthenticatedVideo', 'off', 'gold', 'Its video needs a password.');
 const TRYING = finding('internetGuard', 'on', 'gold', 'The Internet guard blocked 112 attempts to reach the internet in the last 24 hours '
-  + '(*.p2p.example.com, cloud.example.net, time.example.org). Nothing got out.');
+  + '(*.p2p.example.com, cloud.example.net, time.example.org). Each lookup was blocked; a camera can still try an address it already knows, '
+  + 'which the guard can’t see.');
 
 /** The findings of each level's camera. */
 export const SECURITY_FINDINGS = {

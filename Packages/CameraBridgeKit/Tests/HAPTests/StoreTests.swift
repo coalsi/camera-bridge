@@ -151,6 +151,26 @@ import Testing
         #expect(try mode(existing.appending(path: "state.json")) == 0o600)
     }
 
+    /// Review findings (engine-core F5, linux-platform I3): a damaged `state.json` cost every Apple Home pairing of the camera. The copy
+    /// the last save replaced is used, and put back; removing the camera removes it too.
+    @Test func aDamagedStateFallsBackToTheCopyKeptBeforeTheLastSave() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "HAPStoreTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FileHAPStore(directory: directory, secretStore: InMemorySecretStore(), account: "hap.damaged")
+        try store.saveState(sampleState())
+        var newer = sampleState()
+        newer.configNumber = 8
+        try store.saveState(newer)
+        let stateURL = directory.appending(path: "state.json")
+        try Data().write(to: stateURL)   // a power cut while it was written
+
+        assertEqual(try store.loadState(), sampleState())
+        assertEqual(try JSONDecoder().decode(HAPPersistentState.self, from: Data(contentsOf: stateURL)), sampleState())
+
+        try store.deleteAll()
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false)).isEmpty)
+    }
+
     @Test func fileStoreRejectsCorruptState() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "HAPStoreTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: directory) }

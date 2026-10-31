@@ -12,6 +12,11 @@ struct SecureAddressState: Codable, Equatable, Sendable {
     var lastTimestamp: Int64 = 0
     /// Whether `http://camera-bridge.local` sends browsers to the secure address once a certificate is in place. On unless turned off.
     var redirect: Bool = true
+    /// The secure address's own switch: off, the box calls nobody for it (no registration, no address, no certificate). On unless turned
+    /// off; optional, so a state file from before it still reads.
+    var enabled: Bool?
+
+    var isEnabled: Bool { enabled ?? true }
     /// Certificate tries since the last success, and when the next may be asked for.
     var attempts: Int = 0
     var nextAttempt: Date?

@@ -71,8 +71,14 @@ public final class FFmpegMediaCodecs: MediaCodecs {
     /// Motion detection's decoder: pictures at most `FFmpegVideoDecoder.motionPictureWidth` wide, decoded on the GPU for HEVC and anything
     /// larger than 1080p (on the reference box a 4K HEVC camera cost a whole core decoded on the CPU, 2026-10-16).
     public func makeMotionDecoder(format: VideoFormat) throws -> any VideoDecoding {
+        try makeMotionDecoder(format: format, keepEvery: 1)
+    }
+
+    /// The motion decoder making a picture of every `keepEvery`th frame only (the others are not copied out of ffmpeg, nor on the GPU back
+    /// from it): motion detection analyses about four a second, and a picture of every frame was thrown away three times in four.
+    public func makeMotionDecoder(format: VideoFormat, keepEvery: Int) throws -> any VideoDecoding {
         try FFmpegVideoDecoder(runtime: runtime, format: format, sessionLogLevel: .debug, maxOutputWidth: FFmpegVideoDecoder.motionPictureWidth,
-                               hardwareWhenHeavy: true)
+                               hardwareWhenHeavy: true, keepEvery: keepEvery)
     }
 
     /// The sky detector's decoder: pictures at most `maxOutputWidth` wide, a picture of every `keepEvery`th frame only (on the GPU, where the

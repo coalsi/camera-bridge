@@ -33,6 +33,14 @@ actor SkyAimStore {
     static let keptPerSource = 2_000
     static let planeLifetime: TimeInterval = 30 * 86_400
     static let refitMatches = 10
+    /// Once the aim is good or precise and fitted from at least `settledPlanes` planes, it refits every this many passes (a plane's 12 samples
+    /// each), or every `refitPasses` × `refitMatches` matches (a big star pass), not every `refitMatches` matches: such an aim moves little, and a
+    /// fit over the thousands of matches it has by then takes seconds on the box (review Oct 31).
+    static let refitPasses = 10
+    static let settledPlanes = 50
+    /// Lines the matches file may hold beyond the matches kept before it is written again whole: between, new matches are appended (a
+    /// rewrite is about 300 KB), and the file is read back trimmed.
+    static let staleLinesBeforeRewrite = 500
     static let refitInterval: TimeInterval = 3_600
     static let movedMatches = 10
     static let movedFactor = 3.0
@@ -59,6 +67,8 @@ actor SkyAimStore {
         var attempted: Date?
         /// New matches since then.
         var pending = 0
+        /// New passes (calls of `add`) since then; nil in a state saved before they were counted.
+        var pendingPasses: Int?
         /// Plane matches in a row that were further off the aim than a moved camera's threshold.
         var run = 0
         var note: String?
@@ -77,6 +87,8 @@ actor SkyAimStore {
     private var matches: [AimCorrespondence]
     private var rejectionLogged = false
     private var saveFailureLogged = false
+    /// Lines of the matches file beyond the matches kept (trimmed in memory, appended to the file).
+    private var staleLines = 0
     /// Set by `close()`, from outside the actor: a fit that is running (a few seconds) must not hold it up.
     private nonisolated let closedFlag = Mutex(false)
     /// One more each time the aim starts again or its start changes lenses: a fit under way then is of what was dropped, and is not taken.
@@ -188,11 +200,16 @@ actor SkyAimStore {
         }
         let all = matches + usable
         matches = Self.trimmed(all, now: now())
-        if matches.count == all.count { append(usable) } else { saveMatches() }
+        staleLines += all.count - matches.count
+        if staleLines <= Self.staleLinesBeforeRewrite { append(usable) } else { saveMatches() }
         state.pending += usable.count
+        state.pendingPasses = (state.pendingPasses ?? 0) + 1
         defer { saveState() }
         let time = now()
-        let due = state.pending >= Self.refitMatches
+        let settled = state.fit.map { $0.quality != .rough && $0.planes >= Self.settledPlanes } ?? false
+        let enough = settled ? (state.pendingPasses ?? 0) >= Self.refitPasses || state.pending >= Self.refitPasses * Self.refitMatches
+            : state.pending >= Self.refitMatches
+        let due = enough
             || state.attempted.map { time.timeIntervalSince($0) >= Self.refitInterval || $0 > time } ?? true
         return due ? await refit() : nil
     }
@@ -242,6 +259,7 @@ actor SkyAimStore {
         fitting = mine
         defer { if fitting == mine { fitting = nil } }
         state.pending = 0
+        state.pendingPasses = 0
         state.attempted = now()
         let matches = matches, starting = state.fit?.model ?? start, previous = state.fit, seeded = seeded
         let width = pictureWidth, height = pictureHeight
@@ -442,6 +460,7 @@ actor SkyAimStore {
         guard !isClosed else { return }
         do {
             try Self.write(matches, to: matchesURL, directory: directory)
+            staleLines = 0
         } catch {
             saveFailed(Self.matchesFileName)
         }

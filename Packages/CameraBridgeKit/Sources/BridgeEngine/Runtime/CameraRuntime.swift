@@ -113,6 +113,9 @@ actor CameraRuntime {
 
     nonisolated let id: UUID
     nonisolated let configuration: CameraConfiguration
+    /// The camera's name as the person calls it now: a rename is applied in place (`rename(_:)`), without a restart, and the log follows it.
+    nonisolated var name: String { nameBox.value.withLock { $0 } }
+    private nonisolated let nameBox: NameBox
     private let credentials: HTTPCredentials?
     /// The credentials in the camera's stream URLs, from the secret store: its RTSP sessions send them, nothing else sees them.
     private let streamCredentials: StreamURLCredentials
@@ -180,6 +183,9 @@ actor CameraRuntime {
     private var pendingFreeze: AccessoryOptions.Aspect?
     /// Bumped by every start and stop (see the type's documentation).
     private var epoch = 0
+    /// What this runtime names in its writes to the router, claimed at every start (`EventRouter.claim(_:)`): once the engine replaced it,
+    /// what it still sends (a stop that outlived the engine's wait) changes nothing.
+    private var claim: RouterClaim
     private var stack: Stack?
     private var streaming: StreamingHandler?
     private var recording: RecordingHandler?
@@ -257,6 +263,8 @@ actor CameraRuntime {
     init(configuration: CameraConfiguration, credentials: HTTPCredentials?, streamCredentials: StreamURLCredentials = .none,
          dependencies: Dependencies) {
         id = configuration.id
+        claim = RouterClaim(cameraID: configuration.id, number: 0)   // holds nothing before the first start
+        nameBox = NameBox(configuration.name)
         self.configuration = configuration
         self.credentials = credentials
         self.streamCredentials = streamCredentials
@@ -329,6 +337,9 @@ actor CameraRuntime {
         get async { await mainIngest?.isRunning ?? false }
     }
 
+    /// Tests: the names the main and sub stream supervisors log with (nil before they exist).
+    var streamNames: (main: String?, sub: String?) { (mainIngest?.name, subIngest?.name) }
+
     /// Tests: connection attempts of the main and sub stream supervisors (nil before they exist).
     var ingestAttempts: (main: Int?, sub: Int?) {
         get async { (await mainIngest?.attempts, await subIngest?.attempts) }
@@ -353,9 +364,9 @@ actor CameraRuntime {
         running = true
         epoch &+= 1
         let epoch = epoch
-        let name = configuration.name
         log.info("Starting \(name) (\(configuration.vendor.rawValue), \(configuration.kind.rawValue))")
-        await dependencies.router.setStreamConnection(.connecting, for: id)
+        claim = await dependencies.router.claim(id)
+        await dependencies.router.setStreamConnection(.connecting, claim: claim)
         await startIngest(epoch)
         makeSnapshots()
         var listening = port
@@ -404,7 +415,7 @@ actor CameraRuntime {
     /// the same accessory. Idempotent.
     func unpublish() async {
         guard running, let stack else { return }
-        log.info("Unpublishing the HomeKit accessory of \(configuration.name)")
+        log.info("Unpublishing the HomeKit accessory of \(name)")
         serverEvents?.cancel()
         serverEvents = nil
         operatingEvents?.cancel()
@@ -449,7 +460,6 @@ actor CameraRuntime {
     /// Builds the delegates and the accessory, starts its server and registers its controller on the router. Throws
     /// `CancellationError` when the runtime stopped meanwhile (nothing is left running), else the start's failure.
     private func bringUpAccessory(port: UInt16, reserved: Set<UInt16>, epoch: Int) async throws -> UInt16 {
-        let name = configuration.name
         // Recording options are frozen per camera; live options follow the source: the picture when it is already
         // there, else the size remembered at an earlier start. Only a camera seen for the first time waits for a picture.
         let frozen = try? AccessoryOptions.frozenAspect(in: store)
@@ -553,7 +563,7 @@ actor CameraRuntime {
     }
 
     private func startHealthMonitor(_ stack: Stack) {
-        let monitor = HAPHealthMonitor(server: stack.server, name: configuration.name, browser: dependencies.environment.platform.browser,
+        let monitor = HAPHealthMonitor(server: stack.server, name: name, browser: dependencies.environment.platform.browser,
                                        timing: dependencies.tuning.accessoryHealth, log: Log(category: "hap", cameraID: id))
         healthMonitor = monitor
         Task { await monitor.start() }
@@ -573,7 +583,7 @@ actor CameraRuntime {
         let dropped = dropConnections ? await stack.server.dropStaleConnections(inactiveFor: inactiveFor) : 0
         let ended = stack.controller.stopUnstartedStreamingSessions(because: "the Mac woke up")
         if dropped > 0 || ended > 0 {
-            log.info("\(configuration.name): after the wake, closed \(dropped) silent HAP connection\(dropped == 1 ? "" : "s") and ended "
+            log.info("\(name): after the wake, closed \(dropped) silent HAP connection\(dropped == 1 ? "" : "s") and ended "
                      + "\(ended) live view\(ended == 1 ? "" : "s") that never started")
         }
     }
@@ -590,21 +600,33 @@ actor CameraRuntime {
         eventSource?.credentialsConfirmed()
     }
 
+    /// The main stream came back after it was down since `downSince`: the event channel reconnects if its connection is older.
+    private func videoResumed(downSince: ContinuousClock.Instant) {
+        guard running else { return }
+        log.info("\(configuration.name): its video is back after an outage; checking that its event channel is not left on a dead connection")
+        eventSource?.videoResumed(downSince: downSince)
+    }
+
     /// Tells the router what the main stream is doing now: after an accessory that could not start made the camera read as
     /// offline, once it is up the stream's own state is the truth again.
     func reportStreamConnection() async {
         guard running, let ingest = mainIngest else { return }
-        let router = dependencies.router
+        let router = dependencies.router, claim = claim
         switch await ingest.state {
-        case .online: await router.setStreamConnection(.online, for: id)
-        case .connecting: await router.setStreamConnection(.connecting, for: id)
-        case .offline(let reason): await router.setStreamConnection(.offline(reason), for: id)
+        case .online: await router.setStreamConnection(.online, claim: claim)
+        case .connecting: await router.setStreamConnection(.connecting, claim: claim)
+        case .offline(let reason): await router.setStreamConnection(.offline(reason), claim: claim)
         case .idle: break
         }
         dependencies.onChange()
     }
 
-    /// Stops the accessory, ingest and events; the camera's router state goes idle. Idempotent.
+    /// Stops the ingest, events and accessory; the camera's router state goes idle. Idempotent.
+    ///
+    /// What talks to the camera stops first (the event channel and the soft motion, sky and shadow decoders, then both streams, each with
+    /// its own bound), and what Apple Home sees after (live views, recordings, the accessory server): a stop that outlives the engine's wait
+    /// (`EngineTuning.runtimeStopLimit`; an accessory server that hangs) then leaves no connection to the camera beside the next runtime's,
+    /// and what it still sends the router once the engine started another runtime is dropped (`claim`).
     func stop() async {
         guard running else { return }
         running = false
@@ -631,14 +653,6 @@ actor CameraRuntime {
         }
         await stopMotionShadow()
         await stopSky()   // its detector starts it again when the camera runs again
-        await streaming?.stopAll()
-        await recording?.stopAll()
-        for cancel in appSubscriptions.values { cancel() }   // the app's viewers end with the camera
-        if let stack {
-            await stack.server.stop()
-            await stack.dataStream.stop()
-        }
-        stack = nil
         subIdleStop?.cancel()
         subIdleStop = nil
         mainIdleStop?.cancel()
@@ -664,8 +678,17 @@ actor CameraRuntime {
         subEvents = nil
         subOfflineFallback?.cancel()
         subOfflineFallback = nil
-        mainIngest = nil
+        mainIngest = nil   // a live view that arrives while the accessory stops starts no stream again
         subIngest = nil
+        await dependencies.tuning.beforeAccessoryStop?(id)
+        await streaming?.stopAll()
+        await recording?.stopAll()
+        for cancel in appSubscriptions.values { cancel() }   // the app's viewers end with the camera
+        if let stack {
+            await stack.server.stop()
+            await stack.dataStream.stop()
+        }
+        stack = nil
         subUsers = 0
         subPermanent = false
         subState = .idle
@@ -677,9 +700,9 @@ actor CameraRuntime {
         // The next start (often with a new password) learns about the credentials afresh: a stream rejection that
         // outlived its ingest would blame the new password while the camera is merely unreachable.
         reachability?.reset()   // nothing is probed for a stopped camera
-        await dependencies.router.resetOrigin(.stream, for: id)
-        await dependencies.router.setStreamConnection(.idle, for: id)
-        log.info("Stopped \(configuration.name)")
+        await dependencies.router.resetOrigin(.stream, claim: claim)
+        await dependencies.router.setStreamConnection(.idle, claim: claim)
+        log.info("Stopped \(name)")
         dependencies.onChange()
     }
 
@@ -695,7 +718,7 @@ actor CameraRuntime {
     func refresh(woke: Bool = false, advertiseAfter: Duration = .zero) async {
         guard running else { return }
         let epoch = epoch
-        log.info("Reconnecting \(configuration.name) after a system or network change")
+        log.info("Reconnecting \(name) after a system or network change")
         await dependencies.tuning.beforeRuntimeRefresh?(id)
         guard isCurrent(epoch) else { return }
         if woke { await healthMonitor?.systemDidWake() }
@@ -716,7 +739,7 @@ actor CameraRuntime {
             // Still waiting for its stream addresses (the Mac woke or joined the network before the camera's network
             // was up): ask again now with a fresh backoff instead of waiting out up to a minute. Never after rejected
             // credentials (lockout safety), and never while a probe is under way.
-            log.info("\(configuration.name): asking the camera for its stream addresses again")
+            log.info("\(name): asking the camera for its stream addresses again")
             sourceTask?.cancel()
             startProbing(epoch)
         }
@@ -727,12 +750,12 @@ actor CameraRuntime {
         guard isCurrent(epoch) else { return }
         if eventSource != nil {
             if await dependencies.router.credentialsRejected(by: .camera, for: id) {
-                log.info("\(configuration.name): the event channel keeps waiting after rejected credentials")
+                log.info("\(name): the event channel keeps waiting after rejected credentials")
             } else if let healthyWindow, await mainIngest?.isDelivering(within: healthyWindow) == true {
                 // The camera's video still arrives over the same network: its event connection does too. Restarting it on every
                 // network change logs in to the camera again each time (lockout-prone on some cameras) and loses events while
                 // it reconnects; a channel that really dropped reconnects on its own.
-                log.info("\(configuration.name): keeping the event channel connected (the camera's video is still arriving)")
+                log.info("\(name): keeping the event channel connected (the camera's video is still arriving)")
             } else {
                 guard isCurrent(epoch) else { return }
                 await stopEvents()
@@ -855,6 +878,14 @@ actor CameraRuntime {
         await startSoftMotion(epoch)
     }
 
+    /// The camera was renamed: its log lines and its streams' name it as the person now calls it, without a restart (the overlay follows
+    /// through `updateTimestampOverlay`).
+    func rename(_ newName: String) {
+        nameBox.value.withLock { $0 = newName }
+        mainIngest?.rename("\(newName) main stream")
+        subIngest?.rename("\(newName) sub stream")
+    }
+
     /// The timestamp overlay's settings or the camera's name changed while the overlay stays on (or off): the next picture
     /// of every live view and recording draws the new ones. Turning it on or off restarts the runtime instead (the video
     /// path changes).
@@ -942,7 +973,7 @@ actor CameraRuntime {
     private func setPaired(_ value: Bool) async {
         paired = value
         if value, let aspect = pendingFreeze, let server = stack?.server {
-            log.info("\(configuration.name) was paired: its recording options are kept from now on")
+            log.info("\(name) was paired: its recording options are kept from now on")
             await freezeRecordingOptions(aspect, on: server)
         }
         dependencies.onChange()
@@ -983,7 +1014,7 @@ actor CameraRuntime {
     private func formatSeen(_ format: VideoFormat, epoch: Int) async {
         let size = AccessoryOptions.SourceSize(width: format.width, height: format.height)
         guard isCurrent(epoch), let server = stack?.server, size.isPlausible, size != AccessoryOptions.sourceSize(in: store) else { return }
-        log.info("\(configuration.name) delivers \(size.width)×\(size.height): its HomeKit options follow at the next start")
+        log.info("\(name) delivers \(size.width)×\(size.height): its HomeKit options follow at the next start")
         await rememberSourceSize(size, on: server)
     }
 
@@ -1068,7 +1099,6 @@ actor CameraRuntime {
         guard isCurrent(epoch), mainIngest == nil, let main = urls.main else { return }
         rtspAddresses = urls
         let transport = dependencies.environment.platform.transport
-        let name = configuration.name
         let stored = streamCredentials
         let mainSource = StreamSources.rtsp(url: main, credentials: credentials, streamCredentials: stored, displayName: name, cameraID: id,
                                             transport: transport)
@@ -1088,12 +1118,12 @@ actor CameraRuntime {
         guard isCurrent(epoch), mainIngest == nil else { return }
         let timing = dependencies.tuning.ingest
         let (events, continuation) = AsyncStream.makeStream(of: IngestSupervisor.Event.self)
-        let mainIngest = IngestSupervisor(name: "\(configuration.name) main stream", hub: mainHub, primary: main, fallback: fallback?.main,
+        let mainIngest = IngestSupervisor(name: "\(name) main stream", hub: mainHub, primary: main, fallback: fallback?.main,
                                           timing: timing, traits: mainTraits, log: log, reachability: reachability) { continuation.yield($0) }
         // The sub stream's events reach the runtime (its status, soft motion's choice of stream, Local Network).
         let (subEventStream, subContinuation) = AsyncStream.makeStream(of: IngestSupervisor.Event.self)
         let subIngest = sub.map {
-            IngestSupervisor(name: "\(configuration.name) sub stream", hub: subHub, primary: $0, fallback: fallback?.sub, timing: timing,
+            IngestSupervisor(name: "\(name) sub stream", hub: subHub, primary: $0, fallback: fallback?.sub, timing: timing,
                              traits: subTraits, log: log, reachability: reachability) { subContinuation.yield($0) }
         }
         self.mainIngest = mainIngest
@@ -1106,7 +1136,7 @@ actor CameraRuntime {
             subContinuation.finish()
         }
         let router = dependencies.router
-        let cameraID = id
+        let cameraID = id, claim = claim
         let onChange = dependencies.onChange
         let onLocalNetwork = dependencies.onLocalNetwork
         let remote = !Self.isLoopback(configuration.endpoint.host) && configuration.vendor != .demo
@@ -1114,6 +1144,7 @@ actor CameraRuntime {
         ingestEvents = Task { [weak self] in
             // The main stream delivered video since it last started (an on-demand camera: during this wake).
             var wakeDelivered = false
+            var outage = VideoOutage()
             for await event in events {
                 switch event {
                 case .state(.idle):
@@ -1122,19 +1153,22 @@ actor CameraRuntime {
                     if onDemand, wakeDelivered { await self?.reportAsleep(epoch) }
                     wakeDelivered = false
                 case .state(.connecting):
-                    await router.setStreamConnection(.connecting, for: cameraID)
+                    await router.setStreamConnection(.connecting, claim: claim)
                 case .state(.online):
                     wakeDelivered = true
                     let eventsRefused = await router.credentialsRejected(by: .camera, for: cameraID)
-                    await router.setStreamConnection(.online, for: cameraID)
+                    await router.setStreamConnection(.online, claim: claim)
                     if remote { onLocalNetwork(.granted) }
                     // The video signed in with the camera's credentials: the event channel, waiting after a refused login, tries again
                     // now (or when CameraBridge's login pause ends) instead of up to ten minutes later.
                     if eventsRefused { await self?.confirmEventCredentials() }
+                    // Back after an outage (the camera lost power, its network dropped): its event connection may have died with it.
+                    if !onDemand, let downSince = outage.online() { await self?.videoResumed(downSince: downSince) }
                 case .state(.offline(let reason)):
-                    await router.setStreamConnection(.offline(reason), for: cameraID)
+                    outage.offline()
+                    await router.setStreamConnection(.offline(reason), claim: claim)
                 case .unauthorized:
-                    await router.handle(.authenticationFailed, for: cameraID, origin: .stream)
+                    await router.handle(.authenticationFailed, claim: claim, origin: .stream)
                 case .localNetworkDenied:
                     onLocalNetwork(.denied)
                 }
@@ -1163,13 +1197,13 @@ actor CameraRuntime {
     /// An on-demand camera's stream stopped for idle after it delivered video: it sleeps, and reads as online.
     private func reportAsleep(_ epoch: Int) async {
         guard isCurrent(epoch) else { return }   // no state may land after the camera went idle
-        await dependencies.router.setStreamConnection(.online, for: id)
+        await dependencies.router.setStreamConnection(.online, claim: claim)
     }
 
     private func reportOffline(_ reason: String, rejectedCredentials: Bool = false, epoch: Int) async {
         guard isCurrent(epoch) else { return }   // no state may land after the camera went idle
-        await dependencies.router.setStreamConnection(.offline(reason), for: id)
-        if rejectedCredentials, isCurrent(epoch) { await dependencies.router.handle(.authenticationFailed, for: id, origin: .stream) }
+        await dependencies.router.setStreamConnection(.offline(reason), claim: claim)
+        if rejectedCredentials, isCurrent(epoch) { await dependencies.router.handle(.authenticationFailed, claim: claim, origin: .stream) }
         dependencies.onChange()
     }
 
@@ -1335,13 +1369,17 @@ actor CameraRuntime {
             try await control.stop()
             return
         }
-        try await control.move(pan: pan, tilt: tilt)
-        let hold = Self.panTiltHold
-        panTiltStop = Task { [log] in
-            try? await Task.sleep(for: hold)
-            guard !Task.isCancelled else { return }
-            do { try await control.stop() } catch { log.info("Could not stop the camera turning: \(error)") }
+        // The backstop is armed whether the move worked or not: a move whose answer was lost may still have started the camera turning.
+        defer {
+            let hold = Self.panTiltHold
+            panTiltStop?.cancel()   // a move that overlapped this one armed its own: the latest one counts
+            panTiltStop = Task { [log] in
+                try? await Task.sleep(for: hold)
+                guard !Task.isCancelled else { return }
+                do { try await control.stop() } catch { log.info("Could not stop the camera turning: \(error)") }
+            }
         }
+        try await control.move(pan: pan, tilt: tilt)
     }
 
     // MARK: - Battery
@@ -1379,7 +1417,7 @@ actor CameraRuntime {
     private func noteBattery(_ reading: BatteryStatus, epoch: Int) async -> Bool {
         guard isCurrent(epoch) else { return false }
         guard reading != battery else { return true }
-        if battery == nil { log.info("\(configuration.name) reports a battery (\(reading.level) %)") }
+        if battery == nil { log.info("\(name) reports a battery (\(reading.level) %)") }
         battery = reading
         if let controller = stack?.controller { await controller.setBattery(Self.homeKitBattery(reading)) }
         dependencies.onChange()
@@ -1466,7 +1504,7 @@ actor CameraRuntime {
     func homeKitNightVision(_ enabled: Bool) async {
         let before = homeNightVision ?? !enabled
         guard running, let control = nightVisionControl, let known = nightVisionKnown, Self.offersHomeKitNightVision(known) else {
-            log.info("Apple Home turned night vision \(enabled ? "on" : "off") on \(configuration.name), but the bridge cannot change it now: "
+            log.info("Apple Home turned night vision \(enabled ? "on" : "off") on \(name), but the bridge cannot change it now: "
                      + "Home shows it as it was")
             await putBackHomeNightVision(before)
             return
@@ -1477,9 +1515,9 @@ actor CameraRuntime {
             do {
                 try await control.setMode(mode)
                 nightVisionMode = (try? await control.currentMode()) ?? mode
-                log.info("Apple Home turned night vision \(enabled ? "on" : "off") on \(configuration.name)")
+                log.info("Apple Home turned night vision \(enabled ? "on" : "off") on \(name)")
             } catch {
-                log.warning("Apple Home turned night vision \(enabled ? "on" : "off") on \(configuration.name), but the camera did not take it: \(error)")
+                log.warning("Apple Home turned night vision \(enabled ? "on" : "off") on \(name), but the camera did not take it: \(error)")
                 await nightVisionRefused()
                 if nightVisionMode == nil { await putBackHomeNightVision(before) }   // not the value the camera refused
                 return
@@ -1525,7 +1563,7 @@ actor CameraRuntime {
             if await mainIngest?.isDelivering(within: .seconds(2)) == true { return }
             try? await Task.sleep(for: .milliseconds(100))
         }
-        if !Task.isCancelled, running { log.info("\(configuration.name) did not wake within \(MediaFit.seconds(dependencies.tuning.onDemandWakeWait)) s") }
+        if !Task.isCancelled, running { log.info("\(name) did not wake within \(MediaFit.seconds(dependencies.tuning.onDemandWakeWait)) s") }
     }
 
     private func endStartupWake(_ epoch: Int) async {
@@ -1539,7 +1577,7 @@ actor CameraRuntime {
         mainGeneration &+= 1
         mainIdleStop?.cancel()
         mainIdleStop = nil
-        if let mainIngest, await !mainIngest.isRunning { log.info("Waking \(configuration.name)") }
+        if let mainIngest, await !mainIngest.isRunning { log.info("Waking \(name)") }
         await mainIngest?.start()
     }
 
@@ -1558,7 +1596,7 @@ actor CameraRuntime {
 
     private func stopIdleMain(_ generation: Int) async {
         guard generation == mainGeneration, mainUsers == 0, let mainIngest else { return }
-        log.info("\(configuration.name) is unused; letting it sleep")
+        log.info("\(name) is unused; letting it sleep")
         await mainIngest.stop()
         if mainIngest === self.mainIngest, running, mainUsers > 0 { await mainIngest.start() }
     }
@@ -1582,7 +1620,7 @@ actor CameraRuntime {
     private func startEvents() {
         guard running else { return }
         let router = dependencies.router
-        let cameraID = id
+        let claim = claim
         let usesCameraMotion = configuration.motionSource == .cameraEvents
         if let source = driver.makeEventSource() {
             eventSource = source
@@ -1596,7 +1634,7 @@ actor CameraRuntime {
                         await self?.motionOnDemand(active)
                         await self?.shadowCameraMotion(active)   // the camera's own period, for the shadow test
                     }
-                    await router.handle(event, for: cameraID, origin: .camera)
+                    await router.handle(event, claim: claim, origin: .camera)
                 }
             }
         }
@@ -1608,7 +1646,7 @@ actor CameraRuntime {
     private func eventChannelBecameUnreliable(_ epoch: Int) async {
         guard isCurrent(epoch), !eventsUnreliable else { return }
         eventsUnreliable = true
-        log.warning("\(configuration.name): camera events are unreliable; using built-in motion detection instead")
+        log.warning("\(name): camera events are unreliable; using built-in motion detection instead")
         if configuration.motionSource == .cameraEvents, softMotion == nil, mainIngest != nil, !onDemand {
             // Built-in motion detection is live now (it is the camera's motion): a second detector would only repeat it.
             await stopMotionShadow()
@@ -1630,7 +1668,7 @@ actor CameraRuntime {
             eventSource = nil
             // A source's stop hook may talk to the camera (Reolink logout): never let it hold up a stop for long.
             _ = try? await withDeadline(Self.stopLimit) { await source.stop() }
-            await dependencies.router.resetOrigin(.camera, for: id)
+            await dependencies.router.resetOrigin(.camera, claim: claim)
         }
     }
 
@@ -1692,9 +1730,9 @@ actor CameraRuntime {
         let onSub = wantsSubStreamForSoftMotion()
         guard onSub != softMotionOnSub else { return }
         if onSub {
-            log.notice("\(configuration.name): motion detection uses the sub stream again")
+            log.notice("\(name): motion detection uses the sub stream again")
         } else {
-            log.warning("\(configuration.name): the sub stream has had no picture for \(MediaFit.seconds(dependencies.tuning.softMotionSubStreamWait)) s"
+            log.warning("\(name): the sub stream has had no picture for \(MediaFit.seconds(dependencies.tuning.softMotionSubStreamWait)) s"
                         + (subStreamProblem.map { " (\($0))" } ?? "") + "; motion detection uses the main stream")
         }
         softMotion = nil
@@ -1793,7 +1831,7 @@ actor CameraRuntime {
         guard current() else { return }
         let hub = choice.stream == .sub ? subHub : mainHub
         let source = (choice.stream == .sub ? sub.format : mainFormat).map { "\($0.width)×\($0.height)" } ?? "?"
-        log.info("\(configuration.name): the sky detector watches the \(choice.stream.rawValue) stream (\(source), analysed \(choice.analysisWidth) wide, "
+        log.info("\(name): the sky detector watches the \(choice.stream.rawValue) stream (\(source), analysed \(choice.analysisWidth) wide, "
                  + "every \(choice.keepEvery == 1 ? "" : "\(choice.keepEvery)th ")picture)")
         let monitor = SkyMonitor(hub: hub, codecs: dependencies.environment.codecs, choice: choice, sink: sink, log: log)
         skyMonitor = monitor   // claimed before the first suspension: a stop in between finds it
@@ -1824,7 +1862,7 @@ actor CameraRuntime {
                 skyHoldsSub = false
                 releaseSub()
             }
-            log.info("\(configuration.name): the sub stream shows no picture; the sky detector watches the main stream")
+            log.info("\(name): the sub stream shows no picture; the sky detector watches the main stream")
             return (nil, nil)
         }
         if skySubProbeFailed { return (nil, nil) }
@@ -1837,20 +1875,27 @@ actor CameraRuntime {
     }
 
     /// The main stream's keyframe nearest `date` (the wall clock of its frames, as `SkyFrame.wallClock` is) that its ring holds (at least the
-    /// last 12 s), as a JPEG of the camera's own picture, never straightened, at full size and quality 0.8; `at` is that keyframe's wall clock.
-    /// The nearest the ring has, however far: `at` says which. nil without a keyframe, or when the camera is not running or the picture cannot
-    /// be made. One at a time, on a decoder of its own.
-    func skyStill(around date: Date) async -> (jpeg: Data, at: Date)? {
+    /// last 12 s), as a JPEG of the camera's own picture, never straightened, at most `maxWidth` wide (nil: full size) and quality 0.8; `at` is
+    /// that keyframe's wall clock. nil when the nearest is more than `reach` seconds from `date` (nothing is decoded: the light's middle is
+    /// older than the ring), without a keyframe, or when the camera is not running or the picture cannot be made. One at a time, on a decoder
+    /// of its own.
+    func skyStill(around date: Date, within reach: TimeInterval = .infinity, maxWidth: Int? = nil) async -> (jpeg: Data, at: Date)? {
         guard running else { return nil }
-        let keyframes = await mainHub.recentKeyframes()
-        guard let nearest = keyframes.min(by: { abs($0.wallClock.timeIntervalSince(date)) < abs($1.wallClock.timeIntervalSince(date)) }) else { return nil }
+        guard let nearest = Self.nearestKeyframe(await mainHub.recentKeyframes(), to: date, within: reach) else { return nil }
         do {
-            let jpeg = try await skyStills.withLock { try await skyDecoders.jpeg(fromKeyframe: nearest, maxWidth: nil, maxHeight: nil, quality: 0.8) }
+            let jpeg = try await skyStills.withLock { try await skyDecoders.jpeg(fromKeyframe: nearest, maxWidth: maxWidth, maxHeight: nil, quality: 0.8) }
             return (jpeg, nearest.wallClock)
         } catch {
             log.debug("The sky detector's still could not be made: \(URLFreeErrors.describe(error))")
             return nil
         }
+    }
+
+    /// The keyframe of `keyframes` nearest `date` by its wall clock, when it is at most `reach` seconds from it.
+    static func nearestKeyframe(_ keyframes: [EncodedVideoFrame], to date: Date, within reach: TimeInterval) -> EncodedVideoFrame? {
+        guard let nearest = keyframes.min(by: { abs($0.wallClock.timeIntervalSince(date)) < abs($1.wallClock.timeIntervalSince(date)) }),
+              abs(nearest.wallClock.timeIntervalSince(date)) <= reach else { return nil }
+        return nearest
     }
 
     // MARK: - Motion shadow test
@@ -1884,13 +1929,13 @@ actor CameraRuntime {
             motionShadowPause = "The camera has no sub stream"
             if !motionShadowSkipLogged {
                 motionShadowSkipLogged = true
-                log.info("Motion shadow test: \(configuration.name): skipped, the camera has no sub stream (the main stream is not analysed for the test, to keep the load low)")
+                log.info("Motion shadow test: \(name): skipped, the camera has no sub stream (the main stream is not analysed for the test, to keep the load low)")
             }
             dependencies.onChange()
             return
         }
         motionShadowPause = nil
-        let recorder = MotionShadowTest(cameraName: configuration.name, log: Log(category: "Events", cameraID: id))
+        let recorder = MotionShadowTest(cameraName: name, log: Log(category: "Events", cameraID: id))
         motionShadow = recorder   // claimed before the first suspension: a stop in between finds it
         await recorder.start()
         motionShadowHoldsSub = true   // one user of the sub stream while the test runs (`acquireSub` counts it at once)
@@ -1950,14 +1995,14 @@ actor CameraRuntime {
             subState = state
             switch state {
             case .online:
-                if subStreamProblem != nil { log.notice("\(configuration.name): the sub stream is back") }
+                if subStreamProblem != nil { log.notice("\(name): the sub stream is back") }
                 subStreamProblem = nil
                 subPictureMissingSince = nil
                 subOfflineFallback?.cancel()
                 subOfflineFallback = nil
             case .offline(let reason):
                 if subStreamProblem != reason {
-                    log.warning("\(configuration.name): the sub stream is offline (\(reason))"
+                    log.warning("\(name): the sub stream is offline (\(reason))"
                                 + (softMotion != nil ? "; motion detection falls back to the main stream while it has no picture" : ""))
                 }
                 subStreamProblem = reason
@@ -2009,7 +2054,7 @@ actor CameraRuntime {
         subOfflineFallback = nil
         let ended = await streaming.endSubStreamSessions()
         if ended > 0 {
-            log.warning("\(configuration.name): the sub stream is still offline; \(ended == 1 ? "its live view ends" : "\(ended) live views on it end") "
+            log.warning("\(name): the sub stream is still offline; \(ended == 1 ? "its live view ends" : "\(ended) live views on it end") "
                         + "so Home starts \(ended == 1 ? "it" : "them") again on the main stream")
         }
         return true

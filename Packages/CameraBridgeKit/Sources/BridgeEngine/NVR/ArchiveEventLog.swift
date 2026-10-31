@@ -366,15 +366,71 @@ final class ArchiveEventLog: Sendable {
         return before.isEmpty ? Array(sorted.prefix { $0.startMs == boundary }) : Array(before)
     }
 
+    /// A day file as far as it was read: lines are only ever appended, so the next read starts where this one stopped (the Monitor asks for
+    /// today's events every 30 s per open page, and re-parsing every camera's whole day file each time grew through the day and could pass
+    /// the drive's read deadline).
+    private struct Parsed {
+        /// Bytes read, up to the end of the last whole line.
+        var offset: UInt64
+        var modified: Date?
+        /// The inode read: another one is another file (deleted and begun again), read from its start.
+        var fileNumber: UInt64?
+        var events: [Stored]
+        var position: [String: Int]
+    }
+
+    private static let parsedFiles = Mutex<[String: Parsed]>([:])
+    /// More day files than this and the remembered ones are all forgotten (each is read again when asked for).
+    static let parsedFileLimit = 1_024
+
     /// The events of one day file, in file order: start lines paired with their end lines and description lines by id; lines that do not
-    /// parse are skipped.
+    /// parse are skipped. A file read before is read on from where that read stopped; one that shrank, or changed without growing, is read
+    /// again from its start; one over `maximumReadBytes` is read by its tail every time.
     static func parse(_ file: URL, camera: UUID) -> [Stored] {
+        guard let attributes = CatalogLoader.attributes(file), attributes.type == .typeRegular else { return [] }
+        guard attributes.size <= UInt64(maximumReadBytes) else { return parseWhole(file, camera: camera) }
+        let key = file.path(percentEncoded: false)
+        var known = parsedFiles.withLock { $0[key] }
+        if let entry = known, entry.fileNumber != attributes.fileNumber || entry.offset > attributes.size
+            || (entry.offset == attributes.size && entry.modified != attributes.modified) { known = nil }
+        if let entry = known, entry.offset == attributes.size { return entry.events }
+        var entry = known ?? Parsed(offset: 0, modified: nil, fileNumber: attributes.fileNumber, events: [], position: [:])
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return entry.events }
+        defer { try? handle.close() }
+        guard (try? handle.seek(toOffset: entry.offset)) != nil, let data = try? handle.readToEnd() ?? Data() else { return entry.events }
+        // Whole lines only: one being written is read next time.
+        guard let lastBreak = data.lastIndex(of: 0x0A) else { return entry.events }
+        apply(data[data.startIndex...lastBreak], camera: camera, events: &entry.events, position: &entry.position)
+        entry.offset += UInt64(data.distance(from: data.startIndex, to: lastBreak) + 1)
+        entry.modified = entry.offset == attributes.size ? attributes.modified : nil
+        let stored = entry
+        parsedFiles.withLock { files in
+            if files.count >= parsedFileLimit, files[key] == nil { files.removeAll() }
+            files[key] = stored
+        }
+        return entry.events
+    }
+
+    /// Forgets what was read of `file` (it was deleted).
+    static func forgetParsed(_ file: URL) {
+        let key = file.path(percentEncoded: false)
+        parsedFiles.withLock { $0[key] = nil }
+    }
+
+    /// The events of a file read from scratch (its last `maximumReadBytes`).
+    private static func parseWhole(_ file: URL, camera: UUID) -> [Stored] {
         guard let data = readTail(file) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .millisecondsSince1970
         var events: [Stored] = []
         var position: [String: Int] = [:]
-        for raw in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+        apply(data, camera: camera, events: &events, position: &position)
+        return events
+    }
+
+    /// Adds the lines of `data` to `events` (`position`: where each id's start line put its event).
+    private static func apply(_ data: some DataProtocol & Collection<UInt8>, camera: UUID, events: inout [Stored], position: inout [String: Int]) {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        for raw in Data(data).split(separator: 0x0A, omittingEmptySubsequences: true) {
             guard let line = try? decoder.decode(Line.self, from: Data(raw)), line.v == version, !line.id.isEmpty, line.id.utf8.count <= 40 else { continue }
             if let start = line.start, let kind = line.kind, !kind.isEmpty {
                 guard line.camera.flatMap(UUID.init(uuidString:)) == camera, position[line.id] == nil else { continue }
@@ -387,7 +443,6 @@ final class ArchiveEventLog: Sendable {
                 events[index].description = description
             }
         }
-        return events
     }
 
     /// The file, or its last `maximumReadBytes` from the first whole line on; nil when it is not a regular file.
@@ -407,16 +462,20 @@ final class ArchiveEventLog: Sendable {
     /// Deletes the day files whose whole day ended at or before `cutoffMs` (camera folders stay: a write may be making a file in one). Returns how many files went.
     /// Blocking disk work (the store runs it on its control queue). Never follows a link (`.events`, a camera's folder or a day file that is one is
     /// left alone); deletes only regular files named `yyyy-MM-dd.jsonl` in folders named by a camera's UUID.
-    static func prune(folder: URL, cutoffMs: Int64, remove: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }) -> Int {
+    static func prune(folder: URL, cutoffMs: Int64, remove: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) },
+                      keep: (_ camera: UUID, _ dayStartMs: Int64) -> Bool = { _, _ in false }) -> Int {
         let events = folder.appending(path: directoryName, directoryHint: .isDirectory)
         guard entryType(events) == .typeDirectory, let cameras = CatalogLoader.entries(in: events) else { return 0 }
         var removed = 0
         for camera in cameras where !camera.isSymbolicLink && camera.isDirectory && UUID(uuidString: camera.name) != nil {
-            guard entryType(camera.url) == .typeDirectory, let files = CatalogLoader.entries(in: camera.url) else { continue }
+            guard let id = UUID(uuidString: camera.name), entryType(camera.url) == .typeDirectory, let files = CatalogLoader.entries(in: camera.url) else { continue }
             for file in files where !file.isSymbolicLink && file.isRegularFile && file.name.hasSuffix("." + fileExtension) {
                 let base = String(file.name.dropLast(fileExtension.count + 1))
-                guard let dayStart = dayStartMs(base), dayStart + dayMs <= cutoffMs, entryType(file.url) == .typeRegular else { continue }
-                if (try? remove(file.url)) != nil { removed += 1 }
+                guard let dayStart = dayStartMs(base), dayStart + dayMs <= cutoffMs, !keep(id, dayStart), entryType(file.url) == .typeRegular else { continue }
+                if (try? remove(file.url)) != nil {
+                    removed += 1
+                    forgetParsed(file.url)
+                }
             }
         }
         return removed
@@ -498,12 +557,8 @@ extension ArchiveStore {
         guard let folder, !cameras.isEmpty, limit > 0 else { return empty }
         let fromMs = ArchiveTime.ms(range.lowerBound), toMs = ArchiveTime.ms(range.upperBound)
         let found: (events: [ArchiveEventLog.Stored], truncated: Bool)
-        do {
-            found = try await reads.run { try ArchiveEventLog.read(folder: folder, cameras: cameras, fromMs: fromMs, toMs: toMs, limit: limit) }
-        } catch let error as ArchiveError {
-            if error == .timedOut { markReadsStalled() }
-            throw error
-        }
+        // A slow answer here is not a stalled drive (parsing is CPU work): only the probe says that, so playback is not failed for it.
+        found = try await reads.run { try ArchiveEventLog.read(folder: folder, cameras: cameras, fromMs: fromMs, toMs: toMs, limit: limit) }
         let nowMs = ArchiveTime.ms(tuning.now())
         let spans = state.withLock { state in Dictionary(uniqueKeysWithValues: Set(cameras).map { ($0, Self.recordedSpans(camera: $0, in: state.catalog, nowMs: nowMs)) }) }
         let events = found.events.map { stored in
@@ -557,7 +612,7 @@ extension ArchiveStore {
     /// camera's pictures of the sky are kept under their limit, the oldest nights' going first (`SkyLogStore.pruneStills`, Ruling S27: it reads
     /// the size of every picture, so it is done every ten minutes, not at every pass). Then writes what waited for the drive.
     func pruneEvents(_ run: ArchiveRun) async {
-        let plan = state.withLock { state -> (folder: URL, cutoffMs: Int64?, stillsDue: Bool)? in
+        let plan = state.withLock { state -> (folder: URL, cutoffMs: Int64?, stillsDue: Bool, kept: [KeptRecording])? in
             guard state.isCurrent(run), state.isReady, let folder = state.folder, state.pause != .folderMissing, !state.stalled else { return nil }
             let date = tuning.now()
             let nowMs = ArchiveTime.ms(date)
@@ -568,14 +623,17 @@ extension ArchiveStore {
             if let size = state.eventSizeCutoffMs { cutoff = max(cutoff ?? size, size) }
             let due = state.skyStillsPrunedAt.map { date < $0 || date.timeIntervalSince($0) >= tuning.skyStillPruneInterval } ?? true
             if due { state.skyStillsPrunedAt = date }
-            return (folder, cutoff, due)
+            return (folder, cutoff, due, state.kept)
         }
         eventLog.retry()
         skyLog.retry()
         guard let plan else { return }
         let remove = tuning.removeFile
         if let cutoffMs = plan.cutoffMs {
-            let removed = await onControl { ArchiveEventLog.prune(folder: plan.folder, cutoffMs: cutoffMs, remove: remove) }
+            let kept = plan.kept
+            let removed = await onControl {
+                ArchiveEventLog.prune(folder: plan.folder, cutoffMs: cutoffMs, remove: remove) { KeptRecordings.coversDay(kept, camera: $0, dayStartMs: $1) }
+            }
             if removed > 0 { log.info("Deleted \(removed) days of old camera events") }
             let nights = await onControl { SkyLogStore.prune(folder: plan.folder, cutoffMs: cutoffMs, remove: remove) }
             if nights > 0 { log.info("Deleted \(nights) nights of old Sky Watcher logs") }

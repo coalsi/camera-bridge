@@ -73,8 +73,17 @@ actor FlightHistory {
             && (-180.0...180.0).contains(report.longitude) && report.altitudeMeters.isFinite && report.positionTime.timeIntervalSince1970.isFinite
     }
 
-    /// Puts `report` in `list` at its time; a report for that time is replaced. The newest end is the usual place.
+    /// A report this soon after the last one with the same place and height is the feed's same report fetched again (dump1090 writes its file
+    /// once a second; polled twice in that second, the position comes back with a new age), not a plane that stood still.
+    static let repeatWindow: TimeInterval = 2
+
+    /// Puts `report` in `list` at its time; a report for that time is replaced. The newest end is the usual place. The last report again (the
+    /// same place and height within `repeatWindow`) keeps its first time: two times would make the plane seem to stop and then jump.
     private static func insert(_ report: AircraftReport, into list: inout [AircraftReport]) {
+        if let last = list.last, report.positionTime > last.positionTime, report.positionTime.timeIntervalSince(last.positionTime) <= repeatWindow,
+           report.latitude == last.latitude, report.longitude == last.longitude, report.altitudeMeters == last.altitudeMeters {
+            return
+        }
         if let last = list.last, report.positionTime <= last.positionTime {
             let index = firstIndex(in: list, atOrAfter: report.positionTime)
             if list[index].positionTime == report.positionTime { list[index] = report } else { list.insert(report, at: index) }

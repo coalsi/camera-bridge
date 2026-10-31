@@ -48,6 +48,8 @@ public struct IntegrationSettings: Sendable, Codable, Equatable {
         public static let wyzeModel = "wyzeModel"
         /// Wyze: how the camera is reached, `rtsp` (its own RTSP) or `local` (the local Wyze connection through go2rtc).
         public static let wyzeWay = "wyzeWay"
+        /// Wyze, `local`: the address the go2rtc source was made for, so the plugin's sync rewrites it (a restart) only when the camera moved.
+        public static let wyzeAddress = "wyzeAddress"
         /// eufy: the camera's serial number as the Eufy account lists it ("T8134…"), which ties the camera to the Eufy plugin.
         public static let eufySerial = "eufySerial"
         /// eufy: the camera's model code ("T8134").

@@ -166,6 +166,28 @@ private struct BodyFailed: Error, Equatable {}
         #expect(!lock.isLocked)
     }
 
+    /// Review finding (engine-core F2): a body that never ended held the engine's operations for good, and nothing could tell. How long the
+    /// current body has held the lock (the watchdog's question), counted afresh for each body.
+    @Test func heldForCountsFromTheCurrentBodysStart() async {
+        let lock = AsyncSerialLock()
+        #expect(lock.heldFor == nil)
+        let (gate, open) = AsyncStream.makeStream(of: Void.self)
+        let first = Task { await lock.withLock { for await _ in gate {} } }
+        #expect(await eventually { lock.isLocked })
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect((lock.heldFor ?? .zero) >= .milliseconds(200))
+        let (second, openSecond) = AsyncStream.makeStream(of: Void.self)
+        let next = Task { await lock.withLock { for await _ in second {} } }
+        #expect(await eventually { lock.waiterCount == 1 })
+        open.finish()
+        await first.value
+        #expect(await eventually { lock.waiterCount == 0 })
+        #expect((lock.heldFor ?? .seconds(1)) < .milliseconds(150), "the next body's time starts when it gets the lock")
+        openSecond.finish()
+        await next.value
+        #expect(lock.heldFor == nil)
+    }
+
     @Test func throwingBodiesReleaseTheLock() async {
         let lock = AsyncSerialLock()
         await #expect(throws: BodyFailed()) { try await lock.withLock { () async throws(BodyFailed) in throw BodyFailed() } }

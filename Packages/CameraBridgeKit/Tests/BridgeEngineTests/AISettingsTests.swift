@@ -100,6 +100,25 @@ import Testing
         #expect(problem { $0.model = String(repeating: "m", count: 100) } == nil)
     }
 
+    /// Review finding (engine-events F4): `http://api.openai.com/v1` passed, and the first event sent the key and five camera stills in clear
+    /// text across the internet. http is for a service on the home network only.
+    @Test func plainHTTPIsOnlyForAServiceOnTheHomeNetwork() {
+        func problem(_ address: String) -> AIDescriptionSettings.Problem? {
+            AIDescriptionSettings(provider: .openAICompatible, model: "m", baseURL: address).validationProblem
+        }
+        for address in ["http://api.openai.com/v1", "http://openrouter.ai/api/v1", "http://203.0.113.7:11434/v1", "http://8.8.8.8/v1",
+                        "http://[2001:db8::1]/v1", "http://192.168.77.10.example.com/v1", "http://172.32.0.1/v1"] {
+            #expect(problem(address) == AIDescriptionSettings.Problem(field: "baseURL", message: AIDescriptionSettings.cleartextProblem), "\(address)")
+            #expect(!AIDescriptionSettings.isValidAddress(address), "a saved one is not used either: \(address)")
+        }
+        for address in ["http://192.168.77.10:11434/v1", "http://10.0.0.5/v1", "http://172.16.4.2/v1", "http://127.0.0.1:1234/v1",
+                        "http://169.254.10.1/v1", "http://100.101.102.103/v1", "http://[fd00::1]:8080/v1", "http://[fe80::1]/v1", "http://[::1]/v1",
+                        "http://ollama.local:11434/v1", "http://gpu.lan/v1", "http://box.home.arpa/v1", "http://ollama:11434/v1",
+                        "http://localhost:11434/v1", "https://api.openai.com/v1", "https://203.0.113.7/v1"] {
+            #expect(problem(address) == nil, "\(address)")
+        }
+    }
+
     @MainActor @Test func theEngineRefusesSettingsThatDoNotValidateAndKeepsTheOldOnes() async throws {
         let (engine, directory) = try Self.inertEngine()
         defer { directory.remove() }
@@ -242,7 +261,7 @@ import Testing
         #expect(try await Self.keyAfter(home) { $0.logLevel = .debug } == true, "an unrelated setting")
         #expect(try await Self.keyAfter(home) { $0.ai = home } == true, "the same settings saved again")
         let claude = AIDescriptionSettings(provider: .anthropic, baseURL: "http://192.168.77.10:11434/v1")
-        #expect(try await Self.keyAfter(claude) { $0.ai.baseURL = "http://elsewhere.example/v1" } == true, "Claude ignores the address")
+        #expect(try await Self.keyAfter(claude) { $0.ai.baseURL = "https://elsewhere.example/v1" } == true, "Claude ignores the address")
         #expect(try await Self.keyAfter(claude) { $0.ai.model = "claude-sonnet-5-5" } == true)
     }
 

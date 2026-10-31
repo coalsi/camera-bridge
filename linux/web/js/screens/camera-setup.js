@@ -284,6 +284,14 @@ export function restartControl(camera, {
   return host;
 }
 
+/**
+ * Gives `camera` its own settings back: every setting the setup changed is written back from its backup (POST cameras/:id/setup/restore,
+ * sent once and never retried). The bridge's report; a refusal is an ApiError (setupErrorText).
+ */
+export function sendRestore(camera) {
+  return api('POST', `cameras/${camera.id}/setup/restore`, { confirm: true }, { timeoutMs: SETUP_TIMEOUT_MS });
+}
+
 /** One sentence for whatever went wrong. */
 export function setupErrorText(error) {
   if (error?.code === 'camera_setup_busy' || error?.status === 409) return 'This camera’s settings are already being changed. Try again in a minute.';
@@ -401,7 +409,7 @@ export function cameraSetupDialog(camera, { restore = false } = {}) {
     async function restoreNow() {
       working('Putting the camera’s settings back…', 'Don’t close this page. It can take up to a minute.');
       try {
-        const report = await api('POST', `cameras/${camera.id}/setup/restore`, { confirm: true }, { timeoutMs: SETUP_TIMEOUT_MS });
+        const report = await sendRestore(camera);
         state.outcome = 'restored';
         result(report, { restored: true });
       } catch (error) {

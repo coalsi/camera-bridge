@@ -51,6 +51,38 @@ import Testing
         #expect(throws: PrivateFiles.Failure.createFailed("state.json")) { try PrivateFiles.write(Data(), to: missing) }
     }
 
+    /// Review findings (engine-core F5, linux-platform F1 and I3): a save was neither synced nor kept a good copy, so a power cut moments
+    /// after it could leave `config.json` or a camera's pairings empty with nothing to go back to. With `keepingPrevious` the file it
+    /// replaces stays beside it as `<name>.bak`; an empty one never replaces a good copy.
+    @Test func keepingPreviousKeepsTheReplacedFileAsBak() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "config.json", directoryHint: .notDirectory)
+        let previous = PrivateFiles.previousURL(of: file)
+        #expect(previous.lastPathComponent == "config.json.bak")
+
+        try PrivateFiles.write(Data("one".utf8), to: file, keepingPrevious: true)
+        #expect(!PrivateFiles.exists(previous), "nothing to keep yet")
+        try PrivateFiles.write(Data("two".utf8), to: file, keepingPrevious: true)
+        #expect(try Data(contentsOf: file) == Data("two".utf8))
+        #expect(try Data(contentsOf: previous) == Data("one".utf8))
+        #expect(try mode(previous) == 0o600)
+
+        // A damaged (empty) file is not worth keeping: the good copy stays.
+        try Data().write(to: file)
+        try PrivateFiles.write(Data("three".utf8), to: file, keepingPrevious: true)
+        #expect(try Data(contentsOf: previous) == Data("one".utf8))
+        #expect(try Data(contentsOf: file) == Data("three".utf8))
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: root.path(percentEncoded: false))) == ["config.json", "config.json.bak"],
+                "no temporary files left")
+
+        // Without it, nothing is kept.
+        let other = root.appending(path: "notes.json", directoryHint: .notDirectory)
+        try PrivateFiles.write(Data("a".utf8), to: other)
+        try PrivateFiles.write(Data("b".utf8), to: other)
+        #expect(!PrivateFiles.exists(PrivateFiles.previousURL(of: other)))
+    }
+
     @Test func unusedURLSkipsExistingNames() throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }

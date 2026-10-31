@@ -119,6 +119,15 @@ final class RawClient: Sendable {
         return Reply(status: status, headers: headers, body: Data())
     }
 
+    /// Everything left until the server closes its end.
+    func rawRest() async throws -> Data {
+        while try await fill() {}
+        return buffer.withLock { buffer in
+            defer { buffer.removeAll() }
+            return buffer
+        }
+    }
+
     /// Whether the server closed its end (EOF after what was buffered).
     func atEnd() async throws -> Bool {
         if buffer.withLock({ !$0.isEmpty }) { return false }
@@ -403,6 +412,105 @@ final class RawClient: Sendable {
         client.close()
         #expect(await eventually { cancelled.value }, "the streaming task is cancelled when the client closes")
         #expect(await eventually { await rig.server.connectionCount == 0 })
+        await rig.server.stop()
+    }
+
+    @Test func aHeadRequestDiscardsAStreamWithoutRunningIt() async throws {
+        let ran = Box(false), discarded = Box(0)
+        let rig = Rig { _ in
+            var response = HTTPResponse.stream(contentType: "text/event-stream") { _ in ran.set(true) }
+            response.onDiscard = { discarded.update { $0 += 1 } }
+            return response
+        }
+        let client = try await rig.connect()
+        try await client.send("HEAD /events HTTP/1.1\r\nHost: a\r\n\r\n")
+        #expect(try await client.reply(hasBody: false)?.status == 200)
+        #expect(await eventually { discarded.value == 1 }, "what the handler took for the body is given back")
+        #expect(!ran.value)
+        await rig.server.stop()
+    }
+
+    @Test func aStreamWhoseHeadCannotBeSentIsDiscarded() async throws {
+        let ran = Box(false), discarded = Box(0)
+        let ends = Box<[FakeTCPConnection]>([])
+        let rig = Rig { _ in
+            ends.value.last?.failSends()   // the browser reset the connection while the handler worked
+            var response = HTTPResponse.stream(contentType: "text/event-stream") { _ in ran.set(true) }
+            response.onDiscard = { discarded.update { $0 += 1 } }
+            return response
+        }
+        let client = try await rig.connect()
+        ends.set(rig.serverEnds.value)
+        try await client.send("GET /events HTTP/1.1\r\nHost: a\r\n\r\n")
+        #expect(await eventually { discarded.value == 1 })
+        #expect(!ran.value)
+        await rig.server.stop()
+    }
+
+    @Test func aStreamThatRunsIsNotDiscarded() async throws {
+        let discarded = Box(0)
+        let rig = Rig { _ in
+            var response = HTTPResponse.stream(contentType: "text/plain") { try await $0.write("done") }
+            response.onDiscard = { discarded.update { $0 += 1 } }
+            return response
+        }
+        let client = try await rig.connect()
+        try await client.send("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
+        #expect(try await client.reply()?.text == "done")
+        #expect(discarded.value == 0)
+        await rig.server.stop()
+    }
+
+    @Test func aStreamThatFailsEndsWithoutTheLastChunk() async throws {
+        struct Broken: Error {}
+        let rig = Rig { _ in
+            .stream(contentType: "video/mp4") { stream in
+                try await stream.write("half a file")
+                throw Broken()
+            }
+        }
+        let client = try await rig.connect()
+        try await client.send("GET /clip HTTP/1.1\r\nHost: a\r\n\r\n")
+        _ = try await client.head()
+        #expect(try await client.chunk() == Data("half a file".utf8))
+        #expect(try await client.rawRest().isEmpty, "no `0` chunk: the browser sees the download as failed, not finished")
+        await rig.server.stop()
+    }
+
+    @Test func aStreamOfKnownSizeIsSentWithContentLength() async throws {
+        let rig = Rig { _ in
+            .stream(contentType: "video/mp4", contentLength: 10) { stream in
+                try await stream.write("01234")
+                try await stream.write("56789")
+            }
+        }
+        let client = try await rig.connect()
+        try await client.send("GET /clip HTTP/1.1\r\nHost: a\r\n\r\n")
+        let reply = try #require(try await client.reply())
+        #expect(reply.headers["Content-Length"] == "10" && reply.headers["Transfer-Encoding"] == nil)
+        #expect(reply.text == "0123456789")
+        #expect(try await client.atEnd())
+        await rig.server.stop()
+    }
+
+    @Test func aStreamOfKnownSizeCannotSendMore() async throws {
+        let ended = Box<(any Error)?>(nil)
+        let rig = Rig { _ in
+            .stream(contentType: "video/mp4", contentLength: 4) { stream in
+                do {
+                    try await stream.write("0123")
+                    try await stream.write("4")
+                } catch {
+                    ended.set(error)
+                    throw error
+                }
+            }
+        }
+        let client = try await rig.connect()
+        try await client.send("GET /clip HTTP/1.1\r\nHost: a\r\n\r\n")
+        let reply = try #require(try await client.reply())
+        #expect(reply.text == "0123")
+        #expect(await eventually { ended.value != nil }, "a write past the declared size throws")
         await rig.server.stop()
     }
 

@@ -99,7 +99,12 @@ enum HikvisionEvents {
                            resubscribing: Bool = false) -> SupervisedEventSource {
         let label = "Hikvision \(endpoint.host)" + (channelFilter.map { " channel \($0)" } ?? "")
         let pendingResubscribe = LockedValue(resubscribing)
-        return SupervisedEventSource(label: label, cameraID: cameraID, policy: followerPolicy, ringDedupe: timing.ringDedupe) { context in
+        // The camera's video came back after an outage: the shared stream, if it connected before then, may have died with the camera.
+        let videoResumed: @Sendable (ContinuousClock.Instant) -> Void = { downSince in
+            HikvisionAlertHub.reconnect(endpoint: endpoint, credentials: credentials, ifStartedBefore: downSince)
+        }
+        return SupervisedEventSource(label: label, cameraID: cameraID, policy: followerPolicy, ringDedupe: timing.ringDedupe,
+                                     onVideoResumed: videoResumed) { context in
             let resubscribe = pendingResubscribe.withLock { pending in
                 defer { pending = false }
                 return pending

@@ -18,7 +18,7 @@ test('the guard’s first try is one entry, in the Security section, and no dail
   const { json } = await server.api.get('notifications');
   const tried = json.notifications.filter((entry) => entry.kind === 'internetGuard');
   assert.equal(tried.length, 1);
-  assert.deepEqual([tried[0].title, tried[0].detail, tried[0].category, tried[0].action], ['Living Room tried to reach the internet', 'Camera Bridge blocked it. Nothing got out.', 'security', 'open-camera']);
+  assert.deepEqual([tried[0].title, tried[0].detail, tried[0].category, tried[0].action], ['Living Room tried to reach the internet', 'Camera Bridge blocked its lookup. A camera can still try an address it already knows, which the guard can’t see.', 'security', 'open-camera']);
   assert.equal((await server.api.get('notifications')).json.notifications.length, json.notifications.length, 'asking again adds nothing');
   const status = (await server.api.get('status')).json;
   assert.ok(status.notices.every((notice) => notice.id !== 'internet-guard'), 'no daily notice');

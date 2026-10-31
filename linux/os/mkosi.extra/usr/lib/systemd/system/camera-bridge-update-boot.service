@@ -1,0 +1,14 @@
+[Unit]
+Description=Notice an update that did not start (the box went back to this version)
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/docs/linux/UPDATES.md
+# /srv/system holds the versions that did not start; the boot partition shows which tries are used up.
+After=var-lib-camera\x2dbridge.mount srv.mount
+Before=camerabridged.service camera-bridge-update.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/cb-update boot
+
+[Install]
+WantedBy=multi-user.target

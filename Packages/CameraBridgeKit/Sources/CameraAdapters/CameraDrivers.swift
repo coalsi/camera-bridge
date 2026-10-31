@@ -211,7 +211,7 @@ public enum CameraDrivers {
         case 401:
             let challenge = response.value(forHTTPHeaderField: "WWW-Authenticate") ?? ""
             let realm = DigestChallenge.parse(challenge)?.realm ?? ""
-            if realm.localizedCaseInsensitiveContains("hikvision") || realm.uppercased().hasPrefix("DS-") { return true }
+            if isHikvisionRealm(realm) { return true }   // the one check (ANNKE's and newer firmware's `IP Camera(…)` included)
             guard let credentials else { return false }
             let authenticated = AuthenticatingHTTPClient(credentials: credentials, timeout: timeout)
             defer { authenticated.invalidate() }

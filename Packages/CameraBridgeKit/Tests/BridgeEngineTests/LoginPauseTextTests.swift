@@ -59,4 +59,23 @@ import TestSupport
         #expect(BridgeTime.zone.identifier == "Pacific/Chatham")
         #expect(TimeZone.current.identifier == process, "the process's zone is not changed at launch")
     }
+
+    /// Review finding (engine-core F8): every settings save (AI, retention, a camera order) set `TZ` and the process's default zone from a
+    /// running, multi-threaded process, so the janitor's "today" and the recorder's folders disagreed for the rest of the run, and clearing the
+    /// zone left the old one. Nothing needs the process's zone since the overlay draws in the bridge's: a save leaves it alone.
+    @MainActor @Test func aSettingsSaveLeavesTheProcessZoneAlone() async throws {
+        let directory = try TemporaryDirectory()
+        defer {
+            BridgeTime.use(nil)
+            directory.remove()
+        }
+        let process = TimeZone.current.identifier
+        let engine = BridgeEngine(environment: .inert(directory: directory.url))
+        try await engine.updateSettings { $0.timeZone = "Pacific/Chatham" }
+        try await engine.updateSettings { $0.logLevel = .debug }
+        #expect(BridgeTime.zone.identifier == "Pacific/Chatham")
+        #expect(TimeZone.current.identifier == process && NSTimeZone.default.identifier == process, "the process's zone is not changed by a save")
+        try await engine.updateSettings { $0.timeZone = nil }
+        #expect(BridgeTime.zone.identifier == process, "no zone chosen: the process's")
+    }
 }

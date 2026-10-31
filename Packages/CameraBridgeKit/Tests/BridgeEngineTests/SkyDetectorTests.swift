@@ -65,6 +65,8 @@ final class SkyDetectorRig: Sendable {
     let log = SkyLogStore(log: .silent)
     let clock: Box<Date>
     let stillsAsked = Box<[Date]>([])
+    /// How far from the time asked for each picture may be to be the light's (`Context.still`'s `within`).
+    let stillReaches = Box<[TimeInterval]>([])
     /// How far after the time asked for the camera's ring answers with a picture (s): its keyframes are the last 12 s or so, so a light whose middle is
     /// older than that gets the oldest it holds; a test sets it.
     let stillLate = Box<TimeInterval>(0)
@@ -85,7 +87,7 @@ final class SkyDetectorRig: Sendable {
         let data = try data ?? TemporaryDirectory()
         let recordings = try TemporaryDirectory()
         let clock = Box(start)
-        let asked = stillsAsked, late = stillLate, room = room, recorded = recorded, recordedAsked = recordedAsked, logStore = log, written = stillsWritten
+        let asked = stillsAsked, reaches = stillReaches, late = stillLate, room = room, recorded = recorded, recordedAsked = recordedAsked, logStore = log, written = stillsWritten
         self.camera = camera
         self.data = data
         self.recordings = recordings
@@ -94,8 +96,9 @@ final class SkyDetectorRig: Sendable {
         let folder = recordings.url
         context = SkyCameraDetector.Context(cameraID: camera, cameraName: "North Sky", settings: settings, observer: observer, zone: Self.zone,
                                             pictureWidth: pictureWidth, pictureHeight: pictureHeight, folder: { folder },
-                                            still: { date in
+                                            still: { date, reach in
                                                 asked.update { $0.append(date) }
+                                                reaches.update { $0.append(reach) }
                                                 if stillDelay > .zero { try? await Task.sleep(for: stillDelay) }   // a keyframe that takes its time to decode
                                                 return (SkyLogStoreTests.jpeg("still"), date.addingTimeInterval(late.value))
                                             },
@@ -217,9 +220,26 @@ final class SkyDetectorRig: Sendable {
         let asked = try #require(rig.stillsAsked.value.first)
         let middle = entry.start.addingTimeInterval(entry.end.timeIntervalSince(entry.start) / 2)
         #expect(abs(asked.timeIntervalSince(middle)) < 0.01, "the middle of the track: \(asked.timeIntervalSince(middle)) s off")
+        // Review Oct 31 (sky F1): the ring is asked only for a picture near enough to be the light's; one further off is not decoded.
+        #expect(rig.stillReaches.value.first == max(SkyLightFilter.stillReach, entry.end.timeIntervalSince(entry.start) / 4))
         let still = rig.log.still(camera: SkyDetectorRig.camera, night: rig.night(entry.start), entryID: entry.id, folder: rig.recordings.url)
         #expect(still == SkyLogStoreTests.jpeg("still"))
         #expect(SkyEntry.isValidID(entry.id))
+        await rig.detector.stop()
+    }
+
+    /// Review Oct 31 (sky F8): the log's reader joined older lights at the main stream's size even when the detector analyses the sub stream, so
+    /// the joining's pixel tolerances were tighter than live. It reads the running detector's picture.
+    @Test func theJoiningReadsThePictureTheDetectorAnalyses() async throws {
+        let rig = try SkyDetectorRig(settings: Self.dualCard, pictureWidth: 4256, pictureHeight: 1888)
+        defer { rig.remove() }
+        await rig.detector.start()
+        #expect(await rig.detector.stitchPicture == nil, "no picture seen yet: the reader falls back to the camera's stream")
+        let scene = SkyScene(model: Self.dualModel, start: Self.start)
+        await rig.play(scene, 0..<3)
+        let picture = try #require(await rig.detector.stitchPicture)
+        #expect(picture.width == 640 && picture.height == 284, "the analysed size, not the 4256 × 1888 picture")
+        #expect(picture.seam != nil, "two lenses: the seam")
         await rig.detector.stop()
     }
 

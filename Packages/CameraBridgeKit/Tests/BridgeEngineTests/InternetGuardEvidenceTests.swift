@@ -292,7 +292,7 @@ import Testing
                              GuardReport.Camera(address: "192.168.77.24", level: .watch, today: 50, last24h: 50, names: [])])
         let alerts = InternetGuardAlert.firstTries(report: report, cameras: cameras, now: Self.now)
         #expect(alerts.map(\.cameraID) == [ids.1, ids.2], "a quiet camera and a camera the bridge doesn’t watch raise nothing")
-        #expect(alerts[0].title == "Patio New tried to reach the internet" && alerts[0].detail == "Camera Bridge blocked it. Nothing got out.")
+        #expect(alerts[0].title == "Patio New tried to reach the internet" && alerts[0].detail == "Camera Bridge blocked its lookup. A camera can still try an address it already knows, which the guard can’t see.")
         #expect(alerts[0].id == "guard-tried-\(ids.1.uuidString)" && !alerts[0].isWarning && alerts[0].date == Self.now)
         #expect(InternetGuardAlert.firstTries(report: self.report([]), cameras: cameras, now: Self.now).isEmpty)
         #expect(InternetGuardAlert.firstTries(report: nil, cameras: cameras, now: Self.now).isEmpty)

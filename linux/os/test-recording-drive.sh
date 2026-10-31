@@ -1,6 +1,6 @@
 #!/bin/bash
 # Self-test of cb-recording-drive (mkosi.extra/usr/sbin/cb-recording-drive): the recording drive's and the archive drive's forms against stand-ins
-# for lsblk, blkid, blockdev, findmnt, mountpoint, mount, umount, wipefs, sfdisk, mkfs.ext4, udevadm and systemctl, over a made-up set of disks
+# for lsblk, blkid, blockdev, findmnt, mountpoint, mount, umount, wipefs, sfdisk, mkfs.ext4, e2fsck, timeout, udevadm and systemctl, over a made-up set of disks
 # (a fake table that the stand-ins read and change). No root, no disk, no systemd. Needs bash, jq, awk and sed. Runs in the static checks job.
 # What it cannot show (a real mount, the read-only placeholder refusing a write, the engine's sandbox) is test-vm.sh's recording-drive test.
 #
@@ -104,9 +104,25 @@ awk -v t="$2" '$2 == t {found = 1} END {exit found ? 0 : 1}' "$FAKE/mounts"
 STUB
 cat >"$BIN/mount" <<'STUB'
 #!/bin/bash
-# mount -t TYPE -o OPTIONS SOURCE TARGET
+# mount -t TYPE -o OPTIONS SOURCE TARGET; a drive's file system does not mount while $FAKE/mount-fails exists.
 echo "mount $*" >>"$FAKE/calls"
+if [ "$2" = ext4 ] && [ -e "$FAKE/mount-fails" ]; then exit 32; fi
 printf '%s %s %s %s\n' "$5" "$6" "$2" "$4" >>"$FAKE/mounts"
+STUB
+cat >"$BIN/e2fsck" <<'STUB'
+#!/bin/bash
+# e2fsck -p|-y DEVICE: answers with the first code in $FAKE/fsck-codes (one a line, used up in order), else 0.
+echo "e2fsck $*" >>"$FAKE/calls"
+code=$(head -1 "$FAKE/fsck-codes" 2>/dev/null || true)
+if [ -n "$code" ]; then sed '1d' "$FAKE/fsck-codes" >"$FAKE/fsck-codes.new"; mv "$FAKE/fsck-codes.new" "$FAKE/fsck-codes"; fi
+exit "${code:-0}"
+STUB
+cat >"$BIN/timeout" <<'STUB'
+#!/bin/bash
+# timeout SECONDS COMMAND...: a code 124 in $FAKE/fsck-codes is e2fsck taking too long.
+shift
+if [ "$(head -1 "$FAKE/fsck-codes" 2>/dev/null || true)" = 124 ]; then sed '1d' "$FAKE/fsck-codes" >"$FAKE/fsck-codes.new"; mv "$FAKE/fsck-codes.new" "$FAKE/fsck-codes"; echo "timeout $*" >>"$FAKE/calls"; exit 124; fi
+exec "$@"
 STUB
 cat >"$BIN/umount" <<'STUB'
 #!/bin/bash
@@ -192,7 +208,7 @@ expect "a refusal says so in the status" "$(status archive-drive .state)" "faile
 reset_calls
 drive --archive --device /dev/sdb --keep >/dev/null
 expect "the choice is the partition's file system UUID" "$(cat "$ROOT/system/archive-drive")" "arch-1111"
-expect "it is mounted where the engine looks, noexec" "$(mounted_on "$ARCHIVE")" "/dev/sdb1 ext4 nodev,nosuid,noexec,noatime"
+expect "it is mounted where the engine looks, noexec, read-only when it starts failing" "$(mounted_on "$ARCHIVE")" "/dev/sdb1 ext4 nodev,nosuid,noexec,noatime,errors=remount-ro"
 expect "the marker names the drive" "$(jq -c . "$ARCHIVE/.camera-bridge-archive")" '{"uuid":"arch-1111"}'
 expect "the status says mounted" "$(status archive-drive '[.state, .uuid] | join(" ")')" "mounted arch-1111"
 expect "nothing was erased, and the engine was neither stopped nor restarted" "$(calls | grep -cE '^(wipefs|sfdisk|mkfs|systemctl)' || true)" "0"
@@ -221,12 +237,51 @@ drive --archive --apply >/dev/null
 expect "plugged in again: the drive is back, the placeholder gone" "$(awk -v t="$ARCHIVE" '$2 == t {print $1}' "$FAKE/mounts" | tr '\n' ' ')" "/dev/sdb1 "
 expect "mounted again" "$(status archive-drive .state)" "mounted"
 
+# --- a drive that is attached but cannot be used: checked first, never the box's own disk ------------------------------------
+reset_calls
+drive --device /dev/sdc --keep >/dev/null
+expect "a drive's file system is checked before it is mounted" "$(calls | grep -E '^(e2fsck|mount -t ext4)' | sed 's/ -o .*//' | tr '\n' ';')" "e2fsck -p /dev/sdc1;mount -t ext4;"
+"$BIN/umount" -l "$RECORDINGS"
+printf '4\n1\n' >"$FAKE/fsck-codes"
+reset_calls
+drive --apply --restart >/dev/null
+expect "errors a quick check leaves are repaired (e2fsck -y), then it is mounted" "$(calls | grep -E '^e2fsck' | tr '\n' ';')|$(mounted_on "$RECORDINGS")" \
+    "e2fsck -p /dev/sdc1;e2fsck -y /dev/sdc1;|/dev/sdc1 ext4 nodev,nosuid,noexec,noatime,errors=remount-ro"
+"$BIN/umount" -l "$RECORDINGS"
+printf '4\n4\n' >"$FAKE/fsck-codes"
+reset_calls
+if drive --apply --restart >/dev/null; then bad "a drive with errors that cannot be repaired was taken"; else pass "a drive with errors that cannot be repaired is refused"; fi
+expect "and the read-only placeholder takes its place: nothing is recorded to the box's own disk" "$(mounted_on "$RECORDINGS")" "cb-recording-drive-missing tmpfs ro,size=64k,mode=0555,nodev,nosuid,noexec"
+expect "the status says why" "$(status recording-drive '[.state, .message] | join(" | ")')" \
+    "failed | The recording drive is attached but can't be used: its file system has errors that could not be repaired. Recording waits until it works again (or choose another drive)."
+expect "the engine was restarted for the change" "$(calls | grep -c '^systemctl restart camerabridged' || true)" "1"
+: >"$FAKE/fsck-codes"
+touch "$FAKE/mount-fails"
+"$BIN/umount" -l "$RECORDINGS"
+reset_calls
+if drive --apply >/dev/null; then bad "a drive that does not mount was taken"; else pass "a drive that does not mount is refused"; fi
+expect "and the placeholder takes its place too" "$(mounted_on "$RECORDINGS")" "cb-recording-drive-missing tmpfs ro,size=64k,mode=0555,nodev,nosuid,noexec"
+expect "the status says it could not be mounted" "$(status recording-drive .message)" \
+    "The recording drive is attached but can't be used: it could not be mounted. Recording waits until it works again (or choose another drive)."
+reset_calls
+drive --device /dev/sdc --keep >/dev/null 2>&1 || true
+expect "choosing it again when it does not mount still starts the engine again" "$(calls | grep '^systemctl' | tr '\n' ';')" "systemctl stop camerabridged.service;systemctl start camerabridged.service;"
+rm -f "$FAKE/mount-fails"
+echo 124 >"$FAKE/fsck-codes"
+reset_calls
+drive --apply >/dev/null
+expect "a check that takes too long is stopped and the drive mounted as it is (recording goes on)" "$(mounted_on "$RECORDINGS")" "/dev/sdc1 ext4 nodev,nosuid,noexec,noatime,errors=remount-ro"
+: >"$FAKE/fsck-codes"
+"$BIN/umount" -l "$RECORDINGS"
+rm -f "$ROOT/system/recording-drive"
+drive --apply >/dev/null
+
 # --- the recording drive and the archive drive refuse each other --------------------------------------------------------------
 reset_calls
 drive --device /dev/sdc --keep >/dev/null
 expect "the recording drive's form is as before: chosen, mounted on the recordings, the engine stopped and started" \
     "$(cat "$ROOT/system/recording-drive") | $(mounted_on "$RECORDINGS") | $(calls | grep '^systemctl' | tr '\n' ';')" \
-    "rec-2222 | /dev/sdc1 ext4 nodev,nosuid,noexec,noatime | systemctl stop camerabridged.service;systemctl start camerabridged.service;"
+    "rec-2222 | /dev/sdc1 ext4 nodev,nosuid,noexec,noatime,errors=remount-ro | systemctl stop camerabridged.service;systemctl start camerabridged.service;"
 reset_calls
 contains "the recording drive cannot become the archive drive" "$(drive --archive --device /dev/sdc --confirm "ERASE ALL DATA ON sdc" || true)" "can't be used"
 "$BIN/umount" -l "$RECORDINGS"
@@ -240,13 +295,23 @@ reset_calls
 drive --archive --device /dev/sde --confirm "ERASE ALL DATA ON sde" >/dev/null
 expect "the disk is erased, partitioned and made ext4 CBARCHIVE like a recording drive" \
     "$(calls | grep -E '^(wipefs|sfdisk|mkfs)' | tr '\n' ';')" "wipefs -a -f /dev/sde;sfdisk /dev/sde;mkfs.ext4 -q -F -L CBARCHIVE -m 0 -T largefile /dev/sde1;"
-expect "it is the archive now" "$(cat "$ROOT/system/archive-drive") | $(mounted_on "$ARCHIVE")" "new-CBARCHIVE | /dev/sde1 ext4 nodev,nosuid,noexec,noatime"
+expect "it is the archive now" "$(cat "$ROOT/system/archive-drive") | $(mounted_on "$ARCHIVE")" "new-CBARCHIVE | /dev/sde1 ext4 nodev,nosuid,noexec,noatime,errors=remount-ro"
 expect "the marker follows the drive" "$(jq -r .uuid "$ARCHIVE/.camera-bridge-archive")" "new-CBARCHIVE"
 expect "the engine was not stopped: it did not have this disk open" "$(calls | grep -c '^systemctl' || true)" "0"
 reset_calls
 drive --archive --device /dev/sde --confirm "ERASE ALL DATA ON sde" >/dev/null
 expect "erasing the archive in use quiets the engine first and starts it after" "$(calls | grep '^systemctl' | tr '\n' ';')" \
     "systemctl stop camerabridged.service;systemctl start camerabridged.service;"
+
+# --- an archive drive that cannot be used ---------------------------------------------------------------------------------------
+"$BIN/umount" -l "$ARCHIVE"
+printf '4\n4\n' >"$FAKE/fsck-codes"
+if drive --archive --apply >/dev/null; then bad "an archive drive with errors that cannot be repaired was taken"; else pass "an archive drive with errors that cannot be repaired is refused"; fi
+expect "the archive's placeholder takes its place (no marker: the engine never writes there)" "$(mounted_on "$ARCHIVE")" "cb-archive-drive-missing tmpfs ro,size=64k,mode=0555,nodev,nosuid,noexec"
+expect "the archive's status says why" "$(status archive-drive .state)" "failed"
+: >"$FAKE/fsck-codes"
+drive --archive --apply >/dev/null
+expect "repaired, it is back" "$(mounted_on "$ARCHIVE") | $(status archive-drive .state)" "/dev/sde1 ext4 nodev,nosuid,noexec,noatime,errors=remount-ro | mounted"
 
 # --- forgetting it ---------------------------------------------------------------------------------------------------------------
 reset_calls
@@ -268,6 +333,7 @@ check() { # check DESCRIPTION COMMAND...
 check "cb-system allows and handles the archive requests, as heavy jobs" bash -c "s='$X/usr/sbin/cb-system'; grep -q '^ALLOWED_JOBS=\".*\\barchive-use\\b.*\\barchive-forget\\b' \$s && grep -q '^HEAVY_JOBS=\".* archive-use archive-forget ' \$s && grep -q 'cb-recording-drive --archive --device' \$s && grep -q 'cb-recording-drive --archive --forget' \$s"
 check "the archive drive is put in place at boot, before the engine, and the engine only wants it" bash -c "u='$X/usr/lib/systemd/system/camera-bridge-archive-drive.service'; grep -q '^ExecStart=/usr/sbin/cb-recording-drive --archive --apply$' \$u && grep -q '^Before=camerabridged.service' \$u && grep -q '^Wants=camera-bridge-archive-drive.service' '$X/usr/lib/systemd/system/camerabridged.service.d/30-archive-drive.conf' && ! grep -q '^Requires=' '$X/usr/lib/systemd/system/camerabridged.service.d/30-archive-drive.conf' && grep -q 'camera-bridge-archive-drive.service' '$HERE/mkosi.postinst.chroot'"
 check "a CBARCHIVE partition that appears is mounted (udev), without restarting the engine" bash -c "grep -q 'ENV{ID_FS_LABEL}==\"CBARCHIVE\".*camera-bridge-archive-drive-plug.service' '$X/usr/lib/udev/rules.d/60-camera-bridge-archive-drive.rules' && grep -q '^ExecStart=/usr/sbin/cb-recording-drive --archive --apply$' '$X/usr/lib/systemd/system/camera-bridge-archive-drive-plug.service'"
+check "the drives' units leave time for the check of a file system (10 minutes) before systemd gives up" bash -c "for u in camera-bridge-recording-drive camera-bridge-archive-drive camera-bridge-recording-drive-plug camera-bridge-archive-drive-plug; do grep -q '^TimeoutStartSec=15min$' '$X/usr/lib/systemd/system/'\$u.service || exit 1; done; grep -q '^FSCK_SECONDS=\${CB_FSCK_SECONDS:-600}$' '$SCRIPT'"
 check "the engine may write the archive's folder (inside its ReadWritePaths)" bash -c "grep -q '^ReadWritePaths=/var/lib/camera-bridge ' '$HERE/units/camerabridged.service.in'"
 
 [ "$fail" -eq 0 ] && echo "all passed"

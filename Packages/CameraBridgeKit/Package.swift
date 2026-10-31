@@ -58,10 +58,13 @@ let package = Package(
         // Linux: the dns_sd API (libavahi-compat-libdnssd) as a C module; PlatformLinux imports it on Linux only.
         .systemLibrary(name: "CDNSSD", path: "Sources/CDNSSD", pkgConfig: "avahi-compat-libdns_sd",
                        providers: [.apt(["libavahi-compat-libdnssd-dev"])]),
+        // <sys/epoll.h> for the socket reactor (Glibc's module leaves it out).
+        .systemLibrary(name: "CEpoll", path: "Sources/CEpoll"),
         // Linux services: POSIX sockets + Dispatch, dns_sd, netlink, flock, encrypted file secrets, Foundation.Process. Codecs/ drives ffmpeg child
         // processes (portable Swift; it builds on macOS too, so its logic is unit-tested there).
         .target(name: "PlatformLinux",
-                dependencies: ["BridgeSupport", "MediaCore", crypto, .target(name: "CDNSSD", condition: .when(platforms: [.linux]))],
+                dependencies: ["BridgeSupport", "MediaCore", crypto, .target(name: "CDNSSD", condition: .when(platforms: [.linux])),
+                               .target(name: "CEpoll", condition: .when(platforms: [.linux]))],
                 exclude: ["README.md", "Codecs/README.md"], swiftSettings: swift6),
         .target(name: "BridgeEngine",
                 dependencies: ["BridgeSupport", "HAPCore", "HAP", "HDS", "HAPCamera", "MediaCore", "FMP4", "RTP", "RTSP", "CameraAdapters",

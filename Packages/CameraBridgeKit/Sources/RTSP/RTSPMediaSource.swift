@@ -25,6 +25,12 @@ public final class RTSPMediaSource: MediaSource {
     /// Tracks and formats of the most recent successful connection.
     public var sessionInfo: RTSPSessionInfo? { lastInfo.withLock { $0 } }
 
+    /// What the current session counted of its stream's troubles (lost packets, frozen stretches, the audio eased onto the video's clock);
+    /// nil without a playing session.
+    public func health() async -> StreamHealth? {
+        await current.withLock { $0 }?.health
+    }
+
     public func samples() async throws -> AsyncThrowingStream<MediaSample, any Error> {
         let client = RTSPClient(configuration: configuration, transport: transport, videoFrameTimeout: nil, downgradeGuard: downgradeGuard)
         let previous = current.withLock { slot in

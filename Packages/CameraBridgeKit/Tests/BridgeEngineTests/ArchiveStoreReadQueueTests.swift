@@ -179,6 +179,41 @@ import Testing
         #expect(cache.count == 0 && cache.bytes == 0)
     }
 
+    /// The cache against a plain model of "least recently used out first", over a long random run of reads, inserts and removals.
+    @Test func theBlockCacheEvictsExactlyAsALeastRecentlyUsedListWould() {
+        var cache = ArchiveBlockCache(capacity: 1_000)
+        var model: [(key: ArchiveBlockCache.Key, size: Int)] = []   // least recently used first
+        var generator = SystemRandomNumberGenerator()
+        for _ in 0..<20_000 {
+            let key = ArchiveBlockCache.Key(segment: "s\(Int.random(in: 0..<5, using: &generator))", offset: UInt64.random(in: 0..<40, using: &generator), length: 1)
+            switch Int.random(in: 0..<10, using: &generator) {
+            case 0..<5:
+                let size = Int.random(in: 1...120, using: &generator)
+                cache.insert(Data(count: size), for: key)
+                model.removeAll { $0.key == key }
+                model.append((key, size))
+                while model.reduce(0, { $0 + $1.size }) > 1_000 { model.removeFirst() }
+            case 5..<9:
+                let hit = cache.data(for: key) != nil
+                #expect(hit == model.contains { $0.key == key })
+                if let index = model.firstIndex(where: { $0.key == key }) { model.append(model.remove(at: index)) }
+            default:
+                cache.remove(segment: key.segment)
+                model.removeAll { $0.key.segment == key.segment }
+            }
+        }
+        #expect(cache.count == model.count && cache.bytes == model.reduce(0) { $0 + $1.size })
+    }
+
+    @Test func manySmallPartsThenBigOnesEvictQuickly() {
+        var cache = ArchiveBlockCache(capacity: 256 << 20)
+        let started = ContinuousClock.now
+        for part in 0..<200_000 { cache.insert(Data(count: 800), for: ArchiveBlockCache.Key(segment: "h\(part / 100)", offset: UInt64(part), length: 800)) }
+        for part in 0..<400 { cache.insert(Data(count: 1 << 20), for: ArchiveBlockCache.Key(segment: "f\(part)", offset: 0, length: 1 << 20)) }
+        #expect(cache.bytes <= 256 << 20)
+        #expect(ContinuousClock.now - started < .seconds(10), "a clip plan's headers, then an export's fragments")
+    }
+
     @Test func theBlockCacheForgetsOneFileWithoutTheOthers() {
         var cache = ArchiveBlockCache(capacity: 1_000)
         cache.insert(Data(count: 10), for: ArchiveBlockCache.Key(segment: "a", offset: 0, length: 10))

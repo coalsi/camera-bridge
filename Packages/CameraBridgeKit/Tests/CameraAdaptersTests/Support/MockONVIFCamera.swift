@@ -18,6 +18,10 @@ final class MockONVIFCamera: Sendable {
     let subscriptionHeaders = Box<[String]>([])
     /// WS-Security `Created` values seen.
     let createdStamps = Box<[String]>([])
+    /// Seconds added to the device's clock on top of `start(clockOffset:)` (Camera Bridge's setup or a drift moved it).
+    let clockShift = Box<TimeInterval>(0)
+    /// While set, a WS-Security `Created` further than this from the device's clock is refused (`NotAuthorized`), as cameras that check it do.
+    let createdTolerance = Box<TimeInterval?>(nil)
     /// Fixture names returned by successive PullMessages calls; afterwards `Pull-Empty.xml` after a short wait.
     let pullQueue: Box<[String]>
     let failCreateSubscription = Box(false)
@@ -54,6 +58,25 @@ final class MockONVIFCamera: Sendable {
     /// Video source tokens of successive `SetImagingSettings` calls, in order.
     let setImagingSettingsCalls = Box<[String]>([])
     let systemRebootCalled = Box(0)
+    /// The main profile ("000") carries a PTZ configuration and `GetNodes` answers a node with continuous pan, tilt and zoom while set.
+    let ptz = Box(false)
+    /// PTZ calls in order: "ContinuousMove", "ContinuousMove+Timeout" (one that carried a `Timeout`), "Stop".
+    let ptzCalls = Box<[String]>([])
+    /// How the device answers `ContinuousMove`.
+    enum PTZMoveAnswer: Sendable {
+        case accept
+        /// The camera turns, but its answer never comes: the connection is closed without one.
+        case lost
+        /// The camera turns and answers something that is not SOAP.
+        case notSOAP
+        /// A move with a `Timeout` is refused (`InvalidArgVal`); one without it is taken.
+        case refusesTimeout
+    }
+    let ptzMoveAnswer = Box(PTZMoveAnswer.accept)
+    /// How long the device takes to answer `ContinuousMove` (a cheap PTZ's slow SOAP).
+    let ptzMoveDelay = Box<Duration>(.zero)
+    /// The next this many `Stop` requests are dropped without an answer (a Wi-Fi blip).
+    let ptzStopsLost = Box(0)
     /// Profile tokens of successive `SetSynchronizationPoint` calls, in order; the call answers a fault while `refuseSynchronizationPoint`.
     let synchronizationPoints = Box<[String]>([])
     let refuseSynchronizationPoint = Box(false)
@@ -309,13 +332,17 @@ final class MockONVIFCamera: Sendable {
         """)
     }
 
-    private func authorized(_ envelope: XMLTree) -> Bool {
+    private func authorized(_ envelope: XMLTree, clockOffset: TimeInterval) -> Bool {
         guard let token = envelope.child("Header")?.child("Security")?.child("UsernameToken"),
               token.string("Username") == Self.username, let password = token.string("Password"),
               let nonceText = token.string("Nonce"), let nonce = Data(base64Encoded: nonceText), let created = token.string("Created") else {
             return false
         }
         createdStamps.update { $0.append(created) }
+        if let tolerance = createdTolerance.value {
+            guard let stamp = try? Date(created, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
+                  abs(stamp.timeIntervalSince(Date().addingTimeInterval(clockOffset + clockShift.value))) <= tolerance else { return false }
+        }
         return password == ONVIFSOAP.passwordDigest(nonce: nonce, created: created, password: Self.password)
     }
 
@@ -329,7 +356,7 @@ final class MockONVIFCamera: Sendable {
               let action = envelope.child("Body")?.children.first?.name else { return .status(400) }
         actions.update { $0.append(action) }
         if action == "GetSystemDateAndTime" {
-            let date = Date().addingTimeInterval(clockOffset)
+            let date = Date().addingTimeInterval(clockOffset + clockShift.value)
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = TimeZone(identifier: "UTC")!
             let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
@@ -343,7 +370,7 @@ final class MockONVIFCamera: Sendable {
             </tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse>
             """)
         }
-        guard !rejectCredentials.value, openONVIF.value || authorized(envelope) else { return fault("NotAuthorized", "Sender not Authorized") }
+        guard !rejectCredentials.value, openONVIF.value || authorized(envelope, clockOffset: clockOffset) else { return fault("NotAuthorized", "Sender not Authorized") }
         switch refusedWrites.value[action] {
         case .notAuthorizedFault: return fault("NotAuthorized", "Sender not Authorized")
         case .http401: return .status(401)
@@ -360,7 +387,11 @@ final class MockONVIFCamera: Sendable {
         case "GetCapabilities": return .soap(template("GetCapabilitiesResponse.xml"))
         case "GetServices": return .soap(template("GetServicesResponse.xml"))
         case "GetProfiles":
-            let profiles = withEncoderValues(template("GetProfilesResponse.xml"))
+            var profiles = withEncoderValues(template("GetProfilesResponse.xml"))
+            if ptz.value {
+                profiles = profiles.replacingOccurrences(of: "<tt:Name>Profile000_MainStream</tt:Name>",
+                                                         with: "<tt:Name>Profile000_MainStream</tt:Name><tt:PTZConfiguration token=\"PTZ\"><tt:Name>PTZ</tt:Name></tt:PTZConfiguration>")
+            }
             return .soap(mainProfileFirst.value ? Self.mainFirst(profiles) : profiles)
         case "GetStreamUri":
             let token = envelope.firstDescendant("ProfileToken")?.text ?? ""
@@ -545,6 +576,29 @@ final class MockONVIFCamera: Sendable {
             synchronizationPoints.update { $0.append(envelope.firstDescendant("ProfileToken")?.text ?? "") }
             if refuseSynchronizationPoint.value { return fault("ActionNotSupported", "SetSynchronizationPoint is not supported") }
             return self.envelope("<trt:SetSynchronizationPointResponse xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\"/>")
+        case "GetNodes" where ptz.value:
+            return self.envelope("""
+            <tptz:GetNodesResponse xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:PTZNode token="PTZNODE"><tt:SupportedPTZSpaces>\
+            <tt:ContinuousPanTiltVelocitySpace><tt:URI>x</tt:URI></tt:ContinuousPanTiltVelocitySpace>\
+            <tt:ContinuousZoomVelocitySpace><tt:URI>x</tt:URI></tt:ContinuousZoomVelocitySpace></tt:SupportedPTZSpaces></tptz:PTZNode></tptz:GetNodesResponse>
+            """)
+        case "ContinuousMove" where ptz.value:
+            let timeout = envelope.firstDescendant("Timeout") != nil
+            ptzCalls.update { $0.append(timeout ? "ContinuousMove+Timeout" : "ContinuousMove") }
+            let delay = ptzMoveDelay.value
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            switch ptzMoveAnswer.value {
+            case .accept: break
+            case .lost: return .drop
+            case .notSOAP: return .full(status: 200, headers: [("Content-Type", "text/plain")], body: Data("OK".utf8))
+            case .refusesTimeout where timeout: return fault("InvalidArgVal", "Timeout is out of range")
+            case .refusesTimeout: break
+            }
+            return self.envelope("<tptz:ContinuousMoveResponse xmlns:tptz=\"http://www.onvif.org/ver20/ptz/wsdl\"/>")
+        case "Stop" where ptz.value:
+            ptzCalls.update { $0.append("Stop") }
+            if ptzStopsLost.update({ lost -> Bool in guard lost > 0 else { return false }; lost -= 1; return true }) { return .drop }
+            return self.envelope("<tptz:StopResponse xmlns:tptz=\"http://www.onvif.org/ver20/ptz/wsdl\"/>")
         case "SystemReboot":
             systemRebootCalled.update { $0 += 1 }
             return self.envelope("<tds:SystemRebootResponse><tds:Message>Rebooting</tds:Message></tds:SystemRebootResponse>")

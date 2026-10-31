@@ -58,6 +58,13 @@ import Testing
         #expect(small.count < jpeg.count)
     }
 
+    /// Names with what ffmpeg's two parsers treat specially still make the "Camera off" picture (one with a colon made none at all).
+    @Test(.enabled(if: FFmpegTesting.canDrawOverlay), arguments: ["Garage: East", "Kid's room", "Back\\yard, [shed]; 100%", "Front Door"])
+    func theCameraOffPictureTakesAnyName(_ name: String) throws {
+        let jpeg = try FFmpegTesting.makeCodecs().cameraOffJPEG(cameraName: name, width: 640, height: 360)
+        #expect(jpeg.prefix(2) == Data([0xFF, 0xD8]) && FFmpegPictures.imageSize(jpeg)?.width == 640)
+    }
+
     @Test func qualityChangesTheSize() throws {
         let codecs = FFmpegTesting.makeCodecs()
         let low = try codecs.jpeg(from: picture(), maxWidth: nil, maxHeight: nil, quality: 0.2)

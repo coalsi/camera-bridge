@@ -1,6 +1,8 @@
-// The Secure address card on the System page: the box's https name (a real certificate through camera-bridge.app), when the certificate
-// renews, what went wrong in plain words, a test for routers that hide names pointing into the home (DNS rebind protection), and the switch
-// that sends the plain address to the secure one. The card shows only where the box has the pieces for it (`report.available`).
+// The Secure address card on the System page: the switch for the secure address itself (`report.enabled`, on by default: off, the box calls
+// neither camera-bridge.app nor Let's Encrypt), the box's https name (a real certificate through camera-bridge.app), when the certificate
+// renews, what went wrong in plain words (a box with no internet is simply waiting), a test for routers that hide names pointing into the home
+// (DNS rebind protection), and the switch that sends the plain address to the secure one. The card shows only where the box has the pieces for
+// it (`report.available`).
 import { get, post } from '../api.js';
 import { h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
@@ -21,11 +23,19 @@ function dateText(value) {
 
 /**
  * The card for `report` (`GET system/secure-address`), or null where it does not apply. `actions` are called with the new report:
- * `{ retry, check, setRedirect }` return promises; the card asks `redraw()` to draw it again when one ends.
+ * `{ retry, check, setRedirect, setEnabled }` return promises; the card asks `redraw()` to draw it again when one ends.
  */
-export function secureAddressCard(report, { busy = '', retry, check, setRedirect, rebind = report?.rebind } = {}) {
+export function secureAddressCard(report, { busy = '', retry, check, setRedirect, setEnabled, rebind = report?.rebind } = {}) {
   if (!report?.available) return null;
   const parts = [h('h2', null, icon('lock', { size: 18 }), ' Secure address')];
+  const url = report.url || (report.host ? `https://${report.host}` : 'https://…');
+  const on = report.enabled !== false;
+  parts.push(switchRow({ title: `Use the secure address (${url})`, checked: on, disabled: !!busy || typeof setEnabled !== 'function',
+    desc: 'When off, the box never contacts camera-bridge.app or Let’s Encrypt.', onchange: setEnabled }));
+  if (!on) {
+    parts.push(h('p', { class: 'muted' }, 'The secure address is off. The plain address, http://camera-bridge.local, works as before.'));
+    return h('div', { class: 'card secure-address' }, parts);
+  }
   if (report.state === 'ready') {
     parts.push(
       h('p', { class: 'desc' }, 'Your bridge’s secure address is ', h('a', { href: report.url, class: 'secure-url' }, report.url),
@@ -37,6 +47,9 @@ export function secureAddressCard(report, { busy = '', retry, check, setRedirect
     parts.push(h('div', { class: 'banner warning', role: 'alert' }, h('div', { class: 'text' }, report.problem?.message || 'The secure address could not be set up.')),
       h('p', { class: 'muted' }, 'The plain address, http://camera-bridge.local, keeps working. The box tries again by itself.'),
       h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', disabled: !!busy, onclick: retry }, busy === 'retry' ? spinner() : null, 'Try again now')));
+  } else if (report.state === 'waiting' && report.problem?.code === 'no_internet') {
+    // No internet is not a fault: the box goes on by itself once it is online.
+    parts.push(h('p', { class: 'desc', role: 'status' }, 'Waiting for the internet. The box sets up its secure address by itself once it is online; the plain address works meanwhile.'));
   } else {
     parts.push(h('p', { class: 'desc' }, report.state === 'waiting'
       ? 'The box is getting its certificate. This takes a few minutes. The plain address works meanwhile.'
@@ -74,7 +87,8 @@ export function secureAddressSection(onChange = () => {}) {
     if (destroyed) return;
     const card = secureAddressCard(report, { busy, retry: () => act('retry', () => post('system/secure-address/retry', {})),
       check: () => act('check', async () => { const answer = await post('system/secure-address/check', {}); return { ...report, rebind: answer.rebind }; }),
-      setRedirect: (enabled) => act('redirect', () => post('system/secure-address/redirect', { enabled })) });
+      setRedirect: (enabled) => act('redirect', () => post('system/secure-address/redirect', { enabled })),
+      setEnabled: (enabled) => act('enabled', () => post('system/secure-address/enabled', { enabled })) });
     replace(host, card);
     onChange();
   };

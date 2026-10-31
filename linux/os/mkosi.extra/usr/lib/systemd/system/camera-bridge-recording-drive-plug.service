@@ -7,4 +7,5 @@ After=camera-bridge-recording-drive.service
 Type=oneshot
 # Mounts the drive and restarts the engine, if the drive was not in place already.
 ExecStart=/usr/sbin/cb-recording-drive --apply --restart
-TimeoutStartSec=120
+# The drive's file system is checked first (at most 10 minutes).
+TimeoutStartSec=15min

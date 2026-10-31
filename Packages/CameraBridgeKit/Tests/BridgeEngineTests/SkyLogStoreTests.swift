@@ -145,6 +145,24 @@ import Testing
         #expect(SkyCorrection.allCases.map(\.rawValue) == ["plane", "bird", "bug", "satellite", "meteor", "notSure"])
     }
 
+    /// Review Oct 31 (sky F5): a night was read and parsed whole under the recordings drive's read deadline, and a parse that took longer than
+    /// it on a loaded box marked the drive's reads stalled, which failed playback. Only the bytes are read under it; they are parsed after.
+    @Test func aNightsBytesAreReadApartFromTheirParse() async throws {
+        let folder = try TemporaryDirectory()
+        defer { folder.remove() }
+        let log = SkyLogStore(log: .silent)
+        for index in 0..<5 { log.record(Self.entry("b-\(index)", Self.local(24, 20, index)), night: Self.night, folder: folder.url) }
+        await log.flush()
+        log.recordCorrection(.bug, entryID: "b-1", camera: Self.camera, night: Self.night, folder: folder.url, at: Self.local(25, 7))   // still waiting
+        let raw = log.rawNight(camera: Self.camera, night: Self.night, folder: folder.url)
+        let parsed = SkyLogStore.parse(raw, camera: Self.camera)
+        let whole = log.contents(camera: Self.camera, night: Self.night, folder: folder.url)
+        #expect(parsed.entries == whole.entries && parsed.entries.count == 5)
+        #expect(parsed.entries[1].correction == .bug, "the lines still waiting for the drive are read too")
+        #expect(SkyLogStore.parse(log.rawNight(camera: Self.camera, night: "not-a-night", folder: folder.url), camera: Self.camera).entries.isEmpty)
+        await log.flush()
+    }
+
     @Test func aTornLineIsSkipped() async throws {
         let folder = try TemporaryDirectory()
         defer { folder.remove() }

@@ -8,8 +8,8 @@ import Synchronization
 /// One supervised upstream connection feeding a `MediaHub` (plan W3-1 item 1, spec §7, integration brief §3.7).
 ///
 /// Connects `primary` (RTSP, HTTP-FLV or the demo source), ingests every sample into the hub and reconnects when the
-/// stream ends or fails, with exponential backoff (1 s → 60 s; a stream that delivered video reconnects after the
-/// first step) and a watchdog (no video frame for `watchdog`, 15 s → reconnect; audio alone keeps nothing alive). The
+/// stream ends or fails, with exponential backoff (1 s → 60 s; a stream that delivered video for `stableAfter`, 30 s,
+/// reconnects after the first step, while one that keeps ending soon after it starts keeps backing off) and a watchdog (no video frame for `watchdog`, 15 s → reconnect; audio alone keeps nothing alive). The
 /// stream is `.online` from its first video frame. After `fallbackAfterFailures` consecutive attempts without video it
 /// switches to `fallback` (Reolink HTTP-FLV) and back; the source that last delivered video is where the next run starts
 /// (after `reconnect()` or `stop()`/`start()`: a camera with RTSP off is not taken offline by three failed RTSP attempts
@@ -54,6 +54,9 @@ actor IngestSupervisor {
         var maximumBackoff: Duration = .seconds(60)
         var unauthorizedRetry: Duration = .seconds(600)
         var fallbackAfterFailures = 3
+        /// How long a stream must have delivered video for its end to start the back-off afresh (a camera that ends the stream right after
+        /// it starts must not be logged into again every second, each time closing the recorder's file).
+        var stableAfter: Duration = .seconds(30)
         /// Shortest time between two switches of transport (primary to fallback or back).
         var minimumSwitchInterval: Duration = .seconds(30)
         /// Longest wait for a source to connect.
@@ -76,7 +79,9 @@ actor IngestSupervisor {
         case ended
     }
 
-    nonisolated let name: String
+    /// "Porch main stream": the camera's name follows a rename (`rename(_:)`), so the log names the camera as the person now calls it.
+    nonisolated var name: String { label.value.withLock { $0 } }
+    private nonisolated let label: NameBox
     nonisolated let traits: StreamTraits
     /// When the last video frame arrived (nil: none yet on this supervisor).
     private nonisolated let lastVideo = VideoClock()
@@ -112,7 +117,7 @@ actor IngestSupervisor {
     init(name: String, hub: MediaHub, primary: Source, fallback: Source? = nil, timing: Timing = Timing(), traits: StreamTraits = StreamTraits(),
          log: Log, reachability: CameraReachability? = nil, onEvent: @escaping @Sendable (Event) -> Void = { _ in }) {
         self.reachability = reachability
-        self.name = name
+        label = NameBox(name)
         self.traits = traits
         self.hub = hub
         self.primary = primary
@@ -123,6 +128,11 @@ actor IngestSupervisor {
     }
 
     var isRunning: Bool { loop != nil }
+
+    /// The camera was renamed: the log names the stream by `name` from now on.
+    nonisolated func rename(_ name: String) {
+        label.value.withLock { $0 = name }
+    }
 
     /// Starts supervising (no-op while running).
     func start() {
@@ -207,7 +217,8 @@ actor IngestSupervisor {
 
     private enum Outcome {
         case cancelled
-        case finished(reason: String, gotSamples: Bool, error: (any Error)?)
+        /// `deliveredFor`: from the first video frame to the end (nil: no video).
+        case finished(reason: String, deliveredFor: Duration?, error: (any Error)?)
     }
 
     private func run() async {
@@ -242,7 +253,7 @@ actor IngestSupervisor {
             }
             await hub.discontinuity()
             traits.restart()
-            guard case .finished(let reason, let gotSamples, let error) = outcome, !Task.isCancelled else { break }
+            guard case .finished(let reason, let deliveredFor, let error) = outcome, !Task.isCancelled else { break }
 
             var delay: Duration
             let answer = Self.cameraAnswer(error)
@@ -262,9 +273,9 @@ actor IngestSupervisor {
                 rejectedUntil = .now + delay
             } else {
                 if (error as? TransportError) == .localNetworkDenied { onEvent(.localNetworkDenied) }
-                if gotSamples {
-                    failures = 0
-                    backoff.reset()
+                if let deliveredFor {
+                    failures = 0   // the transport works
+                    if deliveredFor >= timing.stableAfter { backoff.reset() }   // a stream that ran a while comes back at once
                 } else if isOffline {
                     failures = 0   // failures while the camera answers nothing say nothing about this transport
                 } else {
@@ -311,9 +322,10 @@ actor IngestSupervisor {
                 group.addTask { [weak self] in
                     for try await sample in stream {
                         if case .video = sample {
-                            progress.lastSample.withLock { $0 = .now }
-                            lastVideo.instant.withLock { $0 = .now }
-                            if progress.gotSamples.withLock({ state in defer { state = true }; return !state }) {
+                            let now = ContinuousClock.now
+                            progress.lastSample.withLock { $0 = now }
+                            lastVideo.instant.withLock { $0 = now }
+                            if progress.firstVideo.withLock({ first in defer { first = first ?? now }; return first == nil }) {
                                 await self?.firstSample()
                             }
                         }
@@ -335,7 +347,8 @@ actor IngestSupervisor {
             }
         } catch {
             if Task.isCancelled { return .cancelled }
-            return .finished(reason: Self.describe(error, watchdog: watchdog), gotSamples: progress.gotSamples.withLock { $0 }, error: error)
+            let deliveredFor = progress.firstVideo.withLock { $0 }.map { ContinuousClock.now - $0 }
+            return .finished(reason: Self.describe(error, watchdog: watchdog), deliveredFor: deliveredFor, error: error)
         }
     }
 
@@ -421,8 +434,10 @@ private final class VideoClock: Sendable {
     let instant = Mutex<ContinuousClock.Instant?>(nil)
 }
 
-/// The ingest watchdog's two flags, in a class: the Linux compiler rejects a noncopyable `Mutex` local captured by a task group's tasks.
+/// The ingest watchdog's last sample and the first video frame, in a class: the Linux compiler rejects a noncopyable `Mutex` local captured by a
+/// task group's tasks.
 private final class IngestProgress: Sendable {
     let lastSample = Mutex(ContinuousClock.now)
-    let gotSamples = Mutex(false)
+    /// When the first video frame came (nil: none yet).
+    let firstVideo = Mutex<ContinuousClock.Instant?>(nil)
 }

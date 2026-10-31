@@ -299,13 +299,79 @@ struct Rig {
         defer { try? FileManager.default.removeItem(at: rig.directory.url) }
         let writer = FakeRootHelper(requests: rig.requests, status: rig.status, clock: rig.clock) { _, _, _ in }
         let expectations: [(String, String, Bool)] = [("checking", "checking", false), ("available", "idle", false), ("current", "idle", false), ("downloading", "downloading", false),
-                                                     ("installing", "downloading", false), ("installed", "ready", true), ("failed", "error", false), ("something-new", "idle", false)]
+                                                     ("installing", "downloading", false), ("installed", "ready", true), ("failed", "error", false), ("rolled-back", "idle", false),
+                                                     ("something-new", "idle", false)]
         for (file, mapped, reboot) in expectations {
             writer.write("update.json", ["state": file, "message": "m", "updatedAt": "2027-01-15T08:00:05Z", "current": "0.1"])
             let update = try #require(await rig.system.info().update)
             #expect(update.state == mapped, "\(file)")
             #expect(update.rebootRequired == reboot, "\(file)")
         }
+    }
+
+    /// A newer version that did not start: the box went back by itself (`cb-update boot`), says so and never offers that version again.
+    @Test func aVersionThatDidNotStartIsReportedWithTheBoxsSentence() async throws {
+        let rig = try Rig(helper: nil)
+        defer { try? FileManager.default.removeItem(at: rig.directory.url) }
+        let writer = FakeRootHelper(requests: rig.requests, status: rig.status, clock: rig.clock) { _, _, _ in }
+        let sentence = "Version 0.1.131 did not start properly, so the box went back to version 0.1.130 by itself. It will not be offered again; a newer version will be."
+        writer.write("update.json", ["state": "rolled-back", "message": sentence, "updatedAt": "2027-01-15T08:00:05Z", "current": "0.1.130", "latest": "0.1.131",
+                                     "failedVersion": "0.1.131", "updateAvailable": false, "rebootRequired": false, "checkedAt": "2027-01-15T08:00:04Z"])
+        let update = try #require(await rig.system.info().update)
+        #expect(update.state == "idle" && !update.available && !update.rebootRequired)
+        #expect(update.failedVersion == "0.1.131" && update.current == "0.1.130")
+        #expect(update.message == sentence)
+
+        writer.write("update.json", ["state": "available", "message": "version 0.1.132 is available", "updatedAt": "2027-01-15T08:00:06Z", "current": "0.1.130",
+                                     "latest": "0.1.132", "updateAvailable": true])
+        #expect(try #require(await rig.system.info().update).failedVersion == nil, "only a box that went back names a version")
+        let encoded = try JSONEncoder().encode(UpdateStatus(state: "idle", current: "0.1.130", failedVersion: "0.1.131"))
+        #expect(try JSONDecoder().decode(UpdateStatus.self, from: encoded).failedVersion == "0.1.131", "the page reads it as failedVersion")
+    }
+
+    /// The drives' health (`status/disk-health.json`, daily), the clock and the network link (`status/system.json`) reach the System page, and a
+    /// drive that is failing or worn out becomes a notice.
+    @Test func theDrivesTheClockAndTheLinkReachTheSystemPage() async throws {
+        let rig = try Rig(helper: nil)
+        defer { try? FileManager.default.removeItem(at: rig.directory.url) }
+        let writer = FakeRootHelper(requests: rig.requests, status: rig.status, clock: rig.clock) { _, _, _ in }
+        let empty = await rig.system.info()
+        #expect(empty.driveHealth == nil && empty.clock == nil && empty.networkLink == nil)
+        #expect(rig.system.driveHealthNotices().isEmpty)
+
+        writer.write("system.json", ["version": "0.3", "state": "ok", "message": "system state", "updatedAt": "2027-01-15T08:00:00Z",
+                                     "clock": ["synchronized": true, "source": "192.168.1.5", "offsetSeconds": -0.000012, "lastSync": "2027-01-15T07:59:00Z"],
+                                     "link": ["interface": "enp1s0", "wired": true, "speedMbps": 100, "duplex": "full"]])
+        writer.write("disk-health.json", ["state": "warning", "message": "The box’s own disk needs attention.", "updatedAt": "2027-01-15T08:10:00Z", "drives": [
+            ["role": "system", "name": "nvme0n1", "model": "Fast NVMe", "state": "warning", "message": "It has used 93% of its rated life. Plan to replace it.",
+             "smartAvailable": true, "passed": true, "percentUsed": 93, "mediaErrors": 0, "temperatureCelsius": 41, "powerOnHours": 5000, "fileSystemErrors": 0,
+             "reallocatedSectors": NSNull(), "pendingSectors": NSNull(), "uncorrectableSectors": NSNull()],
+            ["role": "recording", "name": "sdb", "model": "Portable SSD", "state": "failing", "message": "It reports that it is failing.", "smartAvailable": true,
+             "passed": false],
+            ["role": "archive", "name": "sdc", "model": NSNull(), "state": "unknown", "message": "This drive does not report its health.", "smartAvailable": false],
+        ]])
+        let info = await rig.system.info()
+        #expect(info.clock == ClockStatus(synchronized: true, source: "192.168.1.5", offsetSeconds: -0.000012, lastSync: try Date("2027-01-15T07:59:00Z", strategy: .iso8601)))
+        #expect(info.networkLink == NetworkLink(interface: "enp1s0", wired: true, speedMbps: 100, duplex: "full"))
+        #expect(info.networkLink?.isSlowerThanGigabit == true, "a gigabit port at 100 Mb/s is a bad cable or switch port")
+        let health = try #require(info.driveHealth)
+        let checked = try Date("2027-01-15T08:10:00Z", strategy: .iso8601)
+        #expect(health.state == "warning" && health.checked == checked)
+        #expect(health.drives.map(\.role) == ["system", "recording", "archive"])
+        #expect(health.drives[0] == DriveHealth(role: "system", name: "nvme0n1", model: "Fast NVMe", state: "warning",
+                                                message: "It has used 93% of its rated life. Plan to replace it.", percentUsed: 93, temperatureCelsius: 41,
+                                                powerOnHours: 5000, mediaErrors: 0, fileSystemErrors: 0))
+        #expect(health.drives.map(\.needsReplacing) == [true, true, false])
+
+        let notices = rig.system.driveHealthNotices()
+        #expect(notices.map(\.id) == ["drive-health-system", "drive-health-recording"])
+        #expect(notices.map(\.title) == ["The Box’s Disk Is Wearing Out", "The Recording Drive Is Failing"])
+        #expect(notices.allSatisfy { $0.severity == "warning" && $0.kind == "driveHealth" })
+        #expect(notices[1].detail == "Portable SSD reports that it is failing. Copy the recordings you want to keep and replace it soon.")
+        #expect(notices[0].date == checked, "a stable date: the notice does not change on every look")
+
+        try Data("not json".utf8).write(to: rig.status.appending(path: "disk-health.json"))
+        #expect(await rig.system.info().driveHealth == nil)
     }
 
     @Test func damagedOrHugeStatusFilesAreIgnored() async throws {

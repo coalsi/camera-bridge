@@ -125,6 +125,8 @@ package final class AsyncSerialLock: Sendable {
 
     private struct State {
         var locked = false
+        /// When the body holding the lock got it.
+        var heldSince: ContinuousClock.Instant?
         var nextWaiterID: UInt64 = 0
         var waiters: [Waiter] = []
     }
@@ -154,6 +156,12 @@ package final class AsyncSerialLock: Sendable {
     /// Whether a body holds the lock (tests).
     package var isLocked: Bool { state.withLock { $0.locked } }
 
+    /// How long the body holding the lock has held it; nil while it is free. A body that never ends shows here (the daemon's watchdog
+    /// asks, through `BridgeEngine.operationHeldFor`).
+    package var heldFor: Duration? {
+        state.withLock { $0.heldSince }.map { ContinuousClock.now - $0 }
+    }
+
     /// True once the lock is held; false if a cancellable wait was cancelled (the lock is then not held).
     private func lock(cancellable: Bool) async -> Bool {
         let id = state.withLock { state -> UInt64 in
@@ -167,6 +175,7 @@ package final class AsyncSerialLock: Sendable {
                     if cancellable, Task.isCancelled { return false }
                     guard state.locked else {
                         state.locked = true
+                        state.heldSince = .now
                         return true
                     }
                     state.waiters.append(Waiter(id: id, continuation: continuation))
@@ -188,8 +197,10 @@ package final class AsyncSerialLock: Sendable {
         let next = state.withLock { state -> Waiter? in
             guard !state.waiters.isEmpty else {
                 state.locked = false
+                state.heldSince = nil
                 return nil
             }
+            state.heldSince = .now
             return state.waiters.removeFirst()
         }
         next?.continuation.resume(returning: true)

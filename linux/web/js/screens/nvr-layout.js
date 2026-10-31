@@ -200,13 +200,13 @@ const VALUES = {
   across: (value) => (/^[0-9]+$/.test(String(value)) && MOSAIC_ACROSS.includes(Number(value)) ? Number(value) : null),
   legacyMinWidth: acrossFromMinWidth,
   fit: (value) => (value === 'fit' || value === 'fill' ? value : null),
-  quality: (value) => (value === 'main' || value === 'sub' ? value : null),
+  quality: (value) => (value === 'auto' || value === 'main' || value === 'sub' ? value : null),
 };
 
 /**
  * The wall's choices: `read(key)` gives the kept text or null (nvr.js readStored). A value that makes no sense counts as nothing kept.
- * `?tiles=` (`query`) shows that grid. -> { layout: 'grid' | 'mosaic', tiles, tilesChosen, across, fit: 'fit' | 'fill', quality: 'main' | 'sub' }
- * (live video in Full quality unless Smooth was chosen).
+ * `?tiles=` (`query`) shows that grid. -> { layout: 'grid' | 'mosaic', tiles, tilesChosen, across, fit: 'fit' | 'fill', quality: 'auto' | 'main' | 'sub' }
+ * (live video in Auto quality, the stream the bridge picks for the tile's size, unless Full or Smooth was chosen).
  */
 export function readWallPrefs(read, { query = null, viewportWidth = Infinity } = {}) {
   const stored = (name) => VALUES[name](read(WALL_KEYS[name]));
@@ -218,7 +218,7 @@ export function readWallPrefs(read, { query = null, viewportWidth = Infinity } =
     tilesChosen: chosenTileCount({ query, stored: tilesText }) !== null,
     across: stored('across') ?? stored('legacyMinWidth') ?? DEFAULT_MOSAIC_ACROSS,
     fit: stored('fit') ?? 'fit',
-    quality: stored('quality') ?? 'main',
+    quality: stored('quality') ?? 'auto',
   };
 }
 
@@ -227,4 +227,15 @@ export function writeWallPref(write, name, value) {
   const valid = Object.hasOwn(VALUES, name) && name !== 'legacyMinWidth' ? VALUES[name](value) : null;
   if (valid !== null) write(WALL_KEYS[name], String(valid));
   return valid;
+}
+
+/**
+ * The width Auto quality asks the live request for (`stream=automatic&width=`): the widest tile's width in device pixels, rounded up to a step of
+ * 320 so a small change of the window does not open the live request again. The bridge sends a camera's sub stream to a tile this small and its
+ * main stream to a large one (LiveVideoStream.automatic). Null when nothing was measured.
+ */
+export function autoWidth(tileWidth, pixelRatio = 1) {
+  const px = Number(tileWidth) * (Number(pixelRatio) > 0 ? Number(pixelRatio) : 1);
+  if (!(px > 0)) return null;
+  return Math.ceil(px / 320) * 320;
 }

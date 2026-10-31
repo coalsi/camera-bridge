@@ -60,6 +60,34 @@ import Testing
         #expect(later.events[0].endMs == nil && later.events[0].video == false)
     }
 
+    /// A day file is read on from where the last read stopped: an end appended later finds its start, a line being written waits for its line
+    /// break, and a file that was replaced is read from its start again.
+    @Test func aDayFileIsReadOnFromWhereTheLastReadStopped() throws {
+        let folder = try TemporaryDirectory()
+        defer { folder.remove() }
+        let file = ArchiveEventLog.dayFile(folder: folder.url, camera: Self.camera, day: "2025-10-10")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let cam = Self.camera.uuidString
+        let start = #"{"camera":"\#(cam)","id":"a1","kind":"Motion","start":1760101200000,"v":1,"video":true}"# + "\n"
+        try Data(start.utf8).write(to: file)
+        #expect(ArchiveEventLog.parse(file, camera: Self.camera).map(\.endMs) == [nil])
+        let handle = try FileHandle(forWritingTo: file)
+        _ = try handle.seekToEnd()
+        try handle.write(contentsOf: Data(#"{"end":1760101209000,"id":"a1","v":1}"#.utf8))   // not finished: no line break yet
+        #expect(ArchiveEventLog.parse(file, camera: Self.camera).map(\.endMs) == [nil], "a line being written waits")
+        try handle.write(contentsOf: Data(("\n" + #"{"camera":"\#(cam)","id":"a2","kind":"Person","start":1760101300000,"v":1,"video":true}"# + "\n").utf8))
+        try handle.close()
+        let read = ArchiveEventLog.parse(file, camera: Self.camera)
+        #expect(read.map(\.id) == ["a1", "a2"] && read[0].endMs == 1_760_101_209_000, "the end found the start read before")
+        // Replaced by a shorter file (deleted and begun again): read from its start.
+        try Data((#"{"camera":"\#(cam)","id":"b1","kind":"Ring","start":1760101400000,"v":1,"video":false}"# + "\n").utf8).write(to: file)
+        #expect(ArchiveEventLog.parse(file, camera: Self.camera).map(\.id) == ["b1"])
+        // Deleted by retention: forgotten, so a new file of the same name starts fresh.
+        #expect(ArchiveEventLog.prune(folder: folder.url, cutoffMs: 1_760_200_000_000) == 1)
+        try Data(start.utf8).write(to: file)
+        #expect(ArchiveEventLog.parse(file, camera: Self.camera).map(\.id) == ["a1"])
+    }
+
     @Test func aTornLastLineIsSkippedAndTheNextEventStartsOnALineOfItsOwn() async throws {
         let folder = try TemporaryDirectory()
         defer { folder.remove() }
