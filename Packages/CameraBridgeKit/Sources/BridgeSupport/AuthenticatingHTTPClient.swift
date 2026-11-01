@@ -30,6 +30,12 @@ public enum HTTPClientError: Error, Equatable, Sendable {
 /// client is made so: a key saved for one service must never travel to the address a redirect names.
 ///
 /// Portable: bodies use delegate callbacks (no `URLSession.AsyncBytes`, which is Darwin-only).
+///
+/// Plain `http://` requests go through `PlainHTTP` on a raw connection instead of URLSession once a transport is set for them
+/// (`routePlainHTTP(through:)`: the Linux daemon, where URLSession keeps libdispatch busy while it waits for an answer). They behave
+/// as above; a redirect is followed by this client then (at most `maximumRedirects` in a row, `URLError(.httpTooManyRedirects)`
+/// beyond), as URLSession would: 303, and 301/302 after a POST, become a GET without a body, and the Authorization header goes only
+/// to the same host. HTTPS always takes URLSession.
 public final class AuthenticatingHTTPClient: Sendable {
     private enum CachedAuth: Sendable {
         case basic
@@ -38,6 +44,22 @@ public final class AuthenticatingHTTPClient: Sendable {
 
     /// The `data(for:)` body limit of the contract initializer: camera API, SOAP and snapshot answers are far smaller.
     public static let defaultMaximumBodySize = 16 << 20
+
+    /// Redirects of plain-HTTP requests followed in a row.
+    static let maximumRedirects = 10
+
+    /// The transport every client's plain-HTTP requests take (`routePlainHTTP(through:)`); nil: URLSession.
+    private static let plainHTTPTransport = Mutex<(any NetworkTransport)?>(nil)
+
+    /// A route for plain-HTTP requests made in this task (tests: the Linux daemon's route without changing every client's).
+    @TaskLocal package static var plainHTTPRoute: (any NetworkTransport)?
+
+    /// Sends every client's plain `http://` requests through `transport` (`PlainHTTP`) instead of URLSession; nil goes back to
+    /// URLSession. The Linux daemon does at start: swift-corelibs-foundation's URLSession keeps the write source it made to send
+    /// a request, which wakes libdispatch again and again while the answer is awaited (an ONVIF pull, an event stream, HTTP-FLV).
+    package static func routePlainHTTP(through transport: (any NetworkTransport)?) {
+        plainHTTPTransport.withLock { $0 = transport }
+    }
 
     private let session: URLSession
     private let sessionDelegate: SessionDelegate
@@ -48,6 +70,8 @@ public final class AuthenticatingHTTPClient: Sendable {
     private let cache = Mutex<[String: CachedAuth]>([:])
     /// Hosts that asked for Digest are never answered with Basic (kept when a rejected retry clears `cache`).
     private let downgradeGuard: BasicDowngradeGuard
+    /// Plain-HTTP connections in use, closed by `invalidate()`.
+    private let plainConnections = PlainConnections()
     private let log = Log(category: "http")
 
     /// `timeout` bounds each wait for data, and each `data(for:)` round trip in total; `data(for:)` bodies are limited
@@ -126,6 +150,7 @@ public final class AuthenticatingHTTPClient: Sendable {
     /// Cancels outstanding tasks and releases the session. The client must not be used afterwards.
     public func invalidate() {
         session.invalidateAndCancel()
+        plainConnections.invalidate()
     }
 
     // MARK: - Internals
@@ -140,8 +165,35 @@ public final class AuthenticatingHTTPClient: Sendable {
         }
     }
 
-    /// Starts a data task whose callbacks go to a `BufferedTask`; returns at completion (or with the captured 401).
+    /// One round trip, through `PlainHTTP` (following its redirects) or URLSession. With `capture`, a 401 with a challenge is
+    /// returned with a nil body.
     private func collect(_ request: URLRequest, capture: Bool) async throws -> (Data?, HTTPURLResponse) {
+        var request = request
+        for _ in 0...Self.maximumRedirects {
+            guard let transport = plainTransport(for: request) else { return try await collectThroughSession(request, capture: capture) }
+            let answer = try await collectPlain(request, transport: transport, capture: capture)
+            guard let next = redirection(of: request, by: answer.1) else { return answer }
+            request = next
+        }
+        throw URLError(.httpTooManyRedirects)
+    }
+
+    /// One plain-HTTP round trip: the body is read up to `maximumBodySize` (one announced as longer is not read at all).
+    private func collectPlain(_ request: URLRequest, transport: any NetworkTransport, capture: Bool) async throws -> (Data?, HTTPURLResponse) {
+        let (response, body) = try await PlainHTTP.open(request, transport: transport, timeout: timeout, track: plainConnections.add)
+        defer { body.close() }
+        if capture, Self.isChallenge(response) { return (nil, response) }
+        if let length = body.expectedLength, length > maximumBodySize { throw HTTPClientError.bodyTooLarge(limit: maximumBodySize) }
+        var data = Data()
+        while let chunk = try await body.next() {
+            guard chunk.count <= maximumBodySize - data.count else { throw HTTPClientError.bodyTooLarge(limit: maximumBodySize) }
+            data.append(chunk)
+        }
+        return (data, response)
+    }
+
+    /// Starts a data task whose callbacks go to a `BufferedTask`; returns at completion (or with the captured 401).
+    private func collectThroughSession(_ request: URLRequest, capture: Bool) async throws -> (Data?, HTTPURLResponse) {
         let task = session.dataTask(with: request)
         let handler = BufferedTask(captureHTTPAuth: capture, limit: maximumBodySize)
         sessionDelegate.register(handler, for: task)
@@ -155,8 +207,26 @@ public final class AuthenticatingHTTPClient: Sendable {
         }
     }
 
-    /// Starts a data task whose callbacks go to a `StreamTask`; returns at the response head (or the captured 401).
+    /// Opens a streaming request through `PlainHTTP` (following its redirects) or URLSession; returns at the response head (or the
+    /// captured 401).
     private func openStream(_ request: URLRequest, capture: Bool) async throws -> StreamOpening {
+        var request = request
+        for _ in 0...Self.maximumRedirects {
+            guard let transport = plainTransport(for: request) else { return try await openSessionStream(request, capture: capture) }
+            let (response, body) = try await PlainHTTP.open(request, transport: transport, timeout: timeout, track: plainConnections.add)
+            if capture, Self.isChallenge(response) {
+                body.close()
+                return .challenged(response)
+            }
+            guard let next = redirection(of: request, by: response) else { return .opened(response, body.stream()) }
+            body.close()
+            request = next
+        }
+        throw URLError(.httpTooManyRedirects)
+    }
+
+    /// Starts a data task whose callbacks go to a `StreamTask`; returns at the response head (or the captured 401).
+    private func openSessionStream(_ request: URLRequest, capture: Bool) async throws -> StreamOpening {
         let task = session.dataTask(with: request)
         let handler = StreamTask(captureHTTPAuth: capture)
         handler.onBodyTermination { task.cancel() }
@@ -171,6 +241,35 @@ public final class AuthenticatingHTTPClient: Sendable {
         }
     }
 
+    /// The transport for `request` when it goes through `PlainHTTP`.
+    private func plainTransport(for request: URLRequest) -> (any NetworkTransport)? {
+        guard PlainHTTP.handles(request) else { return nil }
+        return Self.plainHTTPRoute ?? Self.plainHTTPTransport.withLock { $0 }
+    }
+
+    private static func isChallenge(_ response: HTTPURLResponse) -> Bool {
+        response.statusCode == 401 && response.value(forHTTPHeaderField: "WWW-Authenticate") != nil
+    }
+
+    /// The request a plain-HTTP redirect leads to, made as URLSession makes it; nil when the client does not follow redirects or
+    /// the answer is not one.
+    private func redirection(of request: URLRequest, by response: HTTPURLResponse) -> URLRequest? {
+        guard sessionDelegate.followsRedirects, [301, 302, 303, 307, 308].contains(response.statusCode),
+              let location = response.value(forHTTPHeaderField: "Location"),
+              let url = URL(string: location, relativeTo: request.url)?.absoluteURL,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
+        var next = request
+        next.url = url
+        let method = (request.httpMethod ?? "GET").uppercased()
+        if (response.statusCode == 303 && method != "HEAD") || ([301, 302].contains(response.statusCode) && method == "POST") {
+            next.httpMethod = "GET"
+            next.httpBody = nil
+            next.setValue(nil, forHTTPHeaderField: "Content-Type")
+        }
+        if Self.hostKey(url) != Self.hostKey(request.url) { next.setValue(nil, forHTTPHeaderField: "Authorization") }
+        return next
+    }
+
     private static func emptyBody() -> AsyncThrowingStream<Data, any Error> {
         AsyncThrowingStream { $0.finish() }
     }
@@ -181,10 +280,7 @@ public final class AuthenticatingHTTPClient: Sendable {
     }
 
     private static func digestURI(_ url: URL?) -> String {
-        guard let url, let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return "/" }
-        var uri = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
-        if let query = components.percentEncodedQuery { uri += "?" + query }
-        return uri
+        PlainHTTP.requestTarget(url)
     }
 
     /// Applies the timeout and any cached (preemptive) authorization.
@@ -245,6 +341,35 @@ public final class AuthenticatingHTTPClient: Sendable {
     private func forgetAuth(for request: URLRequest) {
         let key = Self.hostKey(request.url)
         _ = cache.withLock { $0.removeValue(forKey: key) }
+    }
+}
+
+/// The plain-HTTP connections a client has open; `invalidate()` closes them, and any opened after it.
+private final class PlainConnections: Sendable {
+    private struct State {
+        var invalidated = false
+        var open: [ObjectIdentifier: WatchedConnection] = [:]
+    }
+    private let state = Mutex(State())
+
+    /// False once invalidated.
+    func add(_ connection: WatchedConnection) -> Bool {
+        let id = ObjectIdentifier(connection)
+        connection.onClose { [weak self] in self?.state.withLock { _ = $0.open.removeValue(forKey: id) } }
+        return state.withLock { state -> Bool in
+            guard !state.invalidated else { return false }
+            state.open[id] = connection
+            return true
+        }
+    }
+
+    func invalidate() {
+        let open = state.withLock { state -> [WatchedConnection] in
+            state.invalidated = true
+            defer { state.open = [:] }
+            return Array(state.open.values)
+        }
+        for connection in open { connection.close() }
     }
 }
 

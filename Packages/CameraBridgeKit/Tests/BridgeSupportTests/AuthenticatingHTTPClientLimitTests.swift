@@ -11,7 +11,7 @@ import Testing
 /// Review finding (W4 BridgeSupport): `data(for:)` kept the whole body in memory with no size cap and only an idle
 /// timeout, so a camera answering with a huge or endless body (compromised camera, MITM on plaintext HTTP, a snapshot
 /// URI that points at an MJPEG stream) grew the bridge's memory without bound (10.7 GB in 5 s on loopback).
-@Suite(.timeLimit(.minutes(1))) struct AuthenticatingHTTPClientLimitTests {
+@Suite(.timeLimit(.minutes(1)), .plainHTTPRoute) struct AuthenticatingHTTPClientLimitTests {
     @Test func defaultBodyLimitIs16MiB() {
         #expect(AuthenticatingHTTPClient.defaultMaximumBodySize == 16 << 20)
     }

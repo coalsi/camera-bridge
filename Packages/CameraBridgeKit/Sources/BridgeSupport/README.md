@@ -34,6 +34,14 @@ Foundation (+ FoundationNetworking / os under `#if canImport`), Synchronization 
 - `AuthenticatingHTTPClient` — URLSession wrapper answering Basic/Digest itself: `data(for:)` (bounded: body limit
   `maximumBodySize`, default `defaultMaximumBodySize` 16 MiB, and `timeout` per round trip in total), `stream(for:)`.
   Never answers Basic for a host that asked for Digest (`BasicDowngradeGuard`, W4 review round 4).
+- `PlainHTTP` (package; Nov 1 2026) — one plain `http://` request on its own connection over a `NetworkTransport`, which
+  `AuthenticatingHTTPClient` sends instead of URLSession once `routePlainHTTP(through:)` is set (the Linux daemon does at start;
+  HTTPS keeps URLSession). swift-corelibs-foundation's URLSession keeps the write source it made to send a request, so while it
+  waits for the answer libdispatch wakes again and again: on Linux a request waiting 3 s for its answer cost 2 s of processor
+  time, on `PlainHTTP` 0.01 s; two cameras' event connections kept a box's dispatch thread at about 60 000 wake-ups a second.
+  Bodies by Content-Length, chunked (`ChunkedDecoder`, shared with CameraAdapters' `RawHTTPStream`) or until the camera hangs
+  up, read only as the body is read; one timer per connection for `timeout`; redirects followed by the client as URLSession
+  would. Tests: `PlainHTTPTests`; the client's suites run on it on Linux (`.plainHTTPRoute`; on a Mac with `CB_TEST_PLAIN_HTTP=1`).
 - Platform protocols (PlatformApple implements them): `NetworkTransport`/`TCPListener`/`TCPConnection`, `TransportError`,
   `ServiceAdvertiser`/`AdvertisedService`/`ServiceAdvertisement`, `SecretStore`, `NetworkChangeMonitoring`, `PowerManaging`
   (with `endBackgroundActivity()`, W4 review: the engine ends its App Nap activity on pause/stop),

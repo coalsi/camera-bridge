@@ -613,6 +613,7 @@ if selected system; then
         ssh_run "systemctl is-active $u" >/dev/null 2>&1 && ok "$u is active" || no "$u is not active"
     done
     ssh_has 'journalctl -u avahi-daemon --no-pager' 'camera-bridge.local' && ok "avahi publishes camera-bridge.local" || no "avahi did not announce camera-bridge.local"
+    ssh_has 'getent hosts camera-bridge.local' '.' && ok "the box looks up .local names (its own camera-bridge.local, through avahi)" || no "camera-bridge.local does not resolve on the box (libnss-mdns, /etc/nsswitch.conf)"
     ssh_has 'ip -4 -o addr show scope global' '.' && ok "DHCP gave the box an address" || no "no IPv4 address"
     ssh_has 'swapon --show=NAME --noheadings' 'zram' && ok "swap is zram" || no "no zram swap"
     ssh_has 'swapon --show=NAME --noheadings | grep -v zram | wc -l' '^0$' && ok "no swap file or partition" || no "a non-zram swap exists"

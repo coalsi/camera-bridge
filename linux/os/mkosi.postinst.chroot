@@ -82,6 +82,13 @@ systemctl mask systemd-sysupdate.timer systemd-sysupdate-reboot.timer >/dev/null
 # The box never sleeps; no weekly file system scrubs on a USB stick.
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target e2scrub_all.timer e2scrub_reap.service >/dev/null 2>&1 || true
 
+# --- name lookups ------------------------------------------------------------------------------------------------------
+# A name ending in .local (a camera added as skydome.local) is asked of avahi-daemon (libnss-mdns), any other name of DNS. Written here
+# rather than left to the package's own edit of nsswitch.conf, and checked, so that no image ships without it.
+ls /usr/lib/*/libnss_mdns4_minimal.so.2 >/dev/null
+sed -i -E 's/^hosts:.*/hosts:          files mdns4_minimal [NOTFOUND=return] dns/' /etc/nsswitch.conf
+grep -qx 'hosts: *files mdns4_minimal \[NOTFOUND=return\] dns' /etc/nsswitch.conf
+
 # --- identity ----------------------------------------------------------------------------------------------------------
 pretty="Camera Bridge OS ${IMAGE_VERSION:-dev} (Debian 13)"
 if [ -f /usr/lib/os-release ]; then

@@ -15,11 +15,20 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.131',
+    date: '2026-11-01',
+    title: 'Lighter on the box',
+    items: [
+      'The box no longer burns processor time while it waits for a camera to answer. Camera events, settings, snapshots and the doorbell’s video now go over their own connections instead of a system library that kept checking a waiting connection tens of thousands of times a second.',
+      'A camera can be added by its .local name (like skydome.local), not only by its address: the box could not look those names up before, so adding one failed with “a network error occurred”.',
+    ],
+  },
+  {
     version: '0.1.130',
     date: '2026-10-31',
     title: 'A full check-up: steadier, lighter on the box, and recordings you can keep',
     items: [
-      'The box no longer crashes and restarts every day or two. Network connections now wait through one shared watcher instead of a new one for every wait, which also frees about half a processor core.',
+      'The box no longer crashes and restarts every day or two: network connections now wait through one shared watcher instead of making a new one for every wait.',
       'Apple Home video from a 4K camera is decoded and scaled on the box’s graphics chip, and the other cameras are shrunk with a cheaper, sharper filter, so watching in Home takes far less of the processor.',
       'Events and Sky Watcher nights are kept as long as their recordings. Before, they could be deleted early, and nothing is deleted for room while the archive drive is still being read after a restart.',
       '“Keep this event” on the Events list keeps that stretch of recording from ever being deleted (together, kept recordings can take up to a quarter of the recording space).',

@@ -259,6 +259,8 @@ public final class Daemon {
             log.warning("ffmpeg is not usable (\(error)); video that needs transcoding will not work. Install ffmpeg.")
         }
         var environment = BridgeEnvironment.linux(dataDirectory: directory, codecs: codecs)
+        // Camera requests over plain HTTP skip URLSession, which keeps libdispatch busy while it waits for an answer.
+        AuthenticatingHTTPClient.routePlainHTTP(through: environment.platform.transport)
         if options.development {
             environment.loopbackOnly = true
             environment.advertise = false

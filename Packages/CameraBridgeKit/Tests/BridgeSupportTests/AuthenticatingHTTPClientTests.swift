@@ -72,7 +72,7 @@ private func verifyDigestAuthInt(_ header: String?, method: String, body: Data, 
 }
 
 /// Loopback only (127.0.0.1).
-@Suite(.timeLimit(.minutes(1))) struct AuthenticatingHTTPClientTests {
+@Suite(.timeLimit(.minutes(1)), .plainHTTPRoute) struct AuthenticatingHTTPClientTests {
     private final class Counters: Sendable {
         private let count = Mutex(0)
         private let all = Mutex(0)
@@ -221,7 +221,7 @@ private func verifyDigestAuthInt(_ header: String?, method: String, body: Data, 
 }
 
 /// `stream(for:)` against a server that sends a chunked body piece by piece, released by the test.
-@Suite(.timeLimit(.minutes(1))) struct AuthenticatingHTTPClientStreamingTests {
+@Suite(.timeLimit(.minutes(1)), .plainHTTPRoute) struct AuthenticatingHTTPClientStreamingTests {
     @Test func deliversChunksAsTheyArrive() async throws {
         let server = try await ChunkedHTTPServer.start()
         defer { server.stop() }
@@ -381,7 +381,7 @@ private final class ChunkedHTTPServer: Sendable {
 /// Digest got the password (base64) in the retry, and the cached `.basic` sent it up front on every later request. A
 /// host impersonating the camera (ARP or DHCP spoofing) needs nothing more. Once a host asked for Digest, the client
 /// never answers Basic for it; a host that only ever asks for Basic still gets it.
-@Suite(.timeLimit(.minutes(1))) struct AuthenticatingHTTPClientDowngradeTests {
+@Suite(.timeLimit(.minutes(1)), .plainHTTPRoute) struct AuthenticatingHTTPClientDowngradeTests {
     private enum Behaviour { case camera, rejectDigest, askForBasic }
 
     /// The camera (Digest, nonce `n0nce`) until the test switches it to an impersonator.
