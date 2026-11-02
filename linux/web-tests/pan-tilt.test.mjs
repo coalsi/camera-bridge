@@ -97,3 +97,36 @@ test('a refused step lets go of the arrow and says why', async () => {
   assert.equal(t.sent.length, 2, 'no more steps');
   t.pad.destroy();
 });
+
+test('a camera that zooms without turning gets the zoom buttons alone: no arrows, its own heading, zoom steps only', async () => {
+  const t = harness();
+  const visible = (node) => { for (let n = node; n; n = n.parentNode) if (n.hidden) return false; return true; };
+  const shown = () => all(t.pad.el, (node) => node.localName === 'button' && visible(node)).map((node) => node.getAttribute('aria-label'));
+  const heading = () => all(t.pad.el, (node) => node.localName === 'strong')[0].textContent;
+  t.pad.setCamera('CAM', { panTilt: false, zoom: true });
+  assert.equal(t.pad.el.hidden, false);
+  assert.deepEqual(shown(), ['Zoom out', 'Zoom in'], 'no arrows and no stop');
+  assert.equal(heading(), 'Zoom');
+  t.down(t.button('Zoom in'));
+  await t.settle();
+  assert.deepEqual(t.sent.map((entry) => entry.body), [{ pan: 0, tilt: 0, zoom: 1 }]);
+  t.sent[0].resolve();
+  t.up(t.button('Zoom in'));
+  await t.advance(1000);
+  assert.ok(t.sent.every((entry) => entry.body.zoom), 'a zoom step needs no stop, and nothing turns the camera');
+
+  t.pad.setCamera('CAM', { panTilt: true, zoom: true });
+  assert.equal(heading(), 'Pan, tilt and zoom');
+  assert.deepEqual(shown(), ['Tilt up', 'Pan left', 'Stop', 'Pan right', 'Tilt down', 'Zoom out', 'Zoom in']);
+  t.pad.setCamera('CAM', {});
+  assert.equal(heading(), 'Pan and tilt', 'turning without zooming, as before');
+  assert.deepEqual(shown(), ['Tilt up', 'Pan left', 'Stop', 'Pan right', 'Tilt down']);
+  t.pad.destroy();
+});
+
+test('monitor.css hides the arrows of a pad whose camera only zooms (the pad is a grid, which a bare hidden attribute does not hide)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../web/monitor.css', import.meta.url), 'utf8');
+  assert.match(css, /\.mon-ptz-pad \{ display: grid;/);
+  assert.match(css, /\.mon-ptz-pad\[hidden\] \{ display: none; \}/);
+});

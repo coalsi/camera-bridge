@@ -26,10 +26,14 @@ export const ARCHIVE_KEEP = 5000;         // events kept in the page at most, be
 
 const DETECTION_WORDS = /person|people|human|face|vehicle|car|animal|pet|dog|cat|package|parcel|line|intrusion|region|object|loiter/i;
 
-/** The kind of an event name: { label, level } with level 'motion' | 'detection' | 'doorbell'. The label is the bridge's word ("Doorbell ring" -> "Doorbell"). */
+/**
+ * The kind of an event name: { label, level } with level 'motion' | 'detection' | 'doorbell'. The label is the bridge's word ("Doorbell ring" -> "Doorbell").
+ * A doorbell is "doorbell" anywhere in the name, or "ring" or "rings" as a word of its own: the letters inside "Loitering" or "Monitoring" are no ring.
+ * The Apple TV app's EventKind.of (apple-tv/Kit/Sources/CameraBridgeTVKit/Timeline/EventKinds.swift) has the same rule; change them together.
+ */
 export function eventKind(name) {
   const text = String(name ?? '').trim() || 'Event';
-  if (/doorbell|ring/i.test(text)) return { label: 'Doorbell', level: 'doorbell' };
+  if (/doorbell|\brings?\b/i.test(text)) return { label: 'Doorbell', level: 'doorbell' };
   if (/^motion$/i.test(text) || (/motion/i.test(text) && !DETECTION_WORDS.test(text))) return { label: 'Motion', level: 'motion' };
   return { label: text, level: 'detection' };
 }

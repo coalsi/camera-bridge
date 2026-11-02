@@ -312,6 +312,7 @@
 .mon-ptz[hidden], .mon-nv[hidden] { display: none; }
 .mon-ptz .mon-timeline-head, .mon-nv .mon-timeline-head { align-self: stretch; }
 .mon-ptz-pad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); gap: 6px; grid-template-areas: ". up ." "left stop right" ". down ."; border-radius: 10px; outline-offset: 4px; }
+.mon-ptz-pad[hidden] { display: none; }   /* a camera that zooms without turning: its zoom buttons alone */
 .mon-ptz-btn { display: grid; place-items: center; border-radius: 10px; border: 1px solid var(--mon-line); background: rgba(255, 255, 255, .06); color: inherit; font-size: 15px; cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none; }
 .mon-ptz-btn:hover { background: rgba(255, 255, 255, .12); }
 .mon-ptz-btn[aria-pressed="true"] { background: var(--brand); color: var(--on-brand); border-color: transparent; }

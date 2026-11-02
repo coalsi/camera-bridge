@@ -112,6 +112,43 @@ test('Driveway also pans, tilts and zooms, so the Monitor holds the pad and the 
   assert.deepEqual(await answer('cameras/not-a-uuid/pan-tilt', { pan: 2, tilt: 0 }), [404, 'not_found', null]);
 });
 
+test('the owner’s switches turn Driveway’s pan and tilt, and its zoom, off as the bridge does: the status, the route, the values checked', opts, async () => {
+  await reset();
+  const driveway = `cameras/${camera('Driveway')}`;
+  const turn = `${driveway}/pan-tilt`;
+  const answer = async (response) => { const r = await response; return [r.status, r.json?.error ?? null, r.json?.field ?? null]; };
+  const offered = (json) => [json.status.panTilt, json.status.zoom, json.status.panTiltDetected, json.status.zoomDetected];
+  const { cameras } = (await server.api.get('cameras')).json;
+  assert.ok(cameras.every((entry) => typeof entry.status.panTiltDetected === 'boolean' && typeof entry.status.zoomDetected === 'boolean'));
+  assert.deepEqual(cameras.filter((entry) => entry.status.panTiltDetected).map((entry) => entry.name), ['Driveway']);
+  const before = (await server.api.get(driveway)).json;
+  assert.ok(!('panTiltEnabled' in before) && !('zoomEnabled' in before), 'absent until set: as the camera’s control says');
+  assert.deepEqual(offered(before), [true, true, true, true]);
+
+  const off = await server.api.patch(driveway, { panTiltEnabled: false });
+  assert.deepEqual([off.status, off.json.panTiltEnabled, 'zoomEnabled' in off.json], [200, false, false]);
+  assert.deepEqual(offered(off.json), [false, true, true, true], 'turned off, and still what the control says');
+  assert.deepEqual(await answer(server.api.post(turn, { pan: 0.6, tilt: 0 })), [409, 'no_pan_tilt', null]);
+  assert.deepEqual(await answer(server.api.post(turn, { pan: 0, tilt: 0, zoom: 1 })), [204, null, null], 'zoom still works');
+  assert.deepEqual(offered((await server.api.patch(driveway, { zoomEnabled: false })).json), [false, false, true, true]);
+  assert.deepEqual(await answer(server.api.post(turn, { pan: 0, tilt: 0, zoom: 1 })), [409, 'no_pan_tilt', null]);
+  // One code; the sentence says what was refused, as the bridge's does.
+  const sentence = async (body) => (await server.api.post(turn, body)).json?.message;
+  assert.equal(await sentence({ pan: 0, tilt: 0, zoom: -1 }), 'This camera can’t zoom right now.');
+  assert.equal(await sentence({ pan: 0.6, tilt: 0 }), 'This camera can’t pan and tilt right now.');
+  assert.equal(await sentence({ pan: 0, tilt: 0 }), 'This camera can’t pan and tilt right now.', 'a stop');
+
+  // Only true or false (null changes nothing), only with the CSRF token; a refusal changes nothing.
+  for (const wrong of ['no', 1, {}, []]) assert.deepEqual(await answer(server.api.patch(driveway, { panTiltEnabled: true, zoomEnabled: wrong })), [400, 'invalid', 'zoomEnabled']);
+  assert.equal((await server.api.patch(driveway, { panTiltEnabled: true }, { csrf: false })).json.error, 'csrf');
+  assert.equal((await server.api.patch(driveway, { panTiltEnabled: null })).json.panTiltEnabled, false);
+  const on = await server.api.patch(driveway, { panTiltEnabled: true, zoomEnabled: true });
+  assert.deepEqual([on.json.panTiltEnabled, on.json.zoomEnabled, ...offered(on.json)], [true, true, true, true, true, true]);
+  assert.deepEqual(await answer(server.api.post(turn, { pan: 0.6, tilt: 0 })), [204, null, null]);
+  await reset();
+  assert.ok(!('panTiltEnabled' in (await server.api.get(driveway)).json), 'a reset forgets them');
+});
+
 test('the page’s own requests against the dev server: a change, the camera read back into the store, a refusal in the bridge’s words', opts, async () => {
   await reset();
   const browser = installFakeBrowser();

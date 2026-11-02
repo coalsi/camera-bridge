@@ -247,6 +247,58 @@ export function createAIDescriptionsCard(camera, { save, busy = () => false, set
   };
 }
 
+// MARK: Pan, tilt and zoom
+
+/** Every word of the camera page's pan, tilt and zoom card. */
+export const PAN_TILT_TEXT = {
+  both: 'Pan, tilt and zoom',
+  panTilt: 'Pan and tilt',
+  zoom: 'Zoom',
+  note: 'Some cameras say they can move or zoom when they can’t. Turn off what this one can’t do, and the Monitor and the Apple TV app no longer show its controls.',
+};
+
+/**
+ * The camera page's pan, tilt and zoom card: a "Pan and tilt" switch and a "Zoom" switch, each only while the camera's control says the
+ * camera has it (status.panTiltDetected, status.zoomDetected), on unless the owner turned it off (panTiltEnabled, zoomEnabled false). Off,
+ * the bridge no longer offers it (status.panTilt, status.zoom: the Monitor's pad, the Apple TV's Move) and refuses a move. Hidden while the
+ * control says neither (it answers a moment after the camera starts). It follows the camera in place (`update(camera)`), so a flip never
+ * builds the page again. Returns { el, update }.
+ *   save(change)   a switch was flipped: { panTiltEnabled } or { zoomEnabled }, true or false
+ *   busy(key)      that switch's change is on its way: the camera's own news does not move it back meanwhile
+ */
+export function createPanTiltCard(camera, { save, busy = () => false }) {
+  let current = camera;
+  const control = (key, title, detected) => {
+    const input = h('input', { type: 'checkbox', role: 'switch', onchange: () => save({ [key]: input.checked }) });
+    const row = h('label', { class: 'switch-row' }, h('span', { class: 'text' }, h('span', { class: 'title' }, title)), h('span', { class: 'switch' }, input));
+    return { key, detected, input, row };
+  };
+  const controls = [control('panTiltEnabled', PAN_TILT_TEXT.panTilt, 'panTiltDetected'), control('zoomEnabled', PAN_TILT_TEXT.zoom, 'zoomDetected')];
+  const heading = h('h2');
+  const el = h('div', { class: 'card ptz-card', hidden: true }, heading, h('p', { class: 'desc' }, PAN_TILT_TEXT.note), controls.map((c) => c.row));
+
+  function draw() {
+    const [panTilt, zoom] = controls.map((c) => current.status?.[c.detected] === true);
+    el.hidden = !panTilt && !zoom;
+    const title = panTilt && zoom ? PAN_TILT_TEXT.both : panTilt ? PAN_TILT_TEXT.panTilt : PAN_TILT_TEXT.zoom;
+    if (heading.textContent !== title) heading.textContent = title;
+    for (const c of controls) {
+      c.row.hidden = current.status?.[c.detected] !== true;
+      if (!busy(c.key)) c.input.checked = current[c.key] !== false;
+    }
+  }
+
+  draw();
+  return {
+    el,
+    /** The camera as the store has it now. */
+    update(next) {
+      current = next;
+      draw();
+    },
+  };
+}
+
 export function renderCamera({ params, navigate, setTitle }) {
   const id = params[0];
   const bannerHost = banners();
@@ -259,6 +311,7 @@ export function renderCamera({ params, navigate, setTitle }) {
   let securityHandle = null; // the Security card: it follows status.security in place
   let wantsSecurity = params[1] === 'security';   // #/camera/<id>/security, or the banner's button on this page: bring the card into view once
   let aiHandle = null;       // the AI descriptions card: made once, it follows the camera's switch in place
+  let panTiltHandle = null;  // the pan, tilt and zoom card: made once, it follows the camera's switches and its control in place
   let skyHandle = null;      // the Sky Watcher card: made once, and only while the Sky Watcher plugin is on; it follows the camera's sky settings and status in place
   let live = false;
   let pictureTimer = null;
@@ -835,6 +888,8 @@ export function renderCamera({ params, navigate, setTitle }) {
       settings: () => settingsAnswer,
     });
     aiHandle.update(camera);
+    panTiltHandle ??= createPanTiltCard(camera, { save: (change) => save(change), busy: (key) => key in pending || key in sending });
+    panTiltHandle.update(camera);
     // Sky Watcher is a plugin: every camera's page has its card while the plugin is on (Plugins), and none while it is off.
     const skyOn = pluginOn('sky');
     if (skyOn) {
@@ -856,16 +911,19 @@ export function renderCamera({ params, navigate, setTitle }) {
     if (camera.status?.paired) { replace(homeHost); replace(homeBottomHost, home); } else { replace(homeBottomHost); replace(homeHost, home); }
     straightenHandle?.destroy();
     straightenHandle = straightenCard();
-    replace(right, recordHandle?.el, securityHandle.el, canSetUp ? cameraSetupCard(camera, { onDone: refreshCamera, localHelp: false }) : null, motionCard(), aiHandle.el, skyOn ? skyHandle.el : null, audioCard(), nightHandle.el, qualityCard(), overlayCard(), straightenHandle.el, hook, connectionCard(),
+    replace(right, recordHandle?.el, securityHandle.el, canSetUp ? cameraSetupCard(camera, { onDone: refreshCamera, localHelp: false }) : null, motionCard(), aiHandle.el, skyOn ? skyHandle.el : null, audioCard(), nightHandle.el, panTiltHandle.el, qualityCard(), overlayCard(), straightenHandle.el, hook, connectionCard(),
       h('div', { class: 'card' }, h('h2', null, 'Remove'), h('p', { class: 'desc' }, 'Removes the camera from Camera Bridge. Its Apple Home pairing is kept for 30 days, so the same camera added again keeps its place in Home.'),
         h('button', { class: 'btn danger', type: 'button', onclick: removeCamera }, icon('trash'), 'Remove camera…')));
     showSecurity();
   }
 
-  // What counts as the camera's structure: everything but its status, the two Record flags, its picture correction, the AI switch and the sky
-  // settings. The Record, Straighten, AI descriptions and Sky Watcher cards follow those in place, so pressing Record or a switch, or letting go
-  // of a slider, never rebuilds the page (the preview keeps running) or takes keyboard focus away from the control.
-  const structure = (c) => JSON.stringify({ ...c, status: null, nvrEnabled: null, nvrRecordSound: null, pictureCorrection: null, aiDescriptions: null, skyDetector: null });
+  // What counts as the camera's structure: everything but its status, the two Record flags, its picture correction, the AI switch, the sky
+  // settings and the pan, tilt and zoom switches. The Record, Straighten, AI descriptions, Sky Watcher and pan, tilt and zoom cards follow
+  // those in place, so pressing Record or a switch, or letting go of a slider, never rebuilds the page (the preview keeps running) or takes
+  // keyboard focus away from the control. The two switches are left out, not set to null: the bridge leaves them out of a camera until they
+  // are set, and one set to null at the end would not read the same as the same key where the bridge's answer has it (its keys are sorted).
+  const structure = ({ panTiltEnabled, zoomEnabled, ...c }) => JSON.stringify({ ...c, status: null, nvrEnabled: null, nvrRecordSound: null, pictureCorrection: null,
+    aiDescriptions: null, skyDetector: null });
 
   const stop = subscribe((kind, detail) => {
     if (destroyed) return;
@@ -880,6 +938,7 @@ export function renderCamera({ params, navigate, setTitle }) {
       straightenHandle?.update(detail);
       if (encoderHost) replace(encoderHost, encoderNote(detail));
       aiHandle?.update(detail);
+      panTiltHandle?.update(detail);
       skyHandle?.update(detail);
       // The structure only changes when something other than a status moved (another browser edited it).
       if (before && structure(before) !== structure(detail) && !Object.keys(pending).length) renderAll();

@@ -239,10 +239,14 @@ struct CameraStatusResource: Encodable {
     var recordingNow: Bool
     var liveViewers: Int
     var appViewers: Int
-    /// The camera pans and tilts (`POST cameras/:id/pan-tilt`).
+    /// The camera pans and tilts (`POST cameras/:id/pan-tilt`): its control says so and the owner has not turned it off (`panTiltEnabled`).
     var panTilt: Bool
-    /// The camera zooms (`POST cameras/:id/pan-tilt {zoom}`).
+    /// The camera zooms (`POST cameras/:id/pan-tilt {zoom}`): its control says so and the owner has not turned it off (`zoomEnabled`).
     var zoom: Bool
+    /// The camera's control says it pans and tilts, whatever the owner turned off: the camera page offers the switch for it.
+    var panTiltDetected: Bool
+    /// The camera's control says it zooms, whatever the owner turned off.
+    var zoomDetected: Bool
     /// The camera's night vision and lamp (`POST cameras/:id/night-vision`); absent when the bridge can't switch them.
     var nightVision: NightVisionResource?
     var lastEvent: String?
@@ -281,6 +285,8 @@ struct CameraStatusResource: Encodable {
         appViewers = status.appViewers
         panTilt = status.panTilt
         zoom = status.zoom
+        panTiltDetected = status.panTiltDetected
+        zoomDetected = status.zoomDetected
         nightVision = status.nightVision.map {
             NightVisionResource(modes: $0.modes.map(\.rawValue), mode: $0.mode?.rawValue, light: $0.light, lightOn: $0.lightOn)
         }

@@ -12,7 +12,8 @@ export const DAY = 86_400_000;
  * security: its status.security level (red, yellow, green, gold, or trying: gold, watched and its attempts to reach the internet blocked;
  * camera-security.mjs); the others have not been checked.
  * sky: it watches the sky (skyDetector on; status.sky and the log's made-up night: sky.mjs). Back Yard does, as a dual-lens camera facing north.
- * panTilt, zoom: it turns and zooms (status.panTilt and status.zoom; POST cameras/:id/pan-tilt answers it and moves nothing). Driveway has
+ * panTilt, zoom: it turns and zooms (status.panTiltDetected and status.zoomDetected; status.panTilt and status.zoom unless the owner's switch,
+ * PATCH cameras/:id {panTiltEnabled, zoomEnabled}, is off; POST cameras/:id/pan-tilt answers it and moves nothing). Driveway has
  * them with night vision and a lamp, as a camera whose lamp is on its PTZ node: the Monitor's column holds the pad and the night vision.
  */
 const RAW_DEFINITIONS = [

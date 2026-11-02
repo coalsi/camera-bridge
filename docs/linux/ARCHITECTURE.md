@@ -82,17 +82,20 @@ GET    /api/v1/viewer                 viewer: what an Apple TV draws its screens
                                       there; id is the box's identity (32 hex, kept until a factory reset), version what About shows, secureURL the secure address
                                       while its certificate is ready (else null); cameras come in the owner's order, each {id, name, kind (camera|doorbell),
                                       enabled, connection (online|connecting|idle|disabled|offline), motion, recordingNow (the box's own recorder is writing it now,
-                                      not Apple Home's recording), panTilt, zoom, sound (its "Camera audio" switch), main and sub ({width, height, codec:
-                                      h264|hevc}, or null before that stream has shown a picture), lastEvent ({kind as GET nvr/events names it, date ISO 8601 UTC},
-                                      or null)}; a camera with no status yet is idle (disabled when turned off), with false and null elsewhere; no address, user
-                                      name, stream URL, setting, token or setup code
+                                      not Apple Home's recording), panTilt and zoom (as its status has them: what its control says, less what the owner turned off),
+                                      sound (its "Camera audio" switch), main and sub ({width, height, codec: h264|hevc}, or null before that stream has shown a
+                                      picture), lastEvent ({kind as GET nvr/events names it, date ISO 8601 UTC}, or null)}; a camera with no status yet is idle
+                                      (disabled when turned off), with false and null elsewhere; no address, user name, stream URL, setting, token or setup code
 GET    /api/v1/camera-types           the Mac app's Camera Type page: groups, types, setup steps, what you get, which inputs
 GET    /api/v1/cameras                {cameras: [camera]}; a camera is its CameraConfiguration JSON plus `status` (live state), vendorName, kindName, address,
                                       motionSourceName, internetWatched (the Internet guard watches it: the engine's verdict) and restartOffered (the
                                       camera waits for a restart to apply a change it took: "Restart the camera now"), both always there; `skyDetector`
                                       is the Sky Watcher's settings of the camera, or null when they were never saved; `status.sky` is its Sky Watcher
                                       while it is on (absent while the plugin or the camera's switch is off): {running, stream (main|sub), analysisWidth,
-                                      picturesPerSecond, decoding (gpu|software), aim, learning, problem (a sentence, or null), profile}
+                                      picturesPerSecond, decoding (gpu|software), aim, learning, problem (a sentence, or null), profile}; `status.panTiltDetected`
+                                      and `status.zoomDetected` say what the camera's control says it can do (asked when the camera starts; false until it answers
+                                      and while the camera does not run), `status.panTilt` and `status.zoom` that less what the owner turned off (`panTiltEnabled`,
+                                      `zoomEnabled` false): what the page's pad and an Apple TV offer
 POST   /api/v1/cameras                add: {type, host, httpPort, rtspPort, onvifPort, useHTTPS, username, password, mainStreamURL, subStreamURL, source,
                                       apiKey, unifiCameraID, nestSession, nestDeviceID, name, kind, motionSource, motionSensitivity, motionHoldSeconds,
                                       sensors, audioEnabled, twoWayAudio}; checks the camera again, then adds it (201)
@@ -109,7 +112,10 @@ PATCH  /api/v1/cameras/{id}           name, isEnabled, username, password, endpo
                                       plugins.sky; PATCH /plugins/sky {enabled} is the switch, off on a new box), "Battery cameras can’t watch the sky: it would
                                       keep them awake." (field skyDetector.enabled), "Set where the box is first." (field sky.location) or "Choose a recordings
                                       folder first: the sky log is kept with the recordings." (field nvrFolder), in that order; saying "off" or changing the aim
-                                      needs none of them, and a camera keeps its settings while the plugin is off)
+                                      needs none of them, and a camera keeps its settings while the plugin is off), panTiltEnabled and zoomEnabled (the owner's
+                                      switches for a camera whose control says it pans and tilts, or zooms, when it can't: false turns that off, true gives it back
+                                      to the control; true or false only (400 with the field), null or left out changes nothing; absent from the camera until set;
+                                      applied in place, the camera is not restarted)
 PATCH  /api/v1/cameras/{id}/nvr       {enabled?, recordSound?}: Record on or off, Record sound on or off, in place (the camera is not restarted);
                                       409 folder_required until a place for recordings was chosen
 DELETE /api/v1/cameras/{id}
@@ -124,7 +130,8 @@ GET    /api/v1/live?cameras=<id>,…&stream=sub|main|automatic[&width=]   viewer
 POST   /api/v1/cameras/{id}/pan-tilt  viewer: {pan, tilt, zoom?} (-1 to 1 each; both 0 stops): moves a camera that pans and tilts for 1.5 s (the page
                                       and the TV repeat it while a button is held); zoom is one step in or out, pan and tilt then ignored -> 204; 400 (field
                                       pan) outside -1 to 1, 404 not_found when there is no such camera, 409 no_pan_tilt when the camera can't pan and tilt
-                                      now, 422 pan_tilt_failed
+                                      (or zoom) now or the owner turned it off (panTiltEnabled, zoomEnabled false; nothing reaches the camera; for a zoom step the
+                                      sentence says zoom), 422 pan_tilt_failed
 GET    /api/v1/cameras/{id}/pairing   {accessoryName, paired, setupCode, setupURI, qrSVG, blocker?, blockerMessage?, blockerAction?}
 POST   /api/v1/cameras/{id}/reset-pairing
 POST   /api/v1/cameras/{id}/optimize        {confirm: true}: the HomeKit optimizer for this camera (one at a time, 20 to 40 s; it can lower the bit rate,

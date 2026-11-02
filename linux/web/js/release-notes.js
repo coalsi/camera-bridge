@@ -15,6 +15,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.133',
+    date: '2026-11-02',
+    title: 'Pan, tilt and zoom only for cameras that can',
+    items: [
+      'Some fixed cameras say they can pan, tilt and zoom when they can’t, so the Monitor and the Apple TV app showed buttons that did nothing. The page of a camera that says it can move or zoom now has a Pan, tilt and zoom card: turn off what the camera can’t really do, and its buttons go away.',
+      'On the Monitor, a camera that zooms but doesn’t pan or tilt now shows its zoom buttons on their own.',
+      'An event whose name only has the letters “ring” inside a word, such as Loitering, Tampering or Monitoring, is no longer shown as a doorbell ring.',
+    ],
+  },
+  {
     version: '0.1.132',
     date: '2026-11-01',
     title: 'Ready for the Apple TV app',

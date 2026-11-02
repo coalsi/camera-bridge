@@ -32,7 +32,7 @@ decodes and seeks like the real thing (ids, anchors, keyframe flags, continuatio
 | Camera | Clip | What it is for |
 |---|---|---|
 | Front Door | gop2 (640x360, key every 2 s) | the plain case, no gaps; security red (Hik-Connect linked, UPnP on) |
-| Driveway | hd (1280x720, 4 Mbps) | big fragments, a 20-minute gap every day, files 300 ms apart; night vision (Auto, Night, Day) and an IR lamp; pans, tilts and zooms (`POST cameras/:id/pan-tilt` answers 204 and moves nothing), so the Monitor shows the pad and the night vision buttons together; security yellow (cloud unknown, video without a password) |
+| Driveway | hd (1280x720, 4 Mbps) | big fragments, a 20-minute gap every day, files 300 ms apart; night vision (Auto, Night, Day) and an IR lamp; pans, tilts and zooms (`POST cameras/:id/pan-tilt` answers 204 and moves nothing; its page's Pan, tilt and zoom card turns either off, and the pad and the route follow), so the Monitor shows the pad and the night vision buttons together; security yellow (cloud unknown, video without a password) |
 | Garage | longgop (key every 12 s) | continuation fragments, the keyframe note and caption, the fix; night vision Auto and Day only, no lamp; security green (DDNS unknown, not watched) |
 | Back Yard | ntsc (30000/1001 fps) | non-integer frame times, files that overlap by 0.4 ms, a 7-minute gap; security gold (everything off, watched and quiet); Sky Watcher set on (it watches once the plugin is on), as a dual-lens camera facing north (see below) |
 | Side Gate | hevc (hvc1) | `isTypeSupported` false in some browsers; night vision whose every change fails (422 `night_vision_failed`) |

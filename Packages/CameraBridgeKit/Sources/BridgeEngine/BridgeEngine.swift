@@ -650,6 +650,10 @@ public final class BridgeEngine {
         if (old.skyDetector?.enabled ?? false) != (camera.skyDetector?.enabled ?? false) {
             log.notice("Sky Watcher turned \(camera.skyDetector?.enabled == true ? "on" : "off") for \(camera.name)")
         }
+        for (control, was, now) in [("Pan and tilt", old.panTiltEnabled, camera.panTiltEnabled), ("Zoom", old.zoomEnabled, camera.zoomEnabled)]
+        where (was != false) != (now != false) {
+            log.notice("\(control) turned \(now == false ? "off" : "back on") for \(camera.name)")
+        }
         await router.register(camera)
         await bridge?.update(cameras: bridgedConfigurations)
         if isActive {
@@ -1286,11 +1290,6 @@ public final class BridgeEngine {
         }
     }
 
-    /// "Clean picture": every label the camera draws itself (clock, name, text lines, logo) off (`clean`), so the bridge's own timestamp and name
-    /// are the only ones, the same on every camera; or back as they were. The backup is kept in `CameraConfiguration.cleanPictureBackup`, which
-    /// only the engine writes. Throws `EngineError.unknownCamera`, `CameraOfflineError` for an unreachable camera, and `CancellationError`.
-    /// Moves a pan/tilt camera (`pan`, `tilt` in -1…1; both 0 stops it). A move ends by itself 1.5 s after the last ask, so the page
-    /// repeats it while a button is held. Throws `EngineError.cameraNotRunning` for a camera that isn't running or can't pan and tilt.
     /// Sets a camera's night vision mode and/or its lamp (`CameraStatus.nightVision` says what it offers). Throws
     /// `EngineError.cameraNotRunning` for a camera that isn't running or can't do it.
     public func setNightVision(cameraID: UUID, mode: NightVisionMode?, light: Bool?) async throws {
@@ -1298,11 +1297,21 @@ public final class BridgeEngine {
         try await runtime.setNightVision(mode: mode, light: light)
     }
 
+    /// Moves a pan/tilt camera (`pan`, `tilt` in -1…1; both 0 stops it), or zooms it one step (`zoom` in -1…1, out or in; pan and tilt are
+    /// then ignored). A move ends by itself 1.5 s after the last ask, so the page repeats it while a button is held. Throws
+    /// `EngineError.cameraNotRunning` for a camera that isn't running or can't pan and tilt (or zoom), and in the same way, before anything
+    /// reaches the camera, for one whose pan and tilt (or zoom) the owner turned off (`CameraConfiguration.panTiltEnabled`, `.zoomEnabled`).
     public func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double = 0) async throws {
-        guard !isPreview, let runtime = runtimes[cameraID] else { throw EngineError.cameraNotRunning }
+        guard !isPreview, let runtime = runtimes[cameraID], let camera = configurations.first(where: { $0.id == cameraID }) else {
+            throw EngineError.cameraNotRunning
+        }
+        guard zoom != 0 ? camera.zoomEnabled != false : camera.panTiltEnabled != false else { throw EngineError.cameraNotRunning }
         try await runtime.panTilt(pan: pan, tilt: tilt, zoom: zoom)
     }
 
+    /// "Clean picture": every label the camera draws itself (clock, name, text lines, logo) off (`clean`), so the bridge's own timestamp and name
+    /// are the only ones, the same on every camera; or back as they were. The backup is kept in `CameraConfiguration.cleanPictureBackup`, which
+    /// only the engine writes. Throws `EngineError.unknownCamera`, `CameraOfflineError` for an unreachable camera, and `CancellationError`.
     public func setCleanPicture(cameraID: UUID, clean: Bool) async throws -> CleanPictureChange {
         guard !isPreview else { throw EngineError.cameraNotRunning }
         if runtimes[cameraID]?.isUnreachable == true { throw CameraOfflineError() }
@@ -2701,8 +2710,11 @@ public final class BridgeEngine {
                 status.recordingNow = runtimeStatus.recordingNow
                 status.liveViewers = runtimeStatus.liveViewers
                 status.appViewers = runtimeStatus.appViewers
-                status.panTilt = runtimeStatus.panTilt
-                status.zoom = runtimeStatus.zoom
+                // What the camera's control says, less what the owner turned off (some fixed cameras say they pan, tilt and zoom).
+                status.panTiltDetected = runtimeStatus.panTilt
+                status.zoomDetected = runtimeStatus.zoom
+                status.panTilt = runtimeStatus.panTilt && camera.panTiltEnabled != false
+                status.zoom = runtimeStatus.zoom && camera.zoomEnabled != false
                 status.nightVision = runtimeStatus.nightVision
                 status.battery = runtimeStatus.battery
                 status.subStreamProblem = runtimeStatus.subStreamProblem
@@ -3058,9 +3070,10 @@ public final class BridgeEngine {
 
     /// Whether a configuration change needs the camera's runtime restarted. The sensors and the motion hold do not
     /// (router and sensors bridge), soft motion's sensitivity, the timestamp overlay's look and the picture correction are
-    /// applied in place, and a paired camera's name does not either (Home keeps its own; the accessory takes the new one at
-    /// its next start). The camera detail form sends every pause in typing or dragging: each restart would cut live views and
-    /// HKSV recordings and close the camera's NVR file.
+    /// applied in place, the owner's pan, tilt and zoom switches are read by the status and the move (never the runtime), and a
+    /// paired camera's name does not either (Home keeps its own; the accessory takes the new one at its next start). The camera
+    /// detail form sends every pause in typing or dragging: each restart would cut live views and HKSV recordings and close the
+    /// camera's NVR file.
     static func needsRestart(_ old: CameraConfiguration, _ new: CameraConfiguration, paired: Bool) -> Bool {
         var comparable = new
         comparable.sensors = old.sensors
@@ -3079,6 +3092,8 @@ public final class BridgeEngine {
         comparable.nvrRecordSound = old.nvrRecordSound
         comparable.aiDescriptions = old.aiDescriptions       // the describer reads the switch when an event starts: never a restart
         comparable.skyDetector = old.skyDetector             // the Sky Watcher takes its settings in place: never a restart
+        comparable.panTiltEnabled = old.panTiltEnabled       // read by the status and `panTilt`, never by the runtime: never a restart
+        comparable.zoomEnabled = old.zoomEnabled
         if paired { comparable.name = old.name }
         return comparable != old
     }

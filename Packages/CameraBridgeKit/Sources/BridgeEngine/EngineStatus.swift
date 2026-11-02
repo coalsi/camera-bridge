@@ -80,10 +80,17 @@ public struct CameraStatus: Sendable, Identifiable, Equatable {
     /// Viewers in CameraBridge's own window ("1 viewer in CameraBridge"), counted apart from the HomeKit viewers in
     /// `liveViewers`.
     public var appViewers: Int
-    /// The camera pans and tilts, and the bridge can move it (`BridgeEngine.panTilt`).
+    /// The camera pans and tilts, and the bridge can move it (`BridgeEngine.panTilt`): its control says so (`panTiltDetected`) and the
+    /// owner has not turned it off (`CameraConfiguration.panTiltEnabled`). What offers to move the camera reads this.
     public var panTilt = false
-    /// The camera zooms, and the bridge can zoom it.
+    /// The camera zooms, and the bridge can zoom it: its control says so (`zoomDetected`) and the owner has not turned it off
+    /// (`CameraConfiguration.zoomEnabled`).
     public var zoom = false
+    /// The camera's control says it pans and tilts (asked when the camera starts), whatever the owner turned off: the page offers its
+    /// switch for these. False until the control has answered, and while the camera does not run (turned off, or the bridge stopped).
+    public var panTiltDetected = false
+    /// The camera's control says it zooms, whatever the owner turned off.
+    public var zoomDetected = false
     /// The camera's night vision and lamp, when the bridge can switch them (nil: it can't).
     public var nightVision: NightVisionState?
     /// A battery camera's charge, as its driver last reported it (`CameraDriver.batteryStatus`, asked every 5 min without waking the

@@ -143,12 +143,20 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
     /// The Sky Watcher on this camera: whether it watches the sky, which way and how high it looks, and the lenses (docs/superpowers/plans/2026-10-25-sky-detector.md).
     /// nil until the person first saves them. Applied in place, so changing them never restarts the camera (`BridgeEngine.needsRestart`).
     public var skyDetector: SkyDetectorSettings?
+    /// The owner's word on the camera's pan and tilt, for a camera whose control says it has them when it has not (some fixed cameras
+    /// advertise PTZ): `false` turns them off, so `CameraStatus.panTilt` is false (nothing offers to move the camera) and
+    /// `BridgeEngine.panTilt` refuses a move; nil (the default, and every configuration saved before it existed) and `true` take the
+    /// control's word (`CameraStatus.panTiltDetected`). It never turns on what the control does not say. Applied in place, so changing it
+    /// never restarts the camera (`BridgeEngine.needsRestart`).
+    public var panTiltEnabled: Bool?
+    /// The same for the camera's zoom: `false` turns it off (`CameraStatus.zoom`, `CameraStatus.zoomDetected`).
+    public var zoomEnabled: Bool?
 
     /// Defaults: no stream URLs, camera events for motion (sensitivity 0.5, 20 s hold), no sensors, audio on,
     /// two-way audio off, port 0 (allocated by the engine), enabled, empty device info, capabilities unknown,
     /// automatic live/recording stream selection, quality matched to what HomeKit/the hub asked for, no bit rate override,
     /// timestamp overlay off, picture correction off, the camera's own clock untouched, NVR recording off (sound off), AI descriptions off,
-    /// the Sky Watcher never set.
+    /// the Sky Watcher never set, pan, tilt and zoom as the camera's control says.
     public init(id: UUID = UUID(), name: String, kind: CameraKind, vendor: CameraVendor, endpoint: CameraEndpoint, username: String) {
         self.id = id
         self.name = name
@@ -189,6 +197,8 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         self.nvrRecordSound = false
         self.aiDescriptions = false
         self.skyDetector = nil
+        self.panTiltEnabled = nil
+        self.zoomEnabled = nil
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -196,7 +206,7 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         case sensors, audioEnabled, twoWayAudio, hapPort, isEnabled, manufacturer, model, serialNumber, firmware, capabilities
         case liveStreamMode, liveQualityMode, liveMaxBitrateOverride, recordingStreamMode, recordingQualityMode
         case preferredConfigMethod, timestampOverlay, hiddenCameraClock, cleanPictureBackup, integration, nvrEnabled, nvrRecordSound
-        case setupBackup, setupState, dnsWatch, pictureCorrection, aiDescriptions, skyDetector
+        case setupBackup, setupState, dnsWatch, pictureCorrection, aiDescriptions, skyDetector, panTiltEnabled, zoomEnabled
     }
 
     public init(from decoder: any Decoder) throws {
@@ -247,6 +257,8 @@ public struct CameraConfiguration: Sendable, Codable, Identifiable, Equatable {
         nvrRecordSound = value(.nvrRecordSound, default: nvrRecordSound)
         aiDescriptions = value(.aiDescriptions, default: aiDescriptions)
         skyDetector = value(.skyDetector, default: nil)
+        panTiltEnabled = value(.panTiltEnabled, default: nil)
+        zoomEnabled = value(.zoomEnabled, default: nil)
         if !unreadable.isEmpty {
             Log(category: "Engine", cameraID: id).warning("\(name): unreadable \(unreadable.joined(separator: ", ")) in the configuration; defaults are used")
         }

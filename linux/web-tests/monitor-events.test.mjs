@@ -40,6 +40,20 @@ test('eventKind names motion, detections and doorbell rings', () => {
   assert.deepEqual(eventKind('Alarm input 1'), { label: 'Alarm input 1', level: 'detection' });
   assert.deepEqual(eventKind(''), { label: 'Event', level: 'detection' });
   assert.deepEqual(eventKind(undefined), { label: 'Event', level: 'detection' });
+
+  // A doorbell is "doorbell" anywhere in the name, or "ring" or "rings" as a word of its own. The Apple TV app's EventKind.of has the same rule
+  // (apple-tv/Kit/Sources/CameraBridgeTVKit/Timeline/EventKinds.swift, and its tests the same names).
+  const doorbell = { label: 'Doorbell', level: 'doorbell' };
+  for (const name of ['Doorbell', 'Front DOORBELL press', 'Ring', 'ring', 'RINGS', 'The bell rings.', 'ring-ring', 'Ring (front)', 'Motion ring']) {
+    assert.deepEqual(eventKind(name), doorbell, name);
+  }
+  // The letters of "ring" inside another word are no ring: these were doorbells once. Each keeps its own name as a detection.
+  for (const name of ['Loitering', 'Tampering', 'Monitoring', 'Entering', 'Region entering', 'Ringing', 'Bring', 'Ringer', 'Spring', 'Scoring', 'Ring2', 'Ring_1']) {
+    assert.deepEqual(eventKind(name), { label: name, level: 'detection' }, name);
+  }
+  // And the rest of the rule reads them as it reads any name: motion without a word of a detection is motion.
+  assert.deepEqual(eventKind('Motion entering'), { label: 'Motion', level: 'motion' });
+  assert.deepEqual(eventKind('Motion monitoring'), { label: 'Motion', level: 'motion' });
 });
 
 test('gatherEvents reads every camera’s recent events and the live ones, and merges the same moment', () => {

@@ -186,8 +186,11 @@ export class DevState {
         recordingNow: false,
         liveViewers: 0,
         appViewers: 0,
-        panTilt: definition.panTilt === true,
-        zoom: definition.zoom === true,
+        // What the camera's control says (…Detected), less what the owner turned off (panTiltEnabled, zoomEnabled false), as the bridge does.
+        panTilt: definition.panTilt === true && configuration.panTiltEnabled !== false,
+        zoom: definition.zoom === true && configuration.zoomEnabled !== false,
+        panTiltDetected: definition.panTilt === true,
+        zoomDetected: definition.zoom === true,
         ...(nightVision ? { nightVision } : {}),
         lastEvent: recentEvents.at(-1)?.name ?? null,
         lastEventDate: recentEvents.at(-1)?.date ?? null,

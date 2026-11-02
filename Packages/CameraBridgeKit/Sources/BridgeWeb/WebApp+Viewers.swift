@@ -105,6 +105,7 @@ extension WebApp {
             motion = status?.motionActive ?? false
             // The box's own recorder, not Apple Home's recording (`CameraStatus.recordingNow`), which the TV's timeline knows nothing of.
             recordingNow = status?.nvr.state == .recording
+            // What the camera's control says, less what the owner turned off (`CameraStatus.panTilt`, `.zoom`).
             panTilt = status?.panTilt ?? false
             zoom = status?.zoom ?? false
             // The page's own rule for its speaker: the camera's "Camera audio" switch.

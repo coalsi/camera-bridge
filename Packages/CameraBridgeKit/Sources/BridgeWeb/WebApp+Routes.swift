@@ -450,6 +450,10 @@ extension WebApp {
         var aiDescriptions: Bool?
         /// The Sky Watcher's switch and aim (`WebApp+Sky.swift`); a field left out stays.
         var skyDetector: SkyDetectorPatch?
+        /// The owner's switches for pan and tilt and for zoom (`CameraConfiguration.panTiltEnabled`, `.zoomEnabled`): false turns off what
+        /// the camera's control says it can do, true gives it back. Saved for any camera: they never turn on what the control does not say.
+        var panTiltEnabled: Bool?
+        var zoomEnabled: Bool?
     }
 
     func patchCamera(_ ctx: RequestContext) async throws -> HTTPResponse {
@@ -553,6 +557,8 @@ extension WebApp {
         if let value = patch.recordingStreamMode { camera.recordingStreamMode = value }
         if let value = patch.recordingQualityMode { camera.recordingQualityMode = value }
         if let value = patch.aiDescriptions { camera.aiDescriptions = value }
+        if let value = patch.panTiltEnabled { camera.panTiltEnabled = value }
+        if let value = patch.zoomEnabled { camera.zoomEnabled = value }
         if let sky = patch.skyDetector { camera.skyDetector = try skyDetectorSettings(applying: sky, to: camera, bridge: bridge) }
         if let overlay = patch.timestampOverlay {
             if let value = overlay.enabled { camera.timestampOverlay.enabled = value }
@@ -1057,7 +1063,8 @@ extension WebApp {
     }
 
     /// `POST cameras/:id/pan-tilt {pan, tilt}` (-1…1 each; both 0 stops): moves a pan/tilt camera for 1.5 s; the page repeats it while a
-    /// button is held.
+    /// button is held. 409 `no_pan_tilt` when the camera can't now: not running, without the control, or the owner turned it off ("This camera
+    /// can’t zoom right now." for a zoom step).
     func panTilt(_ ctx: RequestContext) async throws -> HTTPResponse {
         let id = try ctx.uuid("id")
         let body = try decode(PanTiltBody.self, from: ctx)
@@ -1071,7 +1078,8 @@ extension WebApp {
         do {
             try await backend.panTilt(cameraID: id, pan: body.pan, tilt: body.tilt, zoom: zoom)
         } catch EngineError.cameraNotRunning {
-            throw APIError(status: 409, code: "no_pan_tilt", message: "This camera can’t pan and tilt right now.")
+            // The code is the same for both (what a client branches on); the sentence says which was asked.
+            throw APIError(status: 409, code: "no_pan_tilt", message: zoom != 0 ? "This camera can’t zoom right now." : "This camera can’t pan and tilt right now.")
         } catch {
             throw APIError(status: 422, code: "pan_tilt_failed", message: ErrorText.describe(error))
         }

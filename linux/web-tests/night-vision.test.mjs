@@ -417,6 +417,16 @@ test('the Monitor’s column holds the pad for a camera that turns and the butto
   side.setCamera(turning({ zoom: true, nightVision: FULL }));
   assert.deepEqual([side.el.hidden, pad.el.hidden, buttons.el.hidden, side.el.dataset.both], [false, false, false, 'true'], 'both: side by side where there is room');
   assert.equal(byClass(pad.el, 'mon-ptz-zoom')[0].hidden, false, 'with its zoom');
+  // A camera that zooms without turning (a fixed camera with a motorised zoom, or one whose pan and tilt the owner turned off): the zoom
+  // buttons alone, beside its night vision too.
+  const arrows = byClass(pad.el, 'mon-ptz-pad')[0];
+  side.setCamera(turning({ panTilt: false, zoom: true }));
+  assert.deepEqual([side.el.hidden, pad.el.hidden, arrows.hidden, byClass(pad.el, 'mon-ptz-zoom')[0].hidden, side.el.dataset.both],
+    [false, false, true, false, 'false'], 'zoom alone: no arrows');
+  side.setCamera(turning({ panTilt: false, zoom: true, nightVision: FULL }));
+  assert.deepEqual([side.el.hidden, pad.el.hidden, arrows.hidden, buttons.el.hidden, side.el.dataset.both], [false, false, true, false, 'true']);
+  side.setCamera(turning({ zoom: true }));
+  assert.equal(arrows.hidden, false, 'the arrows come back for a camera that turns');
   side.setCamera(camera(undefined));
   assert.deepEqual([side.el.hidden, side.el.dataset.both], [true, 'false'], 'neither');
   side.setCamera(turning({ nightVision: FULL }));

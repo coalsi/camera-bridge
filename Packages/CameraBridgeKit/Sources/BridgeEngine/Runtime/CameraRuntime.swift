@@ -54,7 +54,8 @@ struct RuntimeStatus: Sendable, Equatable {
     var liveViewers = 0
     /// Viewers in CameraBridge's own window (`BridgeEngine.liveVideo`), apart from the HomeKit viewers.
     var appViewers = 0
-    /// `CameraStatus.panTilt`, `CameraStatus.zoom`.
+    /// What the camera's control says it can do (`CameraStatus.panTiltDetected`, `.zoomDetected`); the engine leaves out what the owner
+    /// turned off (`CameraStatus.panTilt`, `.zoom`).
     var panTilt = false
     var zoom = false
     /// `CameraStatus.nightVision`.

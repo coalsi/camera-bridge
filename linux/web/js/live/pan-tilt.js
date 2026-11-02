@@ -1,6 +1,7 @@
 // The pan/tilt pad of the Monitor (a camera that pans and tilts, opened on its own): a tap turns the camera one step; holding an arrow
-// keeps stepping until it is let go. Zoom in and out (+ and −) for a camera that zooms. Every step stops by itself, so nothing leaves a
-// camera turning. Arrow keys (and + / −) work while the pad has focus.
+// keeps stepping until it is let go. Zoom in and out (+ and −) for a camera that zooms; a camera that zooms without turning (a fixed camera
+// with a motorised zoom, or one whose pan and tilt the owner turned off) gets the zoom buttons alone. Every step stops by itself, so nothing
+// leaves a camera turning. Arrow keys (and + / −) work while the pad has focus.
 // While an arrow is held, the next step goes out only once the bridge has answered the last one (and at most every REPEAT_MS): a slow camera
 // never gets a pile of moves that keep it turning after the arrow is let go. The stop on release goes out at once.
 import { post } from '../api.js';
@@ -105,8 +106,8 @@ export function createPanTiltPad({ send: sendMove = (id, body) => post(`cameras/
 
   return {
     el,
-    /** The camera the pad moves (null hides it), and whether it zooms. */
-    setCamera(id, { zoom = false } = {}) {
+    /** The camera the pad moves (null hides it): its arrows while it pans and tilts, its zoom buttons while it zooms (either one alone). */
+    setCamera(id, { panTilt = true, zoom = false } = {}) {
       if (id !== cameraId) {
         release();
         cameraId = id;
@@ -115,7 +116,8 @@ export function createPanTiltPad({ send: sendMove = (id, body) => post(`cameras/
       }
       zoomOn = zoom;
       zoomRow.hidden = !zoom;
-      heading.textContent = zoom ? 'Pan, tilt and zoom' : 'Pan and tilt';
+      pad.hidden = !panTilt;
+      heading.textContent = panTilt && zoom ? 'Pan, tilt and zoom' : panTilt ? 'Pan and tilt' : 'Zoom';
       el.hidden = id === null;
     },
     destroy() { release(); },

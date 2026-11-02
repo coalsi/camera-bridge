@@ -281,10 +281,10 @@ export function createNightVisionButtons(deps) {
 
 /**
  * The Monitor's column between the timeline and the events, for the camera opened on its own: the pan/tilt pad (`pad`, live/pan-tilt.js)
- * for a camera that turns, the night vision buttons (`buttons`, createNightVisionButtons) for one that has night vision, hidden with
- * neither. With both it says so (data-both): stacked, they are taller than the events and the row under the wall would take that height
- * from the picture, so monitor.css puts them side by side where the row is wide enough. `setCamera(camera)` (null: no camera on its own)
- * is called on every draw of the wall. Returns { el, setCamera, destroy }.
+ * for a camera that turns or zooms (its zoom buttons alone for one that zooms without turning), the night vision buttons (`buttons`,
+ * createNightVisionButtons) for one that has night vision, hidden with neither. With both it says so (data-both): stacked, they are taller
+ * than the events and the row under the wall would take that height from the picture, so monitor.css puts them side by side where the row
+ * is wide enough. `setCamera(camera)` (null: no camera on its own) is called on every draw of the wall. Returns { el, setCamera, destroy }.
  */
 export function createMonitorSide(pad, buttons) {
   const el = h('div', { class: 'mon-side', hidden: true, dataset: { both: 'false' } }, pad.el, buttons.el);
@@ -293,11 +293,13 @@ export function createMonitorSide(pad, buttons) {
     setCamera(camera) {
       const status = camera?.status ?? null;
       const turns = status?.panTilt === true;
-      pad.setCamera(turns ? camera.id : null, { zoom: status?.zoom === true });
+      const zooms = status?.zoom === true;
+      const moves = turns || zooms;
+      pad.setCamera(moves ? camera.id : null, { panTilt: turns, zoom: zooms });
       buttons.setCamera(camera ?? null);   // hides itself for a camera without night vision
       const night = !buttons.el.hidden;
-      if (el.hidden === (turns || night)) el.hidden = !(turns || night);
-      const both = String(turns && night);
+      if (el.hidden === (moves || night)) el.hidden = !(moves || night);
+      const both = String(moves && night);
       if (el.dataset.both !== both) el.dataset.both = both;
     },
     destroy() { pad.destroy(); buttons.destroy(); },

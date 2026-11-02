@@ -99,10 +99,18 @@ export function createDevServer(options) {
   const EDITABLE = ['name', 'isEnabled', 'audioEnabled', 'twoWayAudio', 'motionSource', 'motionSensitivity', 'motionHoldSeconds', 'liveStreamMode', 'liveQualityMode',
     'liveMaxBitrateOverride', 'recordingStreamMode', 'recordingQualityMode'];
 
+  // The owner's pan, tilt and zoom switches: true or false (null changes nothing), anything else refused with the field, as the bridge does.
+  const SWITCHES = ['panTiltEnabled', 'zoomEnabled'];
+
   function patchCameraSettings(ctx) {
     const camera = findCamera(ctx);
+    for (const name of SWITCHES) {
+      const value = ctx.body[name];
+      if (value !== undefined && value !== null && typeof value !== 'boolean') throw ApiError.invalid(`“${name}” has the wrong kind of value.`, name);
+    }
     // Sky Watcher (sky.mjs): checked first, so that a refusal changes nothing.
     if (ctx.body.skyDetector !== undefined) state.sky.patchCamera(camera, ctx.body.skyDetector, { hasFolder: state.settings.nvrFolder !== null });
+    for (const name of SWITCHES) if (typeof ctx.body[name] === 'boolean') camera.configuration[name] = ctx.body[name];
     for (const name of EDITABLE) if (ctx.body[name] !== undefined) camera.configuration[name] = ctx.body[name];
     for (const name of ['sensors', 'timestampOverlay']) if (ctx.body[name] && typeof ctx.body[name] === 'object') Object.assign(camera.configuration[name], ctx.body[name]);
     return json(state.cameraResource(camera));
@@ -170,7 +178,8 @@ export function createDevServer(options) {
   }
 
   // Pan and tilt (WebApp+Routes.swift panTilt), in the bridge's order: the id, the body (pan and tilt, and a zoom step, each -1…1), the
-  // camera, then whether it turns (or zooms, for a zoom step): 409 no_pan_tilt as for a camera that isn't running. Nothing moves; 204.
+  // camera, then whether it turns (or zooms, for a zoom step) and the owner left it on: 409 no_pan_tilt as for a camera that isn't
+  // running, its sentence about zooming for a zoom step. Nothing moves; 204.
   function panTilt(ctx) {
     if (!UUID.test(ctx.params.id)) throw ApiError.notFound('There is no camera with this identifier.');
     const { pan, tilt, zoom } = ctx.body;
@@ -181,7 +190,8 @@ export function createDevServer(options) {
     if (zoom !== undefined && zoom !== null && typeof zoom !== 'number') throw ApiError.invalid('“zoom” has the wrong kind of value.', 'zoom');
     if ([pan, tilt, zoom ?? 0].some((value) => Math.abs(value) > 1)) throw ApiError.invalid('Pan and tilt are numbers from -1 to 1.', 'pan');
     const { configuration, definition } = findCamera(ctx);
-    if (!configuration.isEnabled || !(zoom ? definition.zoom : definition.panTilt)) throw new ApiError(409, 'no_pan_tilt', 'This camera can’t pan and tilt right now.');
+    const offered = zoom ? definition.zoom && configuration.zoomEnabled !== false : definition.panTilt && configuration.panTiltEnabled !== false;
+    if (!configuration.isEnabled || !offered) throw new ApiError(409, 'no_pan_tilt', zoom ? 'This camera can’t zoom right now.' : 'This camera can’t pan and tilt right now.');
     return empty(204);
   }
 

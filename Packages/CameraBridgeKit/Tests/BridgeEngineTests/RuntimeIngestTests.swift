@@ -393,6 +393,8 @@ import TestSupport
         #expect(await eventually(timeout: .seconds(10)) { starts.value.count >= 6 })
         await ingest.stop()
         let gaps = zip(starts.value.dropFirst(), starts.value).map { $0 - $1 }
+        // A slow run (a loaded machine) that saw fewer than six starts fails here: reading gaps[3] and gaps[4] would crash the whole bundle.
+        try #require(gaps.count >= 5, "\(gaps)")
         // 100, 200, 400, 800 ms (± 20 %) after the short ones, where every gap was 100 ms.
         #expect(gaps[3] >= .milliseconds(600), "the back-off grows while the stream keeps dropping: \(gaps)")
         #expect(gaps[4] < .milliseconds(600 + 400), "a stream that stayed up reconnects after the first step: \(gaps)")

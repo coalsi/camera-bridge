@@ -844,6 +844,15 @@ by itself 1.5 s after the last ask. `CameraStatus.panTilt` says whether a camera
 for `makeMotionDecoder(format:keepEvery:)` with a picture of every Nth frame only, never fewer than four a second once the stream's rate is known
 (`SoftMotionMonitor.keepEvery(frameRate:)`; made again at a keyframe when the rate becomes known or falls), and keeps its four-a-second gate.
 `CameraStatus.zoom` and `BridgeEngine.panTilt(cameraID:pan:tilt:zoom:)`: the runtime asks the control what it can do when the camera starts.
+The owner's switches (2026-11-02, docs/CONTRACT_CHANGES.md), because many fixed cameras advertise PTZ (an ONVIF profile with a PTZ configuration or
+continuous spaces on its node, ISAPI's `ContinuousPanTiltSpace`): `CameraConfiguration.panTiltEnabled` and `CameraConfiguration.zoomEnabled`
+(`Bool?`, saved with the camera; nil, the default and what every configuration saved before them reads as, and true take the control's word;
+false turns it off; neither ever turns on what the control does not say). `CameraStatus.panTiltDetected` and `CameraStatus.zoomDetected` are what
+the control said; `CameraStatus.panTilt` and `CameraStatus.zoom` are that less what the owner turned off, and everything that offers to move a
+camera reads them (BridgeWeb's camera status and `GET viewer`, so the page's pad and an Apple TV's Move; Apple Home has no pan and tilt).
+`BridgeEngine.panTilt` refuses a move, a stop or a zoom step that is turned off with `EngineError.cameraNotRunning`, as for a camera without the
+control, before anything reaches the camera. The runtime never reads them: a change is applied in place (`needsRestart` ignores them) and
+takes effect with the status refresh that saves it.
 
 Battery (2026-10-16): `CameraStatus.battery` (`BatteryStatus`, nil without one). The runtime asks `CameraDriver.batteryStatus()` at the start and
 every `EngineTuning.batteryPollInterval` (5 min) once it answered; one that has not answered yet is asked again after 1/20, 1/10, 1/5 and 2/5 of

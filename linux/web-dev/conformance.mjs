@@ -213,11 +213,13 @@ export async function runConformance({ baseUrl, password, mutate = false, intrus
     same([refused.status, refused.json?.error], [409, 'no_night_vision'], `${without.name}, which has no night vision`);
     ok(typeof refused.json?.message === 'string' && refused.json.message.length > 0, 'the 409 has no sentence');
   });
-  // Pan and tilt (POST cameras/:id/pan-tilt): every camera says whether it turns and zooms; only refusals are sent, so nothing moves.
-  await check('pan and tilt: status.panTilt and status.zoom are true or false; a step beyond 1 is 400 invalid, an unknown camera 404', async () => {
+  // Pan and tilt (POST cameras/:id/pan-tilt): every camera says whether it turns and zooms, and what its control said (the owner's switches
+  // only take away from that); only refusals are sent, so nothing moves.
+  await check('pan and tilt: status.panTilt, zoom, panTiltDetected and zoomDetected are true or false; a step beyond 1 is 400 invalid, an unknown camera 404', async () => {
     for (const camera of cameras) {
-      same(typeof camera.status?.panTilt, 'boolean', `${camera.name}: panTilt`);
-      same(typeof camera.status?.zoom, 'boolean', `${camera.name}: zoom`);
+      for (const key of ['panTilt', 'zoom', 'panTiltDetected', 'zoomDetected']) same(typeof camera.status?.[key], 'boolean', `${camera.name}: ${key}`);
+      ok(!camera.status?.panTilt || camera.status?.panTiltDetected, `${camera.name}: pans and tilts that its control never said`);
+      ok(!camera.status?.zoom || camera.status?.zoomDetected, `${camera.name}: zooms that its control never said`);
     }
     const path = `cameras/${UNKNOWN_CAMERA}/pan-tilt`;
     const far = await client.post(path, { pan: 2, tilt: 0 });
