@@ -7,9 +7,11 @@ import Synchronization
 // The NVR's web API: where recordings are stored, the per-camera Record switch, the catalog and the activity waveform, and the video-only
 // fragments the page plays through MediaSource. Contract: docs/superpowers/plans/2026-10-10-nvr/T00-contracts.md, part C.
 //
-// Every route needs a session. A media route meets the gates of C.3 in this order, so a malformed request never uses a slot: it is validated,
-// the backend must have an archive, the archive must be ready, and an admission slot must be free. Nothing here touches the disk on the
-// cooperative pool: `ArchiveReading.read` runs on the store's own queue, and folder checks on the engine's probe queue.
+// Every route needs a session; the seven a TV plays recordings with (the catalog, activity, events, fragment plans, fragments, init segments
+// and key pictures) also take an Apple TV's key (`Route.Access.viewer`). A media route meets the gates of C.3 in this order, so a malformed
+// request never uses a slot: it is validated, the backend must have an archive, the archive must be ready, and an admission slot must be free.
+// Nothing here touches the disk on the cooperative pool: `ArchiveReading.read` runs on the store's own queue, and folder checks on the
+// engine's probe queue.
 //
 // This file: the route table, admission, the gates, request parsing, the error mapping and the state the routes share. The routes themselves
 // are in WebApp+NVRStorage.swift (storage and the Record switch), WebApp+NVRCatalog.swift (catalog, activity and events), WebApp+NVRMedia.swift
@@ -21,13 +23,13 @@ extension WebApp {
         Route("GET", "nvr/storage/locations") { app, _ in await app.nvrLocations() },
         Route("PATCH", "nvr/storage", takesBody: true) { app, ctx in try await app.patchNVRStorage(ctx) },
         Route("PATCH", "cameras/:id/nvr", takesBody: true) { app, ctx in try await app.patchCameraNVR(ctx) },
-        Route("GET", "nvr/cameras") { app, _ in try await app.nvrCameras() },
-        Route("GET", "nvr/activity") { app, ctx in try await app.nvrActivity(ctx) },
-        Route("GET", "nvr/events") { app, ctx in try await app.nvrEvents(ctx) },
-        Route("GET", "nvr/cameras/:id/fragments") { app, ctx in try await app.nvrFragments(ctx) },
-        Route("GET", "nvr/cameras/:id/fragments/:fid") { app, ctx in try await app.nvrFragment(ctx) },
-        Route("GET", "nvr/cameras/:id/fragments/:fid/init") { app, ctx in try await app.nvrFragmentInit(ctx) },
-        Route("GET", "nvr/cameras/:id/keyframe") { app, ctx in try await app.nvrKeyframe(ctx) },
+        Route("GET", "nvr/cameras", .viewer) { app, _ in try await app.nvrCameras() },
+        Route("GET", "nvr/activity", .viewer) { app, ctx in try await app.nvrActivity(ctx) },
+        Route("GET", "nvr/events", .viewer) { app, ctx in try await app.nvrEvents(ctx) },
+        Route("GET", "nvr/cameras/:id/fragments", .viewer) { app, ctx in try await app.nvrFragments(ctx) },
+        Route("GET", "nvr/cameras/:id/fragments/:fid", .viewer) { app, ctx in try await app.nvrFragment(ctx) },
+        Route("GET", "nvr/cameras/:id/fragments/:fid/init", .viewer) { app, ctx in try await app.nvrFragmentInit(ctx) },
+        Route("GET", "nvr/cameras/:id/keyframe", .viewer) { app, ctx in try await app.nvrKeyframe(ctx) },
         Route("GET", "nvr/cameras/:id/clip-plan") { app, ctx in try await app.nvrClipPlan(ctx) },
         Route("GET", "nvr/cameras/:id/clip") { app, ctx in try await app.nvrClip(ctx) },
         Route("GET", "nvr/kept") { app, _ in try await app.nvrKept() },

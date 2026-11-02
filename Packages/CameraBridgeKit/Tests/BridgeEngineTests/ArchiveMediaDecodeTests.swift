@@ -11,8 +11,9 @@ import Testing
 /// ffmpeg and ffprobe (`CB_FFMPEG`, `CB_FFPROBE`, or Homebrew and system locations).
 ///
 /// With `CB_ARCHIVE_MEDIA_EXPORT=<an existing directory>` the files of every fixture are also written there, for the browser spike and the dev server
-/// (`<label>.stored.mp4` as the recorder writes it, `<label>.init.mp4`, `<label>.segment-NNN.m4s` as the routes serve them, `<label>.video-only.mp4` as a
-/// browser sees them joined, and `<label>.json` with the codec string and the counts). Fixtures made from the private capture are never exported.
+/// (`<label>.stored.mp4` as the recorder writes it, `<label>.init.mp4`, `<label>.segment-NNN.m4s` as the routes serve them, `<label>.key-picture-NNN.m4s` as
+/// `?picture=1` serves the fragments that start with a key picture, `<label>.video-only.mp4` as a browser sees the segments joined, and `<label>.json` with the
+/// codec string and the counts). Fixtures made from the private capture are never exported.
 @Suite(.timeLimit(.minutes(5)), .enabled(if: ArchiveMediaTools.available, "ffmpeg and ffprobe not found; set CB_FFMPEG and CB_FFPROBE"))
 struct ArchiveMediaDecodeTests {
     /// The init segment and the segments of `file` as the page appends them, written to `directory`; returns what ffprobe and ffmpeg say about it, and
@@ -62,6 +63,10 @@ struct ArchiveMediaDecodeTests {
             try segment.write(to: folder.appendingPathComponent("\(label).segment-\(String(format: "%03d", index + 1)).m4s"))
         }
         try segments.reduce(into: video.data) { $0.append($1) }.write(to: folder.appendingPathComponent("\(label).video-only.mp4"))
+        for (index, stored) in file.fragments.enumerated() {
+            guard let picture = try? ArchiveMedia.keyPictureSegment(stored) else { continue }       // the fragments that start with a key picture
+            try picture.write(to: folder.appendingPathComponent("\(label).key-picture-\(String(format: "%03d", index + 1)).m4s"))
+        }
         let info: [String: Any] = ["mime": video.mime, "width": video.width, "height": video.height, "hadAudio": video.hadAudio,
                                    "frames": file.frameCount, "segments": segments.count]
         try JSONSerialization.data(withJSONObject: info, options: [.sortedKeys]).write(to: folder.appendingPathComponent("\(label).json"))
@@ -108,6 +113,31 @@ struct ArchiveMediaDecodeTests {
         #expect(video.hadAudio)
         let silent = try ArchiveMediaFixtures.mux(frames, cutEvery: 62)
         #expect(try ArchiveMedia.videoInit(silent.initSegment).data == silent.initSegment, "a file without sound is served as it is")
+    }
+
+    /// A key picture is a segment of its own: with the init segment it is a file of one picture that ffmpeg decodes without a message, and the picture is
+    /// the one the whole fragment starts with.
+    @Test func aKeyPictureDecodesOnItsOwnToTheFirstPictureOfTheFragment() throws {
+        let directory = try TemporaryDirectory(prefix: "cb-archive-media")
+        defer { directory.remove() }
+        let source = try ArchiveMediaTools.encode(codec: .h264, size: "160x90", rate: "25", frames: 75, gop: 25, in: directory)
+        let frames = try #require(ArchiveMediaFixtures.h264Frames(annexB: source, ticks: 3_600))
+        for (label, file) in try variants(frames, cutEvery: 62, soundSeconds: 3) {
+            let video = try ArchiveMedia.videoInit(file.initSegment)
+            #expect(file.fragments.count == 3, "a fragment for each group of pictures")
+            for (index, stored) in file.fragments.enumerated() {
+                let name = "\(label)-\(index)"
+                let alone = directory.file("\(name)-picture.mp4"), whole = directory.file("\(name)-fragment.mp4")
+                try (video.data + ArchiveMedia.keyPictureSegment(stored)).write(to: alone)
+                try (video.data + ArchiveMedia.videoSegment(stored)).write(to: whole)
+                let probe = try ArchiveMediaTools.probe(alone, fields: ["codec_name", "width", "height"])
+                #expect(probe["nb_read_frames"] == "1" && probe["codec_name"] == "h264", "\(name): one picture")
+                #expect(probe["width"] == "\(video.width)" && probe["height"] == "\(video.height)", "\(name): the picture size")
+                #expect(try ArchiveMediaTools.decodeErrors(alone) == "", "\(name): ffmpeg decodes without a message")
+                let picture = try ArchiveMediaTools.firstPictureHash(alone), first = try ArchiveMediaTools.firstPictureHash(whole)
+                #expect(picture != nil && picture == first, "\(name): the picture the fragment starts with")
+            }
+        }
     }
 
     @Test func twoFilesWithDifferentParameterSetsEachDecodeWithTheirOwnMime() throws {

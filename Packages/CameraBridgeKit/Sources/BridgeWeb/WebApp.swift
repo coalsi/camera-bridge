@@ -48,6 +48,12 @@ public struct WebConfiguration: Sendable {
     public var maximumArchiveReadsPerAddress: Int
     /// The largest media answer: a fragment is at most 16 MiB (`ArchiveConstants.fragmentMaximumBytes`); a bigger one is `502 unreadable`.
     public var maximumSegmentBytes: Int
+    /// How often an Apple TV's live view checks that the TV is still added: one removed while it watches loses its picture within this long.
+    /// Never more often than every 100 ms (a smaller value counts as 100 ms).
+    public var viewerRecheckInterval: Duration
+    /// Announces the bridge to Apple TVs as `_camera-bridge._tcp` (`ViewerAnnouncer`) through this advertiser. nil announces nothing: the default, and
+    /// what development runs, the Mac and the tests keep.
+    public var viewerAdvertiser: (any ServiceAdvertiser)? = nil
 
     public init(dataDirectory: URL, staticDirectory: URL? = nil, port: UInt16 = 80, loopbackOnly: Bool = false, allowedHosts: [String] = [],
                 setupToken: String? = nil, product: String = "Camera Bridge OS", version: String = "0.1", build: String = "development",
@@ -74,6 +80,7 @@ public struct WebConfiguration: Sendable {
         maximumArchiveReads = 24
         maximumArchiveReadsPerAddress = 16
         maximumSegmentBytes = 16 * 1_048_576
+        viewerRecheckInterval = .seconds(5)
         diagnosticsContext = { launched in
             var context = DiagnosticsContext.current(appVersion: version, appBuild: build, macModel: "unknown", launched: launched)
             context.appName = product
@@ -88,6 +95,8 @@ struct RequestContext: Sendable {
     var params: [String: String]
     var session: AuthStore.Session?
     var sessionToken: String?
+    /// The Apple TV whose key opened a `viewer` route; nil for a browser (a request with a key has no session, whatever cookie it sent).
+    var viewer: AuthStore.ViewerInfo?
 
     func uuid(_ name: String) throws -> UUID {
         guard let text = params[name], let id = UUID(uuidString: text) else { throw APIError.notFound("There is no camera with this identifier.") }
@@ -156,8 +165,13 @@ extension HTTPResponse {
 /// 3. **Session.** Every other API call needs the session cookie (256 random bits, `HttpOnly`, `SameSite=Strict`): `cb_session`, and over
 ///    HTTPS `__Host-cb_session` (a sibling name under camera-bridge.app cannot set a `__Host-` cookie, so it cannot shadow it; a browser
 ///    that signed in over HTTPS before has `cb_session`, which is still read and moved to the new name on its next request).
+///    The eleven `viewer` routes (`Route.Access.viewer`: live and recorded video, pictures, `GET viewer` and moving a camera) also take an
+///    Apple TV's key, as `Authorization: Bearer <key>`. A key that is there decides alone: a wrong, expired or removed one is
+///    `401 viewer_key`, even beside a valid cookie. A key in the address (`token=`, `access_token=`) is refused even with a good header,
+///    and every other route never looks at one.
 /// 4. **Cross-site requests.** A request that changes anything must have an `Origin` (or `Sec-Fetch-Site`) of this same site, and a
-///    signed-in one must carry the session's `X-CSRF-Token`; a body must be `application/json`.
+///    signed-in one must carry the session's `X-CSRF-Token` (a TV's key needs none: unlike a cookie, no browser sends it by itself); a body
+///    must be `application/json`.
 /// 5. **Headers on every answer.** A strict Content-Security-Policy (own files only), `nosniff`, no referrer, no framing, no
 ///    cross-origin reads; API answers are `no-store`.
 public final class WebApp: Sendable {
@@ -186,6 +200,10 @@ public final class WebApp: Sendable {
     let archiveState = ArchiveWebState()
     /// The secure address (`SecureAddress/`): the box's HTTPS name, its certificate and the redirect to it.
     let secureAddress: SecureAddressService
+    /// Announces the bridge to Apple TVs; nil without a `WebConfiguration.viewerAdvertiser`.
+    let announcer: ViewerAnnouncer?
+    /// The task that gathers what is announced and hands it to the announcer, from `startAnnouncing` until it is done or `stopAnnouncing`.
+    private let announcing = Mutex<Task<Void, Never>?>(nil)
 
     struct StreamCounts {
         var live = 0
@@ -198,6 +216,7 @@ public final class WebApp: Sendable {
 
     init(configuration: WebConfiguration, backend: any BridgeBackend, system: any SystemControlling, logs: LogFeed, auth: AuthStore?, secureAddress: SecureAddressService?) {
         self.secureAddress = secureAddress ?? SecureAddressService(backend: backend, system: system, directory: configuration.dataDirectory)
+        announcer = configuration.viewerAdvertiser.map { ViewerAnnouncer(advertiser: $0) }
         self.configuration = configuration
         self.backend = backend
         self.system = system
@@ -225,6 +244,39 @@ public final class WebApp: Sendable {
         hub.stop()
         let secureAddress = secureAddress
         Task { await secureAddress.stop() }
+    }
+
+    /// Announces the bridge to Apple TVs on `port`, the port the web interface listens on. Returns at once: a task asks for the box's identity (made
+    /// the first time it is asked for), name and version and hands them to the announcer, which registers and tries again on its own, so announcing
+    /// never delays the start. Nothing without a `WebConfiguration.viewerAdvertiser`.
+    func startAnnouncing(port: UInt16) {
+        guard let announcer else { return }
+        let (auth, system) = (auth, system)
+        let task = Task {
+            let id = await auth.bridgeID()
+            let version = await system.info().version
+            let name = await auth.bridgeName
+            guard !Task.isCancelled else { return }
+            await announcer.start(ViewerAnnouncer.Announcement(id: id, name: name, version: version, port: port))
+            // A name saved while this task was asking found nothing announced to rename (`patchSettings`, `setup`): look at it again.
+            await announcer.rename(to: await auth.bridgeName)
+        }
+        announcing.withLock { previous in
+            previous?.cancel()
+            previous = task
+        }
+    }
+
+    /// Withdraws the announcement and ends its retries. The task that gathers what to announce is ended first, so one still at it cannot start
+    /// the announcement after this.
+    func stopAnnouncing() async {
+        let task = announcing.withLock { task -> Task<Void, Never>? in
+            defer { task = nil }
+            return task
+        }
+        task?.cancel()
+        await task?.value
+        await announcer?.stop()
     }
 
     // MARK: Stream slots
@@ -333,15 +385,22 @@ public final class WebApp: Sendable {
             movesCookie = legacy && request.isSecure
             break
         }
-        if route.access == .session {
-            guard configured else { throw APIError(status: 403, code: "setup_required", message: "Set the administrator password first.") }
-            guard let session = context.session else {
-                throw APIError(status: 401, code: "unauthorized", message: "Sign in to continue.", headers: Self.clearedCookies().map { ("Set-Cookie", $0) })
-            }
-            if unsafe {
-                guard let presented = request.headers["X-CSRF-Token"], Secrets.constantTimeEqual(presented, session.csrfToken) else {
-                    throw APIError(status: 403, code: "csrf", message: "This page is out of date. Reload it and try again.")
-                }
+        switch route.access {
+        case .open:
+            break
+        case .session:
+            try requireSession(context, unsafe: unsafe, configured: configured)
+        case .viewer:
+            if request.query.contains(where: { Self.addressTokenNames.contains($0.name) }) { throw Self.keyInTheAddress }
+            if let key = Self.bearerToken(in: request) {
+                // The key decides alone, whatever cookie came with it: the request is the TV's, with no session and no cookie to move.
+                guard let viewer = await auth.viewer(token: key, address: request.remoteAddress) else { throw Self.viewerKeyRefused }
+                context.viewer = viewer
+                context.session = nil
+                context.sessionToken = nil
+                movesCookie = false
+            } else {
+                try requireSession(context, unsafe: unsafe, configured: configured)
             }
         }
         var response = try await route.handler(self, context)
@@ -352,6 +411,31 @@ public final class WebApp: Sendable {
         }
         return response
     }
+
+    /// What a `session` route asks of a request, and a `viewer` route of one without a key: a password exists, the session cookie is good,
+    /// and a request that changes something carries the session's CSRF token.
+    private func requireSession(_ context: RequestContext, unsafe: Bool, configured: Bool) throws {
+        guard configured else { throw APIError(status: 403, code: "setup_required", message: "Set the administrator password first.") }
+        guard let session = context.session else {
+            throw APIError(status: 401, code: "unauthorized", message: "Sign in to continue.", headers: Self.clearedCookies().map { ("Set-Cookie", $0) })
+        }
+        if unsafe {
+            guard let presented = context.request.headers["X-CSRF-Token"], Secrets.constantTimeEqual(presented, session.csrfToken) else {
+                throw APIError(status: 403, code: "csrf", message: "This page is out of date. Reload it and try again.")
+            }
+        }
+    }
+
+    // MARK: Apple TVs' keys
+
+    /// The query names a key might be put under, refused on the viewer routes (an address ends up in logs and histories).
+    static let addressTokenNames: Set<String> = ["token", "access_token"]
+
+    static let keyInTheAddress = APIError.badRequest("Send the key in the Authorization header (Bearer), never in the address.", field: "token")
+
+    /// A key that opens nothing: a wrong one, one unused for a year, or a removed TV's. No cookie is cleared with it.
+    static let viewerKeyRefused = APIError(status: 401, code: "viewer_key", message: "This Apple TV was removed from Camera Bridge. Pair it again.",
+                                           headers: [("WWW-Authenticate", "Bearer")])
 
     // MARK: Cookies
 
@@ -373,6 +457,14 @@ public final class WebApp: Sendable {
     }
 
     // MARK: Request checks
+
+    /// The token of `Authorization: Bearer <token>` ("Bearer" in any case, the token trimmed); nil without that header or with nothing in it.
+    /// `GET monitor` reads its token this way, and the viewer routes an Apple TV's key.
+    static func bearerToken(in request: HTTPRequest) -> String? {
+        guard let header = request.headers["Authorization"], header.prefix(7).lowercased() == "bearer " else { return nil }
+        let token = header.dropFirst(7).trimmingCharacters(in: .whitespaces)
+        return token.isEmpty ? nil : token
+    }
 
     /// Whether the address in the `Host` header may reach the bridge (see the type's documentation).
     static func hostAllowed(_ request: HTTPRequest, extra: [String]) -> Bool {
@@ -455,7 +547,9 @@ public final class WebApp: Sendable {
 // MARK: - Routes
 
 struct Route: Sendable {
-    enum Access { case open, session }
+    /// Who may call the route: anybody (`open`), a signed-in browser (`session`), or a signed-in browser or an Apple TV with its key
+    /// (`viewer`; see `WebApp`'s security notes).
+    enum Access { case open, session, viewer }
 
     let method: String
     let pattern: [String]

@@ -1,7 +1,7 @@
 // What changed in Camera Bridge OS, newest first. The About page (screens/about.js) shows it, and after an update the page says once what is
 // new (js/whats-new.js). The file ships inside the system, so a bridge always has the notes of the version it runs.
 //
-// Until 1.0 there is one product, "Camera Bridge OS beta", updated often but at most one beta a day. Each beta still has its own build
+// Until 1.0 there is one product, "Camera Bridge OS beta", updated often (several betas a day when need be). Each beta still has its own build
 // number (a box needs it to see an update, and it is in the signatures and in bug reports), so each build still gets its own entry here.
 // The page shows the beta as one list grouped by day (the date as the heading, each entry's title in bold, its build number small beside
 // it), and after an update the notice names every entry since the build the person last saw.
@@ -14,6 +14,17 @@
 // The release workflow imports this file on its own (notesFor), so it imports nothing.
 
 export const RELEASE_NOTES = [
+  {
+    version: '0.1.132',
+    date: '2026-11-01',
+    title: 'Ready for the Apple TV app',
+    items: [
+      'Settings › Security has an Apple TV card. Enter the code the Camera Bridge app shows on an Apple TV, and that TV can watch every camera, live and recorded, in the camera’s full quality. Each TV is listed with when and where it was last used, and Remove stops it at once. The Apple TV app itself comes separately.',
+      'An Apple TV never needs the password, and it can only watch and move cameras that pan and tilt: it can’t change anything else.',
+      'The box tells Apple TVs on your network that it is there, so the app finds it by itself.',
+      'The pictures on the Events page and the Monitor’s events list load faster: the box now sends the one picture of the moment instead of a couple of seconds of video.',
+    ],
+  },
   {
     version: '0.1.131',
     date: '2026-11-01',

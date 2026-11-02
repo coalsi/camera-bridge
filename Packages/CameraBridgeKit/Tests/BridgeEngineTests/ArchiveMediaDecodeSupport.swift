@@ -146,6 +146,14 @@ enum ArchiveMediaTools {
         return result.text.split(separator: "\n").count
     }
 
+    /// The MD5 of the first picture ffmpeg decodes from `file` (its pixels, through the `md5` muxer), so two files can be compared by what they show.
+    /// nil when ffmpeg decodes none.
+    static func firstPictureHash(_ file: URL) throws -> String? {
+        let result = try run(ffmpeg, ["-hide_banner", "-loglevel", "error", "-nostdin", "-i", file.path, "-frames:v", "1", "-f", "md5", "-"])
+        guard result.status == 0 else { return nil }
+        return result.text.split(separator: "\n").first { $0.hasPrefix("MD5=") }.map { String($0.dropFirst(4)) }
+    }
+
     /// Decodes every picture of `file` and treats any decoder message as a failure: ffmpeg's exit status and stderr.
     static func decodeErrors(_ file: URL) throws -> String {
         let result = try run(ffmpeg, ["-hide_banner", "-loglevel", "error", "-nostdin", "-xerror", "-i", file.path, "-f", "null", "-"])

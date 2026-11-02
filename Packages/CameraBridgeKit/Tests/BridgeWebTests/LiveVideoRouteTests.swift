@@ -2,6 +2,7 @@ import Foundation
 import BridgeEngine
 import CameraAdapters
 import Testing
+import TestSupport
 @testable import BridgeWeb
 
 /// `GET /api/v1/live`: the framing of its messages and what it refuses.
@@ -43,6 +44,37 @@ import Testing
         #expect(await stream.wait { $0.contains("\"state\":\"unavailable\"") })
         #expect(!stream.finished.value)
         stream.cancel()
+    }
+
+    /// A camera's "Camera audio" switch is the owner's word on whether it is heard. The page never asks for the sound of a camera whose switch is off,
+    /// but an Apple TV's key opens this route too, so `audio=` carries sound only for the cameras whose switch is on: one with it off, listed there
+    /// all the same, is sent without sound (no error, and its picture as ever), and one with it on keeps its sound.
+    @Test func soundIsOnlyAskedOfCamerasWhoseAudioSwitchIsOn() async throws {
+        let harness = try Harness()
+        let owner = try await harness.signIn()
+        let tv = try await harness.pairAppleTV(owner: owner)
+        var porch = CameraConfiguration(name: "Porch", kind: .camera, vendor: .rtsp, endpoint: CameraEndpoint(host: "192.0.2.20"), username: "")
+        porch.audioEnabled = true
+        var garage = CameraConfiguration(name: "Garage", kind: .camera, vendor: .rtsp, endpoint: CameraEndpoint(host: "192.0.2.21"), username: "")
+        garage.audioEnabled = false
+        try await harness.backend.addCamera(porch, password: nil)
+        try await harness.backend.addCamera(garage, password: nil)
+        let both = "\(porch.id.uuidString),\(garage.id.uuidString)"
+
+        /// Whether sound was asked of the backend for each camera, once `start` has opened a live view of both with sound requested for both.
+        func soundAsked(_ start: (String) async -> StreamCollector) async -> [UUID: Bool] {
+            harness.backend.write { $0.liveCalls = [] }
+            let stream = await start("/api/v1/live?cameras=\(both)&audio=\(both)")
+            defer { stream.cancel() }
+            #expect(stream.response.status == 200, "the camera with its switch off is no error")
+            #expect(await eventually { harness.backend.read { $0.liveCalls.count } == 2 }, "both cameras are subscribed to")
+            return Dictionary(harness.backend.read { $0.liveCalls }.map { ($0.camera, $0.audio) }, uniquingKeysWith: { first, _ in first })
+        }
+
+        let browser = await soundAsked { await owner.stream($0) }
+        #expect(browser == [porch.id: true, garage.id: false], "the owner's page: the Porch keeps its sound, the Garage has none")
+        let appleTV = await soundAsked { StreamCollector(await harness.raw("GET", $0, headers: [("Authorization", "Bearer \(tv.key)")])) }
+        #expect(appleTV == [porch.id: true, garage.id: false], "an Apple TV that lists the Garage's sound gets no more than the page")
     }
 }
 

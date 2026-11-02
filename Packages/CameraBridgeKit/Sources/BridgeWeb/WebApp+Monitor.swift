@@ -107,8 +107,7 @@ extension WebApp {
         guard await auth.monitorToken != nil else {
             throw APIError(status: 403, code: "monitor_off", message: "Monitoring is off. Turn it on in Settings to get a token.")
         }
-        let header = request.headers["Authorization"] ?? ""
-        let presented = header.lowercased().hasPrefix("bearer ") ? String(header.dropFirst(7)).trimmingCharacters(in: .whitespaces) : ""
+        let presented = Self.bearerToken(in: request) ?? ""
         guard await auth.isMonitorToken(presented) else {
             throw APIError(status: 401, code: "monitor_token", message: "Send the monitoring token from Settings as Authorization: Bearer <token>.",
                            headers: [("WWW-Authenticate", "Bearer")])

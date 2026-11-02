@@ -6,7 +6,7 @@ import {
   isDescribing, queryRange, typeChoices,
 } from '../web/js/screens/events-model.js';
 import { gatherEvents } from '../web/js/screens/wall-events-model.js';
-import { createThumbnails } from '../web/js/nvr/thumbs.js';
+import { createThumbnails, decodeFirstFrame, loadKeyframePicture } from '../web/js/nvr/thumbs.js';
 import { installFakeBrowser } from './support/fake-browser.mjs';
 import { settle } from './nvr-grid-helpers.mjs';
 
@@ -249,6 +249,218 @@ test('a picture already loaded is not asked for twice, and no video element is e
     assert.deepEqual([...walk(a), ...walk(b)].filter((n) => /^(video|audio|canvas)$/i.test(n.tagName)), []);
     thumbs.destroy();
   } finally { browser.restore(); }
+});
+
+// What the page does with a MediaSource, a <video> and a canvas, noted in `events`, on globalThis until `restore()`. `held` says what the source buffer holds
+// once a media segment of that many bytes is appended: [start, end] in seconds, or null for nothing (the init segment is 3 bytes and holds no picture).
+function fakeMedia(held) {
+  const events = [];
+  const saved = { source: globalThis.MediaSource, document: globalThis.document, create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+  const later = (fn) => setTimeout(fn, 0);
+  let range = null;
+  class FakeBuffer extends EventTarget {
+    updating = false;
+    appendBuffer(bytes) {
+      events.push(`append ${bytes.length}`);
+      if (bytes.length in held) range = held[bytes.length];
+      later(() => this.dispatchEvent(new Event('updateend')));
+    }
+    get buffered() { return { length: range ? 1 : 0, start: () => range[0], end: () => range[1] }; }
+  }
+  const buffer = new FakeBuffer();
+  let source;
+  class FakeSource extends EventTarget {
+    static isTypeSupported() { return true; }
+    constructor() { super(); source = this; this.readyState = 'closed'; range = null; }
+    addSourceBuffer() { return buffer; }
+    endOfStream() { events.push('endOfStream'); this.readyState = 'ended'; }
+  }
+  class FakeVideo extends EventTarget {
+    videoWidth = 320;
+    videoHeight = 180;
+    removeAttribute() {}
+    load() {}
+    set src(url) { later(() => { source.readyState = 'open'; source.dispatchEvent(new Event('sourceopen')); }); }
+    set currentTime(seconds) { events.push(`seek ${seconds.toFixed(4)}`); later(() => this.dispatchEvent(new Event('seeked'))); }
+  }
+  const canvas = { getContext: () => ({ drawImage() { events.push('draw'); } }), toDataURL: () => 'data:image/jpeg;base64,AAAA' };
+  globalThis.MediaSource = FakeSource;
+  globalThis.document = { createElement: (tag) => (tag === 'video' ? new FakeVideo() : canvas) };
+  URL.createObjectURL = () => 'blob:picture';
+  URL.revokeObjectURL = () => {};
+  return {
+    events,
+    restore() {
+      globalThis.MediaSource = saved.source;
+      if (saved.document === undefined) delete globalThis.document; else globalThis.document = saved.document;
+      URL.createObjectURL = saved.create;
+      URL.revokeObjectURL = saved.revoke;
+    },
+  };
+}
+
+// A copy of nvr/thumbs.js of its own, so what it learns about a browser (that the picture alone does not decode) starts over, as it does with a page load.
+let pages = 0;
+const freshThumbs = () => import(`../web/js/nvr/thumbs.js?page=${++pages}`);
+
+const PART = JSON.stringify({ id: 'abcdef012345.7', mime: 'video/mp4; codecs="avc1.64001e"', initId: 'abcdef012345.7' });
+const keyPath = (cameraId, atMs, alone) => `nvr/cameras/${cameraId}/keyframe?at=${atMs}${alone ? '&picture=1' : ''}`;
+const initPath = (cameraId) => `nvr/cameras/${cameraId}/fragments/abcdef012345.7/init`;
+
+/** The bridge for the thumbnail requests: `asked` is every path in order; the init segment is 3 bytes, the picture alone 5, the whole key fragment 50. */
+function fakeBridge() {
+  const asked = [];
+  const bytes = async (path) => {
+    asked.push(path);
+    const size = path.includes('/fragments/') ? 3 : path.includes('picture=1') ? 5 : 50;
+    return { headers: new Headers(path.includes('/keyframe?') ? { 'X-CB-Part': PART } : {}), data: new Uint8Array(size) };
+  };
+  return { asked, bytes };
+}
+
+/** A decoder for loadKeyframePicture: `alone(media)` and `whole(media)` give the picture (or throw, or give null) for what is asked; `calls` says which and how big. */
+function fakeDecoder({ alone, whole = () => 'data:image/jpeg;base64,WHOLE' }) {
+  const calls = [];
+  const decode = async ({ media, alone: isAlone }) => {
+    calls.push(`${isAlone ? 'alone' : 'whole'} ${media.length}`);
+    return isAlone ? alone(media) : whole(media);
+  };
+  return { calls, decode };
+}
+
+const LONE = 'data:image/jpeg;base64,LONE';
+const WHOLE = 'data:image/jpeg;base64,WHOLE';
+const cannotDecode = () => { throw new Error('no seeked'); };           // as decodeFirstFrame fails when the decoder says nothing in DECODE_MS
+
+test('a thumbnail asks the bridge for the key picture alone, then for the init segment its answer names', async () => {
+  const asked = [];
+  const part = JSON.stringify({ id: 'abcdef012345.7', mime: 'video/mp4; codecs="avc1.64001e"', initId: 'abcdef012345.7' });
+  const bytes = async (path) => {
+    asked.push(path);
+    return { headers: new Headers(path.includes('/keyframe?') ? { 'X-CB-Part': part } : {}), data: new Uint8Array(8).buffer };
+  };
+  assert.equal(await loadKeyframePicture(id(1), NOW + 0.9, { bytes }), null, 'no MediaSource in this page: no picture, and no failure');
+  assert.deepEqual(asked, [
+    `nvr/cameras/${id(1)}/keyframe?at=${NOW}&picture=1`,
+    `nvr/cameras/${id(1)}/fragments/abcdef012345.7/init`,
+  ], 'the whole key fragment is not asked for: the first picture is all a thumbnail draws');
+});
+
+test('a fragment of one picture is decoded once the stream is ended, and the seek lands inside that picture', async () => {
+  // One picture of a camera at 200 frames a second: the buffer holds 5 ms, from 80 ms (the picture's composition offset).
+  const media = fakeMedia({ 5: [0.08, 0.085] });
+  try {
+    const picture = await decodeFirstFrame({ mime: 'video/mp4; codecs="avc1.64001e"', init: new Uint8Array(3), media: new Uint8Array(5), alone: true });
+    assert.equal(picture, 'data:image/jpeg;base64,AAAA');
+    assert.deepEqual(media.events, ['append 3', 'append 5', 'endOfStream', 'seek 0.0825', 'draw'],
+      'ended before the seek (a decoder with B-frames holds the first picture back otherwise), and half way into a picture shorter than 20 ms');
+  } finally { media.restore(); }
+});
+
+test('a whole key fragment is decoded as it was before the picture alone: the stream is not ended, and the seek is 10 ms in', async () => {
+  const media = fakeMedia({ 50: [0.08, 2.58] });
+  try {
+    const picture = await decodeFirstFrame({ mime: 'video/mp4; codecs="avc1.64001e"', init: new Uint8Array(3), media: new Uint8Array(50) });
+    assert.equal(picture, 'data:image/jpeg;base64,AAAA');
+    assert.deepEqual(media.events, ['append 3', 'append 50', 'seek 0.0900', 'draw']);
+  } finally { media.restore(); }
+});
+
+test('a moment with no footage is no picture, and a passing failure is not', async () => {
+  const gap = async () => { throw Object.assign(new Error('Nothing was recorded at that time.'), { status: 404, code: 'gap' }); };
+  assert.equal(await loadKeyframePicture(id(1), NOW, { bytes: gap }), null);
+  const busy = async () => { throw Object.assign(new Error('The bridge is busy.'), { status: 429, code: 'busy' }); };
+  await assert.rejects(loadKeyframePicture(id(1), NOW, { bytes: busy }), { status: 429 });
+  const noPart = async () => ({ headers: new Headers(), data: new ArrayBuffer(0) });
+  assert.equal(await loadKeyframePicture(id(1), NOW, { bytes: noPart }), null, 'an answer without its description is no picture');
+});
+
+test('when the picture alone decodes it is the thumbnail, and the whole key fragment is never asked for', async () => {
+  const { loadKeyframePicture: load } = await freshThumbs();
+  const bridge = fakeBridge();
+  const decoder = fakeDecoder({ alone: () => LONE });
+  assert.equal(await load(id(1), NOW, { bytes: bridge.bytes, decode: decoder.decode }), LONE);
+  assert.equal(await load(id(1), NOW - 60_000, { bytes: bridge.bytes, decode: decoder.decode }), LONE);
+  assert.deepEqual(bridge.asked, [keyPath(id(1), NOW, true), initPath(id(1)), keyPath(id(1), NOW - 60_000, true), initPath(id(1))]);
+  assert.deepEqual(decoder.calls, ['alone 5', 'alone 5']);
+});
+
+test('a browser that cannot decode the picture alone is asked for the whole key fragment, once, and that picture is the thumbnail', async () => {
+  const { loadKeyframePicture: load } = await freshThumbs();
+  const bridge = fakeBridge();
+  const decoder = fakeDecoder({ alone: cannotDecode });
+  assert.equal(await load(id(1), NOW, { bytes: bridge.bytes, decode: decoder.decode }), WHOLE);
+  assert.deepEqual(bridge.asked, [keyPath(id(1), NOW, true), initPath(id(1)), keyPath(id(1), NOW, false), initPath(id(1))],
+    'the picture alone first, then the key fragment as the page always asked for it');
+  assert.deepEqual(decoder.calls, ['alone 5', 'whole 50']);
+});
+
+test('a browser that takes the picture alone and draws nothing from it is asked for the whole key fragment too', async () => {
+  const media = fakeMedia({});                      // a MediaSource that supports the codec
+  try {
+    const { loadKeyframePicture: load } = await freshThumbs();
+    const bridge = fakeBridge();
+    const decoder = fakeDecoder({ alone: () => null });
+    assert.equal(await load(id(1), NOW, { bytes: bridge.bytes, decode: decoder.decode }), WHOLE);
+    assert.deepEqual(bridge.asked, [keyPath(id(1), NOW, true), initPath(id(1)), keyPath(id(1), NOW, false), initPath(id(1))]);
+    assert.deepEqual(decoder.calls, ['alone 5', 'whole 50']);
+  } finally { media.restore(); }
+});
+
+test('a browser that cannot play the codec at all gets no picture, and the whole key fragment is not downloaded for nothing', async () => {
+  const { loadKeyframePicture: load } = await freshThumbs();       // no MediaSource in this page
+  const bridge = fakeBridge();
+  const decoder = fakeDecoder({ alone: () => null });
+  assert.equal(await load(id(1), NOW, { bytes: bridge.bytes, decode: decoder.decode }), null);
+  assert.equal(await load(id(1), NOW - 1000, { bytes: bridge.bytes, decode: decoder.decode }), null);
+  assert.deepEqual(bridge.asked, [keyPath(id(1), NOW, true), initPath(id(1)), keyPath(id(1), NOW - 1000, true), initPath(id(1))],
+    'and it is still the picture alone that is asked for: nothing was learned about the lone picture');
+  assert.deepEqual(decoder.calls, ['alone 5', 'alone 5']);
+});
+
+test('after one picture the browser could not decode alone, every picture goes straight to the whole key fragment, as before', async () => {
+  const { loadKeyframePicture: load } = await freshThumbs();
+  const bridge = fakeBridge();
+  const decoder = fakeDecoder({ alone: cannotDecode });
+  assert.equal(await load(id(1), NOW, { bytes: bridge.bytes, decode: decoder.decode }), WHOLE);
+  const before = bridge.asked.length;
+  assert.equal(await load(id(2), NOW - 60_000, { bytes: bridge.bytes, decode: decoder.decode }), WHOLE);
+  assert.equal(await load(id(1), NOW - 120_000, { bytes: bridge.bytes, decode: decoder.decode }), WHOLE);
+  assert.deepEqual(bridge.asked.slice(before), [
+    keyPath(id(2), NOW - 60_000, false), initPath(id(2)), keyPath(id(1), NOW - 120_000, false), initPath(id(1)),
+  ], 'no more tries of the picture alone, and no second request for any picture');
+  assert.deepEqual(decoder.calls, ['alone 5', 'whole 50', 'whole 50', 'whole 50']);
+  // The page that learned it is that page's: another one (a reload) tries the picture alone again.
+  const reloaded = await freshThumbs();
+  const again = fakeBridge();
+  await reloaded.loadKeyframePicture(id(1), NOW, { bytes: again.bytes, decode: fakeDecoder({ alone: () => LONE }).decode });
+  assert.equal(again.asked[0], keyPath(id(1), NOW, true));
+});
+
+test('a busy bridge or a lost connection says nothing about the browser: no second request, and the next picture is asked for alone again', async () => {
+  const { loadKeyframePicture: load } = await freshThumbs();
+  const asked = [];
+  const failing = (error) => async (path) => { asked.push(path); throw error; };
+  const decoder = fakeDecoder({ alone: cannotDecode });
+  await assert.rejects(load(id(1), NOW, { bytes: failing(Object.assign(new Error('The bridge is busy.'), { status: 429, code: 'busy' })), decode: decoder.decode }), { status: 429 });
+  await assert.rejects(load(id(1), NOW - 1000, { bytes: failing(new Error('network')), decode: decoder.decode }), { message: 'network' });
+  assert.deepEqual(asked, [keyPath(id(1), NOW, true), keyPath(id(1), NOW - 1000, true)]);
+  const gap = failing(Object.assign(new Error('Nothing was recorded at that time.'), { status: 404, code: 'gap' }));
+  assert.equal(await load(id(1), NOW - 2000, { bytes: gap, decode: decoder.decode }), null, 'no footage is no picture, in this browser as in any');
+  assert.deepEqual(asked.slice(2), [keyPath(id(1), NOW - 2000, true)]);
+  assert.deepEqual(decoder.calls, [], 'nothing was decoded, so nothing was learned');
+});
+
+test('the real decoder: a picture alone that leaves the buffer empty is taken again as the whole key fragment, decoded as before', async () => {
+  const media = fakeMedia({ 5: null, 50: [0.08, 2.58] });          // this browser buffers nothing of a fragment of one sample
+  try {
+    const { loadKeyframePicture: load } = await freshThumbs();
+    const bridge = fakeBridge();
+    assert.equal(await load(id(1), NOW, { bytes: bridge.bytes }), 'data:image/jpeg;base64,AAAA');
+    assert.deepEqual(bridge.asked, [keyPath(id(1), NOW, true), initPath(id(1)), keyPath(id(1), NOW, false), initPath(id(1))]);
+    assert.deepEqual(media.events, ['append 3', 'append 5', 'append 3', 'append 50', 'seek 0.0900', 'draw'],
+      'the key fragment is not ended and is entered 10 ms in, as it was before the picture alone was asked for');
+  } finally { media.restore(); }
 });
 
 test('a page without IntersectionObserver still gets its pictures (a few at a time)', async () => {

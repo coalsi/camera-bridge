@@ -23,11 +23,13 @@ import TestSupport
 
         init(port: UInt16) { base = URL(string: "http://127.0.0.1:\(port)")! }
 
+        /// `key`: an Apple TV's key, sent as `Authorization: Bearer` (the TV's client never holds a cookie).
         @discardableResult
-        mutating func send(_ method: String, _ path: String, json: [String: Any]? = nil) async throws -> (status: Int, data: Data, headers: [AnyHashable: Any]) {
+        mutating func send(_ method: String, _ path: String, json: [String: Any]? = nil, key: String? = nil) async throws -> (status: Int, data: Data, headers: [AnyHashable: Any]) {
             var request = URLRequest(url: URL(string: path, relativeTo: base)!)
             request.httpMethod = method
             if let cookie { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
+            if let key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
             if method != "GET", let csrf { request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token") }
             if let json {
                 request.httpBody = try JSONSerialization.data(withJSONObject: json)
@@ -129,6 +131,50 @@ import TestSupport
         #expect(try await client.send("DELETE", "/api/v1/cameras/\(id)").status == 204)
         #expect(try await client.send("GET", "/api/v1/cameras/\(id)").status == 404)
         #expect((client.object(try await client.send("GET", "/api/v1/status").data)["cameras"] as? [String: Int])?["total"] == 0)
+        await daemon.stop()
+    }
+
+    /// The Mac development daemon serves every Apple TV route (it announces nothing: `Daemon.viewerAdvertiser`): the tvOS simulator reaches it by
+    /// typed address, the owner approves its code on the page or with curl, and the key it is handed opens the viewer routes and nothing else.
+    @Test @MainActor func theDevelopmentDaemonPairsAnAppleTV() async throws {
+        let directory = try TemporaryDirectory(prefix: "cb-daemon")
+        defer { directory.remove() }
+        let daemon = try makeDaemon(directory: directory)
+        let port = try await daemon.start()
+        var owner = Client(port: port)
+        var television = Client(port: port)
+        #expect(try await owner.send("POST", "/api/v1/auth/setup", json: ["password": "daemon test password", "bridgeName": "Test bridge"]).status == 201)
+
+        // The TV asks for a code with no cookie at all.
+        let asked = try await television.send("POST", "/api/v1/viewers/pair", json: ["name": "Living Room", "device": "Apple TV 4K (3rd generation)"])
+        #expect(asked.status == 200, "\(String(decoding: asked.data, as: UTF8.self))")
+        let request = try #require(television.object(asked.data)["request"] as? String)
+        let secret = try #require(television.object(asked.data)["secret"] as? String)
+        let code = try #require(television.object(asked.data)["code"] as? String)
+        #expect(code.wholeMatch(of: /[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}/) != nil)
+        #expect(television.cookie == nil)
+
+        // Not before the owner approves it, and then with the session's cookie and CSRF token.
+        let waiting = try await television.send("POST", "/api/v1/viewers/pair/status", json: ["request": request, "secret": secret])
+        #expect(waiting.status == 200 && television.object(waiting.data)["state"] as? String == "waiting" && television.object(waiting.data)["token"] == nil)
+        #expect(try await owner.send("POST", "/api/v1/viewers/approve", json: ["code": code]).status == 201)
+
+        let collected = try await television.send("POST", "/api/v1/viewers/pair/status", json: ["request": request, "secret": secret])
+        let key = try #require(television.object(collected.data)["token"] as? String, "\(String(decoding: collected.data, as: UTF8.self))")
+        #expect(key.wholeMatch(of: /[0-9a-f]{64}/) != nil)
+
+        // The key alone reads the bridge for the TV: its version, and no secure address on a development Mac.
+        let overview = try await television.send("GET", "/api/v1/viewer", key: key)
+        #expect(overview.status == 200, "\(String(decoding: overview.data, as: UTF8.self))")
+        let bridge = try #require(television.object(overview.data)["bridge"] as? [String: Any])
+        #expect(bridge["version"] as? String == "0.1" && bridge["name"] as? String == "Test bridge")
+        #expect(bridge.keys.contains("secureURL") && bridge["secureURL"] is NSNull)
+        #expect((bridge["id"] as? String)?.wholeMatch(of: /[0-9a-f]{32}/) != nil)
+
+        // Nothing else: settings are the owner's.
+        #expect(try await television.send("GET", "/api/v1/settings", key: key).status == 401)
+        #expect(try await television.send("GET", "/api/v1/viewers", key: key).status == 401)
+        #expect(try await owner.send("GET", "/api/v1/settings").status == 200)
         await daemon.stop()
     }
 

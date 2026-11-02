@@ -16,6 +16,7 @@ import { renderSystem } from './screens/system.js';
 import { renderAbout } from './screens/about.js';
 import { renderEufyPlugin, renderPlugins, renderWyzePlugin } from './screens/plugins.js';
 import { SKY_ROUTE, SKY_TEXT } from './screens/sky-model.js';
+import { PAIR_ROUTE, isPairPath } from './screens/viewers-card.js';
 import { versionLabel, whatsNewNotice } from './whats-new.js';
 
 const root = document.getElementById('app');
@@ -35,11 +36,11 @@ const NAV = [
   { href: '#/notifications', label: 'Notifications', icon: 'bell', match: (p) => p === 'notifications', phone: true },
   // Sky Watcher's morning log (#/sky, #/sky/<camera>): in the menu, and so in a phone's tab bar, only while the Sky Watcher plugin is on (showSkyMenu).
   { href: '#/sky', label: SKY_TEXT.menu, icon: 'moon', match: (p) => p === 'sky' || p.startsWith('sky/') || p.startsWith('sky?'), when: skyIsOn, phone: true },
-  { href: '#/cameras', label: 'Cameras', icon: 'camera', match: (p) => p === 'cameras' || p.startsWith('camera/') || p === 'add' || p.startsWith('pair'), phone: true },
+  { href: '#/cameras', label: 'Cameras', icon: 'camera', match: (p) => p === 'cameras' || p.startsWith('camera/') || p === 'add' || (p.startsWith('pair') && !isPairPath(p)), phone: true },
   { href: '#/plugins', label: 'Plugins', icon: 'plugin', match: (p) => p === 'plugins' || p.startsWith('plugins/') },
   { href: '#/logs', label: 'Log', icon: 'list', match: (p) => p === 'logs' },
   { href: '#/system', label: 'System', icon: 'server', match: (p) => p === 'system' },
-  { href: '#/settings', label: 'Settings', icon: 'sliders', match: (p) => p === 'settings' || p.startsWith('settings/') },
+  { href: '#/settings', label: 'Settings', icon: 'sliders', match: (p) => p === 'settings' || p.startsWith('settings/') || isPairPath(p) },
   { href: '#/about', label: 'About', icon: 'info', match: (p) => p === 'about' },
 ];
 
@@ -86,6 +87,8 @@ const ROUTES = [
   { pattern: /^nvr(?:\/(\d{12,13}))?(?:\?(.*))?$/, title: 'NVR', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^monitor$/, title: 'Monitor', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^pair\/sensors$/, title: 'Sensors bridge', render: renderSensorsPairing },
+  // #/pair/<code> is the address in the QR code an Apple TV shows: Settings at the Apple TV card, the code filled in. It adds nothing by itself.
+  { pattern: PAIR_ROUTE, title: 'Settings', render: (context) => renderSettings({ ...context, params: ['apple-tv', context.params[0]] }) },
   { pattern: /^logs$/, title: 'Log', render: renderLogs },
   { pattern: /^system$/, title: 'System', render: renderSystem },
   { pattern: /^settings(?:\/(recording|ai))?$/, title: 'Settings', render: renderSettings },

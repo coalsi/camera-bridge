@@ -459,9 +459,11 @@ final class ThumbnailCodecs: MediaCodecs {
         }
     }
 
+    /// The places are freed one or two at a time, each body held by its own latch, so the test sees whom the gate let in. Freeing both places at once
+    /// and reading the order the bodies started measured the threads instead: two let in a moment apart may start in either order.
     @Test func atMostTheGivenNumberRunAtOnceAndTheOthersWaitInTheOrderTheyAsked() async throws {
         let gate = SkyThumbnailGate(places: 2, maximumWaiting: 10)
-        let latch = Latch()
+        let latches = (1...7).map { _ in Latch() }
         let running = Box(0), most = Box(0), order = Box<[Int]>([])
         func ask(_ number: Int) -> Task<Int?, any Error> {
             Task {
@@ -469,7 +471,7 @@ final class ThumbnailCodecs: MediaCodecs {
                     let inside = running.update { $0 += 1; return $0 }
                     most.update { $0 = max($0, inside) }
                     order.update { $0.append(number) }
-                    await latch.wait()
+                    await latches[number - 1].wait()
                     running.update { $0 -= 1 }
                     return number
                 }
@@ -477,17 +479,28 @@ final class ThumbnailCodecs: MediaCodecs {
         }
         var tasks = [ask(1), ask(2)]
         #expect(await eventually(timeout: .seconds(30)) { running.value == 2 })
-        for number in 3...6 {
+        for number in 3...7 {
             tasks.append(ask(number))
             #expect(await eventually(timeout: .seconds(30)) { gate.waitingCount == number - 2 }, "\(number) waits")
         }
         #expect(running.value == 2 && order.value.count == 2, "no more than two at once")
-        await latch.open()
+        // One place frees: the one that has waited longest goes in, and only it.
+        await latches[0].open()
+        #expect(await eventually(timeout: .seconds(30)) { order.value.count == 3 })
+        #expect(order.value.last == 3 && gate.waitingCount == 4, "3 asked first of the waiting ones: \(order.value)")
+        await latches[2].open()
+        #expect(await eventually(timeout: .seconds(30)) { order.value.count == 4 })
+        #expect(order.value.last == 4 && gate.waitingCount == 3, "then 4: \(order.value)")
+        // Both places free at once: the two that have waited longest go in, in either order, and the last still waits.
+        await latches[1].open()
+        await latches[3].open()
+        #expect(await eventually(timeout: .seconds(30)) { order.value.count == 6 })
+        #expect(Set(order.value.suffix(2)) == [5, 6] && gate.waitingCount == 1, "5 and 6 before 7: \(order.value)")
+        for latch in latches { await latch.open() }
         var answers: [Int?] = []
         for task in tasks { answers.append(try await task.value) }
-        #expect(answers == [1, 2, 3, 4, 5, 6])
-        #expect(Array(order.value.suffix(4)) == [3, 4, 5, 6], "the ones that waited went in the order they asked: \(order.value)")
-        #expect(most.value == 2 && gate.waitingCount == 0)
+        #expect(answers == [1, 2, 3, 4, 5, 6, 7])
+        #expect(order.value.last == 7 && most.value == 2 && gate.waitingCount == 0)
     }
 
     @Test func aFullQueueSendsTheNextAwayAtOnceAndKeepsThePlacesOfTheOnesThatWait() async throws {

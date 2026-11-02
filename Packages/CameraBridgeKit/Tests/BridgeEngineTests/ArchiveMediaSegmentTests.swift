@@ -197,4 +197,180 @@ import Testing
         let patched = ArchiveMediaBytes.patching(stored.subdata(in: 0..<moof.offset + moof.size) + pssh + stored.subdata(in: moof.offset + moof.size..<stored.count), at: moof.offset, ArchiveMediaBytes.u32(size))
         #expect(throws: ArchiveMedia.Failure.unsupported("a moof holds a 'pssh' box the recorder never writes")) { _ = try ArchiveMedia.videoSegment(patched) }
     }
+
+    // MARK: Key picture
+
+    /// A `trun` entry as the muxer writes it: duration, size and flags, then the composition offset when the run has them.
+    private struct Entry: Equatable {
+        var duration: UInt32
+        var size: UInt32
+        var flags: UInt32
+        var composition: UInt32?
+    }
+
+    /// The video `trun` of a fragment (stored or served): its version and flags word, its data offset and its entries.
+    private func videoRun(_ fragment: Data) throws -> (header: UInt32, dataOffset: Int, entries: [Entry]) {
+        let trun = try ArchiveMediaBytes.trun(in: fragment, track: 1)
+        let header = ArchiveMediaBytes.readU32(fragment, at: trun.payloadOffset)
+        let withOffsets = header & 0x00FF_FFFF == 0xF01
+        let count = Int(ArchiveMediaBytes.readU32(fragment, at: trun.payloadOffset + 4))
+        let entries = (0..<count).map { index -> Entry in
+            let at = trun.payloadOffset + 12 + index * (withOffsets ? 16 : 12)
+            return Entry(duration: ArchiveMediaBytes.readU32(fragment, at: at), size: ArchiveMediaBytes.readU32(fragment, at: at + 4),
+                         flags: ArchiveMediaBytes.readU32(fragment, at: at + 8), composition: withOffsets ? ArchiveMediaBytes.readU32(fragment, at: at + 12) : nil)
+        }
+        return (header, Int(Int32(bitPattern: ArchiveMediaBytes.readU32(fragment, at: trun.payloadOffset + 8))), entries)
+    }
+
+    /// The bytes of the first video sample of a stored fragment: the start of its mdat, as long as its first entry says.
+    private func firstSample(of stored: Data) throws -> Data {
+        let mdat = try #require(try MP4BoxReader.parse(stored).first { $0.type == "mdat" })
+        return stored.subdata(in: mdat.payloadOffset..<mdat.payloadOffset + Int(try videoRun(stored).entries[0].size))
+    }
+
+    /// What a key picture must be whatever the fragment held: a moof of the stored one's `mfhd` and video track fragment (its `tfhd` and `tfdt` as they
+    /// were) with a `trun` of the same version and flags and the first entry only, and an mdat of the first sample.
+    private func expectKeyPicture(_ segment: Data, of stored: Data, _ label: String) throws {
+        let boxes = try MP4BoxReader.parse(segment)
+        #expect(boxes.map(\.type) == ["moof", "mdat"], "\(label): no prft")
+        #expect(boxes[0].children.map(\.type) == ["mfhd", "traf"] && boxes[0].children[1].children.map(\.type) == ["tfhd", "tfdt", "trun"], "\(label): one video traf")
+        for path in ["moof/mfhd", "moof/traf/tfhd", "moof/traf/tfdt"] {
+            let was = try #require(try ArchiveMediaBytes.boxes(in: stored, at: path).first), now = try #require(try ArchiveMediaBytes.boxes(in: segment, at: path).first)
+            #expect(segment.subdata(in: now.offset..<now.offset + now.size) == stored.subdata(in: was.offset..<was.offset + was.size), "\(label): \(path) as it was")
+        }
+        let whole = try videoRun(stored), run = try videoRun(segment)
+        #expect(run.header == whole.header, "\(label): the trun's version and flags as they were")
+        #expect(run.entries == [whole.entries[0]], "\(label): the first picture's entry (duration, size, flags, composition offset) and no other")
+        #expect(run.dataOffset == boxes[0].size + 8, "\(label): the data offset points at the first byte of the mdat")
+        #expect(segment.dropFirst(boxes[1].payloadOffset) == (try firstSample(of: stored)), "\(label): the mdat holds the first picture and nothing else")
+        #expect(ArchiveMediaBytes.isConsistentSegment(segment), "\(label)")
+    }
+
+    @Test func keyPictureSegmentKeepsOnlyTheFirstPicture() throws {
+        let file = try ArchiveMediaFixtures.mux(ArchiveMediaFixtures.syntheticFrames(capture, count: 30, keyEvery: 10), cutEvery: 10)
+        #expect(file.fragments.count == 3)
+        for (index, stored) in file.fragments.enumerated() {
+            #expect(try videoRun(stored).entries.count == 10)
+            let segment = try ArchiveMedia.keyPictureSegment(stored)
+            try expectKeyPicture(segment, of: stored, "fragment \(index)")
+            #expect(try videoRun(segment).entries.count == 1)
+            #expect(segment.count < stored.count / 2, "the picture of ten is less than half the fragment (\(segment.count) of \(stored.count) bytes)")
+        }
+    }
+
+    /// The first picture's composition offset is carried in its entry whatever the other pictures have: none, a zero among others, positive ones
+    /// (trun flags 0x000F01) and signed ones (trun version 1).
+    @Test func theFirstPicturesOwnEntryIsKeptWhateverTheRunHolds() throws {
+        let variants: [(String, (Int) -> Int64)] = [
+            ("none", { _ in 0 }),
+            ("a zero among others", { index in index % 10 == 0 ? 0 : 7_200 }),
+            ("positive", { index in index % 10 == 0 ? 7_200 : 3_600 }),
+            ("signed first", { index in index % 10 == 0 ? -1_800 : 3_600 }),
+            ("signed others", { index in index % 10 == 0 ? 7_200 : (index % 3 == 1 ? -1_800 : 3_600) }),
+        ]
+        for (name, offset) in variants {
+            let file = try ArchiveMediaFixtures.mux(ArchiveMediaFixtures.syntheticFrames(capture, count: 30, keyEvery: 10, compositionOffset: offset), cutEvery: 10)
+            for (index, stored) in file.fragments.enumerated() {
+                try expectKeyPicture(try ArchiveMedia.keyPictureSegment(stored), of: stored, "\(name), fragment \(index)")
+            }
+        }
+    }
+
+    /// The oracle is the muxer itself: the key picture of a fragment is, byte for byte, the fragment a muxer writes for that one picture, once it has
+    /// written the fragments before it (the sequence number and the decode time follow them).
+    @Test func aKeyPictureIsTheFragmentAMuxerWritesForThatPictureAlone() throws {
+        func decodeTime(_ frame: EncodedVideoFrame) -> MediaTime { frame.dts ?? frame.pts }
+        let variants: [(String, (Int) -> Int64)] = [("none", { _ in 0 }), ("positive", { index in index % 10 == 0 ? 7_200 : 3_600 }), ("signed", { index in index % 10 == 0 ? -1_800 : 3_600 })]
+        for (name, offset) in variants {
+            let frames = ArchiveMediaFixtures.syntheticFrames(capture, count: 30, keyEvery: 10, compositionOffset: offset)
+            let file = try ArchiveMediaFixtures.mux(frames, cutEvery: 10)
+            for (index, stored) in file.fragments.enumerated() {
+                var muxer = try FMP4Muxer(configuration: FMP4Configuration(video: capture, audio: nil))
+                for earlier in 0..<index {
+                    _ = try muxer.fragment(video: Array(frames[earlier * 10..<(earlier + 1) * 10]), audio: [], nextDecodeTime: decodeTime(frames[(earlier + 1) * 10]))
+                }
+                let alone = try muxer.fragment(video: [frames[index * 10]], audio: [], nextDecodeTime: decodeTime(frames[index * 10 + 1]))
+                #expect(try ArchiveMedia.keyPictureSegment(stored) == alone, "\(name), fragment \(index)")
+            }
+        }
+    }
+
+    @Test func keyPictureSegmentDropsSoundAndPrft() throws {
+        let (withSound, videoOnly) = try twin(count: 100, keyEvery: 25, cutEvery: 25)
+        #expect(withSound.fragments.count == 4 && videoOnly.fragments.count == 4)
+        for (index, stored) in withSound.fragments.enumerated() {
+            #expect(stored.prefix(8).suffix(4) == Data("prft".utf8), "the stored fragment starts with a prft")
+            if index == 0 { #expect(try ArchiveMediaBytes.boxes(in: stored, at: "moof/traf").count == 2, "and the first holds sound") }
+            let segment = try ArchiveMedia.keyPictureSegment(stored)
+            try expectKeyPicture(segment, of: stored, "fragment \(index)")
+            let boxes = try MP4BoxReader.parse(segment)
+            let size = Int(try videoRun(stored).entries[0].size)
+            #expect(boxes[0].children(ofType: "traf").count == 1 && boxes[1].payloadSize == size, "no sound track fragment and no sound samples")
+            #expect(segment == (try ArchiveMedia.keyPictureSegment(videoOnly.fragments[index])), "the sound makes no difference")
+        }
+    }
+
+    /// The caller hands it key fragments; one that starts with a delta picture (a continuation of a long group of pictures) is not one, and is
+    /// refused by the first sample's own flags (`sample_is_non_sync_sample`), not by where the fragment sits in a file.
+    @Test func keyPictureSegmentRefusesANonKeyStart() throws {
+        let file = try ArchiveMediaFixtures.mux(ArchiveMediaFixtures.syntheticFrames(capture, count: 30, keyEvery: 20), cutEvery: 5)
+        #expect(file.fragments.count == 6)
+        let refused = ArchiveMedia.Failure.malformed("the first video sample is not a key picture")
+        for index in [1, 2, 3, 5] {
+            #expect(throws: refused, "fragment \(index) continues a group of pictures") { _ = try ArchiveMedia.keyPictureSegment(file.fragments[index]) }
+        }
+        for index in [0, 4] { _ = try ArchiveMedia.keyPictureSegment(file.fragments[index]) }
+        // The flags decide: a key fragment whose first sample is marked as a delta picture is refused, and a continuation marked as a key picture is not.
+        let flagsAt = 12 + 8                                           // in the trun payload: version and flags, count, data offset, then duration, size, flags
+        let delta = try ArchiveMediaBytes.settingTrunField(file.fragments[0], track: 1, at: flagsAt, to: 0x0101_0000)
+        #expect(throws: refused) { _ = try ArchiveMedia.keyPictureSegment(delta) }
+        let key = try ArchiveMediaBytes.settingTrunField(file.fragments[1], track: 1, at: flagsAt, to: 0x0200_0000)
+        #expect(try videoRun(ArchiveMedia.keyPictureSegment(key)).entries.first?.flags == 0x0200_0000)
+    }
+
+    @Test func aKeyPictureTellsHowLongItLasts() throws {
+        let ntsc = ArchiveMediaFixtures.syntheticFrames(capture, count: 20, keyEvery: 10, ticks: 3_003)
+        let file = try ArchiveMediaFixtures.mux(ntsc, cutEvery: 10)
+        for stored in file.fragments {
+            let picture = try ArchiveMedia.keyPicture(stored)
+            #expect(picture.duration == 3_003, "in ticks of the 90 kHz video track, the first entry's duration")
+            #expect(picture.segment == (try ArchiveMedia.keyPictureSegment(stored)))
+        }
+    }
+
+    @Test func aSliceOfALargerBufferGivesTheSameKeyPicture() throws {
+        let (withSound, videoOnly) = try twin(count: 12, keyEvery: 6, cutEvery: 6)
+        for stored in withSound.fragments + videoOnly.fragments {
+            let slice = (Data(repeating: 0xEE, count: 5) + stored + Data(repeating: 0xEE, count: 3))[5..<5 + stored.count]
+            #expect(slice.startIndex == 5)
+            #expect(try ArchiveMedia.keyPictureSegment(slice) == ArchiveMedia.keyPictureSegment(stored))
+        }
+    }
+
+    /// Everything `videoSegment` checks about where the samples are, the key picture checks too: a fragment that is damaged is not served in part.
+    @Test func samplesThatAreNotWhereTheMoofSaysAreRefusedForTheKeyPictureToo() throws {
+        let (withSound, videoOnly) = try twin(count: 12, keyEvery: 6, cutEvery: 6)
+        let stored = withSound.fragments[0]
+        let videoOffset = ArchiveMediaBytes.readU32(stored, at: try ArchiveMediaBytes.trun(in: stored, track: 1).payloadOffset + 8)
+        let soundOffset = ArchiveMediaBytes.readU32(stored, at: try ArchiveMediaBytes.trun(in: stored, track: 2).payloadOffset + 8)
+        let movedVideo = try ArchiveMediaBytes.settingTrunField(stored, track: 1, at: 8, to: videoOffset + 4)
+        #expect(throws: ArchiveMedia.Failure.unsupported("the video samples do not start the mdat")) { _ = try ArchiveMedia.keyPictureSegment(movedVideo) }
+        let movedSound = try ArchiveMediaBytes.settingTrunField(stored, track: 2, at: 8, to: soundOffset - 4)
+        #expect(throws: ArchiveMedia.Failure.unsupported("the sound samples do not follow the video samples")) { _ = try ArchiveMedia.keyPictureSegment(movedSound) }
+        // A size of a later sample one byte off: the first picture would still be whole, but the sum no longer adds up to the mdat.
+        let silent = try #require(videoOnly.fragments.first)
+        let secondSize = try ArchiveMediaBytes.trun(in: silent, track: 1).payloadOffset + 12 + 12 + 4
+        let size = ArchiveMediaBytes.readU32(silent, at: secondSize)
+        for delta: Int32 in [1, -1] {
+            let wrong = ArchiveMediaBytes.patching(silent, at: secondSize, ArchiveMediaBytes.u32(size &+ UInt32(bitPattern: delta)))
+            do {
+                _ = try ArchiveMedia.keyPictureSegment(wrong)
+                Issue.record("a sample size \(delta) off was accepted")
+            } catch ArchiveMedia.Failure.malformed(let message) {
+                #expect(message.hasPrefix("the samples add up to"), "\(message)")
+            } catch {
+                Issue.record("\(error)")
+            }
+        }
+    }
 }

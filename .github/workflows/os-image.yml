@@ -4,8 +4,8 @@ name: Camera Bridge OS image
 # Tag os-v0.1 -> version 0.1 -> camera-bridge-os-0.1-amd64.img.xz. (The Mac app uses v* tags; the two never mix.)
 #
 # Until 1.0 the OS is one product in public beta, "Camera Bridge OS beta". Every beta still gets its own build number and tag
-# (os-v0.1.109, os-v0.1.110, ...): boxes need it to see an update, and signatures and bug reports name it. At most one beta a day:
-# gather the day's changes into one tag. After a beta is published and checked, the release job removes older betas from GitHub
+# (os-v0.1.109, os-v0.1.110, ...): boxes need it to see an update, and signatures and bug reports name it. A beta goes out whenever it
+# is ready, several a day if need be. After a beta is published and checked, the release job removes older betas from GitHub
 # Releases and keeps the newest two (linux/os/prune-betas.sh); their git tags stay, and each one's package list and source offer are
 # first copied to the release os-sources (the source offer in every image promises them for three years). It only lists what it
 # would remove until the repository variable PRUNE_OS_BETAS is "on" (Settings > Secrets and variables > Actions > Variables). From

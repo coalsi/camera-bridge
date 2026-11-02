@@ -66,6 +66,7 @@ extension WebApp {
             } catch let failure as AuthStore.Failure {
                 throw authError(failure)
             }
+            await announcer?.rename(to: await auth.bridgeName)   // Apple TVs find the bridge by its name
         }
         if let zone = patch.timeZone, TimeZone(identifier: zone) == nil {
             throw APIError.badRequest("That is not a time zone.", field: "timeZone")

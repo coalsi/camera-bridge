@@ -218,4 +218,155 @@ import Testing
         #expect((await rig.get("nvr/cameras/\(rig.cameraID)/keyframe?at=\(rig.ms(2_500))")).status == 410)
         #expect((await rig.get("nvr/cameras/not-an-id/keyframe?at=\(rig.ms(0))")).status == 404)
     }
+
+    // MARK: Key picture
+
+    private func keyframe(_ rig: NVRRig, at offsetMs: Int64, _ query: String = "") async -> Answer {
+        await rig.get("nvr/cameras/\(rig.cameraID)/keyframe?at=\(rig.ms(offsetMs))\(query)")
+    }
+
+    /// The `X-CB-Part` description of a key answer.
+    private func partHeader(_ answer: Answer) throws -> [String: Any] {
+        let header = try #require(answer.headers["X-CB-Part"])
+        return try #require(try JSONSerialization.jsonObject(with: Data(header.utf8)) as? [String: Any])
+    }
+
+    @Test func aKeyPictureAnswerHoldsOneFrame() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        let file = try rig.file(fragments: 6, gopFragments: 3)
+        archive.files = [file]
+        let whole = await keyframe(rig, at: 4_400)                    // inside fragment 4; its group starts at fragment 3
+        let answer = await keyframe(rig, at: 4_400, "&picture=1")
+        #expect(answer.status == 200 && answer.headers["Content-Type"] == "video/mp4" && answer.headers["Cache-Control"] == "no-store")
+        let boxes = try MP4BoxReader.parse(answer.body)
+        #expect(boxes.map(\.type) == ["moof", "mdat"])
+        let trun = try #require(boxes.first?.child("traf")?.child("trun"))
+        #expect(u32(answer.body, trun.payloadOffset + 4) == 1, "one sample")
+        #expect(u32(answer.body, trun.payloadOffset + 8) == boxes[0].size + 8, "the data offset points at it")
+        let stored = file.stored[3]                                     // the key fragment, with its prft
+        let storedBoxes = try MP4BoxReader.parse(stored)
+        let storedRun = try #require(storedBoxes.first { $0.type == "moof" }?.child("traf")?.child("trun")), mdat = try #require(storedBoxes.first { $0.type == "mdat" })
+        let size = u32(stored, storedRun.payloadOffset + 12 + 4)
+        #expect(boxes[1].payloadSize == size && answer.body.suffix(size) == stored[mdat.payloadOffset..<mdat.payloadOffset + size], "the key picture's bytes and nothing else")
+        #expect(answer.body.count < whole.body.count / 3, "\(answer.body.count) bytes against \(whole.body.count)")
+
+        // The same description, except that the part ends with its picture: one frame of 40 ms at 25 a second, not the fragment's second.
+        let part = try partHeader(answer), wholePart = try partHeader(whole)
+        #expect(Set(part.keys) == Set(wholePart.keys) && Set(part.keys) == ["id", "file", "start", "end", "mime", "width", "height", "anchor", "initId"])
+        for key in wholePart.keys where key != "end" { #expect("\(part[key] ?? "")" == "\(wholePart[key] ?? "")", "\(key) is the key fragment's") }
+        #expect(part["id"] as? String == file.fragments[3].id && part["initId"] as? String == file.fragments[3].id)
+        #expect(jsonInt(part["start"]) == rig.ms(3_000) && jsonInt(part["end"]) == rig.ms(3_040), "end = start + one frame")
+        #expect(jsonInt(wholePart["end"]) == rig.ms(4_000))
+    }
+
+    /// Frames 3,003 ticks apart (30000/1001) last 33.37 ms. The end is worked out as every part's is, from the file's anchor and integer ticks: the start
+    /// is the fragment's own (1,001 ms into the file for fragment 2) and the end the start of the picture plus its ticks, both rounded.
+    @Test func aKeyPictureEndsWhereItsOwnFrameEnds() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        archive.files = [try rig.file(fragments: 4, framesPerFragment: 15, frameTicks: 3_003, gopFragments: 2)]
+        let first = try partHeader(await keyframe(rig, at: 100, "&picture=1"))
+        #expect(jsonInt(first["start"]) == rig.ms(0) && jsonInt(first["end"]) == rig.ms(33))
+        let third = try partHeader(await keyframe(rig, at: 1_100, "&picture=1"))
+        #expect(jsonInt(third["start"]) == rig.ms(1_001) && jsonInt(third["end"]) == rig.ms(1_034))
+    }
+
+    @Test func withoutPictureTheKeyFragmentIsUnchanged() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        let file = try rig.file(fragments: 6, gopFragments: 3)
+        archive.files = [file]
+        let plain = await keyframe(rig, at: 4_400)
+        #expect(plain.status == 200 && plain.body == file.stored[3].dropFirst(32))
+        let plainPart = try partHeader(plain)
+        #expect(jsonInt(plainPart["end"]) == rig.ms(4_000), "the key fragment's own end")
+        let zero = await keyframe(rig, at: 4_400, "&picture=0")
+        #expect(zero.status == 200 && zero.body == plain.body && zero.headers["X-CB-Part"] == plain.headers["X-CB-Part"], "picture=0 is no picture=")
+        #expect(zero.headers["Content-Type"] == "video/mp4" && zero.headers["Cache-Control"] == "no-store")
+        let first = await rig.get("nvr/cameras/\(rig.cameraID)/keyframe?picture=0&at=\(rig.ms(4_400))")
+        #expect(first.body == plain.body && first.headers["X-CB-Part"] == plain.headers["X-CB-Part"], "the order of the parameters does not matter")
+    }
+
+    @Test func pictureMustBeZeroOrOne() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        archive.files = [try rig.file(fragments: 4, gopFragments: 2)]
+        for value in ["", "2", "-1", "01", "10", "true", "false", "yes", "on", "one", "%201", "1%20", "1.0", "1,1"] {
+            let answer = await keyframe(rig, at: 500, "&picture=\(value)")
+            #expect(answer.status == 400 && answer.json["error"] as? String == "invalid" && answer.json["code"] as? String == "invalid" && answer.json["field"] as? String == "picture", "picture=\(value)")
+        }
+        #expect(archive.reads.isEmpty && rig.harness.app.archiveSlotsInUse == 0, "refused before anything was read")
+        let both = await rig.get("nvr/cameras/\(rig.cameraID)/keyframe?at=abc&picture=2")
+        #expect(both.status == 400 && both.json["field"] as? String == "at", "the time is looked at first")
+    }
+
+    /// A key picture meets the refusals the key fragment does: a gap with where the next recording starts, a camera the bridge does not have, HEAD, a busy
+    /// bridge, a drive that does not answer, a part that cannot be read and one that is gone.
+    @Test func aKeyPictureIsRefusedWhereTheKeyFragmentIs() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive) { $0.maximumArchiveReads = 1; $0.maximumArchiveReadsPerAddress = 1 }
+        let file = try rig.file("13-24-05", fragments: 4, gopFragments: 4)
+        archive.files = [file, try rig.file("13-24-30", offsetMs: 20_000, fragments: 2)]
+        let gap = await keyframe(rig, at: 10_000, "&picture=1")
+        #expect(gap.status == 404 && gap.json["error"] as? String == "gap" && gap.headers["X-CB-Next"] == String(rig.ms(20_000)))
+        let unknown = await rig.get("nvr/cameras/\(UUID().uuidString)/keyframe?at=\(rig.ms(0))&picture=1")
+        #expect(unknown.status == 404 && unknown.json["error"] as? String == "gap")
+        let head = await rig.session.send("HEAD", "/api/v1/nvr/cameras/\(rig.cameraID)/keyframe?at=\(rig.ms(500))&picture=1")
+        #expect(head.status == 405 && head.headers["Allow"] == "GET")
+        #expect(archive.reads.isEmpty)
+
+        #expect(rig.harness.app.takeArchiveSlot(address: "192.0.2.77"), "the only slot is taken")
+        let busy = await keyframe(rig, at: 500, "&picture=1")
+        #expect(busy.status == 429 && busy.json["error"] as? String == "busy" && busy.headers["Retry-After"] == "1")
+        rig.harness.app.releaseArchiveSlot(address: "192.0.2.77")
+        #expect((await keyframe(rig, at: 500, "&picture=1")).status == 200)
+
+        archive.fail(file.fragments[0].id, with: .timedOut)
+        let slow = await keyframe(rig, at: 2_500, "&picture=1")
+        #expect(slow.status == 504 && slow.json["error"] as? String == "drive_slow" && slow.headers["Retry-After"] == "2")
+        archive.fail(file.fragments[0].id, with: .unreadable("/var/lib/camera-bridge/recordings/SECRET/x.mp4"))
+        let unreadable = await keyframe(rig, at: 2_500, "&picture=1")
+        #expect(unreadable.status == 502 && unreadable.json["error"] as? String == "unreadable" && !unreadable.text.contains("SECRET"))
+        archive.remove(file.fragments[0].id)
+        #expect((await keyframe(rig, at: 2_500, "&picture=1")).status == 410)
+        #expect(rig.harness.app.archiveSlotsInUse == 0, "every slot was released")
+    }
+
+    @Test func aKeyPictureLargerThanTheLimitIsRefused() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive) { $0.maximumSegmentBytes = 100 }
+        archive.files = [try rig.file(fragments: 2)]
+        let answer = await keyframe(rig, at: 100, "&picture=1")
+        #expect(answer.status == 502 && answer.json["error"] as? String == "unreadable")
+        #expect(rig.harness.app.archiveSlotsInUse == 0)
+    }
+
+    @Test func aFragmentThatStartsWithoutAKeyPictureIsUnreadableForItsPictureToo() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        let file = try rig.file(fragments: 3, gopFragments: 3)
+        // The index says fragment 0 holds a key picture; its bytes say the first sample is a delta picture (a damaged file).
+        let run = try #require(try MP4BoxReader.parse(file.stored[0]).first { $0.type == "moof" }?.child("traf")?.child("trun"))
+        let flags = run.payloadOffset + 12 + 8                         // the first entry's sample flags
+        var damaged = file
+        damaged.stored[0].replaceSubrange(flags..<flags + 4, with: [0x01, 0x01, 0x00, 0x00])
+        archive.files = [damaged]
+        let answer = await keyframe(rig, at: 100, "&picture=1")
+        #expect(answer.status == 502 && answer.json["error"] as? String == "unreadable", "\(answer.text)")
+        #expect((await keyframe(rig, at: 100)).status == 200, "the whole key fragment is served as it was")
+    }
+
+    @Test func aTVsKeyMayAskForTheKeyPicture() async throws {
+        let archive = FakeArchiveReading()
+        let rig = try await NVRRig.make(archive: archive)
+        archive.files = [try rig.file(fragments: 4, gopFragments: 2)]
+        let tv = try await rig.harness.pairAppleTV(owner: rig.session)
+        let path = "/api/v1/nvr/cameras/\(rig.cameraID)/keyframe?at=\(rig.ms(500))&picture=1"
+        let answer = await rig.harness.send("GET", path, headers: [("Authorization", "Bearer \(tv.key)")])
+        #expect(answer.status == 200 && answer.headers["Content-Type"] == "video/mp4")
+        let boxes = try MP4BoxReader.parse(answer.body)
+        let trun = try #require(boxes.first?.child("traf")?.child("trun"))
+        #expect(boxes.map(\.type) == ["moof", "mdat"] && u32(answer.body, trun.payloadOffset + 4) == 1)
+    }
 }

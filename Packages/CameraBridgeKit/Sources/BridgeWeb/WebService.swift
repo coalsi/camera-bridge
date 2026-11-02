@@ -15,19 +15,24 @@ public final class WebService: Sendable {
         }
     }
 
-    /// Starts listening and returns the port.
+    /// Starts listening and returns the port. Once it listens the bridge is announced to Apple TVs (`WebConfiguration.viewerAdvertiser`), without
+    /// the start waiting for it.
     @discardableResult
     public func start() async throws -> UInt16 {
         app.startEvents()
         do {
-            return try await server.start()
+            let port = try await server.start()
+            app.startAnnouncing(port: port)
+            return port
         } catch {
             app.stopEvents()
             throw error
         }
     }
 
+    /// Stops announcing first, then the rest: an Apple TV stops finding the bridge before it stops answering.
     public func stop() async {
+        await app.stopAnnouncing()
         app.stopEvents()
         await server.stop()
     }

@@ -160,18 +160,25 @@ struct LoginLimiter: Sendable {
     }
 }
 
-/// The administrator: one password, the bridge's name, and the signed-in browsers. Kept in `<data>/web/auth.json` (0600 in a 0700
-/// directory): the password as a PBKDF2 hash, a session as the SHA-256 of its token (the token itself is only in the browser's
-/// cookie), so a copy of the file signs nobody in.
+/// The administrator: one password, the bridge's name, the signed-in browsers and the Apple TVs, and the box's identity. Kept in
+/// `<data>/web/auth.json` (0600 in a 0700 directory): the password as a PBKDF2 hash, a session as the SHA-256 of its token (the token
+/// itself is only in the browser's cookie), an Apple TV as the SHA-256 of its key (the key is only on the TV), so a copy of the file signs
+/// nobody in.
 ///
 /// - `configure` runs once (first-run setup); a second attempt fails. Nothing else works until it has.
 /// - A session lasts 7 days after its last use and 30 days at most. Changing the password signs every other browser out.
+/// - An Apple TV is added with a code the owner types while signed in (`ViewerPairing` holds the requests, in memory only) and is handed
+///   its key once. At most 20 are kept, a key unused for a year stops working, and changing the password keeps them all.
+/// - `bridgeID()` is the box's identity, made the first time anyone asks and kept in the same file as the TVs. Both are optional in the
+///   file: one written before them still reads.
 /// - Passwords are 8 to 256 bytes long; hashing happens off the actor, one at a time, so guesses cannot pile up on the CPU.
 /// - A file that is there but cannot be read or decoded is not a new bridge (offering setup would let anyone on the network claim it):
-///   the store falls back to `auth.json.bak` (the copy `PrivateFiles` keeps of the version before), and without one it is `isDamaged`:
-///   configured, with no password that can be right, until a factory reset. The damaged file is never written over.
+///   the store reads `auth.json.bak` instead when there is one, and without one it is `isDamaged`: configured, with no password that can
+///   be right, until a factory reset. The damaged file is never written over. The store does not make the `.bak` itself (`persist` does
+///   not ask `PrivateFiles` to keep the version it replaces): it is a copy that somebody put there.
 /// - A sign-in works while the file cannot be written (a full or read-only data partition): the session is kept in memory and saved
-///   once the disk takes it again. A first-run setup that cannot be saved is undone, so it never holds only until the next restart.
+///   once the disk takes it again, as are the box's identity and the removal of an Apple TV. A first-run setup that cannot be saved is
+///   undone, and so is the adding of an Apple TV, so neither holds only until the next restart.
 public actor AuthStore {
     public enum Failure: Error, Equatable, Sendable {
         case alreadyConfigured
@@ -194,6 +201,29 @@ public actor AuthStore {
         var address: String?
     }
 
+    /// An Apple TV as the file keeps it.
+    struct StoredViewer: Codable, Equatable {
+        /// 32 random hex characters of its own, not derived from the key (`ViewerInfo.id`).
+        var id: String
+        /// The SHA-256 of the key, in hex: the key itself is only on the TV.
+        var tokenHash: String
+        var name: String
+        var device: String?
+        var created: Date
+        /// Written to the file at most hourly, like a session's.
+        var lastSeen: Date?
+        var address: String?
+
+        var info: ViewerInfo {
+            ViewerInfo(id: id, name: name, device: device, created: created, lastSeen: lastSeen, address: address)
+        }
+
+        /// Its key has gone unused for a year (counted from when the TV was added until it is first used), so it stops working.
+        func isIdle(at date: Date) -> Bool {
+            date.timeIntervalSince(lastSeen ?? created) > AuthStore.viewerIdleLifetime
+        }
+    }
+
     struct Stored: Codable, Equatable {
         var version = 1
         var bridgeName = AuthStore.defaultBridgeName
@@ -202,6 +232,11 @@ public actor AuthStore {
         /// The read-only monitoring token (`GET monitor`), nil while monitoring is off. Kept as it is: the owner copies it into Home
         /// Assistant or Uptime Kuma from Settings, like the webhook's token, and it signs nobody in.
         var monitorToken: String?
+        /// The box's identity (`bridgeID()`), nil until it is first asked for.
+        var bridgeID: String?
+        /// The Apple TVs. Optional, like `bridgeID`: a synthesized `Decodable` throws on a key that is missing even when the property has a
+        /// default, and a file that cannot be decoded is taken for a damaged one, so a file written before Apple TVs would lock the owner out.
+        var viewers: [StoredViewer]?
     }
 
     /// A signed-in browser, as the Signed-in browsers list shows it.
@@ -249,6 +284,12 @@ public actor AuthStore {
     static let persistInterval: TimeInterval = 3_600
     /// A burst of wrong passwords is forgotten after this long without one.
     static let quietDay: TimeInterval = 86_400
+    /// The Apple TVs the box keeps; one has to be removed before another can be added.
+    static let maximumViewers = 20
+    /// A TV's key stops working after this long unused.
+    static let viewerIdleLifetime: TimeInterval = 365 * 86_400
+    /// What a TV is called when it did not say.
+    static let defaultViewerName = "Apple TV"
 
     /// A signed-in browser.
     public struct Session: Sendable, Equatable {
@@ -265,11 +306,14 @@ public actor AuthStore {
     private var configuring = false
     private var limiter: LoginLimiter
     private var lastPersisted = Date.distantPast
-    /// A change (a new session) that could not be written yet.
+    /// A change that could not be written yet (a new session, the box's identity, an Apple TV removed): saved on the next use of a session or
+    /// of a TV's key (`saveOrRetryLater`).
     private var unsaved = false
     /// Wrong passwords of the last day, oldest first (at most `maximumFailuresKept`), and the burst they are in.
     private var failures: [(date: Date, address: String)] = []
     private var alert: SignInAlert?
+    /// The Apple TVs that are asking to be added: in memory only.
+    private var pairing = ViewerPairing()
     private static let maximumFailuresKept = 5_000
     private let damaged: Bool
     private let log = Log(category: "web")
@@ -566,7 +610,185 @@ public actor AuthStore {
         return right ? .right : .wrong
     }
 
+    // MARK: Apple TVs
+
+    /// An Apple TV that was added with a pairing code, as the Apple TV card lists it. Never its key: the box keeps only the key's SHA-256.
+    public struct ViewerInfo: Sendable, Equatable {
+        /// 32 random hex characters of its own, not derived from the key: it names the TV in the list and signs nobody in.
+        public var id: String
+        public var name: String
+        /// The model as the TV sent it ("Apple TV 4K (3rd generation)"), shown as it came.
+        public var device: String?
+        public var created: Date
+        /// When its key was last used, nil while it never was.
+        public var lastSeen: Date?
+        /// Where it last came from.
+        public var address: String?
+    }
+
+    /// What a TV is given when it asks to be added: `request` and `secret` to ask again with, and the `code` to show on its screen.
+    public struct PairingStart: Sendable, Equatable {
+        public var request: String
+        public var secret: String
+        /// As it is shown, with the dash ("BCDF-GHJK").
+        public var code: String
+        /// Seconds the request lasts.
+        public var expiresIn: Int
+        /// Seconds the TV waits between questions.
+        public var interval: Int
+    }
+
+    /// The answer to a TV asking whether its code was entered.
+    public enum PairingStatus: Sendable, Equatable {
+        case waiting
+        /// The TV's key, plain, this once: the request is over with this answer.
+        case approved(token: String, viewer: ViewerInfo)
+        /// Ended, removed, never there, or asked with a wrong secret: the TV starts again with a new code.
+        case gone
+    }
+
+    /// Why a pairing call did not go through.
+    public enum PairingFailure: Error, Equatable, Sendable {
+        /// Too many requests are open, from this address or in all: ask again after so many seconds.
+        case busy(retryAfter: Int)
+        /// The code opens nothing: unknown, ended, approved already, or not a code.
+        case noSuchCode
+        /// The box takes no more Apple TVs: one has to be removed first.
+        case tooManyViewers
+    }
+
+    /// The box's identity: 32 lowercase hex characters, made the first time anyone asks and kept in `auth.json` from then on. An Apple
+    /// TV knows the box by it, so it outlives restarts, updates and new passwords, and goes only with a factory reset.
+    public func bridgeID() -> String {
+        if let id = stored.bridgeID { return id }
+        let id = Secrets.hex(Secrets.randomBytes(16))
+        stored.bridgeID = id
+        saveOrRetryLater()
+        return id
+    }
+
+    /// A TV asks to be added from `address`. Its `name` and `device` are cleaned as the bridge's name is ("Apple TV" for no name). Throws
+    /// `busy` when that address, or everyone together, has too many requests open.
+    public func beginPairing(name: String?, device: String?, address: String) throws -> PairingStart {
+        let date = now()
+        removeLapsedViewers(date)
+        let request = try pairing.open(name: Self.cleaned(name) ?? Self.defaultViewerName, device: Self.cleaned(device),
+                                       address: String(address.prefix(64)), now: date)
+        return PairingStart(request: request.id, secret: request.secret, code: ViewerPairing.displayed(request.code),
+                            expiresIn: Int(pairing.policy.lifetime), interval: pairing.policy.interval)
+    }
+
+    /// The owner types the code a TV shows. The TV is added at once, and its next question is answered with its new key, which the box
+    /// keeps only as a hash. Throws `noSuchCode` (the code stays as it was), `tooManyViewers`, `storageFailed` when the TV cannot be
+    /// saved (it is not added then, and the code still waits), and `unreadable` while `auth.json` is damaged (`isDamaged`: nothing can be saved).
+    public func approvePairing(code: String) throws -> ViewerInfo {
+        // One reading of the clock for the whole call: a request found open here is still open when it is approved below, so a saved TV
+        // always has its key waiting for it.
+        let date = now()
+        removeLapsedViewers(date)
+        guard let code = ViewerPairing.normalized(code), let request = pairing.waiting(code: code, now: date) else { throw PairingFailure.noSuchCode }
+        guard viewerList.count < Self.maximumViewers else { throw PairingFailure.tooManyViewers }
+        let token = Secrets.hex(Secrets.randomBytes(32))
+        let viewer = StoredViewer(id: Secrets.hex(Secrets.randomBytes(16)), tokenHash: Secrets.sha256Hex(token), name: request.name,
+                                  device: request.device, created: date, address: request.address)
+        let before = stored
+        viewerList.append(viewer)
+        do {
+            try persist()
+        } catch {
+            stored = before   // not added in memory only: it would be gone at the next restart, with the key it was just given
+            throw error
+        }
+        log.notice("an Apple TV was added (\(viewer.name))")
+        pairing.approve(requestID: request.id, token: token, viewer: viewer.info, now: date)
+        return viewer.info
+    }
+
+    /// What a TV that asks with its `request` and `secret` is told. Values that cannot be ours are `.gone` without a look.
+    public func pairingStatus(request: String, secret: String) -> PairingStatus {
+        guard Self.isLowercaseHex(request, count: 32), Self.isLowercaseHex(secret, count: 64) else { return .gone }
+        let date = now()
+        removeLapsedViewers(date)
+        return pairing.status(request: request, secret: secret, now: date)
+    }
+
+    /// The Apple TVs, the one used last first (one not used yet counts from when it was added).
+    public func viewers() -> [ViewerInfo] {
+        removeLapsedViewers(now())
+        return viewerList.sorted { ($0.lastSeen ?? $0.created) > ($1.lastSeen ?? $1.created) }.map(\.info)
+    }
+
+    /// The Apple TV a key belongs to; nil when there is none, or when the TV went unused for a year (it is removed then). A key is 64
+    /// lowercase hex characters: anything else is refused at once. The use is kept, when and from `address`, and written to the file at
+    /// most hourly, as a session's is.
+    public func viewer(token: String, address: String?) -> ViewerInfo? {
+        guard Self.isLowercaseHex(token, count: 64) else { return nil }
+        let hash = Secrets.sha256Hex(token)
+        guard let index = viewerList.firstIndex(where: { Secrets.constantTimeEqual($0.tokenHash, hash) }) else { return nil }
+        let date = now()
+        if viewerList[index].isIdle(at: date) {
+            removeLapsedViewers(date)
+            return nil
+        }
+        viewerList[index].lastSeen = date
+        if let address { viewerList[index].address = String(address.prefix(64)) }
+        if unsaved || date.timeIntervalSince(lastPersisted) > Self.persistInterval { try? persist() }
+        return viewerList[index].info
+    }
+
+    /// Whether the TV that `ViewerInfo.id` names is still in the list (a live view asks every few seconds).
+    public func isViewerListed(_ id: String) -> Bool {
+        viewerList.contains { $0.id == id }
+    }
+
+    /// Removes the TV that `ViewerInfo.id` names, with the key that was waiting for it if one was. False when there is no such TV.
+    public func removeViewer(id: String) -> Bool {
+        removeLapsedViewers(now())
+        guard let viewer = viewerList.first(where: { $0.id == id }) else { return false }
+        viewerList.removeAll { $0.id == id }
+        pairing.forget(viewerID: id)
+        log.notice("an Apple TV was removed (\(viewer.name))")
+        saveOrRetryLater()
+        return true
+    }
+
+    /// Takes out the TVs nobody can use any more: those an approval added whose key nobody collected (`ViewerPairing.expire` names them),
+    /// and those unused for a year. Every pairing call starts with this.
+    private func removeLapsedViewers(_ date: Date) {
+        var removed = false
+        for id in pairing.expire(now: date) {
+            guard let viewer = viewerList.first(where: { $0.id == id }) else { continue }
+            viewerList.removeAll { $0.id == id }
+            log.notice("an Apple TV whose key was never collected was removed (\(viewer.name))")
+            removed = true
+        }
+        for viewer in viewerList where viewer.isIdle(at: date) {
+            viewerList.removeAll { $0.id == viewer.id }
+            log.notice("an Apple TV unused for a year was removed (\(viewer.name))")
+            removed = true
+        }
+        if removed { saveOrRetryLater() }
+    }
+
+    /// The TVs as the file holds them: `Stored.viewers` is nil in a file from before Apple TVs.
+    private var viewerList: [StoredViewer] {
+        get { stored.viewers ?? [] }
+        set { stored.viewers = newValue }
+    }
+
+    /// Whether `text` is `count` lowercase hex characters, the form of a request, a secret and a key.
+    private static func isLowercaseHex(_ text: String, count: Int) -> Bool {
+        let digits = UInt8(ascii: "0")...UInt8(ascii: "9"), letters = UInt8(ascii: "a")...UInt8(ascii: "f")
+        return text.utf8.count == count && text.utf8.allSatisfy { digits.contains($0) || letters.contains($0) }
+    }
+
     // MARK: Storage
+
+    /// Saves a change that is made in memory already. When the disk will not take it, the change stays and is saved on the next use
+    /// (`createSession` does the same), so the call that noticed it does not fail.
+    private func saveOrRetryLater() {
+        do { try persist() } catch { unsaved = true }
+    }
 
     private func persist() throws {
         guard !damaged else { throw Failure.unreadable }   // kept as it is, for whoever looks at it

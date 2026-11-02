@@ -706,6 +706,8 @@ a.version:hover { color: var(--text); text-decoration: underline; }
 .ai-try-summary { margin: 0 0 2px; font-weight: 600; unicode-bidi: isolate; }   /* the model's words never reorder what is around them */
 .ai-card { scroll-margin-top: 84px; }      /* #/settings/ai scrolls here, below the sticky top bar */
 .ai-card h2:focus { outline: none; }       /* and its heading takes the focus */
+.viewers-card { scroll-margin-top: 84px; }  /* #/pair/<code> scrolls to the Apple TV card (screens/viewers-card.js), below the sticky top bar */
+.viewer-title { overflow-wrap: anywhere; }  /* a TV's name has no spaces to break at, and a long one must not push the card sideways on a phone */
 /* The camera page's AI descriptions card (screens/camera.js createAIDescriptionsCard): what Settings says is missing, and the camera's last
    description with its mark as on the Monitor's events list (red for an alarm, amber for something unusual, none for the routine; "Nothing
    notable" dimmed). */

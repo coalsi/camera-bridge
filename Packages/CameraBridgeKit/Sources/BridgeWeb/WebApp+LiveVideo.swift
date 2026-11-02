@@ -5,8 +5,10 @@ import MediaCore
 import Synchronization
 
 // Live video for the page: `GET /api/v1/live?cameras=<id>,<id>…&stream=sub|main|automatic[&width=<px>][&audio=<id>,…]`. One long response carries
-// every asked camera's live H.264/HEVC as fragmented MP4 (no video transcoding; the cameras named in `audio` also carry their sound as AAC-LC), so a wall of cameras needs one of the browser's ~6 connections to the
-// bridge instead of one each. The page appends the pieces to a Media Source Extensions buffer per camera (linux/web/js/live/mux.js).
+// every asked camera's live H.264/HEVC as fragmented MP4 (no video transcoding; the cameras named in `audio` also carry their sound as AAC-LC, unless
+// the camera's "Camera audio" switch is off), so a wall of cameras needs one of the browser's ~6 connections to the
+// bridge instead of one each. The page appends the pieces to a Media Source Extensions buffer per camera (linux/web/js/live/mux.js). An Apple
+// TV watches through it with its key (`Route.Access.viewer`); a TV removed while it watches loses the stream within `viewerRecheckInterval`.
 //
 // The body is a sequence of messages: a 6-byte header (type: UInt8, camera: UInt8 = its index in `cameras`, length: UInt32 big-endian) and the
 // payload. Types:
@@ -25,6 +27,14 @@ extension WebApp {
     static let maximumLiveCameras = 32
     /// Bytes queued for the browser beyond which a camera skips to its next keyframe (the network is slower than the cameras).
     static let liveBacklogLimit = 24 << 20
+    /// The shortest wait between two looks at whether an Apple TV that watches live is still added. A `WebConfiguration.viewerRecheckInterval`
+    /// below it counts as this long, so a zero or tiny setting cannot turn the look into a loop that never sleeps.
+    static let minimumViewerRecheck = Duration.milliseconds(100)
+
+    /// How long a TV's live view waits between two looks at whether the TV is still added: the configured interval, but at least `minimumViewerRecheck`.
+    static func viewerRecheckWait(_ configured: Duration) -> Duration {
+        max(configured, minimumViewerRecheck)
+    }
 
     static func liveFrame(_ type: LiveMessage, camera: Int, payload: Data) -> Data {
         var out = Data(capacity: payload.count + 6)
@@ -46,21 +56,27 @@ extension WebApp {
         guard !ids.isEmpty, ids.count <= Self.maximumLiveCameras, Set(ids).count == ids.count else {
             throw APIError.badRequest("Name 1 to \(Self.maximumLiveCameras) different cameras in cameras=.", field: "cameras")
         }
-        let known = Set(await backend.overview().configurations.map(\.id))
+        let configurations = await backend.overview().configurations
+        let known = Set(configurations.map(\.id))
         guard ids.allSatisfy(known.contains) else { throw APIError.notFound("There is no camera with this identifier.") }
         let streamText = ctx.request.queryValue("stream") ?? "sub"
         guard let stream = LiveVideoStream(rawValue: streamText) else {
             throw APIError.badRequest("stream must be sub, main or automatic.", field: "stream")
         }
         let width = ctx.request.queryValue("width").flatMap(Int.init).map { min(max($0, 64), 8192) }
-        // Sound costs a converter per camera (G.711 to AAC), so only the cameras the page plays aloud carry it.
-        let audible = Set((ctx.request.queryValue("audio") ?? "").split(separator: ",").compactMap { UUID(uuidString: String($0).trimmingCharacters(in: .whitespaces)) })
+        // Sound costs a converter per camera (G.711 to AAC), so only the cameras the page plays aloud carry it. And never a camera whose "Camera audio"
+        // switch is off, however the request lists it: the page does not ask for those, but an Apple TV's key opens this route too, and the switch is
+        // the owner's word on whether a camera is heard. Such a camera is sent without sound; that is no error.
+        let asked = Set((ctx.request.queryValue("audio") ?? "").split(separator: ",").compactMap { UUID(uuidString: String($0).trimmingCharacters(in: .whitespaces)) })
+        let audible = asked.intersection(configurations.filter(\.audioEnabled).map(\.id))
         guard takeLiveSlot() else {
             throw APIError(status: 429, code: "too_many_streams", message: "Too many live views are open. Close one and try again.", headers: [("Retry-After", "5")])
         }
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
         let backend = backend
+        // An Apple TV's view (its key opened the route): the TV is looked for in the list while it watches.
+        let (auth, viewer, recheck) = (auth, ctx.viewer?.id, Self.viewerRecheckWait(configuration.viewerRecheckInterval))
         let release = ReleaseOnce { [self] in releaseLiveSlot() }
         var answer = HTTPResponse.stream(contentType: "application/octet-stream", headers: headers) { response in
             defer { release() }
@@ -84,6 +100,15 @@ extension WebApp {
                     group.addTask {
                         await Self.pumpLiveCamera(id: id, index: index, stream: stream, width: width, audio: audible.contains(id), backend: backend, send: send,
                                               backlogged: backlogged)
+                    }
+                }
+                // A TV removed while it watches: its key is refused from then on, and its view ends within `viewerRecheckInterval`, as when
+                // the writer stops.
+                if let viewer {
+                    group.addTask {
+                        while !Task.isCancelled, await auth.isViewerListed(viewer) {
+                            try? await Task.sleep(for: recheck)
+                        }
                     }
                 }
                 _ = try await group.next()

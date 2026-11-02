@@ -26,13 +26,13 @@ extension WebApp {
         Route("GET", "cameras/:id") { app, ctx in try await app.getCamera(ctx) },
         Route("PATCH", "cameras/:id", takesBody: true) { app, ctx in try await app.patchCamera(ctx) },
         Route("DELETE", "cameras/:id") { app, ctx in try await app.deleteCamera(ctx) },
-        Route("GET", "cameras/:id/snapshot") { app, ctx in try await app.snapshot(ctx) },
+        Route("GET", "cameras/:id/snapshot", .viewer) { app, ctx in try await app.snapshot(ctx) },
         Route("GET", "cameras/:id/live") { app, ctx in try await app.live(ctx) },
-        Route("GET", "live") { app, ctx in try await app.liveVideo(ctx) },
+        Route("GET", "live", .viewer) { app, ctx in try await app.liveVideo(ctx) },
         Route("POST", "cameras/:id/camera-clock", takesBody: true) { app, ctx in try await app.cameraClock(ctx) },
         Route("POST", "cameras/:id/camera-time-zone", takesBody: true) { app, ctx in try await app.cameraTimeZone(ctx) },
         Route("POST", "cameras/:id/clean-picture", takesBody: true) { app, ctx in try await app.cleanPicture(ctx) },
-        Route("POST", "cameras/:id/pan-tilt", takesBody: true) { app, ctx in try await app.panTilt(ctx) },
+        Route("POST", "cameras/:id/pan-tilt", .viewer, takesBody: true) { app, ctx in try await app.panTilt(ctx) },
         Route("POST", "cameras/:id/night-vision", takesBody: true) { app, ctx in try await app.nightVision(ctx) },
         Route("POST", "cameras/:id/security/check") { app, ctx in try await app.checkSecurity(ctx) },
         Route("POST", "cameras/:id/restart") { app, ctx in try await app.restartCamera(ctx) },
@@ -94,7 +94,7 @@ extension WebApp {
         Route("POST", "system/ssh", takesBody: true) { app, ctx in try await app.systemSSH(ctx) },
         Route("POST", "system/auto-update", takesBody: true) { app, ctx in try await app.systemAutomaticUpdates(ctx) },
         Route("POST", "system/factory-reset", takesBody: true) { app, ctx in try await app.systemFactoryReset(ctx) },
-    ] + archiveRoutes + cameraSetupRoutes + aiRoutes + notificationRoutes + skyRoutes + sessionRoutes + monitorRoutes
+    ] + archiveRoutes + cameraSetupRoutes + aiRoutes + notificationRoutes + skyRoutes + sessionRoutes + monitorRoutes + viewerRoutes
 
     // MARK: Status and session
 
@@ -276,6 +276,7 @@ extension WebApp {
             throw authError(failure)
         }
         log.notice("the administrator password was set")
+        await announcer?.rename(to: await auth.bridgeName)   // the box was found as "Camera Bridge" until it was named
         return try await startSession(status: 201, ctx)
     }
 

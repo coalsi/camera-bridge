@@ -605,8 +605,10 @@ fragment for the index (`CBIndexFragmentRecord`, per-minute `CBIndexRollup`s) an
 `ArchiveMedia` (package access, the browser's view of a recording) reads the init segments and fragments `FMP4Muxer` writes and gives the page video only:
 `mime(forInit:)` (`video/mp4; codecs="avc1.PPCCLL"` or `hvc1.…`, the string `MediaSource.isTypeSupported` wants), `videoInit(_:)` (the init segment without its
 sound track, byte for byte what a muxer without sound writes, or the input itself when there is none; with the picture size and whether sound was dropped) and
-`videoSegment(_:)` (a stored `prft` + `moof` + `mdat` as `moof` + `mdat` with the video samples only). Video is track 1 and sound is track 2; any other layout is
-refused with `ArchiveMedia.Failure.unsupported` or `.malformed`, the only errors it throws. Tests: `ArchiveMedia*Tests` in `BridgeEngineTests`.
+`videoSegment(_:)` (a stored `prft` + `moof` + `mdat` as `moof` + `mdat` with the video samples only). `keyPictureSegment(_:)` cuts a key fragment further, to its first
+picture alone: a `moof` + `mdat` with that one video sample and its `trun` entry as it was (`keyPicture(_:)` also says how long the picture lasts), for
+`GET nvr/cameras/:id/keyframe?picture=1`; a fragment whose first video sample is not a sync sample is `.malformed`. Video is track 1 and sound is track 2; any other
+layout is refused with `ArchiveMedia.Failure.unsupported` or `.malformed`, the only errors it throws. Tests: `ArchiveMedia*Tests` in `BridgeEngineTests`.
 
 The store behind `BridgeEngine.archive` (NVR; `ArchiveStore`, internal): `start` returns at once while the folder is probed, unclosed files are repaired (`IndexScanner`: a
 torn tail is cut, the sidecar rebuilt) and the catalog is loaded from each file's sidecar header and per-minute rollups; `ArchiveReading.isReady` turns true when that is done, so

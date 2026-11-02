@@ -20,7 +20,7 @@ credited if you wish. Please give a reasonable period to fix a problem before yo
 ## Scope
 
 In scope: Camera Bridge OS and the engine in this repository, including the HomeKit Accessory Protocol server (pairing,
-sessions, HomeKit Data Stream), the web interface and its sign-in, camera credential handling, the local webhook server,
+sessions, HomeKit Data Stream), the web interface, its sign-in and the Apple TVs' keys, camera credential handling, the local webhook server,
 the diagnostics export and redaction, the update mechanism and release signing, and the build scripts.
 
 Out of scope: vulnerabilities in cameras or their firmware, in Apple's Home app, hubs or operating systems, in third-party
@@ -39,6 +39,11 @@ box or network that is already compromised, or physical access to the box.
 
 - Camera passwords and the HomeKit pairing keys are kept in the box's encrypted secret store, never in the configuration
   file or logs. Logs and the diagnostics export are redacted (URL user info, password-like parameters).
+- An Apple TV is added only when the signed-in owner types the code it shows, and it is handed its key once. The box keeps only the
+  SHA-256 of the key (256 random bits), with the TV's name, model and when and from where it was last used, so a copy of its files
+  signs nobody in; no administrator password is typed into or kept on a TV. The key only watches (live and recorded video, still
+  pictures, events) and moves cameras that pan and tilt: it changes nothing else on the box. It is sent in a header and never in an
+  address, it stops working after a year unused, and Remove in Settings stops it at once (a live view it has open ends within 5 seconds).
 - Camera Bridge OS sends no telemetry. It talks to the cameras on your network and to the paired Home hub, to GitHub to
   check for updates, to a time server for the clock, to a camera maker's cloud only if you add a cloud camera, and to the AI
   service you choose, only for cameras with AI descriptions on, and only still pictures.

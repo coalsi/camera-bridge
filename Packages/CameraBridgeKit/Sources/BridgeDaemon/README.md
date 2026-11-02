@@ -9,6 +9,8 @@ libsystemd), a journald-friendly log sink (`StdoutLogSink`), the operating syste
 
 ## Additions beyond the contract
 
+Apple TVs (2026-11-02, docs/CONTRACT_CHANGES.md; BridgeWeb README, "Apple TVs"): `Daemon.viewerAdvertiser(options:environment:)` (internal) gives the web interface (`WebConfiguration.viewerAdvertiser`, announced by `BridgeWeb`'s `ViewerAnnouncer` as `_camera-bridge._tcp` on the web port) the platform's advertiser (on Camera Bridge OS, `DNSSDServiceAdvertiser` through avahi) when the run is not `--dev` (with or without `--lan`) and not `--preview` and the environment advertises; on a Mac, and in a development run, nothing is announced, so a development daemon never puts a second "Camera Bridge" on every Apple TV in the house. A developer who wants the app's discovery announces a `--dev --lan` daemon by hand (`camerabridged/README.md`). BridgeDaemon's import graph does not change.
+
 The box's health and the update rollback (2026-10-31, docs/CONTRACT_CHANGES.md): `RequestFileSystemControl` reads `status/disk-health.json` (the drives' daily check) and
 `system.json`'s `clock` and `link` into `SystemInfo.driveHealth`, `SystemInfo.clock` and `SystemInfo.networkLink`, maps `update.json`'s `rolled-back` to `idle` with
 `UpdateStatus.failedVersion`, and takes a check that ends `installed` or `rolled-back` as answered. `RequestFileSystemControl.driveHealthNotices()` makes a warning
@@ -45,6 +47,10 @@ The NVR (2026-10-10, docs/CONTRACT_CHANGES.md): `DaemonOptions.recordingsDirecto
 - Linux: `BridgeEnvironment.linux(dataDirectory:)` (PlatformLinux). `--dev` keeps the engine on loopback and silent.
 - macOS: always `BridgeEnvironment.testing` (loopback, nothing advertised, secrets in memory) with a data directory you name; the
   Mac app's own directories are refused. `--dev` also moves the HomeKit ports to 38100 and up.
+- Apple TVs find the box by `_camera-bridge._tcp`. `Daemon.viewerAdvertiser(options:environment:)` gives the web interface
+  (`WebConfiguration.viewerAdvertiser`, announced by `BridgeWeb`'s `ViewerAnnouncer`) the platform's advertiser on Camera Bridge OS only:
+  `--dev` (with or without `--lan`), `--preview` and a Mac announce nothing. A developer announces a `--dev --lan` daemon by hand
+  (`camerabridged/README.md`).
 
 ## Recordings (the NVR)
 

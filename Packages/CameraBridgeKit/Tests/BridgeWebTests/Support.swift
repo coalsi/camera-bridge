@@ -50,6 +50,8 @@ final class FakeBackend: BridgeBackend {
         /// to the bridge while a write is under way.
         var afterUpdate: (@Sendable (inout State, CameraConfiguration) -> Void)?
         var statusOverrides: [UUID: CameraStatus] = [:]
+        /// Cameras the overview gives no status for (the engine has not reported one yet).
+        var withoutStatus: Set<UUID> = []
         var calls: [String] = []
         /// This machine's IPv4 addresses.
         var localAddresses = ["192.0.2.10"]
@@ -72,6 +74,11 @@ final class FakeBackend: BridgeBackend {
         var security: Result<CameraSecurity, any Error> = .failure(EngineError.cameraNotRunning)
         /// What "Restart the camera now" throws (nil: the camera took it).
         var restartError: (any Error)?
+        /// What moving a camera throws (nil: it moved). A camera can't pan and tilt unless a test says so.
+        var panTiltError: (any Error)? = EngineError.cameraNotRunning
+        /// Every live video subscription asked for, in order: the camera, and whether its sound was asked for with it. The fake has no video to give,
+        /// so each is refused as a camera that is not running (the live stream then says the camera is unavailable).
+        var liveCalls: [(camera: UUID, audio: Bool)] = []
         /// The sky log the Sky Watcher's routes read: every camera's entries (the fake serves them for whatever night it is asked), the log's
         /// conditions, the aim and the learning it reports, and the stills by entry id.
         var skyEntries: [SkyEntry] = []
@@ -117,8 +124,9 @@ final class FakeBackend: BridgeBackend {
 
     func overview() async -> BridgeOverview {
         box.withLock { state in
-            BridgeOverview(state: state.state, cameras: state.configurations.map { status(for: $0, in: state) }, configurations: state.configurations,
-                           sensorsBridge: state.sensorsBridge, localNetworkAccess: .granted, networkNotices: state.notices, settings: state.settings,
+            BridgeOverview(state: state.state, cameras: state.configurations.filter { !state.withoutStatus.contains($0.id) }.map { status(for: $0, in: state) },
+                           configurations: state.configurations, sensorsBridge: state.sensorsBridge, localNetworkAccess: .granted,
+                           networkNotices: state.notices, settings: state.settings,
                            webhookProblem: state.webhookProblem, configurationRecovered: state.configurationRecovery != nil,
                            configurationRestoredPrevious: state.configurationRecovery?.restoredPrevious ?? false,
                            streamingHelperInstalled: state.helperInstalled, nvrStorage: state.nvrStorage)
@@ -278,6 +286,16 @@ final class FakeBackend: BridgeBackend {
     func restartCamera(cameraID: UUID) async throws {
         write { $0.calls.append("restartCamera") }
         if let error = read({ $0.restartError }) { throw error }
+    }
+
+    func panTilt(cameraID: UUID, pan: Double, tilt: Double, zoom: Double) async throws {
+        write { $0.calls.append("panTilt") }
+        if let error = read({ $0.panTiltError }) { throw error }
+    }
+
+    func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
+        write { $0.liveCalls.append((cameraID, audio)) }
+        throw EngineError.cameraNotRunning
     }
 
     func skyNightLog(cameraID: UUID, night: String?, view: SkyLogView) async throws -> SkyNightLog {
@@ -534,5 +552,33 @@ final class Harness: Sendable {
         func stream(_ path: String, headers: [(String, String)] = []) async -> StreamCollector {
             StreamCollector(await harness.raw("GET", path, cookie: cookie, headers: headers))
         }
+    }
+}
+
+extension Harness {
+    /// An Apple TV that was added, and the key it was handed.
+    struct PairedTV: Sendable {
+        /// What the TV sends as `Authorization: Bearer <key>`.
+        var key: String
+        var id: String
+        var name: String
+    }
+
+    /// Adds an Apple TV the way a real one is added: it asks for a code from `address`, the signed-in `owner` types the code, and the TV
+    /// collects its key. `device` is left out of the request when nil.
+    func pairAppleTV(owner: Session, name: String = "Living Room", device: String? = "Apple TV 4K (3rd generation)",
+                     from address: String = "192.0.2.40") async throws -> PairedTV {
+        var body = ["name": name]
+        if let device { body["device"] = device }
+        let asked = await send("POST", "/api/v1/viewers/pair", json: body, from: address)
+        let request = try #require(asked.json["request"] as? String, "the TV should be given a code: \(asked.text)")
+        let secret = try #require(asked.json["secret"] as? String)
+        let code = try #require(asked.json["code"] as? String)
+        let approved = await owner.send("POST", "/api/v1/viewers/approve", json: ["code": code])
+        try #require(approved.status == 201, "the owner should be able to add it: \(approved.text)")
+        let collected = await send("POST", "/api/v1/viewers/pair/status", json: ["request": request, "secret": secret], from: address)
+        let key = try #require(collected.json["token"] as? String, "the TV should be handed its key: \(collected.text)")
+        let viewer = try #require(collected.json["viewer"] as? [String: Any])
+        return PairedTV(key: key, id: try #require(viewer["id"] as? String), name: try #require(viewer["name"] as? String))
     }
 }

@@ -196,6 +196,44 @@ private struct SeededGenerator: RandomNumberGenerator {
         }
     }
 
+    /// The key picture is cut from the same damaged bytes: a prefix or a suffix of a fragment is malformed, and bytes that are changed in any way give a
+    /// `Failure` or a segment of one picture that is itself consistent.
+    @Test func theKeyPictureOfDamagedBytesIsMalformedOrOnePictureThatIsConsistent() throws {
+        let inputs = try Self.makeInputs()
+        func isOnePicture(_ segment: Data) -> Bool {
+            guard ArchiveMediaBytes.isConsistentSegment(segment), let trun = try? ArchiveMediaBytes.trun(in: segment, track: 1) else { return false }
+            return ArchiveMediaBytes.readU32(segment, at: trun.payloadOffset + 4) == 1
+        }
+        for data in [inputs.fragmentWithSound, inputs.fragmentVideoOnly] {
+            for length in 0..<data.count {
+                #expect(throws: ArchiveMedia.Failure.self, "fragment cut to \(length)") { _ = try ArchiveMedia.keyPictureSegment(data.prefix(length)) }
+            }
+            for start in 1..<data.count where start != 32 {
+                #expect(throws: ArchiveMedia.Failure.self, "fragment from \(start)") { _ = try ArchiveMedia.keyPictureSegment(data.suffix(from: start)) }
+            }
+        }
+        var random = SeededGenerator(seed: 0x7A5C_0005)
+        for round in 0..<2_000 {
+            for source in [inputs.fragmentWithSound, inputs.fragmentVideoOnly] {
+                var data = source
+                for _ in 0..<Int.random(in: 1...4, using: &random) {
+                    data[Int.random(in: 0..<data.count, using: &random)] ^= UInt8(1) << UInt8.random(in: 0..<8, using: &random)
+                }
+                settle("key picture round \(round)", { try ArchiveMedia.keyPictureSegment(data) }, check: isOnePicture)
+            }
+        }
+        let headerBytes = try ArchiveMediaBytes.boxes(in: inputs.fragmentWithSound).filter { $0.box.type != "mdat" }.flatMap { entry in
+            (entry.box.offset..<min(entry.box.offset + min(entry.box.size, 48), inputs.fragmentWithSound.count)).map { ($0, entry.path) }
+        }
+        for (offset, path) in headerBytes {
+            for value in [UInt8(0x00), 0x01, 0x7F, 0x80, 0xFF] where inputs.fragmentWithSound[offset] != value {
+                var damaged = inputs.fragmentWithSound
+                damaged[offset] = value
+                settle("\(path) byte \(offset) = \(value)", { try ArchiveMedia.keyPictureSegment(damaged) }, check: isOnePicture)
+            }
+        }
+    }
+
     /// The `Failure` text is for a log: printable ASCII, short, and free of the bytes that were read.
     @Test func failureMessagesArePrintableAndShort() throws {
         let inputs = try Self.makeInputs()

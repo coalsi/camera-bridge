@@ -1,5 +1,8 @@
+import BridgeEngine
+import BridgeSupport
 import Foundation
 import Testing
+import TestSupport
 @testable import BridgeDaemon
 
 /// `--lan` and the hidden `--demo-keyframe-seconds`: the two development flags the NVR's integration runs use. `--dev` alone keeps the web
@@ -51,5 +54,32 @@ import Testing
     @Test func theUsageTextDocumentsLanAndNotTheHiddenFlag() {
         #expect(DaemonOptions.usage.contains("--lan"))
         #expect(!DaemonOptions.usage.contains("demo-keyframe"))
+    }
+
+    /// Apple TVs find the box by `_camera-bridge._tcp`, and only a Camera Bridge OS box announces it: not a development run (`--lan` included, which
+    /// opens the web interface to the network), not the preview, and not a Mac (its environment advertises nothing). Every Apple TV in the house
+    /// would otherwise list a second "Camera Bridge".
+    @Test @MainActor func onlyCameraBridgeOSAnnouncesForAppleTVs() throws {
+        let directory = try TemporaryDirectory(prefix: "cb-flags")
+        defer { directory.remove() }
+        let platform = NullServiceAdvertiser()
+        var environment = BridgeEnvironment.testing(directory: directory.url)
+        environment.platform.advertiser = platform
+        let box = try DaemonOptions.parse(arguments: [])
+        let development = try DaemonOptions.parse(arguments: ["--dev"])
+        let lan = try DaemonOptions.parse(arguments: ["--dev", "--lan"])
+        let preview = try DaemonOptions.parse(arguments: ["--preview"])
+
+        environment.advertise = false   // a Mac, and every test environment
+        for options in [box, development, lan, preview] {
+            #expect(Daemon.viewerAdvertiser(options: options, environment: environment) == nil)
+        }
+
+        environment.advertise = true    // Camera Bridge OS
+        let announced = try #require(Daemon.viewerAdvertiser(options: box, environment: environment), "the box announces")
+        #expect(announced as AnyObject === platform, "through the platform's own advertiser")
+        #expect(Daemon.viewerAdvertiser(options: development, environment: environment) == nil, "--dev announces nothing")
+        #expect(Daemon.viewerAdvertiser(options: lan, environment: environment) == nil, "--dev --lan announces nothing")
+        #expect(Daemon.viewerAdvertiser(options: preview, environment: environment) == nil, "--preview announces nothing")
     }
 }

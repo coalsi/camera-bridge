@@ -702,6 +702,88 @@ PY
         grep -Eq '^check (200|409) ' <<<"$out" && ok "the update check came back (a status or the helper's own sentence)" || no "the update check did not come back"
         ssh_has 'cat /run/camera-bridge/status/update-check.json' '"state": *"(ok|failed)"' && ok "the request reached the root helper (status/update-check.json ends ok or failed)" || no "no status for the update-check request"
         ssh_has 'ls /run/camera-bridge/requests | wc -l' '^0$' && ok "the request folder is empty again (nothing left behind, no temporary files)" || no "request files were left behind"
+        # Apple TVs (docs/linux/ARCHITECTURE.md, "Web API"): a TV asks for a code through the open routes (no cookie, as the app does), the signed-in
+        # owner types the code in lower case with a space for the dash, the TV collects its key once and reads GET viewer with that header alone; the
+        # key opens nothing else and nothing in the address; Remove ends it. The client prints one line per step.
+        cat >"$work/viewer-client.py" <<'PY'
+import http.cookiejar, json, sys, urllib.error, urllib.request
+port, password = sys.argv[1], sys.argv[2]
+base = "http://127.0.0.1:%s" % port
+tv = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # an Apple TV keeps no cookie
+jar = http.cookiejar.CookieJar()
+owner = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(jar))
+def call(opener, method, path, body=None, headers=None):
+    sent = dict(headers or {})
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        sent["Content-Type"] = "application/json"
+    try:
+        with opener.open(urllib.request.Request(base + path, data=data, headers=sent, method=method), timeout=60) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+code, answer = call(tv, "POST", "/api/v1/viewers/pair", {"name": "VM test TV", "device": "Apple TV 4K (VM test)"})
+shown = answer.get("code") or ""
+print("pair", code, shown, answer.get("expiresIn"), answer.get("interval"))
+asking = {"request": answer.get("request"), "secret": answer.get("secret")}
+code, answer = call(tv, "POST", "/api/v1/viewers/pair/status", asking)
+print("waiting", code, answer.get("state"))
+code, answer = call(owner, "POST", "/api/v1/auth/login", {"password": password}, {"Origin": base})
+csrf = answer.get("csrfToken", "")
+owner_headers = {"Origin": base, "X-CSRF-Token": csrf}
+code, answer = call(owner, "POST", "/api/v1/viewers/approve", {"code": shown.lower().replace("-", " ")}, owner_headers)
+added = answer.get("viewer") or {}
+print("approve", code, added.get("name"))
+code, answer = call(tv, "POST", "/api/v1/viewers/pair/status", asking)
+key = answer.get("token") or ""
+print("collect", code, answer.get("state"), len(key))
+code, answer = call(tv, "POST", "/api/v1/viewers/pair/status", asking)
+print("again", code, answer.get("code"))
+code, answer = call(tv, "GET", "/api/v1/viewer", None, {"Authorization": "Bearer " + key})
+bridge = answer.get("bridge") or {}
+print("viewer", code, bridge.get("id"), bridge.get("version"), len(answer.get("cameras") or []))
+code, answer = call(tv, "GET", "/api/v1/settings", None, {"Authorization": "Bearer " + key})
+print("elsewhere", code, answer.get("code"))
+code, answer = call(tv, "GET", "/api/v1/viewer?token=" + key)
+print("inaddress", code, answer.get("field"))
+code, answer = call(owner, "DELETE", "/api/v1/viewers/" + str(added.get("id")), None, owner_headers)
+print("removed", code)
+code, answer = call(tv, "GET", "/api/v1/viewer", None, {"Authorization": "Bearer " + key})
+print("gone", code, answer.get("code"))
+PY
+        vout=$(python3 -I "$work/viewer-client.py" "$http_port" "$pw" 2>&1 || true)
+        echo "$vout" | sed 's/^/        /'
+        grep -Eq '^pair 200 [BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4} 600 2$' <<<"$vout" && ok "an Apple TV asks for a code with no sign-in: 200, eight letters without vowels as XXXX-XXXX, valid for 600 s, asking again every 2 s" || no "the pairing request did not answer as the contract says"
+        grep -q '^waiting 200 waiting$' <<<"$vout" && ok "its question before the owner has typed the code is answered \"waiting\"" || no "the TV's first question was not answered \"waiting\""
+        grep -q '^approve 201 VM test TV$' <<<"$vout" && ok "the signed-in owner types the code (lower case, a space for the dash): 201, the TV is added with the name it sent" || no "the owner could not add the TV with its code"
+        grep -q '^collect 200 approved 64$' <<<"$vout" && grep -q '^again 404 pairing_gone$' <<<"$vout" && ok "the TV collects its key once (64 hex); asking again is 404 pairing_gone" || no "the key was not handed over exactly once"
+        grep -Eq '^viewer 200 [0-9a-f]{32} [0-9][0-9.]* [0-9]+$' <<<"$vout" && ok "GET /api/v1/viewer with only the key answers: the box's identity (32 hex), its version and its cameras" || no "GET /api/v1/viewer did not answer a TV's key"
+        grep -q '^elsewhere 401 unauthorized$' <<<"$vout" && ok "the key opens no other route (GET /api/v1/settings is 401 unauthorized)" || no "a TV's key opened a route it must not"
+        grep -q '^inaddress 400 token$' <<<"$vout" && ok "a key in the address is refused (400, field token)" || no "a key in the address was not refused"
+        grep -q '^removed 204$' <<<"$vout" && grep -q '^gone 401 viewer_key$' <<<"$vout" && ok "Remove (204) ends the key at once: 401 viewer_key" || no "a removed TV's key still worked, or it could not be removed"
+        # The announcement: avahi (asked with systemd's busctl; the image has no avahi-utils) resolves what the daemon registered under the name the
+        # bridge has, and the TXT record carries the identity GET viewer gave. The VM sets no bridge name, so the instance is "Camera Bridge".
+        # (The "--" is needed: without it busctl takes the -1 of "any interface" for an option.)
+        viewer_line=$(grep '^viewer ' <<<"$vout" | head -1 || true)
+        read -r _ _ viewer_id viewer_version _ <<<"$viewer_line" || true
+        resolved=""
+        for ((n = 0; n < 10; n++)); do
+            resolved=$(ssh_run "busctl --json=short call org.freedesktop.Avahi / org.freedesktop.Avahi.Server ResolveService iisssiu -- -1 -1 'Camera Bridge' _camera-bridge._tcp local -1 0" 2>&1 || true)
+            case $resolved in '{"type"'*) break ;; esac
+            sleep 3
+        done
+        announced=$(python3 -I -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)["data"]
+    txt = dict(bytes(entry).decode().partition("=")[::2] for entry in data[9])
+    print(data[8], txt.get("id"), txt.get("name"), txt.get("v"), txt.get("api"))
+except Exception as error:
+    print("unreadable:", error)
+' <<<"$resolved" 2>&1 || true)
+        echo "        avahi: $announced"
+        [ -n "${viewer_id:-}" ] && [ "$announced" = "80 $viewer_id Camera Bridge ${viewer_version:-} 1" ] && ok "avahi resolves _camera-bridge._tcp on port 80 with the id GET viewer gives, name Camera Bridge, v and api=1" || no "avahi does not resolve _camera-bridge._tcp as announced (${announced:-nothing}; ssh said: $(echo "$resolved" | head -c 200))"
         ssh_has 'journalctl -u camerabridged --no-pager -o cat' 'Sandbox|denied|Operation not permitted' && no "the daemon logged a sandbox or permission problem" || ok "no sandbox or permission errors in the daemon's log"
     fi
 fi

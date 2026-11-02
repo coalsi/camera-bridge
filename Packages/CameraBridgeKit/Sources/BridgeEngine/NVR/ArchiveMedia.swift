@@ -3,7 +3,8 @@ import FMP4
 import Foundation
 
 /// MP4 surgery for the browser (addendum L5.2): the video-only view of a file that may also hold sound, and the codec string
-/// `MediaSource.isTypeSupported` wants. Lives in BridgeEngine because BridgeWeb may not import FMP4; `package` access.
+/// `MediaSource.isTypeSupported` wants; and for an Apple TV scrubbing, the first picture of a key fragment alone. Lives in BridgeEngine because BridgeWeb may
+/// not import FMP4; `package` access.
 ///
 /// It reads only what `FMP4Muxer` writes (docs/superpowers/plans/2026-10-10-nvr/T03-archive-media.md): an initialization segment of `ftyp` and `moov`
 /// (`mvhd`, a video `trak` with track id 1, an optional sound `trak` with track id 2, `mvex` with one `trex` per track), and fragments of an optional
@@ -72,41 +73,9 @@ package enum ArchiveMedia {
 
     /// One stored fragment (`prft` + `moof` + `mdat`) as `moof` + `mdat` with the video samples only: no `prft`, no audio `traf`.
     package static func videoSegment(_ fragment: Data) throws -> Data {
-        guard fragment.count <= Int(Int32.max) else { throw malformed("a fragment is under 2 GiB") }
-        let source = Source(fragment)
-        let boxes = try parseBoxes(fragment)
-        let skipped = boxes.first?.type == "prft" ? 1 : 0                  // the prft goes by its box size, whatever it is
-        guard boxes.count == skipped + 2, boxes[skipped].type == "moof", boxes[skipped + 1].type == "mdat" else {
-            throw malformed("a fragment is an optional prft, a moof and an mdat")
-        }
-        let moof = boxes[skipped]
-        let mdat = boxes[skipped + 1]
-
-        var mfhd: MP4Box?
-        var runs: [UInt32: TrackRun] = [:]
-        for child in moof.children {
-            switch child.type {
-            case "mfhd" where mfhd == nil:
-                mfhd = child
-            case "traf":
-                let run = try TrackRun(traf: child, source: source)
-                guard runs[run.trackID] == nil else { throw malformed("a moof has two traf boxes for track \(run.trackID)") }
-                runs[run.trackID] = run
-            default:
-                throw unsupported("a moof holds a '\(child.type)' box the recorder never writes")
-            }
-        }
-        guard let mfhd, let video = runs[videoTrackID] else { throw malformed("a moof needs an mfhd and a video traf") }
-        guard video.sampleCount > 0 else { throw malformed("the video traf has no samples") }
-        guard moof.offset + video.dataOffset == mdat.payloadOffset else { throw unsupported("the video samples do not start the mdat") }
-        let audio = runs[audioTrackID]
-        if let audio {
-            guard audio.dataOffset == video.dataOffset + video.sampleBytes else { throw unsupported("the sound samples do not follow the video samples") }
-        }
-        let sampleBytes = video.sampleBytes + (audio?.sampleBytes ?? 0)
-        guard sampleBytes == mdat.payloadSize else {
-            throw malformed("the samples add up to \(sampleBytes) bytes and the mdat holds \(mdat.payloadSize)")
-        }
+        let stored = try StoredFragment(fragment)
+        let (mfhd, video, audio) = try stored.checkedVideo()
+        let (source, moof, mdat) = (stored.source, stored.moof, stored.mdat)
         guard audio != nil else {
             return fragment.subdata(in: fragment.startIndex + moof.offset..<fragment.endIndex)       // only the prft is dropped
         }
@@ -159,29 +128,10 @@ package enum ArchiveMedia {
 
     /// One stored fragment as `moof` + `mdat` with the sound samples only. nil when the fragment holds no sound.
     package static func soundSegment(_ fragment: Data) throws -> Data? {
-        guard fragment.count <= Int(Int32.max) else { throw malformed("a fragment is under 2 GiB") }
-        let source = Source(fragment)
-        let boxes = try parseBoxes(fragment)
-        let skipped = boxes.first?.type == "prft" ? 1 : 0
-        guard boxes.count == skipped + 2, boxes[skipped].type == "moof", boxes[skipped + 1].type == "mdat" else {
-            throw malformed("a fragment is an optional prft, a moof and an mdat")
-        }
-        let moof = boxes[skipped]
-        let mdat = boxes[skipped + 1]
-        var mfhd: MP4Box?
-        var runs: [UInt32: TrackRun] = [:]
-        for child in moof.children {
-            switch child.type {
-            case "mfhd" where mfhd == nil: mfhd = child
-            case "traf":
-                let run = try TrackRun(traf: child, source: source)
-                guard runs[run.trackID] == nil else { throw malformed("a moof has two traf boxes for track \(run.trackID)") }
-                runs[run.trackID] = run
-            default: throw unsupported("a moof holds a '\(child.type)' box the recorder never writes")
-            }
-        }
-        guard let mfhd else { throw malformed("a moof needs an mfhd") }
-        guard let audio = runs[audioTrackID], audio.sampleCount > 0 else { return nil }
+        let stored = try StoredFragment(fragment)
+        let (source, moof, mdat) = (stored.source, stored.moof, stored.mdat)
+        guard let mfhd = stored.mfhd else { throw malformed("a moof needs an mfhd") }
+        guard let audio = stored.runs[audioTrackID], audio.sampleCount > 0 else { return nil }
         let start = moof.offset + audio.dataOffset
         guard start >= mdat.payloadOffset, start + audio.sampleBytes <= mdat.payloadOffset + mdat.payloadSize else {
             throw malformed("the sound samples lie outside the mdat")
@@ -205,6 +155,62 @@ package enum ArchiveMedia {
         return out.data
     }
 
+    // MARK: - Key picture
+
+    /// The first picture of a key fragment on its own, and how long it lasts.
+    package struct KeyPicture: Sendable, Equatable {
+        /// `moof` + `mdat` with that one video sample.
+        package var segment: Data
+        /// In ticks of the video track (90 kHz in a recording): the picture's end is its start plus this.
+        package var duration: Int64
+    }
+
+    /// One stored fragment that starts with a key picture as `moof` + `mdat` with that picture alone: the video track's first sample, no `prft` and no sound, a `trun` of that
+    /// one entry (its duration, size, flags and composition offset as the run carries them) and the `trun` data offset and the `mdat` size to match. What an Apple TV decodes to
+    /// show a moment while it scrubs: a picture, not 2.5 s of video. `Failure.malformed` when the first video sample is not a sync sample (the caller hands it key fragments
+    /// only), and for everything `videoSegment` refuses.
+    package static func keyPictureSegment(_ fragment: Data) throws -> Data {
+        try keyPicture(fragment).segment
+    }
+
+    /// `keyPictureSegment`, and how long its picture lasts.
+    package static func keyPicture(_ fragment: Data) throws -> KeyPicture {
+        let stored = try StoredFragment(fragment)
+        let (mfhd, video, _) = try stored.checkedVideo()
+        let first = video.first
+        guard first.flags & nonSyncSample == 0 else { throw malformed("the first video sample is not a key picture") }
+
+        let source = stored.source
+        let mfhdBytes = source.bytes(mfhd)
+        let tfhdBytes = source.bytes(video.traf.children[0])               // a traf is a tfhd, a tfdt and one trun (TrackRun)
+        let tfdtBytes = source.bytes(video.traf.children[1])
+        let trunSize = 8 + 12 + (first.compositionOffset == nil ? 12 : 16) // header, version and flags, sample count, data offset, one entry
+        let trafSize = 8 + tfhdBytes.count + tfdtBytes.count + trunSize
+        let moofSize = 8 + mfhdBytes.count + trafSize
+        var out = ByteWriter()
+        out.writeUInt32BE(UInt32(moofSize))
+        out.write(Data("moof".utf8))
+        out.write(mfhdBytes)
+        out.writeUInt32BE(UInt32(trafSize))
+        out.write(Data("traf".utf8))
+        out.write(tfhdBytes)
+        out.write(tfdtBytes)
+        out.writeUInt32BE(UInt32(trunSize))
+        out.write(Data("trun".utf8))
+        out.write(source.payload(video.trun).prefix(4))                    // version and flags as they were
+        out.writeUInt32BE(1)
+        out.writeUInt32BE(UInt32(moofSize + 8))                            // the new mdat starts right after the new moof
+        out.writeUInt32BE(first.duration)
+        out.writeUInt32BE(UInt32(first.size))
+        out.writeUInt32BE(first.flags)
+        if let offset = first.compositionOffset { out.writeUInt32BE(offset) }
+        out.writeUInt32BE(UInt32(8 + first.size))
+        out.write(Data("mdat".utf8))
+        let begin = fragment.startIndex + stored.mdat.payloadOffset
+        out.write(fragment[begin..<begin + first.size])
+        return KeyPicture(segment: out.data, duration: Int64(first.duration))
+    }
+
     // MARK: - The recorder's layout
 
     /// `FMP4Muxer` writes the video track as track 1 and the optional sound track as track 2 (`VideoTrack.trackID`, `AudioTrack.trackID`, internal to FMP4).
@@ -219,6 +225,8 @@ package enum ArchiveMedia {
     private static let trunFlagsWithCompositionOffsets: UInt32 = 0x00_0F01
     /// `tfhd` as the muxer writes it: version 0, flags default-base-is-moof, and the track id.
     private static let tfhdVersionAndFlags: UInt32 = 0x0002_0000
+    /// `sample_is_non_sync_sample`, bit 16 of a sample's flags: clear in a key picture (the muxer writes 0x02000000 for one and 0x01010000 for a delta picture).
+    private static let nonSyncSample: UInt32 = 0x0001_0000
 
     private static func malformed(_ message: String) -> Failure { .malformed(printable(message)) }
     private static func unsupported(_ message: String) -> Failure { .unsupported(printable(message)) }
@@ -416,7 +424,65 @@ package enum ArchiveMedia {
         }
     }
 
-    /// One `traf` of a fragment: its track, where its samples start (from the `moof`) and how many bytes they add up to.
+    /// One stored fragment taken apart: its `moof` and `mdat` (an optional `prft` before them goes by its box size, whatever it is), the `mfhd` and the run of each track.
+    private struct StoredFragment {
+        var source: Source
+        var moof: MP4Box
+        var mdat: MP4Box
+        var mfhd: MP4Box?
+        var runs: [UInt32: TrackRun] = [:]
+
+        init(_ fragment: Data) throws {
+            guard fragment.count <= Int(Int32.max) else { throw malformed("a fragment is under 2 GiB") }
+            source = Source(fragment)
+            let boxes = try parseBoxes(fragment)
+            let skipped = boxes.first?.type == "prft" ? 1 : 0
+            guard boxes.count == skipped + 2, boxes[skipped].type == "moof", boxes[skipped + 1].type == "mdat" else {
+                throw malformed("a fragment is an optional prft, a moof and an mdat")
+            }
+            moof = boxes[skipped]
+            mdat = boxes[skipped + 1]
+            for child in moof.children {
+                switch child.type {
+                case "mfhd" where mfhd == nil:
+                    mfhd = child
+                case "traf":
+                    let run = try TrackRun(traf: child, source: source)
+                    guard runs[run.trackID] == nil else { throw malformed("a moof has two traf boxes for track \(run.trackID)") }
+                    runs[run.trackID] = run
+                default:
+                    throw unsupported("a moof holds a '\(child.type)' box the recorder never writes")
+                }
+            }
+        }
+
+        /// The `mfhd`, the video run and the sound run (if there is one), once the samples are known to lie as the recorder writes them: the video samples start the
+        /// `mdat`, the sound samples follow them, and together they are the `mdat`.
+        func checkedVideo() throws -> (mfhd: MP4Box, video: TrackRun, audio: TrackRun?) {
+            guard let mfhd, let video = runs[videoTrackID] else { throw malformed("a moof needs an mfhd and a video traf") }
+            guard video.sampleCount > 0 else { throw malformed("the video traf has no samples") }
+            guard moof.offset + video.dataOffset == mdat.payloadOffset else { throw unsupported("the video samples do not start the mdat") }
+            let audio = runs[audioTrackID]
+            if let audio {
+                guard audio.dataOffset == video.dataOffset + video.sampleBytes else { throw unsupported("the sound samples do not follow the video samples") }
+            }
+            let sampleBytes = video.sampleBytes + (audio?.sampleBytes ?? 0)
+            guard sampleBytes == mdat.payloadSize else {
+                throw malformed("the samples add up to \(sampleBytes) bytes and the mdat holds \(mdat.payloadSize)")
+            }
+            return (mfhd, video, audio)
+        }
+    }
+
+    /// A `trun` entry: duration, size and flags, then the composition offset when the run has them (`trunFlagsWithCompositionOffsets`).
+    private struct Entry {
+        var duration: UInt32 = 0
+        var size = 0
+        var flags: UInt32 = 0
+        var compositionOffset: UInt32?
+    }
+
+    /// One `traf` of a fragment: its track, where its samples start (from the `moof`), how many bytes they add up to and its first sample's entry.
     private struct TrackRun {
         var traf: MP4Box
         var trun: MP4Box
@@ -424,6 +490,8 @@ package enum ArchiveMedia {
         var sampleCount: Int
         var dataOffset: Int
         var sampleBytes: Int
+        /// The run's first entry as it is written (all zero in a run without samples).
+        var first: Entry
 
         init(traf: MP4Box, source: Source) throws {
             guard traf.children.map(\.type) == ["tfhd", "tfdt", "trun"] else { throw unsupported("a traf is a tfhd, a tfdt and one trun") }
@@ -440,6 +508,7 @@ package enum ArchiveMedia {
             var sampleCount = 0
             var dataOffset = 0
             var sampleBytes = 0
+            var first = Entry()
             try fields(of: trun, in: source) { reader in
                 let versionAndFlags = try reader.readUInt32BE()
                 let version = versionAndFlags >> 24
@@ -453,10 +522,11 @@ package enum ArchiveMedia {
                 guard sampleCount <= reader.remaining / entryLength, sampleCount * entryLength == reader.remaining else {
                     throw malformed("a trun of \(sampleCount) samples does not fit its box")
                 }
-                for _ in 0..<sampleCount {
-                    try reader.skip(4)
-                    sampleBytes += Int(try reader.readUInt32BE())
-                    try reader.skip(entryLength - 8)
+                for index in 0..<sampleCount {
+                    let entry = try Entry(duration: reader.readUInt32BE(), size: Int(reader.readUInt32BE()), flags: reader.readUInt32BE(),
+                                          compositionOffset: entryLength == 16 ? reader.readUInt32BE() : nil)
+                    sampleBytes += entry.size
+                    if index == 0 { first = entry }
                 }
             }
             self.traf = traf
@@ -465,6 +535,7 @@ package enum ArchiveMedia {
             self.sampleCount = sampleCount
             self.dataOffset = dataOffset
             self.sampleBytes = sampleBytes
+            self.first = first
         }
     }
 }

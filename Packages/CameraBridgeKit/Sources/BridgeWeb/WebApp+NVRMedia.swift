@@ -6,6 +6,7 @@ import Foundation
 // The recorded video for the browser's MediaSource: what to fetch for a time (`GET /nvr/cameras/:id/fragments`), the video-only fragments, the init
 // segments and the key pictures (`.../fragments/:fid`, `.../init`, `GET /nvr/cameras/:id/keyframe`). With `?track=sound`, a fragment or init is the
 // recording's sound alone (AAC-LC, `audio/mp4`), for the page's audio element that plays it beside the picture; 204 when that file has no sound.
+// With `?picture=1`, a key picture is the key fragment's first picture alone, for a thumbnail or an Apple TV that scrubs (a picture, not 2.5 s of video).
 
 extension WebApp {
     static let maximumLeadIn = 64
@@ -152,9 +153,10 @@ extension WebApp {
         return (value * 1000).rounded() / 1000
     }
 
-    private func part(_ fragment: ArchiveFragment, anchor: Double) -> PartResource {
+    /// `ticks`: how long the part lasts when that is less than its fragment (a key picture alone).
+    private func part(_ fragment: ArchiveFragment, anchor: Double, ticks: Int64? = nil) -> PartResource {
         // Start and end come from the file's anchor and integer ticks, so consecutive parts of a file abut exactly.
-        let ticks = Int64((fragment.duration * Double(ArchiveConstants.videoTimescale)).rounded())
+        let ticks = ticks ?? Int64((fragment.duration * Double(ArchiveConstants.videoTimescale)).rounded())
         return PartResource(id: fragment.id, file: fragment.fileKey,
                             start: Int64((anchor + Double(fragment.mediaStart) / 90).rounded()),
                             end: Int64((anchor + Double(fragment.mediaStart + ticks) / 90).rounded()),
@@ -218,12 +220,30 @@ extension WebApp {
         }
     }
 
+    /// The first picture of the key fragment `fragment` alone (`moof` + `mdat` of that one sample), and how long it lasts.
+    private func keyPicture(of fragment: ArchiveFragment, archive: any ArchiveReading) async throws -> ArchiveMedia.KeyPicture {
+        do {
+            return try ArchiveMedia.keyPicture(try await archive.read(fragment, .fragment))
+        } catch {
+            throw mediaFailure(error, fileKey: fragment.fileKey)
+        }
+    }
+
     /// `?track=sound`: the sound alone; nothing else is a track this route serves.
     private func wantsSound(_ ctx: RequestContext) throws -> Bool {
         switch ctx.request.queryValue("track") {
         case nil, "video": return false
         case "sound": return true
         default: throw APIError.badRequest("track must be video or sound.", field: "track")
+        }
+    }
+
+    /// `?picture=1`: the key fragment's first picture alone; 0 or nothing is the whole key fragment.
+    private func wantsPicture(_ ctx: RequestContext) throws -> Bool {
+        switch ctx.request.queryValue("picture") {
+        case nil, "0": return false
+        case "1": return true
+        default: throw APIError.badRequest("picture must be 0 or 1.", field: "picture")
         }
     }
 
@@ -281,7 +301,8 @@ extension WebApp {
         }
     }
 
-    /// What the page needs to play the key fragment `GET /keyframe` returns (`X-CB-Part`, ASCII JSON).
+    /// What the page needs to play the key fragment `GET /keyframe` returns, or its first picture with `picture=1` (`X-CB-Part`, ASCII JSON): the same for both,
+    /// except that with the picture alone the part ends where the picture does.
     private struct KeyPart: Encodable {
         var id: String
         var file: String
@@ -298,6 +319,7 @@ extension WebApp {
         try refuseHEAD(ctx)
         let id = try ctx.uuid("id")
         let at = try queryTime("at", in: ctx.request)
+        let pictureOnly = try wantsPicture(ctx)
         return try await withArchiveSlot(ctx) { archive in
             let time = Self.date(milliseconds: at)
             guard let target = await archive.fragment(camera: id, containing: time) else {
@@ -308,8 +330,16 @@ extension WebApp {
             let key = target.backToKey == 0 ? target : try await fragmentOrGone(camera: id, fileKey: target.fileKey, index: target.index - target.backToKey, archive: archive)
             guard key.hasKeyframe else { throw APIError(status: 502, code: "unreadable", message: "This part of the recording can’t be read.") }
             let info = try await fileInfo(for: key, archive: archive)
-            var response = try mp4(try await segment(of: key, archive: archive))
-            let described = part(key, anchor: info.anchor)
+            let described: PartResource
+            var response: HTTPResponse
+            if pictureOnly {
+                let picture = try await keyPicture(of: key, archive: archive)
+                response = try mp4(picture.segment)
+                described = part(key, anchor: info.anchor, ticks: picture.duration)
+            } else {
+                response = try mp4(try await segment(of: key, archive: archive))
+                described = part(key, anchor: info.anchor)
+            }
             let header = KeyPart(id: key.id, file: key.fileKey, start: described.start, end: described.end, mime: info.mime, width: info.width, height: info.height,
                                  anchor: info.anchor, initId: key.id)
             response.headers["X-CB-Part"] = String(decoding: (try? JSONEncoder.iso.encode(header)) ?? Data(), as: UTF8.self)

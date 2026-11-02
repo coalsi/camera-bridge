@@ -52,7 +52,10 @@ import TestSupport
 
     @Test func everyNVRRouteIsListedHere() {
         #expect(WebApp.archiveRoutes.map(name) == expected)
-        #expect(WebApp.archiveRoutes.allSatisfy { $0.access == .session }, "every route needs a session")
+        #expect(WebApp.archiveRoutes.allSatisfy { $0.access != .open }, "every route needs a session")
+        let viewer = ["GET nvr/cameras", "GET nvr/activity", "GET nvr/events", "GET nvr/cameras/:id/fragments", "GET nvr/cameras/:id/fragments/:fid",
+                      "GET nvr/cameras/:id/fragments/:fid/init", "GET nvr/cameras/:id/keyframe"]
+        #expect(WebApp.archiveRoutes.filter { $0.access == .viewer }.map(name) == viewer, "the seven a TV plays recordings with also take its key (ViewerAccessTests)")
         let all = Set(WebApp.routes.map(name))
         #expect(expected.allSatisfy(all.contains), "and every one is in the route table the application serves")
         #expect(WebApp.routes.count == Set(all).count, "no route is listed twice")

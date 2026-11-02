@@ -20,7 +20,8 @@ public enum DaemonInfo {
 
 /// The engine and its web interface in one process: `start()` brings both up, `stop()` shuts both down in order.
 ///
-/// - **Linux** (`BridgeEnvironment.linux`): the real platform services. `--dev` keeps the engine on loopback and silent.
+/// - **Linux** (`BridgeEnvironment.linux`): the real platform services. `--dev` keeps the engine on loopback and silent. Only a run that is neither
+///   `--dev` nor `--preview` announces `_camera-bridge._tcp` for Apple TVs (`viewerAdvertiser`).
 /// - **macOS**: always `BridgeEnvironment.testing` — loopback only, nothing advertised, secrets in memory, a data directory you
 ///   name. A Mac is for developing the interface; the Mac app is the product there, and this never touches its data, its Keychain
 ///   or its ports.
@@ -118,6 +119,7 @@ public final class Daemon {
         configuration.offersDemoCamera = options.offersDemoCamera
         configuration.archiveLocations = recordingsFolder.map { RecordingsFolder.locations(recordings: $0) } ?? []
         archiveLocations = configuration.archiveLocations
+        configuration.viewerAdvertiser = Self.viewerAdvertiser(options: options, environment: bridgeEnvironment)
         let build = DaemonInfo.build(environment: environment)
         configuration.diagnosticsContext = { launched in
             var context = DiagnosticsContext.current(appVersion: DaemonInfo.version, appBuild: build, macModel: HostInfo.hardwareModel(), launched: launched)
@@ -274,6 +276,15 @@ public final class Daemon {
         #else
         throw Failure.cannotPrepare("this platform has no bridge environment yet")
         #endif
+    }
+
+    /// The advertiser that announces the bridge to Apple TVs (`_camera-bridge._tcp`, `WebConfiguration.viewerAdvertiser`): the platform's, on Camera Bridge OS
+    /// only. A development run (`--lan` too, which opens the web interface to the network), the preview and a Mac announce nothing: a second "Camera Bridge"
+    /// would show up on every Apple TV in the house. A Mac's environment advertises nothing anyway; on Linux a development run keeps the real advertiser and
+    /// only turns `advertise` off, and the preview runs on the box's own environment, so both are refused here.
+    static func viewerAdvertiser(options: DaemonOptions, environment: BridgeEnvironment) -> (any ServiceAdvertiser)? {
+        guard !options.development, options.preview == nil, environment.advertise else { return nil }
+        return environment.platform.advertiser
     }
 
     /// Whether a chrony configuration serves time to other machines: an `allow` line, and no `port 0` (which turns the server off).

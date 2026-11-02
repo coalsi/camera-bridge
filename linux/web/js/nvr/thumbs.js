@@ -1,11 +1,15 @@
 // Snapshots of recorded moments for the Events page and the Monitor's events list: the picture at an event's start, from the recording.
 //
-// The bridge has no picture route for a moment in the past, only the recording's key fragment (GET nvr/cameras/:id/keyframe?at=). So the page
-// decodes the first picture of that fragment itself: a <video> that is never put on the page plays the fragment through a MediaSource, one
-// frame is drawn on a canvas, and the picture is kept as a small data: URL (the page's CSP allows img-src data:, not blob:). Nothing is
-// shown as video. Pictures are asked for only when their tile is on screen (IntersectionObserver), at most `concurrency` at a time, and a
-// tile that scrolled away before its turn is dropped from the queue. A moment with no footage, or a browser that cannot decode it, leaves a plain
-// placeholder (data-state "none").
+// The bridge has no picture route for a moment in the past, only the recording's key picture (GET nvr/cameras/:id/keyframe?at=&picture=1: the first
+// picture of the key fragment, alone, as a fragment of one sample). So the page decodes that picture itself: a <video> that is never put on the page
+// plays it through a MediaSource, one frame is drawn on a canvas, and the picture is kept as a small data: URL (the page's CSP allows img-src data:,
+// not blob:). Nothing is shown as video. Pictures are asked for only when their tile is on screen (IntersectionObserver), at most `concurrency` at a
+// time, and a tile that scrolled away before its turn is dropped from the queue. A moment with no footage, or a browser that cannot decode it, leaves
+// a plain placeholder (data-state "none").
+//
+// The picture alone is the lighter ask, but only Chrome is known to decode it. When a browser's decode of one fails or says nothing in DECODE_MS, the
+// picture is asked for the way every browser was asked before: the whole key fragment, decoded as it always was, for that picture at once and for every
+// picture after it for the life of the page. So no thumbnail is worse for the lone picture than it was.
 import { getBytes } from '../api.js';
 import { clear, h } from '../dom.js';
 
@@ -15,6 +19,9 @@ const DECODE_MS = 6000;
 const KEEP = 400;                     // pictures kept in memory (data URLs of 10 to 20 KB)
 const RETRY_MS = 30_000;              // a picture that failed for a passing reason is asked for again after this, if its tile is still on screen
 const TRIES = 3;                      // and after this many failures it is a plain placeholder for good
+
+// Whether pictures are still asked for alone. A browser that fails to decode one clears it, and every picture after that is the whole key fragment.
+let pictureAlone = true;
 
 /** Reads the X-CB-Part header of a keyframe answer: { mime, initId }, or null. */
 function partOf(headers) {
@@ -38,10 +45,20 @@ async function append(buffer, bytes) {
   await finished;
 }
 
-/** Decodes the first picture of a key fragment (`init` + `media`, MP4 bytes of `mime`) to a JPEG data: URL, or null when this browser cannot. */
-export async function decodeFirstFrame({ mime, init, media }) {
+/** Whether this browser can play `mime` through a MediaSource at all. */
+function playable(mime) {
   const Source = globalThis.MediaSource;
-  if (!Source || !Source.isTypeSupported?.(mime)) return null;
+  return Boolean(Source && Source.isTypeSupported?.(mime));
+}
+
+/**
+ * Decodes the first picture of `media` to a JPEG data: URL, or null when this browser cannot. `init` and `media` are MP4 bytes of `mime`: `media` is a
+ * key fragment, or with `alone` its first picture only (a fragment of one sample). Alone, the stream is ended before the seek and the seek lands inside
+ * a picture shorter than 20 ms; a key fragment is decoded exactly as it was before the picture alone was asked for.
+ */
+export async function decodeFirstFrame({ mime, init, media, alone = false }) {
+  if (!playable(mime)) return null;
+  const Source = globalThis.MediaSource;
   const video = document.createElement('video');
   video.muted = true;
   video.preload = 'auto';
@@ -56,8 +73,12 @@ export async function decodeFirstFrame({ mime, init, media }) {
     await append(buffer, init);
     await append(buffer, media);
     if (!buffer.buffered.length) return null;
+    // Nothing more comes. A decoder that holds pictures back (a stream with B-frames) gives up the first picture of a fragment of one only when it is told so.
+    if (alone && source.readyState === 'open') source.endOfStream();
     const ready = once(video, 'seeked', DECODE_MS);
-    video.currentTime = buffer.buffered.start(0) + 0.01;
+    const range = buffer.buffered;
+    // Inside the first picture, which alone may be all there is.
+    video.currentTime = range.start(0) + (alone ? Math.min(0.01, (range.end(0) - range.start(0)) / 2) : 0.01);
     await ready;
     if (!video.videoWidth) return null;
     const canvas = document.createElement('canvas');
@@ -73,15 +94,13 @@ export async function decodeFirstFrame({ mime, init, media }) {
 }
 
 /**
- * The picture of camera `cameraId` at `atMs` as a data: URL; null when there is none (a 404 gap is a plain "no footage", and so is a browser that
- * cannot decode it). A passing failure (busy, the drive slow or away, the network) rejects. `bytes(path)` fetches: the page's request scheduler
- * (nvr/fetcher.js), so the pictures keep to its budget of the browser's connections; getBytes alone by default.
+ * What the bridge answers for the key picture at `atMs`, with the init segment its answer names: { mime, init, media }; null when there is no footage then
+ * (a 404 gap) or the answer does not say what it is. `alone` asks for the first picture only (&picture=1), else the whole key fragment. Other failures reject.
  */
-export async function loadKeyframePicture(cameraId, atMs, { bytes = (path) => getBytes(path, { timeoutMs: 8000 }) } = {}) {
-  const base = `nvr/cameras/${encodeURIComponent(cameraId)}`;
+async function keyAnswer(base, atMs, bytes, alone) {
   let answer;
   try {
-    answer = await bytes(`${base}/keyframe?at=${Math.floor(atMs)}`);
+    answer = await bytes(`${base}/keyframe?at=${Math.floor(atMs)}${alone ? '&picture=1' : ''}`);
   } catch (error) {
     if (error?.status === 404 || error?.code === 'gap') return null;
     throw error;
@@ -89,7 +108,32 @@ export async function loadKeyframePicture(cameraId, atMs, { bytes = (path) => ge
   const part = partOf(answer.headers);
   if (!part) return null;
   const init = await bytes(`${base}/fragments/${encodeURIComponent(part.initId)}/init`);
-  return decodeFirstFrame({ mime: part.mime, init: init.data, media: answer.data });
+  return { mime: part.mime, init: init.data, media: answer.data };
+}
+
+/**
+ * The picture of camera `cameraId` at `atMs` as a data: URL; null when there is none (a 404 gap is a plain "no footage", and so is a browser that
+ * cannot decode it). A passing failure (busy, the drive slow or away, the network) rejects. `bytes(path)` fetches: the page's request scheduler
+ * (nvr/fetcher.js), so the pictures keep to its budget of the browser's connections; getBytes alone by default. `decode` is decodeFirstFrame (a test
+ * gives its own).
+ *
+ * The picture is asked for alone first. If this browser then fails to decode it (the decode throws, or times out, or draws nothing though the browser can
+ * play that codec), the picture is asked for again as the whole key fragment, once, and `pictureAlone` is cleared: the next pictures go straight there. Only
+ * the decode counts. A busy bridge or a lost connection says nothing about the browser and rejects as before, with no second request and nothing remembered.
+ */
+export async function loadKeyframePicture(cameraId, atMs, { bytes = (path) => getBytes(path, { timeoutMs: 8000 }), decode = decodeFirstFrame } = {}) {
+  const base = `nvr/cameras/${encodeURIComponent(cameraId)}`;
+  if (pictureAlone) {
+    const found = await keyAnswer(base, atMs, bytes, true);
+    if (!found) return null;
+    try {
+      const picture = await decode({ ...found, alone: true });
+      if (picture || !playable(found.mime)) return picture;
+    } catch { /* it never answered, or the browser refused the append: the whole fragment, below */ }
+    pictureAlone = false;
+  }
+  const found = await keyAnswer(base, atMs, bytes, false);
+  return found ? decode({ ...found, alone: false }) : null;
 }
 
 /** A loader of pictures through the page's request scheduler (`fetcher`, nvr/fetcher.js): the lowest priority, so a button or a tile goes first. */
