@@ -1,7 +1,7 @@
 // Bridge-wide settings, in sections: General (name, time zone, password, sign out), Video and recording (one label on every camera,
 // recording), Apple Home and other systems (ports, webhook), AI (descriptions of events), Troubleshooting (the log). The appearance is the
-// menu's button. (Sky Watcher's own setup, where the box is and the flight feed, is on its page, #/sky.) Security also has the Apple TV
-// card; #/pair/<code>, the address in an Apple TV's QR code, opens Settings at it (params ['apple-tv', code], see app.js).
+// menu's button. (Sky Watcher's own setup, where the box is and the flight feed, is on its page, #/sky.) Security also has the Apple TV and iPhone
+// card; #/pair/<code>, the address in an Apple TV's or iPhone's QR code, opens Settings at it (params ['apple-tv', code], see app.js).
 import { get, patch, post } from '../api.js';
 import { confirmDialog, h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
@@ -21,13 +21,13 @@ export function renderSettings({ params, setTitle }) {
   let recording = null;   // the Recording card: { el, refresh, destroy }, made once and put back by every draw()
   let kept = null;        // the Kept recordings card under it (nvr/kept.js): { el, refresh, destroy }
   const sessions = createSessionsCard();   // Signed-in browsers: made once (it loads its own list)
-  // The Apple TV card: made once too. An Apple TV added from the #/pair/<code> address leaves that address, so a reload does not fill the code again.
+  // The Apple TV and iPhone card: made once too. A device added from the #/pair/<code> address leaves that address, so a reload does not fill the code again.
   const viewers = createViewersCard({ onApproved: () => { if (location.hash.startsWith('#/pair/')) history.replaceState(null, '', '#/settings'); } });
   let monitorShown = false;               // the monitoring token is shown (Show), across the draws of Settings
   let aiCard = null;      // the AI descriptions card: { el, update }, made once (it keeps what is being typed and Try it's answer)
   let settings = null;
   let destroyed = false;
-  let wanted = params?.[0] ?? null;   // the address #/settings/recording or #/settings/ai scrolls to that card; #/pair/<code> ('apple-tv', the code) to the Apple TV card
+  let wanted = params?.[0] ?? null;   // the address #/settings/recording or #/settings/ai scrolls to that card; #/pair/<code> ('apple-tv', the code) to the Apple TV and iPhone card
 
   async function load() {
     try {
@@ -191,9 +191,9 @@ export function renderSettings({ params, setTitle }) {
   }
 
   /**
-   * Scrolls to the card the address names (Recording, AI descriptions, Apple TV) once, when both it and the other settings are on the page.
+   * Scrolls to the card the address names (Recording, AI descriptions, Apple TV and iPhone) once, when both it and the other settings are on the page.
    * The AI card also waits for the Recording card, which loads on demand above it and would push it down (mountRecording asks again). The
-   * Apple TV card, in Security above the Recording card, is not pushed by it: it gets the code from the address and the keyboard on Add, and
+   * Apple TV and iPhone card, in Security above the Recording card, is not pushed by it: it gets the code from the address and the keyboard on Add, and
    * nothing is added until the owner presses Add.
    */
   function showWanted() {

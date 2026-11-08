@@ -31,4 +31,16 @@ import Testing
         for stored in file.fragments { #expect(try ArchiveMedia.soundSegment(stored) == nil) }
         #expect(ArchiveMedia.soundMime == "audio/mp4; codecs=\"mp4a.40.2\"")
     }
+
+    @Test func aSegmentWithSoundLosesOnlyItsProducerReferenceTime() throws {
+        let frames = ArchiveMediaFixtures.syntheticFrames(capture, count: 100, keyEvery: 25)
+        let file = try ArchiveMediaFixtures.mux(frames, audio: ArchiveMediaFixtures.syntheticAudio(seconds: 4), audioFormat: ArchiveMediaFixtures.aac, cutEvery: 12)
+        for stored in file.fragments {
+            let segment = try ArchiveMedia.segmentWithSound(stored)
+            #expect(stored.suffix(segment.count) == segment, "the stored bytes from the moof on, unchanged")
+            let video = try ArchiveMedia.videoSegment(stored), sound = try ArchiveMedia.soundSegment(stored)
+            #expect(segment.count > video.count || sound == nil)
+        }
+        #expect(throws: ArchiveMedia.Failure.self) { try ArchiveMedia.segmentWithSound(Data(count: 40)) }
+    }
 }

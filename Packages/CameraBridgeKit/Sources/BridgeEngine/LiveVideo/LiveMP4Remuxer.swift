@@ -11,8 +11,9 @@ package struct LiveMP4Remuxer: Sendable {
     package enum Part: Sendable, Equatable {
         /// A new init segment: everything after it belongs to it (a browser starts a new decoder for it).
         case initialization(Data, mime: String, width: Int, height: Int)
-        /// One frame as a `moof` + `mdat`; `keyframe` lets a reader that fell behind skip to the next one.
-        case media(Data, keyframe: Bool)
+        /// One frame as a `moof` + `mdat`; `keyframe` lets a reader that fell behind skip to the next one. `duration` is the frame's own
+        /// duration in 90 kHz ticks (the next frame's decode time minus its own), so a reader can cut segments of a known length.
+        case media(Data, keyframe: Bool, duration: Int64)
     }
 
     private var muxer: FMP4Muxer?
@@ -87,7 +88,8 @@ package struct LiveMP4Remuxer: Sendable {
                                             continuation: !previous.isKeyframe)
             audio.removeFirst(split)
             muxer = current
-            parts.append(.media(data, keyframe: previous.isKeyframe))
+            let duration = end - Self.decodeTime(previous).converted(to: 90_000).value
+            parts.append(.media(data, keyframe: previous.isKeyframe, duration: duration))
             pending = frame
         } catch FMP4Error.emptyFragment {
             pending = frame                     // a frame with nothing to show (only filler or delimiters): skipped

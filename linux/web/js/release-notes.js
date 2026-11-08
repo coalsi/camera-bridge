@@ -15,6 +15,16 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.134',
+    date: '2026-11-08',
+    title: 'Ready for the iPhone and iPad app',
+    items: [
+      'The Apple TV card in Settings › Security is now Apple TV and iPhone. The box is ready for the iPhone and iPad app, which is coming and not out yet: an iPhone or iPad will be added the same way as an Apple TV, by entering the code the app shows. Up to 20 devices in all.',
+      'The box can now give a camera to AirPlay and CarPlay in a form they can play. Video sent that way runs about 7 to 17 seconds behind when the camera sends a key frame every 2 seconds, and further behind with longer key frame intervals. It works on your home network only for now.',
+      'Recorded moments can be played that way too, starting at the nearest clear frame and with the camera’s sound when its switch is on.',
+    ],
+  },
+  {
     version: '0.1.133',
     date: '2026-11-02',
     title: 'Pan, tilt and zoom only for cameras that can',

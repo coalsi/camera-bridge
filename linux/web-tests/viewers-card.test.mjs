@@ -1,6 +1,6 @@
-// Settings › Security › Apple TV (screens/viewers-card.js): the Apple TVs that can watch this bridge, each with when it was added and last
-// used, Remove (asked first) and "Add an Apple TV" with the 8 letters the TV shows; and the address #/pair/<code> in the TV's QR code, which
-// opens Settings at the card with the code filled in and the keyboard on Add, and never adds the TV by itself. In the fake browser, with the
+// Settings › Security › Apple TV and iPhone (screens/viewers-card.js): the Apple TVs that can watch this bridge, each with when it was added and last
+// used, Remove (asked first) and "Add a device" with the 8 letters the device shows; and the address #/pair/<code> in its QR code, which
+// opens Settings at the card with the code filled in and the keyboard on Add, and never adds the device by itself. In the fake browser, with the
 // functions the card calls injected, as for the Signed-in browsers card; the bridge's zone is Phoenix.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
@@ -63,7 +63,7 @@ function watchFocus() {
 test('each Apple TV is its name and model, then when it was added and last used, and from where', async () => {
   assert.equal(viewerTitle(LIVING_ROOM), 'Living Room · Apple TV 4K (3rd generation)');
   assert.equal(viewerTitle(BEDROOM), 'Bedroom', 'no model: the name alone');
-  assert.equal(viewerTitle({ ...BEDROOM, name: '', device: 'Apple TV HD' }), 'Apple TV · Apple TV HD', 'no name: the box says “Apple TV”, and so does the card');
+  assert.equal(viewerTitle({ ...BEDROOM, name: '', device: 'Apple TV HD' }), 'Device · Apple TV HD', 'no name: the box says “Device”, and so does the card');
   assert.equal(plain(viewerUse(LIVING_ROOM, NOW)), 'Added Oct 28, 2026, 2:00 PM · last used 2 min ago from 192.0.2.40', 'in the bridge’s time');
   assert.equal(plain(viewerUse(DEN, NOW)), 'Added Oct 22, 2026, 2:00 PM · last used just now from 192.0.2.41');
   assert.equal(plain(viewerUse(BEDROOM, NOW)), 'Added Oct 30, 2026, 2:00 PM · not used yet');
@@ -78,7 +78,7 @@ test('each Apple TV is its name and model, then when it was added and last used,
   assert.ok(plain(visibleText(rows[0])).includes('Added Oct 28, 2026, 2:00 PM · last used 2 min ago from 192.0.2.40'));
   assert.ok(plain(visibleText(rows[1])).includes('Bedroom'));
   assert.ok(plain(visibleText(rows[1])).includes('Added Oct 30, 2026, 2:00 PM · not used yet'));
-  assert.doesNotMatch(visibleText(card.el), /No Apple TV is added yet/, 'there are some');
+  assert.doesNotMatch(visibleText(card.el), /No device is added yet/, 'there are some');
   assert.equal(byClass(card.el, 'viewer-list')[0].hidden, false);
   assert.ok(plain(visibleText(card.el)).includes('Living Room · Apple TV 4K (3rd generation)'), 'the list itself is shown, not only its rows');
   card.destroy();
@@ -87,13 +87,13 @@ test('each Apple TV is its name and model, then when it was added and last used,
 test('the card says what an Apple TV can do, that none is added yet, and asks for the 8 letters the TV shows', async () => {
   const card = createViewersCard({ load: async () => ({ viewers: [] }), now: () => NOW });
   await settle();
-  assert.equal(all(card.el, (node) => node.localName === 'h2')[0].textContent, 'Apple TV');
+  assert.equal(all(card.el, (node) => node.localName === 'h2')[0].textContent, 'Apple TV and iPhone');
   const text = visibleText(card.el);
-  assert.ok(text.includes('Apple TVs with the Camera Bridge app. Each one can watch your cameras, live and recorded, and move cameras that pan and tilt. It can’t change anything else, and it never needs the password.'), text);
-  assert.ok(text.includes('No Apple TV is added yet.'), text);
+  assert.ok(text.includes('Apple TVs with the Camera Bridge app, and soon iPhones and iPads. Each one can watch your cameras, live and recorded, and move cameras that pan and tilt. It can’t change anything else, and it never needs the password.'), text);
+  assert.ok(text.includes('No device is added yet.'), text);
   assert.equal(byClass(card.el, 'viewer-list')[0].hidden, true, 'no empty list is left standing above it');
-  assert.ok(text.includes('Add an Apple TV'), text);
-  assert.ok(text.includes('Open Camera Bridge on the Apple TV and enter the code it shows.'), text);
+  assert.ok(text.includes('Add a device'), text);
+  assert.ok(text.includes('Open Camera Bridge on the device and enter the code it shows.'), text);
   const input = inputOf(card.el);
   assert.equal(input.getAttribute('placeholder'), 'BCDF-GHJK');
   assert.equal(input.getAttribute('autocomplete'), 'off');
@@ -107,21 +107,21 @@ test('the list is not called empty before it is read, or when it could not be re
   let release;
   const waiting = createViewersCard({ load: () => new Promise((resolve) => { release = resolve; }), now: () => NOW });
   await settle();
-  assert.doesNotMatch(visibleText(waiting.el), /No Apple TV is added yet/, 'still reading');
+  assert.doesNotMatch(visibleText(waiting.el), /No device is added yet/, 'still reading');
   release({ viewers: [] });
   await settle();
-  assert.match(visibleText(waiting.el), /No Apple TV is added yet/);
+  assert.match(visibleText(waiting.el), /No device is added yet/);
   waiting.destroy();
 
   const broken = createViewersCard({ load: async () => { throw refusal(0, 'network', 'The bridge didn’t answer. Check that it is on and that this device is on the same network.'); }, now: () => NOW });
   await settle();
   assert.equal(problemOf(broken), 'The bridge didn’t answer. Check that it is on and that this device is on the same network.', 'the bridge’s words');
-  assert.doesNotMatch(visibleText(broken.el), /No Apple TV is added yet/, 'it may have some: it could not say');
+  assert.doesNotMatch(visibleText(broken.el), /No device is added yet/, 'it may have some: it could not say');
   broken.destroy();
 
   const silent = createViewersCard({ load: async () => { throw new Error(''); }, now: () => NOW });
   await settle();
-  assert.equal(problemOf(silent), 'The Apple TVs can’t be read right now.', 'ours when it has none');
+  assert.equal(problemOf(silent), 'The devices can’t be read right now.', 'ours when it has none');
   silent.destroy();
 
   let failing = true;
@@ -174,7 +174,7 @@ test('Add sends the code, says the TV can watch, and lists it; a code the bridge
     load: async () => { loads += 1; return { viewers: list }; },
     approve: async (code) => {
       sent.push(code);
-      if (code !== 'BCDF-GHJK') throw refusal(404, 'no_such_code', 'No Apple TV is waiting with this code. Check the code on the TV: it shows a new one every 10 minutes.');
+      if (code !== 'BCDF-GHJK') throw refusal(404, 'no_such_code', 'No device is waiting with this code. Check the code on the device: it shows a new one every 10 minutes.');
       list = [LIVING_ROOM, ...list];
       return { viewer: LIVING_ROOM };
     },
@@ -189,7 +189,7 @@ test('Add sends the code, says the TV can watch, and lists it; a code the bridge
   submit(card.el);
   await settle();
   assert.deepEqual(sent, ['BCDF-GHJL'], 'typed in lower case with a space, sent as ABCD-EFGH');
-  assert.equal(problemOf(card), 'No Apple TV is waiting with this code. Check the code on the TV: it shows a new one every 10 minutes.', 'the bridge’s words, on the card');
+  assert.equal(problemOf(card), 'No device is waiting with this code. Check the code on the device: it shows a new one every 10 minutes.', 'the bridge’s words, on the card');
   assert.deepEqual(rowIDs(card), ['v2'], 'the list is as it was');
   assert.equal(loads, 1, 'and not read again');
   assert.equal(inputOf(card.el).value, 'bcdf ghjl', 'the code stays in the field to be put right');
@@ -212,7 +212,7 @@ test('Add sends the code, says the TV can watch, and lists it; a code the bridge
   submit(card.el);
   await settle();
   assert.equal(said(), '', 'what was said of the last one does not stand beside the next refusal');
-  assert.match(problemOf(card), /^No Apple TV is waiting/);
+  assert.match(problemOf(card), /^No device is waiting/);
   card.destroy();
 });
 
@@ -246,7 +246,7 @@ test('Add without 8 letters asks for them and sends nothing', async () => {
     typeCode(card.el, typed);
     submit(card.el);
     await settle();
-    assert.equal(problemOf(card), 'Enter the 8 letters the Apple TV shows.', JSON.stringify(typed));
+    assert.equal(problemOf(card), 'Enter the 8 letters the device shows.', JSON.stringify(typed));
   }
   assert.deepEqual(sent, []);
   typeCode(card.el, 'bcdfghjk');
@@ -275,9 +275,9 @@ test('a second press while the first is still out sends nothing more, and every 
   assert.equal(named(card.el, 'Add')[0].getAttribute('aria-disabled'), null);
 
   const messages = [
-    [refusal(409, 'too_many_viewers', '20 Apple TVs are added already. Remove one you no longer use, then try again.'), '20 Apple TVs are added already. Remove one you no longer use, then try again.'],
-    [refusal(500, 'storage', 'The Apple TV couldn’t be saved. The disk may be full or read-only.'), 'The Apple TV couldn’t be saved. The disk may be full or read-only.'],
-    [new Error(''), 'That Apple TV couldn’t be added.'],
+    [refusal(409, 'too_many_viewers', '20 devices are added already. Remove one you no longer use, then try again.'), '20 devices are added already. Remove one you no longer use, then try again.'],
+    [refusal(500, 'storage', 'The device couldn’t be saved. The disk may be full or read-only.'), 'The device couldn’t be saved. The disk may be full or read-only.'],
+    [new Error(''), 'That device couldn’t be added.'],
   ];
   for (const [error, said] of messages) {
     next = () => Promise.reject(error);
@@ -305,7 +305,7 @@ test('fill puts the code in the field as ABCD-EFGH and the keyboard on Add, and 
     assert.equal(watch.focused.length, 1);
     assert.equal(watch.focused[0], named(card.el, 'Add')[0], 'the keyboard is on Add');
     await settle();
-    assert.deepEqual(sent, [], 'a link alone must not add someone’s Apple TV');
+    assert.deepEqual(sent, [], 'a link alone must not add someone’s device');
   } finally {
     watch.restore();
     card.destroy();
@@ -351,12 +351,12 @@ test('Remove asks first: No sends nothing, Remove takes the TV off the list', as
   assert.equal(questions.at(-1).title, 'Remove Bedroom?');
   assert.equal(questions.at(-1).body, 'Bedroom. It stops showing your cameras at once and needs a new code to come back.', 'no model: the name alone');
   assert.deepEqual(rowIDs(card), []);
-  assert.match(visibleText(card.el), /No Apple TV is added yet/, 'the last one is gone');
+  assert.match(visibleText(card.el), /No device is added yet/, 'the last one is gone');
   card.destroy();
 });
 
 test('a TV the bridge no longer has counts as removed; any other refusal is said and the TV stays', async () => {
-  let failure = refusal(404, 'not_found', 'That Apple TV isn’t added any more.');
+  let failure = refusal(404, 'not_found', 'That device isn’t added any more.');
   let loads = 0;
   const card = createViewersCard({
     load: async () => { loads += 1; return { viewers: loads === 1 ? [LIVING_ROOM, BEDROOM] : [BEDROOM] }; },
@@ -379,7 +379,7 @@ test('a TV the bridge no longer has counts as removed; any other refusal is said
   failure = new Error('');
   named(byClass(card.el, 'viewer-item')[0], 'Remove')[0].click();
   await settle();
-  assert.equal(problemOf(card), 'That Apple TV couldn’t be removed.');
+  assert.equal(problemOf(card), 'That device couldn’t be removed.');
   card.destroy();
 });
 
@@ -481,12 +481,12 @@ test('Settings opened from #/pair/<code> shows the card with the code filled in 
     assert.ok(card, 'the Apple TV card is in Settings');
     assert.equal(scrolled.length, 1, 'scrolled to once');
     assert.equal(scrolled[0], card, 'to the Apple TV card');
-    assert.equal(all(card, (node) => node.localName === 'h2')[0].textContent, 'Apple TV');
+    assert.equal(all(card, (node) => node.localName === 'h2')[0].textContent, 'Apple TV and iPhone');
     assert.equal(inputOf(card).value, 'BCDF-GHJK', 'the code from the address, as the TV shows it');
     assert.ok(focused.includes(named(card, 'Add')[0]), 'the keyboard is on Add');
     assert.deepEqual(rowIDs({ el: card }), ['v1'], 'the Apple TVs already added are there');
     assert.ok(requests.includes('GET viewers'));
-    assert.deepEqual(requests.filter((request) => request.startsWith('POST')), [], 'nothing was approved: a link alone must not add someone’s Apple TV');
+    assert.deepEqual(requests.filter((request) => request.startsWith('POST')), [], 'nothing was approved: a link alone must not add someone’s device');
   });
 });
 
@@ -496,7 +496,7 @@ test('Settings opened without a code has the card, and moves nothing', async () 
     assert.equal(fieldText(card), '');
     assert.deepEqual(scrolled, []);
     assert.deepEqual(focused, []);
-    assert.match(visibleText(card), /No Apple TV is added yet/);
+    assert.match(visibleText(card), /No device is added yet/);
   });
 });
 

@@ -288,8 +288,8 @@ public actor AuthStore {
     static let maximumViewers = 20
     /// A TV's key stops working after this long unused.
     static let viewerIdleLifetime: TimeInterval = 365 * 86_400
-    /// What a TV is called when it did not say.
-    static let defaultViewerName = "Apple TV"
+    /// What a device (an Apple TV, an iPhone) is called when it did not say.
+    static let defaultViewerName = "Device"
 
     /// A signed-in browser.
     public struct Session: Sendable, Equatable {
@@ -483,6 +483,12 @@ public actor AuthStore {
         stored.sessions[index].lastSeen = date
         if unsaved || date.timeIntervalSince(lastPersisted) > Self.persistInterval { try? persist() }
         return Session(id: id, csrfToken: Secrets.csrfToken(forSessionToken: token))
+    }
+
+    /// Whether the session `Session.id` names is still signed in (not signed out, removed from the list or expired).
+    public func isSessionListed(_ id: String) -> Bool {
+        pruneSessions(now())
+        return stored.sessions.contains { Secrets.constantTimeEqual($0.id, id) }
     }
 
     public func endSession(token: String) {

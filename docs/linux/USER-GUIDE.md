@@ -302,6 +302,14 @@ While a camera's switch is on and the service is not on your home network (Claud
 
 Sentences already written stay with their events and go when the recordings' rules delete those days (**Keep for** and **Maximum size**, section 11).
 
+## 13. iPhone, iPad and CarPlay
+
+The Camera Bridge app for iPhone and iPad is coming and is not available yet, so nothing here can be tried on a phone today. When it is, it will watch the same cameras as the Apple TV app, live and recorded, and pair the same way: open the app on the phone, and it shows an 8-letter code (and a button that opens this page on the phone). In the web page, go to **Settings › Security › Apple TV and iPhone**, type the code into **Add a device**, and press **Add**. The phone never needs your password. **Remove** on the same card stops a device at once. Up to 20 devices can be added in all, Apple TVs and phones together.
+
+* **Home network only, for now.** The phone finds the box and plays video only while it is on your home network. Watching from away from home is not supported yet.
+* **AirPlay and CarPlay play a little behind.** The phone's own screen shows live video under a second behind. Sending it to a TV by AirPlay, or to a car screen, goes through a different kind of stream (called HLS) that runs about 7 to 17 seconds behind and takes about 7 seconds to start when the camera sends a key frame every 2 seconds. A camera with longer key frame intervals is slower: about 14 to 16 seconds to start at 4 seconds, and about 32 seconds at 10 seconds, with the delay growing the same way.
+* **CarPlay needs Apple's approval and a car that supports CarPlay video.** Apple has to approve the app for CarPlay, and few cars show video from a phone at all. No car is known to work yet, so treat CarPlay as something that may come, not something to count on.
+
 ## Troubleshooting
 
 | Problem | What to try |
@@ -331,7 +339,7 @@ Sentences already written stay with their events and go when the recordings' rul
 * No Wi-Fi setup (wired only).
 * No Secure Boot, no disk encryption (the secrets file on the data partition is protected by file permissions, not by a TPM yet).
 * Only amd64 mini PCs; Raspberry Pi 5 is planned.
-* The box is for your local network only. Do not forward ports to it from the internet. Apple Home reaches it through your home hub.
+* The box is for your local network only. Do not forward ports to it from the internet. The iPhone, iPad and CarPlay apps, and the HLS streams they use, work on the home network only for now. Apple Home reaches it through your home hub.
 * Recordings go only to the box's own storage. Recording to a separate USB drive comes in a later version.
 * The page does not play recorded sound yet (it is stored when Record sound is on).
 * No motion or person markers on the timeline: the wave shows how much was going on, not what.

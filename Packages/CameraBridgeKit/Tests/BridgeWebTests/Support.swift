@@ -76,9 +76,11 @@ final class FakeBackend: BridgeBackend {
         var restartError: (any Error)?
         /// What moving a camera throws (nil: it moved). A camera can't pan and tilt unless a test says so.
         var panTiltError: (any Error)? = EngineError.cameraNotRunning
-        /// Every live video subscription asked for, in order: the camera, and whether its sound was asked for with it. The fake has no video to give,
-        /// so each is refused as a camera that is not running (the live stream then says the camera is unavailable).
+        /// Every live video subscription asked for, in order: the camera, and whether its sound was asked for with it. Unless `liveAnswer` is set the
+        /// fake has no video to give, so each is refused as a camera that is not running (the live stream then says the camera is unavailable).
         var liveCalls: [(camera: UUID, audio: Bool)] = []
+        /// What `liveVideo` answers, for a test with frames to give.
+        var liveAnswer: (@Sendable (_ camera: UUID, _ stream: LiveVideoStream, _ audio: Bool) throws -> LiveVideoSubscription)?
         /// The sky log the Sky Watcher's routes read: every camera's entries (the fake serves them for whatever night it is asked), the log's
         /// conditions, the aim and the learning it reports, and the stills by entry id.
         var skyEntries: [SkyEntry] = []
@@ -295,6 +297,7 @@ final class FakeBackend: BridgeBackend {
 
     func liveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
         write { $0.liveCalls.append((cameraID, audio)) }
+        if let answer = read({ $0.liveAnswer }) { return try answer(cameraID, stream, audio) }
         throw EngineError.cameraNotRunning
     }
 

@@ -100,6 +100,14 @@ package enum ArchiveMedia {
         return out.data
     }
 
+    /// One stored fragment as `moof` + `mdat` with whatever it holds, sound included: only the `prft` is dropped. For a player that is given the whole
+    /// recording, picture and sound in one file (HLS); the fragment is checked as `videoSegment` checks it.
+    package static func segmentWithSound(_ fragment: Data) throws -> Data {
+        let stored = try StoredFragment(fragment)
+        _ = try stored.checkedVideo()
+        return fragment.subdata(in: fragment.startIndex + stored.moof.offset..<fragment.endIndex)
+    }
+
     // MARK: - Sound only
 
     /// The mime of the sound track: the recorder writes AAC-LC only.

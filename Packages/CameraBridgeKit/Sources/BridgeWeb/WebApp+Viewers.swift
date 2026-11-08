@@ -150,13 +150,13 @@ extension WebApp {
     func pairingError(_ failure: AuthStore.PairingFailure) -> APIError {
         switch failure {
         case .busy(let seconds):
-            APIError(status: 429, code: "too_many_pairings", message: "Too many Apple TVs are asking for a code right now. Try again in a few minutes.",
+            APIError(status: 429, code: "too_many_pairings", message: "Too many devices are asking for a code right now. Try again in a few minutes.",
                      headers: [("Retry-After", String(seconds))])
         case .noSuchCode:
             APIError(status: 404, code: "no_such_code",
-                     message: "No Apple TV is waiting with this code. Check the code on the TV: it shows a new one every 10 minutes.")
+                     message: "No device is waiting with this code. Check the code on the device: it shows a new one every 10 minutes.")
         case .tooManyViewers:
-            .conflict("too_many_viewers", "\(AuthStore.maximumViewers) Apple TVs are added already. Remove one you no longer use, then try again.")
+            .conflict("too_many_viewers", "\(AuthStore.maximumViewers) devices are added already. Remove one you no longer use, then try again.")
         }
     }
 
@@ -202,7 +202,7 @@ extension WebApp {
         } catch let failure as AuthStore.PairingFailure {
             throw pairingError(failure)
         } catch AuthStore.Failure.storageFailed {
-            throw APIError(status: 500, code: "storage", message: "The Apple TV couldn’t be saved. The disk may be full or read-only.")
+            throw APIError(status: 500, code: "storage", message: "The device couldn’t be saved. The disk may be full or read-only.")
         } catch AuthStore.Failure.unreadable {
             throw Self.authUnreadable
         }
@@ -215,7 +215,7 @@ extension WebApp {
 
     func removeViewer(_ ctx: RequestContext) async throws -> HTTPResponse {
         guard let id = ctx.params["id"], !id.isEmpty, id.utf8.count <= 64, await auth.removeViewer(id: id) else {
-            throw APIError.notFound("That Apple TV isn’t added any more.")
+            throw APIError.notFound("That device isn’t added any more.")
         }
         return .empty()
     }

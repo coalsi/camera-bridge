@@ -87,7 +87,7 @@ const ROUTES = [
   { pattern: /^nvr(?:\/(\d{12,13}))?(?:\?(.*))?$/, title: 'NVR', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^monitor$/, title: 'Monitor', page: 'monitor', render: lazy(() => import('./screens/nvr.js'), 'renderNVR') },
   { pattern: /^pair\/sensors$/, title: 'Sensors bridge', render: renderSensorsPairing },
-  // #/pair/<code> is the address in the QR code an Apple TV shows: Settings at the Apple TV card, the code filled in. It adds nothing by itself.
+  // #/pair/<code> is the address in the QR code an Apple TV or iPhone shows (the iPhone's approve button opens it in Safari): Settings at the Apple TV and iPhone card, the code filled in. It adds nothing by itself.
   { pattern: PAIR_ROUTE, title: 'Settings', render: (context) => renderSettings({ ...context, params: ['apple-tv', context.params[0]] }) },
   { pattern: /^logs$/, title: 'Log', render: renderLogs },
   { pattern: /^system$/, title: 'System', render: renderSystem },

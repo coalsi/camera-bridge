@@ -36,13 +36,25 @@ import Testing
         #expect(mime.hasPrefix("video/mp4; codecs=\"avc1.64001e"))
         #expect(width > 0 && height > 0 && data.count > 100)
         let second = try remuxer.push(Self.frame(2, key: false))
-        guard case .media(let keyframeData, keyframe: true)? = second.first, second.count == 1 else {
+        guard case .media(let keyframeData, keyframe: true, _)? = second.first, second.count == 1 else {
             Issue.record("the keyframe's fragment comes once the next frame arrived: \(second)")
             return
         }
         #expect(keyframeData.count > 8)
         let third = try remuxer.push(Self.frame(3, key: false))
-        guard case .media(_, keyframe: false)? = third.first else { Issue.record("then deltas: \(third)"); return }
+        guard case .media(_, keyframe: false, _)? = third.first else { Issue.record("then deltas: \(third)"); return }
+    }
+
+    @Test func mediaPartsCarryTheirFrameDuration() throws {
+        var remuxer = LiveMP4Remuxer()
+        _ = try remuxer.push(Self.frame(0, key: true))
+        var durations: [Int64] = []
+        for index in 1...4 {
+            for part in try remuxer.push(Self.frame(Int64(index), key: false)) {
+                if case .media(_, _, let duration) = part { durations.append(duration) }
+            }
+        }
+        #expect(durations == [3000, 3000, 3000, 3000])
     }
 
     @Test func timingThatRestartsBeginsANewInitAtTheKeyframe() throws {
@@ -85,7 +97,7 @@ import Testing
         #expect(mime.hasSuffix(",mp4a.40.2\""))
         for index in Int64(6)...Int64(9) { remuxer.push(audio: Self.sound(index)) }
         let next = try remuxer.push(Self.frame(5, key: false))
-        guard case .media(let data, keyframe: true)? = next.first else { Issue.record("the keyframe's fragment: \(next)"); return }
+        guard case .media(let data, keyframe: true, _)? = next.first else { Issue.record("the keyframe's fragment: \(next)"); return }
         #expect(data.count > 40, "video and the sound before the next frame")
         // Without audio asked for, sound is ignored.
         var silent = LiveMP4Remuxer()

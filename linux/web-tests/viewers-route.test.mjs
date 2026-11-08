@@ -84,7 +84,7 @@ test('#/pair/sensors is still the sensors bridge’s page, and the menu marks Ca
   assert.ok(headings().includes('Sensors bridge'), headings().join('|'));
   assert.match(browser.document.title, /^Sensors bridge · Dev Bridge$/);
   assert.ok(requests.includes('GET sensors-bridge'), 'its pairing panel asked for the setup code');
-  assert.ok(!headings().includes('Apple TV'));
+  assert.ok(!headings().includes('Apple TV and iPhone'));
 });
 
 test('#/pair/<code> opens Settings, the menu marks Settings, and the card has the code in its field', async () => {
@@ -94,7 +94,7 @@ test('#/pair/<code> opens Settings, the menu marks Settings, and the card has th
   assert.deepEqual(marked(), ['Settings']);
   assert.match(browser.document.title, /^Settings · Dev Bridge$/);
   assert.ok(headings().includes('Settings'), headings().join('|'));
-  assert.ok(headings().includes('Apple TV'), 'the Apple TV card is in Settings');
+  assert.ok(headings().includes('Apple TV and iPhone'), 'the Apple TV card is in Settings');
   assert.equal(cardInput().value, 'BCDF-GHJK');
   assert.equal(scrolled.length, 1, 'Settings was scrolled to the card');
   assert.ok(scrolled[0].classList.contains('viewers-card'));

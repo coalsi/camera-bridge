@@ -36,6 +36,10 @@ extension WebApp {
         max(configured, minimumViewerRecheck)
     }
 
+    /// Every live slot is taken.
+    static let tooManyLiveViews = APIError(status: 429, code: "too_many_streams", message: "Too many live views are open. Close one and try again.",
+                                           headers: [("Retry-After", "5")])
+
     static func liveFrame(_ type: LiveMessage, camera: Int, payload: Data) -> Data {
         var out = Data(capacity: payload.count + 6)
         out.append(type.rawValue)
@@ -69,9 +73,7 @@ extension WebApp {
         // the owner's word on whether a camera is heard. Such a camera is sent without sound; that is no error.
         let asked = Set((ctx.request.queryValue("audio") ?? "").split(separator: ",").compactMap { UUID(uuidString: String($0).trimmingCharacters(in: .whitespaces)) })
         let audible = asked.intersection(configurations.filter(\.audioEnabled).map(\.id))
-        guard takeLiveSlot() else {
-            throw APIError(status: 429, code: "too_many_streams", message: "Too many live views are open. Close one and try again.", headers: [("Retry-After", "5")])
-        }
+        guard takeLiveSlot() else { throw Self.tooManyLiveViews }
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
         let backend = backend
@@ -120,9 +122,38 @@ extension WebApp {
         return answer
     }
 
-    /// One camera of a live request, until the request ends: subscribes, remuxes and sends; says when there is no picture and tries again.
+    /// What one camera's live loop hands on: `GET live` frames it as messages, the HLS packager cuts segments from its parts.
+    enum LiveCameraOutput: Sendable {
+        /// A piece of the video, and the stream it was actually read from.
+        case part(LiveMP4Remuxer.Part, stream: LiveVideoStream)
+        /// The camera cannot be read for now. Said once; the loop keeps trying.
+        case unavailable(message: String)
+        /// The subscription ended (the camera restarted or was reconfigured); the loop subscribes again.
+        case reconnecting
+    }
+
+    /// One camera of a live request, until the request ends, as the messages of `GET live`.
     static func pumpLiveCamera(id: UUID, index: Int, stream: LiveVideoStream, width: Int?, audio: Bool = false, backend: any BridgeBackend,
                                send: @escaping @Sendable (Data) -> Void, backlogged: @escaping @Sendable () -> Bool) async {
+        await pumpLiveCamera(id: id, stream: stream, width: width, audio: audio, backend: backend, backlogged: backlogged) { output in
+            switch output {
+            case .part(.initialization(let data, let mime, let width, let height), let stream):
+                send(liveFrame(.meta, camera: index, payload: liveJSON(["mime": mime, "width": width, "height": height, "stream": stream.rawValue])))
+                send(liveFrame(.initialization, camera: index, payload: data))
+            case .part(.media(let data, let keyframe, _), _):
+                send(liveFrame(keyframe ? .keyframe : .delta, camera: index, payload: data))
+            case .unavailable(let message):
+                send(liveFrame(.status, camera: index, payload: liveJSON(["state": "unavailable", "message": message])))
+            case .reconnecting:
+                send(liveFrame(.status, camera: index, payload: liveJSON(["state": "waiting", "message": "Reconnecting to the camera…"])))
+            }
+        }
+    }
+
+    /// One camera's live loop, until its task is cancelled: subscribes, remuxes and hands on; says when there is no picture and tries again. While
+    /// `backlogged`, frames are dropped up to the next keyframe, which starts a new init segment.
+    static func pumpLiveCamera(id: UUID, stream: LiveVideoStream, width: Int?, audio: Bool, backend: any BridgeBackend,
+                               backlogged: @escaping @Sendable () -> Bool, sink: @escaping @Sendable (LiveCameraOutput) async -> Void) async {
         var announcedWaiting = false
         while !Task.isCancelled {
             let subscription: LiveVideoSubscription
@@ -131,8 +162,7 @@ extension WebApp {
             } catch {
                 if !announcedWaiting {
                     announcedWaiting = true
-                    let message = (error as? EngineError)?.description ?? "The camera is not running."
-                    send(liveFrame(.status, camera: index, payload: liveJSON(["state": "unavailable", "message": message])))
+                    await sink(.unavailable(message: (error as? EngineError)?.description ?? "The camera is not running."))
                 }
                 try? await Task.sleep(for: .seconds(5))
                 continue
@@ -157,14 +187,7 @@ extension WebApp {
                     do { parts = try remuxer.push(frame) } catch { remuxer.restart(); continue }
                     for part in parts {
                         if backlogged() { skipping = true; remuxer.restart(); break }
-                        switch part {
-                        case .initialization(let data, let mime, let width, let height):
-                            send(liveFrame(.meta, camera: index, payload: liveJSON(["mime": mime, "width": width, "height": height,
-                                                                                    "stream": subscription.stream.rawValue])))
-                            send(liveFrame(.initialization, camera: index, payload: data))
-                        case .media(let data, let keyframe):
-                            send(liveFrame(keyframe ? .keyframe : .delta, camera: index, payload: data))
-                        }
+                        await sink(.part(part, stream: subscription.stream))
                     }
                 }
             } onCancel: {
@@ -173,7 +196,7 @@ extension WebApp {
             subscription.cancel()
             if Task.isCancelled { return }
             // The subscription ended (the camera restarted or was reconfigured): say so, then subscribe again.
-            send(liveFrame(.status, camera: index, payload: liveJSON(["state": "waiting", "message": "Reconnecting to the camera…"])))
+            await sink(.reconnecting)
             try? await Task.sleep(for: .seconds(1))
         }
     }

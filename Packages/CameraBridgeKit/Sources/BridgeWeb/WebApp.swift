@@ -54,6 +54,13 @@ public struct WebConfiguration: Sendable {
     /// Announces the bridge to Apple TVs as `_camera-bridge._tcp` (`ViewerAnnouncer`) through this advertiser. nil announces nothing: the default, and
     /// what development runs, the Mac and the tests keep.
     public var viewerAdvertiser: (any ServiceAdvertiser)? = nil
+    /// The time of day, for what expires (HLS tickets); tests move it.
+    public var now: @Sendable () -> Date = { Date() }
+    /// A clock nobody sets, for how long something has been idle (an HLS packager); tests move it.
+    public var uptime: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+    /// How long a request for a camera's first HLS playlist waits for three finished segments before it is answered 503 (the master: 200 if one is out).
+    /// Under AVPlayer's own 20 s for a playlist, past which the item fails without an answer (CoreMediaErrorDomain -12884).
+    public var hlsFirstPlaylistWait: Duration = .seconds(18)
 
     public init(dataDirectory: URL, staticDirectory: URL? = nil, port: UInt16 = 80, loopbackOnly: Bool = false, allowedHosts: [String] = [],
                 setupToken: String? = nil, product: String = "Camera Bridge OS", version: String = "0.1", build: String = "development",
@@ -165,7 +172,7 @@ extension HTTPResponse {
 /// 3. **Session.** Every other API call needs the session cookie (256 random bits, `HttpOnly`, `SameSite=Strict`): `cb_session`, and over
 ///    HTTPS `__Host-cb_session` (a sibling name under camera-bridge.app cannot set a `__Host-` cookie, so it cannot shadow it; a browser
 ///    that signed in over HTTPS before has `cb_session`, which is still read and moved to the new name on its next request).
-///    The eleven `viewer` routes (`Route.Access.viewer`: live and recorded video, pictures, `GET viewer` and moving a camera) also take an
+///    The twelve `viewer` routes (`Route.Access.viewer`: live and recorded video, pictures, `GET viewer` and moving a camera) also take an
 ///    Apple TV's key, as `Authorization: Bearer <key>`. A key that is there decides alone: a wrong, expired or removed one is
 ///    `401 viewer_key`, even beside a valid cookie. A key in the address (`token=`, `access_token=`) is refused even with a good header,
 ///    and every other route never looks at one.
@@ -198,6 +205,10 @@ public final class WebApp: Sendable {
     let eufy: EufyPlugin
     /// What the NVR routes remember between requests (`WebApp+NVR.swift`): admission counters, per-file playback information, folder checks.
     let archiveState = ArchiveWebState()
+    /// The tickets HLS files are fetched with (`WebApp+HLS.swift`), in memory only.
+    let hlsTickets = HLSTickets()
+    /// The running live HLS packagers (`HLS/HLSLivePackager.swift`).
+    let hlsPackagers = HLSLivePackagers()
     /// The secure address (`SecureAddress/`): the box's HTTPS name, its certificate and the redirect to it.
     let secureAddress: SecureAddressService
     /// Announces the bridge to Apple TVs; nil without a `WebConfiguration.viewerAdvertiser`.
@@ -242,8 +253,9 @@ public final class WebApp: Sendable {
 
     func stopEvents() {
         hub.stop()
-        let secureAddress = secureAddress
+        let (secureAddress, hlsPackagers) = (secureAddress, hlsPackagers)
         Task { await secureAddress.stop() }
+        Task { await hlsPackagers.stopAll() }
     }
 
     /// Announces the bridge to Apple TVs on `port`, the port the web interface listens on. Returns at once: a task asks for the box's identity (made
@@ -311,7 +323,9 @@ public final class WebApp: Sendable {
         let request = SecureAddressRules.normalized(request)
         var response = await dispatch(request)
         Self.addSecurityHeaders(to: &response, isAPI: request.path.hasPrefix("/api/"))
-        log.debug("\(request.method) \(request.path) -> \(response.status)")
+        // A path under hls/ holds a live ticket: never logged.
+        let shown = request.path.hasPrefix("/api/v1/hls/") ? "/api/v1/hls/…" : request.path
+        log.debug("\(request.method) \(shown) -> \(response.status)")
         return response
     }
 
@@ -434,7 +448,7 @@ public final class WebApp: Sendable {
     static let keyInTheAddress = APIError.badRequest("Send the key in the Authorization header (Bearer), never in the address.", field: "token")
 
     /// A key that opens nothing: a wrong one, one unused for a year, or a removed TV's. No cookie is cleared with it.
-    static let viewerKeyRefused = APIError(status: 401, code: "viewer_key", message: "This Apple TV was removed from Camera Bridge. Pair it again.",
+    static let viewerKeyRefused = APIError(status: 401, code: "viewer_key", message: "This device was removed from Camera Bridge. Pair it again.",
                                            headers: [("WWW-Authenticate", "Bearer")])
 
     // MARK: Cookies

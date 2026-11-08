@@ -12,7 +12,7 @@ import TestSupport
     private static let approvePath = "/api/v1/viewers/approve"
     private static let viewersPath = "/api/v1/viewers"
 
-    private static let noSuchCode = "No Apple TV is waiting with this code. Check the code on the TV: it shows a new one every 10 minutes."
+    private static let noSuchCode = "No device is waiting with this code. Check the code on the device: it shows a new one every 10 minutes."
     private static let pairingGone = "This code ran out or was removed. Ask for a new one."
 
     private func isLowercaseHex(_ text: Any?, count: Int) -> Bool {
@@ -109,7 +109,7 @@ import TestSupport
         let code = try #require(asked.json["code"] as? String)
         let added = await owner.send("POST", Self.approvePath, json: ["code": code])
         let viewer = try #require(added.json["viewer"] as? [String: Any])
-        #expect(viewer["name"] as? String == "Apple TV")
+        #expect(viewer["name"] as? String == "Device")
         #expect(viewer.keys.contains("device") && viewer["device"] is NSNull, "the key is there, with null")
         let everyKey = try await listed(owner).allSatisfy { Set($0.keys) == ["id", "name", "device", "created", "lastSeen", "address"] }
         #expect(everyKey)
@@ -194,7 +194,7 @@ import TestSupport
 
         let refused = await owner.send("POST", Self.approvePath, json: ["code": code])
         #expect(refused.status == 500 && refused.json["error"] as? String == "storage" && refused.json["code"] as? String == "storage")
-        #expect(refused.json["message"] as? String == "The Apple TV couldn’t be saved. The disk may be full or read-only.")
+        #expect(refused.json["message"] as? String == "The device couldn’t be saved. The disk may be full or read-only.")
         let afterwards = try await listed(owner)
         #expect(afterwards.isEmpty, "a TV that would be gone at the next restart is not added")
 
@@ -209,7 +209,7 @@ import TestSupport
         for _ in 0..<3 { #expect(await ask(harness, from: "192.0.2.40").status == 200) }
         let fourth = await ask(harness, from: "192.0.2.40")
         #expect(fourth.status == 429 && fourth.json["error"] as? String == "too_many_pairings" && fourth.json["code"] as? String == "too_many_pairings")
-        #expect(fourth.json["message"] as? String == "Too many Apple TVs are asking for a code right now. Try again in a few minutes.")
+        #expect(fourth.json["message"] as? String == "Too many devices are asking for a code right now. Try again in a few minutes.")
         let wait = try #require(fourth.headers["Retry-After"].flatMap { Int($0) }, "Retry-After is whole seconds")
         #expect((1...600).contains(wait), "\(wait)")
         #expect(await ask(harness, from: "192.0.2.41").status == 200, "another address is not held up")
@@ -239,7 +239,7 @@ import TestSupport
         let code = try #require(await ask(harness, ["name": "One too many"], from: "192.0.2.21").json["code"] as? String)
         let refused = await owner.send("POST", Self.approvePath, json: ["code": code])
         #expect(refused.status == 409 && refused.json["error"] as? String == "too_many_viewers" && refused.json["code"] as? String == "too_many_viewers")
-        #expect(refused.json["message"] as? String == "20 Apple TVs are added already. Remove one you no longer use, then try again.")
+        #expect(refused.json["message"] as? String == "20 devices are added already. Remove one you no longer use, then try again.")
         let stillFull = try await listed(owner).count
         #expect(stillFull == 20)
 
@@ -268,7 +268,7 @@ import TestSupport
         #expect(removed.status == 204 && removed.body.isEmpty)
         let again = await owner.send("DELETE", "\(Self.viewersPath)/\(livingRoom.id)")
         #expect(again.status == 404 && again.json["error"] as? String == "not_found")
-        #expect(again.json["message"] as? String == "That Apple TV isn’t added any more.")
+        #expect(again.json["message"] as? String == "That device isn’t added any more.")
         let left = try await listedIDs(owner)
         #expect(left == [bedroom.id])
 

@@ -442,9 +442,9 @@ import TestSupport
         let long = String(repeating: "x", count: 80), cut = String(repeating: "x", count: 60)
         let cases: [(name: String?, device: String?, shownName: String, shownDevice: String?)] = [
             ("  Den\u{7}  ", "  Apple TV HD\u{7} ", "Den", "Apple TV HD"),
-            ("", "  ", "Apple TV", nil),
-            (nil, nil, "Apple TV", nil),
-            ("   ", "", "Apple TV", nil),
+            ("", "  ", "Device", nil),
+            (nil, nil, "Device", nil),
+            ("   ", "", "Device", nil),
             (long, long, cut, cut),
         ]
         for (name, device, shownName, shownDevice) in cases {

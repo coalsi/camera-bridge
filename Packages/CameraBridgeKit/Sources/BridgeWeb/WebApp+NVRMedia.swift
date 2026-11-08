@@ -139,7 +139,7 @@ extension WebApp {
         return .json(MoreParts(serverTime: Self.milliseconds(Date()), parts: described.parts, files: described.files))
     }
 
-    private func fragmentOrGone(camera: UUID, fileKey: String, index: Int, archive: any ArchiveReading) async throws -> ArchiveFragment {
+    func fragmentOrGone(camera: UUID, fileKey: String, index: Int, archive: any ArchiveReading) async throws -> ArchiveFragment {
         guard index >= 0, let fragment = await archive.fragment(camera: camera, id: ArchiveIdentity.fragmentID(fileKey: fileKey, index: index)) else {
             throw Self.archiveAPIError(ArchiveError.fileGone)
         }
@@ -192,7 +192,7 @@ extension WebApp {
         return info
     }
 
-    private func readInit(of fragment: ArchiveFragment, archive: any ArchiveReading) async throws -> ArchiveMedia.VideoInit {
+    func readInit(of fragment: ArchiveFragment, archive: any ArchiveReading) async throws -> ArchiveMedia.VideoInit {
         do {
             return try ArchiveMedia.videoInit(try await archive.read(fragment, .initialization))
         } catch {
@@ -212,7 +212,7 @@ extension WebApp {
     }
 
     /// The video-only bytes of `fragment`: `moof` + `mdat` without the `prft` and without any sound.
-    private func segment(of fragment: ArchiveFragment, archive: any ArchiveReading) async throws -> Data {
+    func segment(of fragment: ArchiveFragment, archive: any ArchiveReading) async throws -> Data {
         do {
             return try ArchiveMedia.videoSegment(try await archive.read(fragment, .fragment))
         } catch {
