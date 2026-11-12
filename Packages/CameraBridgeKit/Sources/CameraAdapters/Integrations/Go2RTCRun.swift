@@ -68,8 +68,6 @@ final class Go2RTCRun: Sendable {
         await finish()
     }
 
-    var isTerminating: Bool { box.state.withLock { $0.terminating } }
-
     /// Polls for the exit, at most `limit` (a bounded wait: no unbounded loops).
     private func waitForExit(up limit: Duration) async -> Bool {
         let deadline = ContinuousClock.now + limit

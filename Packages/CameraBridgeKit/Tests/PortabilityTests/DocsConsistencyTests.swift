@@ -258,7 +258,7 @@ private func platformAppleFrameworks() throws -> Set<String> {
     }
 
     @Test func markdownHasNoEmptyCodeBlocks() throws {
-        let files = ["docs", "App", "Tools", "Interop", "Packages/CameraBridgeKit/Sources", "Packages/CameraBridgeKit/Tests"]
+        let files = ["docs", "Tools", "Interop", "Packages/CameraBridgeKit/Sources", "Packages/CameraBridgeKit/Tests"]
             .flatMap(markdownFiles(under:))
         #expect(files.contains { $0.lastPathComponent == "2026-09-30-camerabridge-contracts.md" })
         var found: [String] = []

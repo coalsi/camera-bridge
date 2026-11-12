@@ -107,6 +107,7 @@ mkdir -p "$stage$CB_WEB_ROOT"
 if [ -n "$web" ]; then
     [ -d "$web" ] || die "no such web directory: $web"
     cp -a "$web"/. "$stage$CB_WEB_ROOT"/
+    rm -f "$stage$CB_WEB_ROOT/README.md"   # the page's developer notes (linux/web/README.md) are not part of the page
 fi
 if [ -n "$helpers" ]; then
     # go2rtc (MIT), where PlatformLinux's ProcessHelperLauncher finds it. Its licence goes where Debian keeps every package's.
@@ -201,6 +202,9 @@ done
 install -D -m 0644 "$repo_root/docs/linux/LICENSES.md" "$docdir/OS-LICENSES.md"
 sed -e "s|@VERSION@|$version|g" "$HERE/SOURCE-OFFER.txt.in" >"$docdir/SOURCE-OFFER.txt"
 
+echo "==> the initrd's boot fallback (a package of our own: emergency or rescue mode restarts after 30 seconds there too)"
+"$HERE/build-boot-fallback.sh" --version "$version" --out "$work/packages"
+
 echo "==> rendering the partition layout (root slots $root_size, version $version)"
 for f in "$HERE"/repart/image/*.conf; do
     sed -e "s|@VERSION@|$version|g" -e "s|@ROOT_SIZE@|$root_size|g" "$f" >"$work/repart/$(basename "$f")"
@@ -216,6 +220,8 @@ mkosi_args=(
     --workspace-dir "$work/ws"
     --repart-directory "$work/repart"
     --extra-tree "$stage"
+    # camera-bridge-boot-fallback, which the default initrd installs (InitrdPackages= in mkosi.conf)
+    --package-directory "$work/packages"
 )
 [ -z "$mirror" ] || mkosi_args+=(--mirror "$mirror")
 [ "$stub" -eq 0 ] || mkosi_args+=(--package python3-minimal)
@@ -255,18 +261,25 @@ cp --sparse=always "$raw" "$work/$img_name"
 cp "$uki" "$out/$uki_name"
 read -r start size <<<"$root_a"
 dd if="$raw" of="$work/root.raw" bs=512 skip="$start" count="$size" status=none
+# in_image PATH: the root file system holds PATH, a regular file. debugfs exits 0 whether it finds the path or not, so its answer is read: for a
+# file it begins with "Inode: N   Type: regular" (a folder of that name does not count).
+in_image() { local st; st=$(debugfs -R "stat $1" "$work/root.raw" 2>/dev/null) || return 1; grep -Eq '^Inode: +[0-9]+ +Type: regular' <<<"$st"; }
 # The package list and the source offer go next to the release files too (they are inside the image as well).
 packages_name=camera-bridge-os-$version-packages.txt
 debugfs -R "cat /usr/share/camera-bridge/packages.txt" "$work/root.raw" >"$out/$packages_name" 2>/dev/null
 [ -s "$out/$packages_name" ] || die "could not read the package list from the image"
 cp "$docdir/SOURCE-OFFER.txt" "$out/SOURCE-OFFER.txt"
 for f in LICENSE NOTICE OS-LICENSES.md; do
-    debugfs -R "stat /usr/share/doc/camera-bridge/$f" "$work/root.raw" >/dev/null 2>&1 || die "$f is missing from the image"
+    in_image "/usr/share/doc/camera-bridge/$f" || die "$f is missing from the image"
 done
 if [ "$stub" -eq 0 ] && [ -f "$(dirname "$daemon")/swift-backtrace-static" ]; then
-    debugfs -R "stat /usr/share/doc/swift-backtrace/copyright" "$work/root.raw" >/dev/null 2>&1 || die "the crash helper's licence is missing from the image"
+    in_image /usr/share/doc/swift-backtrace/copyright || die "the crash helper's licence is missing from the image"
     st=$(debugfs -R "stat /usr/libexec/swift/linux/swift-backtrace-static" "$work/root.raw" 2>/dev/null)
     if ! grep -Eq 'User: +0 +Group: +0' <<<"$st" || ! grep -Eq 'Mode: +0?0755' <<<"$st"; then die "the crash helper in the image is not root-owned 0755"; fi
+fi
+if [ -n "$web" ]; then
+    in_image "$CB_WEB_ROOT/index.html" || die "the web page is missing from the image"
+    ! in_image "$CB_WEB_ROOT/README.md" || die "the web page's developer notes (README.md) are in the image's web root"
 fi
 if [ -n "$helpers" ]; then
     image_files=("$CB_HELPERS_DIR/go2rtc" /usr/share/doc/go2rtc/copyright)
@@ -282,7 +295,7 @@ if [ -n "$helpers" ]; then
         image_programs+=("$CB_HELPERS_DIR/eufy-bridge" "$CB_HELPERS_DIR/eufy/node")
     fi
     for f in "${image_files[@]}"; do
-        debugfs -R "stat $f" "$work/root.raw" >/dev/null 2>&1 || die "$f is missing from the image"
+        in_image "$f" || die "$f is missing from the image"
     done
     # The programs: root-owned, 0755 (the daemon's user can run them, not change them).
     for f in "${image_programs[@]}"; do

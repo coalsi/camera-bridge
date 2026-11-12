@@ -1265,7 +1265,8 @@ actor CameraRuntime {
     /// An in-app viewer's subscription (`BridgeEngine.liveVideo`): the hub of the stream it asks for, leased as a HomeKit
     /// viewer leases it (the sub stream starts on demand and is released when the subscription ends), read from the
     /// newest keyframe on. Counted in `RuntimeStatus.appViewers`, never in the HomeKit viewers. nil while the camera is
-    /// not running. Ends by itself when the camera stops.
+    /// not running. Ends by itself when the camera stops. Sound only while the camera's "Camera audio" switch is on, whatever
+    /// `audio` asks: turning it off restarts the camera, so a view that had sound ends and its next subscription has none.
     func openLiveVideo(stream: LiveVideoStream, audio: Bool, displayWidth: Int?) async -> LiveVideoSubscription? {
         guard running else { return nil }
         var preferSub = stream == .sub
@@ -1281,7 +1282,7 @@ actor CameraRuntime {
         appViewers += 1
         appSubscriptions[viewer] = {}   // registered before the subscription exists: its end may come first
         dependencies.onChange()
-        let subscription = await LiveVideoPump.start(lease: lease, audio: audio) { [weak self] in await self?.appViewerEnded(viewer) }
+        let subscription = await LiveVideoPump.start(lease: lease, audio: audio && configuration.audioEnabled) { [weak self] in await self?.appViewerEnded(viewer) }
         if appSubscriptions[viewer] != nil { appSubscriptions[viewer] = subscription.cancel }
         if !running { subscription.cancel() }   // stopped meanwhile
         return subscription
@@ -1984,9 +1985,8 @@ actor CameraRuntime {
                                   sinceEnabled: totals.sinceEnabled, eventInProgress: totals.eventInProgress)
     }
 
-    /// Tests: the shadow test's detector runs (on the sub stream), and the recorder it reports to.
+    /// Tests: the shadow test's detector runs (on the sub stream).
     var isMotionShadowRunning: Bool { motionShadowMonitor != nil }
-    var motionShadowRecorder: MotionShadowTest? { motionShadow }
 
     /// The sub stream's supervisor reported `event`: its state (status, soft motion), Local Network.
     private func subStreamEvent(_ event: IngestSupervisor.Event, epoch: Int) async {

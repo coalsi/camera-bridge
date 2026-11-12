@@ -32,6 +32,28 @@ extension WebApp {
         var regenerateMonitorToken: Bool?
     }
 
+    /// The ports Camera Bridge OS's firewall opens (the same numbers in the image's nftables rules and on the page): the webhook (21090 by
+    /// default) and the sensors bridge (21099) anywhere from 21090 to 21199, the cameras' HomeKit accessories from 21100 to 21199.
+    static let firewallPorts = 21_090...21_199
+    static let homeKitPorts = 21_100...21_199
+    /// Why a port the settings are given would not reach the bridge through the box's firewall; nil when it would. Only a new value is checked:
+    /// one equal to what is saved is left alone, wherever it is. The base port is where new cameras' HomeKit ports are looked for
+    /// (`PortAllocator.assignPorts`: the lowest free one from it; a camera keeps the port it has), so it must be in `homeKitPorts` itself.
+    static func firewallProblem(basePort: Int?, sensorsBridgePort: Int?, webhookPort: Int?, saved: BridgeSettings) -> APIError? {
+        for (value, savedValue, field) in [(sensorsBridgePort, saved.sensorsBridgePort, "sensorsBridgePort"), (webhookPort, saved.webhookPort, "webhookPort")] {
+            guard let value, value != Int(savedValue) else { continue }
+            if !firewallPorts.contains(value) {
+                return APIError.badRequest("Use a port from \(firewallPorts.lowerBound) to \(firewallPorts.upperBound): the box’s firewall lets only those through.",
+                                           field: field)
+            }
+        }
+        if let base = basePort, base != Int(saved.basePort), !homeKitPorts.contains(base) {
+            return APIError.badRequest("Use a HomeKit base port from \(homeKitPorts.lowerBound) to \(homeKitPorts.upperBound): the box’s firewall lets HomeKit "
+                                       + "through on those only.", field: "basePort")
+        }
+        return nil
+    }
+
     func patchSettings(_ ctx: RequestContext) async throws -> HTTPResponse {
         let patch = try decode(SettingsPatch.self, from: ctx)
         for (value, field, allowZero) in [(patch.basePort, "basePort", false), (patch.sensorsBridgePort, "sensorsBridgePort", true),
@@ -39,6 +61,13 @@ extension WebApp {
             guard let value else { continue }
             guard (allowZero && value == 0) || (1_024...65_535).contains(value) else {
                 throw APIError.badRequest("Use a port between 1024 and 65535.", field: field)
+            }
+        }
+        // Only on Camera Bridge OS (system mode "installed", the signal the page uses too): a development daemon has no such firewall.
+        if patch.basePort != nil || patch.sensorsBridgePort != nil || patch.webhookPort != nil, await system.info().mode == "installed" {
+            if let problem = Self.firewallProblem(basePort: patch.basePort, sensorsBridgePort: patch.sensorsBridgePort, webhookPort: patch.webhookPort,
+                                                  saved: await backend.overview().settings) {
+                throw problem
             }
         }
         var level: LogLevel?

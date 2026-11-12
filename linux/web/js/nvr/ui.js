@@ -115,7 +115,7 @@ export function recordCard(camera) {
     const audioOff = current.audioEnabled === false;
     soundRow.set({
       checked: soundOn, busy: Boolean(request), disabled: audioOff && !soundOn,
-      text: audioOff ? 'Turn on Camera audio first.' : 'Saves the camera’s sound too. This page plays video only for now.',
+      text: audioOff ? 'Turn on Camera audio first.' : 'Saves the camera’s sound too. Recordings play it at normal speed.',
     });
     const note = noteText(current, 'sound');
     soundNote.textContent = note ? sentence(note) : '';

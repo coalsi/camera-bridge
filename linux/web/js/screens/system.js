@@ -63,7 +63,7 @@ const INSTALL_STEPS = {
   done: 'Done',
 };
 
-/** The sentence for an update that did not start (`update.state` "rolled-back"): the bridge's own, else made from the versions. */
+/** The sentence for an update that did not start (`update.failedVersion`): the bridge's own, else made from the versions. */
 export function rolledBackText(update, running) {
   if (typeof update?.message === 'string' && update.message.trim()) return update.message.trim();
   const back = update?.current || running || 'the version it had';
@@ -185,8 +185,10 @@ export function renderSystem() {
       message = h('div', { class: 'banner error', role: 'alert' }, icon('alert'), h('div', { class: 'text' }, update.message || 'The update did not work.'));
     } else if (update?.available) {
       message = h('div', { class: 'banner info' }, icon('info'), h('div', { class: 'text' }, h('span', { class: 'title' }, `${updateLabel(update.latest, true)} is available`), update.notes || 'It installs next to the system you are running and takes effect when you restart.'));
-    } else if (state === 'rolled-back') {
+    } else if (update?.failedVersion) {
       // A newer version did not start, so the box went back by itself and won't offer it again (docs/linux/UPDATES.md): the bridge's sentence.
+      // The bridge says so with failedVersion and its sentence in message; the state stays "idle" (cb-update's "rolled-back" is not a state of
+      // the API: BridgeDaemon/RequestFileSystemControl.swift).
       message = h('div', { class: 'banner warning', role: 'status' }, icon('alert'), h('div', { class: 'text' }, rolledBackText(update, info.version),
         update.checked ? h('div', { class: 'small muted' }, `Checked ${timeAgo(update.checked)}.`) : null));
     } else if (update?.checked) {

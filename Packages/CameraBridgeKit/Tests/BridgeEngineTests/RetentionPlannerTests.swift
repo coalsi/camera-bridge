@@ -15,9 +15,9 @@ import Testing
                                   bytes: megabytes * 1_000_000)
     }
 
-    static func plan(_ closed: [RetentionCandidate], open: UInt64 = 0, newestStart: Int64? = nil, keepDays: Int = 7, maximum: UInt64 = .max, now: Int64 = RetentionPlannerTests.now)
+    static func plan(_ closed: [RetentionCandidate], open: UInt64 = 0, ageRule: Bool = true, keepDays: Int = 7, maximum: UInt64 = .max, now: Int64 = RetentionPlannerTests.now)
         -> [RetentionCandidate] {
-        RetentionPlanner.plan(.init(closed: closed, openBytes: open, newestStartMs: newestStart ?? closed.map(\.startMs).max(), nowMs: now, keepDays: keepDays, maximumBytes: maximum))
+        RetentionPlanner.plan(.init(closed: closed, openBytes: open, ageRuleRuns: ageRule, nowMs: now, keepDays: keepDays, maximumBytes: maximum))
     }
 
     @Test func nothingToDeleteWhenEverythingIsYoungAndFits() {
@@ -81,13 +81,21 @@ import Testing
         #expect(plan == Array(files.prefix(20)), "19 files would leave 111 GB, still over 110.8 GB: 20 go")
     }
 
-    @Test func aClockThatJumpedForwardNeverAgesAnythingOut() {
+    @Test func whileTheClockIsNotTrustedNothingAgesOutButTheSizeRuleRuns() {
         let old = Self.file(0, hoursAgo: 24 * 30)
         let young = Self.file(1, hoursAgo: 1)
-        let future = Self.now + 10 * 60_000   // the newest file starts 10 minutes ahead
-        #expect(Self.plan([old, young], newestStart: future).isEmpty, "the age rule waits until the clock agrees again")
-        #expect(Self.plan([old, young], newestStart: Self.now + 4 * 60_000) == [old], "4 minutes ahead is normal drift")
-        #expect(Self.plan([old, young], newestStart: future, maximum: 150_000_000) == [old], "the size rule does not use the clock")
+        #expect(Self.plan([old, young], ageRule: false).isEmpty, "the age rule waits (AgeRuleClock)")
+        #expect(Self.plan([old, young], ageRule: false, maximum: 150_000_000) == [old], "the size rule does not use the clock")
+        #expect(Self.plan([old, young]) == [old])
+    }
+
+    /// Review of 2026-11-09, I1: one file stamped in the future once stopped the age rule for every file until its date came, which could be years.
+    @Test func aFileDatedInTheFutureIsNotAgedAndTheOthersAge() {
+        let old = Self.file(0, hoursAgo: 24 * 30)
+        let young = Self.file(1, hoursAgo: 1)
+        let future = Self.file(2, hoursAgo: -24 * 400)   // starts more than a year ahead
+        #expect(Self.plan([old, young, future]) == [old], "the future file waits for its time; the old one goes as ever")
+        #expect(Self.plan([old, young, future], now: future.endMs + 8 * Self.day).count == 3, "once its time has come and gone it ages like any other")
     }
 
     @Test func filesThatStartTogetherAreOrderedByTheirNames() {

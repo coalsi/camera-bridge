@@ -211,7 +211,7 @@ public struct SensorsBridgeStatus: Sendable, Equatable {
     public var setupURI: String
     public var accessoryCount: Int
     /// The sensors the bridge publishes for each camera, in bridge order (`SensorsBridge.sensors(for:)`; cameras without
-    /// any are left out). The app lists these instead of working them out from the options: an alarm input, for
+    /// any are left out). The page lists these instead of working them out from the options: an alarm input, for
     /// example, is published only once the camera has reported it.
     public var publishedSensors: [UUID: [BridgedSensor]]
 

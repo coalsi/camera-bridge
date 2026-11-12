@@ -23,8 +23,7 @@ public enum DaemonInfo {
 /// - **Linux** (`BridgeEnvironment.linux`): the real platform services. `--dev` keeps the engine on loopback and silent. Only a run that is neither
 ///   `--dev` nor `--preview` announces `_camera-bridge._tcp` for Apple TVs (`viewerAdvertiser`).
 /// - **macOS**: always `BridgeEnvironment.testing` — loopback only, nothing advertised, secrets in memory, a data directory you
-///   name. A Mac is for developing the interface; the Mac app is the product there, and this never touches its data, its Keychain
-///   or its ports.
+///   name. A Mac is for developing the interface and the engine; the archived Mac app's data, Keychain and ports are never touched.
 @MainActor
 public final class Daemon {
     public enum Failure: Error, CustomStringConvertible, Sendable {

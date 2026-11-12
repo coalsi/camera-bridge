@@ -1,5 +1,10 @@
 import BridgeEngine
+import BridgeSupport
 import Foundation
+import Synchronization
+#if os(Linux)
+import PlatformLinux
+#endif
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Musl)
@@ -22,11 +27,13 @@ import Darwin
 ///   same, the safe answer.
 /// - `lowerThreadPriority`: the archive mover's thread at the lowest priority (`lowerThisThread`).
 /// - `dropCachedPages`: `POSIX_FADV_DONTNEED` on a moved copy before it is read back (`dropCachedPages(of:)`).
+/// - `isClockSynchronized`: on Linux the kernel's word (`kernelClockIsSynchronized`); on a Mac none, so its clock counts as synchronized.
 enum DaemonArchivePolicy {
-    /// `deviceOf` and `spaceOf` are the two things that touch the machine; tests replace them.
+    /// `deviceOf`, `spaceOf` and `clockIsSynchronized` are the things that touch the machine; tests replace them.
     static func make(dataDirectory: URL,
                      deviceOf: @escaping @Sendable (URL) -> UInt64? = { DaemonArchivePolicy.deviceNumber(of: $0) },
-                     spaceOf: @escaping @Sendable (URL) -> (total: UInt64, free: UInt64)? = { DaemonArchivePolicy.volumeSpace(of: $0) }) -> ArchivePlatformPolicy {
+                     spaceOf: @escaping @Sendable (URL) -> (total: UInt64, free: UInt64)? = { DaemonArchivePolicy.volumeSpace(of: $0) },
+                     clockIsSynchronized: (@Sendable () -> Bool)? = DaemonArchivePolicy.kernelClockIsSynchronized()) -> ArchivePlatformPolicy {
         let dataDevice = deviceOf(dataDirectory)
         var policy = ArchivePlatformPolicy(
             space: spaceOf,
@@ -42,7 +49,43 @@ enum DaemonArchivePolicy {
         }
         policy.lowerThreadPriority = { DaemonArchivePolicy.lowerThisThread() }
         policy.dropCachedPages = { DaemonArchivePolicy.dropCachedPages(of: $0) }
+        policy.isClockSynchronized = clockIsSynchronized
         return policy
+    }
+
+    /// Whether the clock is synchronized, as the NVR's age rule asks it (`ArchivePlatformPolicy.isClockSynchronized`): on Linux the kernel's
+    /// word (`KernelClock`), which chrony keeps on Camera Bridge OS. A reading that fails counts as not synchronized, so nothing is deleted for its
+    /// age until the system has been running for a day, and is said once. Elsewhere nil: a Mac's development daemon counts its clock as synchronized.
+    static func kernelClockIsSynchronized() -> (@Sendable () -> Bool)? {
+        #if os(Linux)
+        let said = SaidOnce()
+        return {
+            switch KernelClock.synchronization() {
+            case .synchronized: return true
+            case .unsynchronized: return false
+            case .unknown(let code):
+                if said.first() {
+                    Log(category: "NVR").warning("This system does not let Camera Bridge read whether its clock is synchronized (error \(code)): recordings "
+                                                 + "are deleted for their age only once the system has been running for a day")
+                }
+                return false
+            }
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    /// True the first time it is asked, false after.
+    final class SaidOnce: Sendable {
+        private let said = Mutex(false)
+
+        func first() -> Bool {
+            said.withLock { said in
+                defer { said = true }
+                return !said
+            }
+        }
     }
 
     /// Asks the kernel to forget the cached pages of a file whose data was synced (`POSIX_FADV_DONTNEED`), so the next read comes from the drive.

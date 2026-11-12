@@ -279,7 +279,7 @@ import TestSupport
         #expect(await eventually { lines.messages.contains { $0.contains("“\(name)”") } }, "registered at the fourth try, and said so")
         #expect(fake.requests.count == 4)
         #expect(lines.messages.filter { $0.contains(reason) }.count == 2, "the second failure is the first again; the third differs")
-        #expect(lines.messages.contains { $0.contains("Apple TVs can find this bridge: “\(name)” (_camera-bridge._tcp) on port 80") })
+        #expect(lines.messages.contains { $0.contains("Apple TVs and iPhones can find this bridge: “\(name)” (_camera-bridge._tcp) on port 80") })
         await announcer.stop()
     }
 

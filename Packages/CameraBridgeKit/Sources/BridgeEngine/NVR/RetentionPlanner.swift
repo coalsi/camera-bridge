@@ -19,8 +19,9 @@ enum RetentionPlanner {
         var closed: [RetentionCandidate]
         /// The bytes of files a recorder has open (counted, never deleted).
         var openBytes: UInt64
-        /// The newest start of any file, open or closed (the clock-jump guard).
-        var newestStartMs: Int64?
+        /// Whether the age rule runs in this pass: false while the clock cannot be trusted to age files out (`AgeRuleClock`). The size rule
+        /// runs either way.
+        var ageRuleRuns: Bool
         var nowMs: Int64
         var keepDays: Int
         /// `ArchiveStorageStatus.effectiveMaximumBytes(maxSizeGB:)`.
@@ -33,9 +34,9 @@ enum RetentionPlanner {
         var deletions: [RetentionCandidate] = []
         var remaining = input.closed.sorted { ($0.startMs, $0.segment) < ($1.startMs, $1.segment) }
 
-        // Age: files that ended before the keep time. Skipped while the newest file starts in the future (the clock jumped).
-        let futureLimit = input.nowMs + Int64(ArchiveConstants.futureFileGuard * 1_000)
-        if !(input.newestStartMs.map { $0 > futureLimit } ?? false) {
+        // Age: files that ended before the keep time (a file dated in the future is not aged until its time comes). Not while the clock is not
+        // trusted.
+        if input.ageRuleRuns {
             let cutoff = input.nowMs - Int64(input.keepDays) * 86_400_000
             let aged = remaining.filter { $0.endMs < cutoff }
             deletions += aged
@@ -84,7 +85,7 @@ enum RetentionPlanner {
     }
 
     /// `plan(_:)` with an archive drive. Without one (`archive == nil`) it is `plan(_:)`, unchanged. With one:
-    /// 1. Age, on both drives: files that ended before the keep time are deleted where they are (skipped while the clock looks wrong).
+    /// 1. Age, on both drives: files that ended before the keep time are deleted where they are (not while the clock is not trusted).
     /// 2. The archive over its own maximum by itself (a smaller drive): its oldest files go until it fits.
     /// 3. Size, on the box: over `mainHardMaximumBytes` the oldest are deleted (as today); over `maximumBytes` they leave the box oldest first,
     ///    each moved when the archive can take it within its maximum and above its floor, after the archive let go of what is older than it (its
@@ -99,8 +100,7 @@ enum RetentionPlanner {
         var archived = archive.closed.sorted(by: order)
 
         // 1. Age, both drives.
-        let futureLimit = input.nowMs + Int64(ArchiveConstants.futureFileGuard * 1_000)
-        if !(input.newestStartMs.map { $0 > futureLimit } ?? false) {
+        if input.ageRuleRuns {
             let cutoff = input.nowMs - Int64(input.keepDays) * 86_400_000
             let aged = remaining.filter { $0.endMs < cutoff }
             result.deletions += aged

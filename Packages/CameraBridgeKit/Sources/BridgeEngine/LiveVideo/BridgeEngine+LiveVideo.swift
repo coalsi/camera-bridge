@@ -4,7 +4,8 @@ import MediaCore
 
 extension BridgeEngine {
     /// Opens a live view of `cameraID` for the app's own viewer: the camera's encoded access units from the newest keyframe
-    /// on (no transcoding; the app decodes them in hardware), with the camera's audio when `audio` is true.
+    /// on (no transcoding; the app decodes them in hardware), with the camera's audio when `audio` is true and the camera's
+    /// "Camera audio" switch is on (turning the switch restarts the camera, which ends the subscription).
     ///
     /// The subscription leases the camera's ingest the way a HomeKit viewer does: the sub stream starts on demand and is
     /// released when the subscription ends (`LiveVideoSubscription.cancel()`, the consumer finishing, or dropping its
@@ -28,6 +29,8 @@ extension BridgeEngine {
     /// `liveVideo` for a browser: with `audio`, the camera's sound as AAC-LC (`LiveAudioConverter`: G.711 and the like converted, 16 kHz mono),
     /// which a browser plays in MP4; without, video only. Cancelling it ends the converter and the camera's subscription.
     public func browserLiveVideo(cameraID: UUID, stream: LiveVideoStream, displayWidth: Int?, audio: Bool) async throws -> LiveVideoSubscription {
+        // No converter for a camera whose "Camera audio" switch is off: it would have no sound to convert.
+        let audio = audio && configurations.first(where: { $0.id == cameraID })?.audioEnabled == true
         let source = try await liveVideo(cameraID: cameraID, stream: stream, audio: audio, displayWidth: displayWidth)
         guard audio else { return source }
         let codecs = environment.codecs

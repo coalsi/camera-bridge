@@ -28,6 +28,11 @@ struct ArchiveStoreTuning: Sendable {
     var log = ArchiveStoreLog.standard
     /// The clock of the age rule and the new-file rules.
     var now: @Sendable () -> Date = { Date() }
+    /// Seconds on a clock nobody sets, which goes on counting while the machine sleeps; only the difference between two readings means anything.
+    /// The age rule compares the wall clock with it to see the wall clock jump (`AgeRuleClock`).
+    var monotonic: @Sendable () -> TimeInterval = { (ContinuousClock.now - ArchiveStoreTuning.monotonicOrigin).timeInterval }
+    /// Seconds since the system started: the age rule runs on a clock the system never said was synchronized once this reaches a day.
+    var uptime: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// How often the drive is probed, and how long a probe may be pending before the drive counts as not answering.
     var probeInterval: Duration = .seconds(ArchiveConstants.storageStatusRefresh)
     var probeStallAfter: Duration = .seconds(5)
@@ -72,6 +77,9 @@ struct ArchiveStoreTuning: Sendable {
     var moveCrash: (@Sendable (ArchiveMoveStep) -> Bool)?
 
     init() {}
+
+    /// Where `monotonic` counts from: the first time anything asks.
+    private static let monotonicOrigin = ContinuousClock.now
 }
 
 /// One start of the store (and one folder): background work belongs to the run that started it and ends when the run is over.
@@ -114,6 +122,8 @@ struct ArchiveStoreState: Sendable {
     var skyStillsPrunedAt: Date?
     /// The stretches the person chose to keep (`KeptRecordings`), read with the catalog.
     var kept: [KeptRecording] = []
+    /// Whether the clock may age recordings out (`AgeRuleClock`). About the clock, not the folder: a new folder or a restart of the store keeps it.
+    var ageRule = AgeRuleClock()
 
     var pause: ArchivePause?
     var space: VolumeMonitor.Space?
@@ -236,6 +246,7 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
             return ArchiveRun(id: state.runID, generation: state.generation)
         }
         guard let run else { return }
+        checkAgeRule()   // the clocks' first look: a jump while the catalog loads is seen at the first pass
         publishStatus(force: true)
         launch(run)
     }
@@ -309,6 +320,7 @@ final class ArchiveStore: ArchiveReading, ArchiveWriteTarget, Sendable {
                                               floorBytes: state.floorBytes, oldest: span.map { ArchiveTime.date(ms: $0.oldest) },
                                               newest: span.map { ArchiveTime.date(ms: $0.newest) })
             status.archive = Self.driveStatus(state, now: tuning.now())
+            status.ageRulePause = state.ageRule.pause
             state.statusAt = now
             guard status != state.status else { return false }
             state.status = status

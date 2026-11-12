@@ -41,7 +41,9 @@ Foundation (+ FoundationNetworking / os under `#if canImport`), Synchronization 
   time, on `PlainHTTP` 0.01 s; two cameras' event connections kept a box's dispatch thread at about 60 000 wake-ups a second.
   Bodies by Content-Length, chunked (`ChunkedDecoder`, shared with CameraAdapters' `RawHTTPStream`) or until the camera hangs
   up, read only as the body is read; one timer per connection for `timeout`; redirects followed by the client as URLSession
-  would. Tests: `PlainHTTPTests`; the client's suites run on it on Linux (`.plainHTTPRoute`; on a Mac with `CB_TEST_PLAIN_HTTP=1`).
+  would. Tests: `PlainHTTPTests`; the client's suites run on it on Linux (`.plainHTTPRoute`; on a Mac with `CB_TEST_PLAIN_HTTP=1`),
+  and so do camera suites whose camera drops a request on a kept-alive connection (CameraAdaptersTests' own `.plainHTTPRoute`): there
+  URLSession sends it again without its body, which libcurl 8.5.0 (Ubuntu 24.04) waits on until the timeout.
 - Platform protocols (PlatformApple implements them): `NetworkTransport`/`TCPListener`/`TCPConnection`, `TransportError`,
   `ServiceAdvertiser`/`AdvertisedService`/`ServiceAdvertisement`, `SecretStore`, `NetworkChangeMonitoring`, `PowerManaging`
   (with `endBackgroundActivity()`, W4 review: the engine ends its App Nap activity on pause/stop),

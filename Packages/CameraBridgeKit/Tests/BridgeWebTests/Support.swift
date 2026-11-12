@@ -487,10 +487,10 @@ final class Harness: Sendable {
     let host: String
 
     init(backend: FakeBackend = FakeBackend(), setupToken: String? = nil, staticDirectory: URL? = nil, allowedHosts: [String] = [],
-         eventInterval: Duration = .milliseconds(20), modify: (inout WebConfiguration) -> Void = { _ in }) throws {
+         eventInterval: Duration = .milliseconds(20), systemMode: String = "installed", modify: (inout WebConfiguration) -> Void = { _ in }) throws {
         directory = try TemporaryDirectory(prefix: "cb-web")
         self.backend = backend
-        system = FakeSystem()
+        system = FakeSystem(mode: systemMode)
         logs = LogFeed()
         host = "camera-bridge.local"
         var configuration = WebConfiguration(dataDirectory: directory.url, staticDirectory: staticDirectory, port: 0, loopbackOnly: true,

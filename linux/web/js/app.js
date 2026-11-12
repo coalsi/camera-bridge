@@ -104,7 +104,12 @@ export function navigate(path) {
 }
 
 function currentPath() {
-  return decodeURIComponent(location.hash.replace(/^#\/?/, '')).replace(/\/+$/, '');
+  const raw = location.hash.replace(/^#\/?/, '');
+  // A mangled address (a stray "%" in a link, #/%) cannot be decoded: it is matched as it is, so it draws "That page doesn't exist" instead of
+  // throwing before anything is drawn.
+  let path;
+  try { path = decodeURIComponent(raw); } catch { path = raw; }
+  return path.replace(/\/+$/, '');
 }
 
 /** Marks the shell with the screen's kind (`data-page`), or clears it: style.css lays out the Monitor's route on its own. */

@@ -1,19 +1,16 @@
 # The IPCamera Web family (cameras whose web page is titled "IPCamera Web")
 
-A family of OEM cameras whose web page is titled **IPCamera Web** has its own web API next to ONVIF. The owner's "Patio New" is one: model
-`N801B-RB-IRC-WM701`, ONVIF manufacturer `A_ONVIF_CAMERA`, the maker's phone app VisionEye. Camera Bridge adds them as ONVIF cameras
+A family of OEM cameras whose web page is titled **IPCamera Web** has its own web API next to ONVIF. One known model is `N801B-RB-IRC-WM701`: its ONVIF manufacturer is `A_ONVIF_CAMERA` and the maker's phone app is VisionEye. Camera Bridge adds them as ONVIF cameras
 (streams, events, time zone and time stay ONVIF) and uses their API for the security check, three steps of Set up for Camera Bridge, and
 "Watch its internet" where ONVIF cannot point both of the camera's DNS servers at the bridge.
 Code: `Packages/CameraBridgeKit/Sources/CameraAdapters/IPCamWeb/`. It is not the [IP camera web API](ip-camera-web-api.md) (Jennov and other
 Anjvision cameras): another family, another protocol.
 
-The protocol below was checked by hand with the owner signed in to the camera's page, and against the page's own scripts (`land.js`,
-`common.js`, `md5-min.js`, loaded without signing in; Oct 18, 2026). The bridge's use of it is tested against a fake camera
-(`FakeIPCamWebCamera`) only. Through build 0.1.110 the bridge encrypted the lowercase MD5 (see the sign-in below), so the owner's camera
-refused every sign-in. Build 0.1.111 could not read a code from the answer to its corrected sign-in and stopped the API ("answered Camera
-Bridge's sign-in without a code": that one line stood for no `<root>`, no `<code>` and a code that is not a number). It was most likely
-`<root>` without `<code>`, which the camera's page reads as 0, signed in (see the codes below); later builds log the three apart
-("something other than its XML", "a code that is not a number"). Whether that answer held a session has not been seen yet.
+The protocol below was checked by hand against a camera of this family with a signed-in session, and against the page's own scripts
+(`land.js`, `common.js`, `md5-min.js`, loaded without signing in). The bridge's use of it is tested against a fake camera
+(`FakeIPCamWebCamera`) only. If a sign-in answer holds no readable code, the bridge logs which of three things it was ("no `<root>`",
+"something other than its XML", "a code that is not a number") and stops using the web API for that camera. An answer that is
+`<root>` without `<code>` is read as code 0, signed in, as the camera's own page reads it (see the codes below).
 
 ## What Camera Bridge does with it
 
@@ -57,10 +54,10 @@ Only ONVIF cameras are checked this way, and only when the camera is not of the 
   | Code | At the sign-in | At a read or write |
   |---|---|---|
   | 0 | signed in: `<authid>SESSION</authid>` is the session, reused for every call; without an `authid`, "the camera signed in without giving a session" (`IPCamWebUnavailable.noSession`; nothing is latched) | done |
-  | none (`<root>` without `<code>`) | 0, as the page reads it: signed in with its `authid` (else no session, as for 0). most likely how Patio New answered build 0.1.111's sign-in, which that build could not read and stopped the API for | 0: done (the reads never carry a code) |
+  | none (`<root>` without `<code>`) | 0, as the page reads it: signed in with its `authid` (else no session, as for 0). how some cameras of the family answer a sign-in | 0: done (the reads never carry a code) |
   | 532379 | signed in, with a session, but the camera calls the password insecure (the page then asks for a new one: 9 to 16 characters with a letter, a digit and a symbol). Camera Bridge uses the session, says once in the camera's log that the camera asks for a stronger password, and keeps it for the address (`IPCamWebClient.asksForStrongerPassword`, for the security check) | — |
   | 532227 | a refusal | the session is not valid (the page goes back to its sign-in): Camera Bridge signs in once more and asks again, once |
-  | 532374 | a refusal, said as "no privilege" by every step after it (the latch keeps the code): use an administrator account in the camera's settings. Those steps are changes the account may not make (owner decision, Oct 18): the setup goes on with the steps after them | "No Privilege": the account may not do this, said as such, with the same advice; the session still serves. At a write it is a change the account may not make (`CameraAdapterError.notPermitted`, "the account Camera Bridge uses may not change this; use an administrator account in the camera’s settings"): nothing is latched, and the setup goes on with the steps after it |
+  | 532374 | a refusal, said as "no privilege" by every step after it (the latch keeps the code): use an administrator account in the camera's settings. Those steps are changes the account may not make: the setup goes on with the steps after them | "No Privilege": the account may not do this, said as such, with the same advice; the session still serves. At a write it is a change the account may not make (`CameraAdapterError.notPermitted`, "the account Camera Bridge uses may not change this; use an administrator account in the camera’s settings"): nothing is latched, and the setup goes on with the steps after it |
   | 532229 | — | "no option": the camera has no such feature |
   | any other | a refusal (the page says "Login Failed!" for all of them; what a wrong password answers is not known) | an error with its code |
 
@@ -70,7 +67,7 @@ Only ONVIF cameras are checked this way, and only when the camera is not of the 
   (`IPCamWebLatch.cameraStarted`): a restart of the camera in the bridge (a setup run, a settings change) never resends a password the
   camera refused, while a restart of Camera Bridge itself (a reboot, an update) tries once more, since nothing is saved. The latch
   keeps the credentials only as the SHA-256 of `username:password`, in memory. ONVIF's logins are not paused: the family's ONVIF and RTSP
-  may ask no password at all (Patio New's don't), and pausing them stopped its events and snapshots for 2 minutes at every start. The other
+  may ask no password at all, and pausing them would stop a camera's events and snapshots. The other
   way round still holds: while ONVIF's logins are paused or locked (the same account), the web sign-in is not tried. A sign-in answer
   that is not the camera's XML (no `<root>`, such as a web page from a server in front of it), or whose code is not a number, is
   unreadable (`invalidResponse`), not a refused password: it stops the API the same way, without the word "refused". A call's answer that
@@ -86,7 +83,7 @@ Only ONVIF cameras are checked this way, and only when the camera is not of the 
 
 ### Readings (identifiers left out)
 
-| Read | Answer on the owner's camera | Camera Bridge |
+| Read | Typical answer | Camera Bridge |
 |---|---|---|
 | `get=mobile` | `<mobile on="0" sendalarm="1" cuid="…"/>` | the VisionEye app's cloud: `on="1"` is on, link to an account unknown |
 | `get=ddns` | `<version version="0"/><ddns on="0" type="0" account="…" port="80" name="" pwd="…" times="3600"/>` | DDNS |
@@ -111,11 +108,10 @@ Only ONVIF cameras are checked this way, and only when the camera is not of the 
 ### DNS (Watch its internet)
 
 The camera's page has two DNS slots, "Preferred" (`dns1`) and "Alternative" (`dns2`), and its own switch for them (`dns` `ondhcp`; the
-address can stay on DHCP while the DNS is set by hand). On 2026-10-18 ONVIF's `SetDNS` with the bridge alone filled only the first slot
-of "Patio New": its `GetDNS` then showed the bridge and 8.8.8.8, both set by hand. So Watch goes:
+address can stay on DHCP while the DNS is set by hand). On some cameras of the family, ONVIF's `SetDNS` with the bridge alone fills only the first
+slot: `GetDNS` then shows the bridge and another server (for example 8.8.8.8), both set by hand. So Watch goes:
 
-1. ONVIF `SetDNS`, the bridge in both slots; then the bridge alone; then the bridge and an empty entry (since 2026-10-18; before, the
-   bridge alone came first). Each form the camera takes is read back with `GetDNS` at once and every 2 s: the first for up to 30 s (a
+1. ONVIF `SetDNS`, the bridge in both slots; then the bridge alone; then the bridge and an empty entry. Each form the camera takes is read back with `GetDNS` at once and every 2 s: the first for up to 30 s (a
    camera that applies DNS slowly), each later one for up to 6 s. ONVIF goes first because it touches only the DNS and needs no web
    sign-in.
 2. If ONVIF still shows another server (or refused), and the family's API can be asked: `get=eth`, then `set=eth` with the interface exactly
@@ -136,7 +132,7 @@ a real camera has not been made yet. Tests: `CameraDNSOwnAPITests` (the write by
 ## Security levels
 
 The check's readings go into the camera's security level (red "Outside access possible", yellow "Needs work", green "Good", gold "Local
-only"; `BridgeEngine/Security/CameraSecurity.swift`). On the owner's camera as it was: the VisionEye cloud on with its link unknown is red;
+only"; `BridgeEngine/Security/CameraSecurity.swift`). For a camera of this family as it comes: the VisionEye cloud on with its link unknown is red;
 with the cloud off, the open RTSP and ONVIF keep it yellow; with the video password on, the Meari and Hikvision services keep it green until
 they are off too; gold needs the Internet guard as well (Camera Bridge OS).
 

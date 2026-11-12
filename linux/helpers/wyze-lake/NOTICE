@@ -20,7 +20,7 @@ All code in this directory is our own. The protocol it speaks was learned from t
 
 Third-party Go modules linked into the binary (licence texts in LICENSES/):
 
-  Go standard library            go1.24.13   BSD-3-Clause   LICENSES/go-stdlib.txt
+  Go standard library            go1.27.4    BSD-3-Clause   LICENSES/go-stdlib.txt
   github.com/pion/webrtc/v4      v4.2.3      MIT            LICENSES/github.com_pion_webrtc_v4.txt
   github.com/pion/datachannel    v1.6.0      MIT            LICENSES/github.com_pion_datachannel.txt
   github.com/pion/dtls/v3        v3.0.10     MIT            LICENSES/github.com_pion_dtls_v3.txt
@@ -40,9 +40,9 @@ Third-party Go modules linked into the binary (licence texts in LICENSES/):
   github.com/gorilla/websocket   v1.5.3      BSD-2-Clause   LICENSES/github.com_gorilla_websocket.txt
   github.com/google/uuid         v1.6.0      BSD-3-Clause   LICENSES/github.com_google_uuid.txt
   github.com/wlynxg/anet         v0.0.5      BSD-3-Clause   LICENSES/github.com_wlynxg_anet.txt
-  golang.org/x/crypto            v0.33.0     BSD-3-Clause   LICENSES/golang.org_x_crypto.txt
-  golang.org/x/net               v0.35.0     BSD-3-Clause   LICENSES/golang.org_x_net.txt
-  golang.org/x/sys               v0.30.0     BSD-3-Clause   LICENSES/golang.org_x_sys.txt
+  golang.org/x/crypto            v0.59.0     BSD-3-Clause   LICENSES/golang.org_x_crypto.txt
+  golang.org/x/net               v0.62.0     BSD-3-Clause   LICENSES/golang.org_x_net.txt
+  golang.org/x/sys               v0.50.0     BSD-3-Clause   LICENSES/golang.org_x_sys.txt
   golang.org/x/time              v0.10.0     BSD-3-Clause   LICENSES/golang.org_x_time.txt
 
 ffmpeg is run as a separate program (not linked); it is the appliance's own package.

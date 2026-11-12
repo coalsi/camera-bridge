@@ -124,8 +124,6 @@ struct H264FLVOutput {
         fallbackSize = (width, height)
     }
 
-    var isBroken: Bool { reader.failed }
-
     mutating func push(_ data: Data) -> [Packet] {
         var packets: [Packet] = []
         for tag in reader.push(data) {

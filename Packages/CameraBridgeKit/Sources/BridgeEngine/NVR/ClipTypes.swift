@@ -1,7 +1,7 @@
 import Foundation
 
 // The types of exporting a clip (docs/superpowers/specs/2026-10-12-export-clip-design.md, 3.1): the request, the plan that says exactly what the file
-// will be before a byte is written, the errors, and the two protocols the Mac app and the box's web routes talk to. The planner, the writer and the
+// will be before a byte is written, the errors, and the two protocols the box's web routes (and the archived Mac app) talk to. The planner, the writer and the
 // exporter that implement `ClipExporting` have files of their own; `ClipPartTables` is the only package type the plan refers to, so this file stands
 // alone. Foundation only: BridgeEngine has no Apple-only framework.
 
@@ -89,7 +89,7 @@ public struct ClipPlan: Sendable {
     }
 }
 
-/// Why a plan or an export stopped. Every case has a sentence in the Mac app and a status on the box.
+/// Why a plan or an export stopped. Every case has a status on the box (and had a sentence in the archived Mac app).
 public enum ClipError: Error, Equatable, Sendable {
     /// No footage at all in the range.
     case nothingRecorded

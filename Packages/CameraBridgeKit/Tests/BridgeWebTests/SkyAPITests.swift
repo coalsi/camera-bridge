@@ -504,7 +504,7 @@ import TestSupport
         }
         #expect(backend.read { $0.settings.sky } == SkySettings(), "nothing was saved")
         // A refusal stops the whole request.
-        let mixed = await session.send("PATCH", "/api/v1/settings", json: ["basePort": 22_000, "sky": ["aiDailyLimit": 0]])
+        let mixed = await session.send("PATCH", "/api/v1/settings", json: ["basePort": 21_150, "sky": ["aiDailyLimit": 0]])
         #expect(mixed.status == 400)
         #expect((await session.get("/api/v1/settings")).json["basePort"] as? Int == 21_100)
         // The edges that are allowed.

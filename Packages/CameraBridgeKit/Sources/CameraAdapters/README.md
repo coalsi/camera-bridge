@@ -250,7 +250,8 @@ with two slots that keep one not sent, refuse one address twice or keep their se
 and `CameraDNSOwnAPITests` (the IPCamera Web family's `set=eth` byte for byte, its restart and Restore, against `FakeIPCamWebCamera` beside a
 `MockONVIFCamera`; Reolink's `SetLocalLink` against `MockONVIFCamera.otherAPI`), and `IPCWebDNSTests` (the IP camera web API's
 `setNetworkLANConfig` byte for byte, its restart with dropped requests (`MockResponse.drop`), Restore, DHCP, a paused API, ONVIF beside it,
-against `FakeIPCWebCamera` and `MockONVIFCamera`). A change the account may not make: `ONVIFWriteNameTests`
+against `FakeIPCWebCamera` and `MockONVIFCamera`; on Linux through `PlainHTTP`, as the daemon asks a camera, `.plainHTTPRoute`).
+A change the account may not make: `ONVIFWriteNameTests`
 (which calls are writes and which prove the login) and `ONVIFWriteRefusalTests` (`MockONVIFCamera.refusedWrites` answers chosen writes with
 `NotAuthorized` or HTTP 401 while its reads answer: `.notPermitted`, no pause; a first refused call, a write after only calls anyone gets, a
 proof older than `loginProofWindow` and one ended by a refused login are refused logins).

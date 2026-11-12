@@ -10,11 +10,21 @@ import TestSupport
 /// Short-lived HLS tickets: a viewer mints one with its key (`POST hls/tickets`), and the player then fetches files with only the ticket in
 /// the path (`GET hls/:ticket/:file`, open). A ticket opens one camera, read-only, and the viewer's key never goes in a URL.
 @Suite(.timeLimit(.minutes(1))) struct HLSTicketRoutesTests {
-    /// A clock the tests move.
+    /// The clocks the tests move: the time of day, and the time that passed (what tickets end on). Time passing moves both; somebody setting the
+    /// clock moves only the first.
     private final class Clock: Sendable {
         private let time = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
+        private let passed = Mutex(ContinuousClock.now)
         var now: Date { time.withLock { $0 } }
-        func advance(_ seconds: TimeInterval) { time.withLock { $0 = $0.addingTimeInterval(seconds) } }
+        var uptime: ContinuousClock.Instant { passed.withLock { $0 } }
+
+        func advance(_ seconds: TimeInterval) {
+            step(seconds)
+            passed.withLock { $0 = $0.advanced(by: .seconds(seconds)) }
+        }
+
+        /// The time of day is set `seconds` forward, or back if negative.
+        func step(_ seconds: TimeInterval) { time.withLock { $0 = $0.addingTimeInterval(seconds) } }
     }
 
     private struct Bridge {
@@ -35,6 +45,7 @@ import TestSupport
         let clock = Clock()
         let harness = try Harness(backend: backend) {
             $0.now = { clock.now }
+            $0.uptime = { clock.uptime }
             $0.hlsFirstPlaylistWait = .milliseconds(10)
         }
         let owner = try await harness.signIn()
@@ -83,7 +94,7 @@ import TestSupport
         // Removing an Apple TV does not end a browser's ticket.
         #expect(await bridge.owner.send("DELETE", "/api/v1/viewers/\(bridge.tv.id)").status == 204)
         #expect((await fetch(bridge, ticket)).status == 503, "there is still a ticket, and this fake's camera gives no picture")
-        let touched = await bridge.harness.app.hlsTickets.touch(ticket, now: bridge.clock.now)
+        let touched = await bridge.harness.app.hlsTickets.touch(ticket, now: bridge.clock.uptime)
         #expect(touched != nil)
     }
 
@@ -145,12 +156,12 @@ import TestSupport
         let ticket = try ticketOf(in: await mint(bridge))
         let tickets = bridge.harness.app.hlsTickets
         bridge.clock.advance(299)
-        #expect(await tickets.touch(ticket, now: bridge.clock.now) != nil)
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) != nil)
         bridge.clock.advance(299)
-        #expect(await tickets.touch(ticket, now: bridge.clock.now) != nil, "each use starts the five minutes again")
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) != nil, "each use starts the five minutes again")
         bridge.clock.advance(301)
-        #expect(await tickets.touch(ticket, now: bridge.clock.now) == nil)
-        #expect(await tickets.touch(ticket, now: bridge.clock.now) == nil, "and stays gone")
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) == nil)
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) == nil, "and stays gone")
     }
 
     @Test func hardCapSixHours() async throws {
@@ -159,12 +170,33 @@ import TestSupport
         let tickets = bridge.harness.app.hlsTickets
         for _ in 0..<71 {
             bridge.clock.advance(299)
-            #expect(await tickets.touch(ticket, now: bridge.clock.now) != nil)
+            #expect(await tickets.touch(ticket, now: bridge.clock.uptime) != nil)
         }
         bridge.clock.advance(299)   // 72 x 299 s = 21,528 s
-        #expect(await tickets.touch(ticket, now: bridge.clock.now) != nil)
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) != nil)
         bridge.clock.advance(100)   // 21,628 s, kept alive all along
-        #expect(await tickets.touch(ticket, now: bridge.clock.now) == nil)
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) == nil)
+    }
+
+    /// Review of 2026-11-09, M1: tickets ended on the time of day, so a clock set forward ended every open one and a clock set back made them last longer.
+    @Test func settingTheClockNeitherEndsATicketNorMakesOneLastLonger() async throws {
+        let bridge = try await makeBridge()
+        let ticket = try ticketOf(in: await mint(bridge))
+        let tickets = bridge.harness.app.hlsTickets
+        bridge.clock.step(3_600)
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) != nil, "an hour ahead on the wall, but no time passed")
+        #expect((await fetch(bridge, ticket)).status != 404, "and its files are still there")
+        bridge.clock.step(-86_400)
+        bridge.clock.advance(301)
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) == nil, "a day back on the wall, and five minutes passed: it ended")
+        let second = try ticketOf(in: await mint(bridge))
+        for _ in 0..<72 {
+            bridge.clock.step(-3_600)
+            bridge.clock.advance(299)
+            _ = await tickets.touch(second, now: bridge.clock.uptime)
+        }
+        bridge.clock.advance(100)
+        #expect(await tickets.touch(second, now: bridge.clock.uptime) == nil, "six hours of use, whatever the clock says")
     }
 
     @Test func eighthIsKeptAndNinthDropsTheOldest() async throws {
@@ -178,8 +210,10 @@ import TestSupport
         #expect(await tickets.count(viewer: bridge.tv.id) == 8)
         minted.append(try ticketOf(in: await mint(bridge)))
         #expect(await tickets.count(viewer: bridge.tv.id) == 8)
-        #expect(await tickets.touch(minted[0], now: bridge.clock.now) == nil, "the oldest")
-        for kept in minted.dropFirst() { #expect(await tickets.touch(kept, now: bridge.clock.now) != nil) }
+        #expect(await tickets.touch(minted[0], now: bridge.clock.uptime) == nil, "the oldest")
+        for kept in minted.dropFirst() { #expect(await tickets.touch(kept, now: bridge.clock.uptime) != nil) }
+        let key = HLSLivePackager.Key(camera: bridge.camera.id, stream: .sub, audio: false)
+        #expect(await bridge.harness.app.hlsPackagers.running(key) != nil, "the other tickets play the same packager: it goes on")
     }
 
     @Test func oneViewersTicketsDoNotCountForAnother() async throws {
@@ -189,7 +223,7 @@ import TestSupport
         for _ in 0..<9 {
             _ = await bridge.harness.send("POST", "/api/v1/hls/tickets", json: ["camera": bridge.camera.id.uuidString, "kind": "live"], headers: bearer(other.key))
         }
-        #expect(await bridge.harness.app.hlsTickets.touch(first, now: bridge.clock.now) != nil)
+        #expect(await bridge.harness.app.hlsTickets.touch(first, now: bridge.clock.uptime) != nil)
     }
 
     @Test func removedViewerGets404AtOnce() async throws {
@@ -198,7 +232,7 @@ import TestSupport
         let tickets = bridge.harness.app.hlsTickets
         #expect(await bridge.owner.send("DELETE", "/api/v1/viewers/\(bridge.tv.id)").status == 204)
         #expect((await fetch(bridge, ticket)).status == 404)
-        #expect(await tickets.touch(ticket, now: bridge.clock.now) == nil, "and the ticket is dropped, not only refused")
+        #expect(await tickets.touch(ticket, now: bridge.clock.uptime) == nil, "and the ticket is dropped, not only refused")
     }
 
     @Test func signOutEndsItsTickets() async throws {
@@ -207,7 +241,7 @@ import TestSupport
         let ticket = try ticketOf(in: answer)
         #expect(await bridge.owner.send("POST", "/api/v1/auth/logout").status == 204)
         #expect((await fetch(bridge, ticket)).status == 404)
-        #expect(await bridge.harness.app.hlsTickets.touch(ticket, now: bridge.clock.now) == nil, "dropped, not only refused")
+        #expect(await bridge.harness.app.hlsTickets.touch(ticket, now: bridge.clock.uptime) == nil, "dropped, not only refused")
     }
 
     @Test func removingABrowserEndsItsTickets() async throws {
@@ -217,9 +251,9 @@ import TestSupport
         let listed = try #require(await bridge.owner.get("/api/v1/auth/sessions").json["sessions"] as? [[String: Any]])
         let theirs = try #require(listed.first { $0["current"] as? Bool == false }?["id"] as? String)
         #expect(await bridge.owner.send("DELETE", "/api/v1/auth/sessions/\(theirs)").status == 204)
-        #expect(await bridge.harness.app.hlsTickets.touch(ticket, now: bridge.clock.now) != nil, "still held until it is fetched")
+        #expect(await bridge.harness.app.hlsTickets.touch(ticket, now: bridge.clock.uptime) != nil, "still held until it is fetched")
         #expect((await fetch(bridge, ticket)).status == 404)
-        #expect(await bridge.harness.app.hlsTickets.touch(ticket, now: bridge.clock.now) == nil)
+        #expect(await bridge.harness.app.hlsTickets.touch(ticket, now: bridge.clock.uptime) == nil)
     }
 
     @Test func aPasswordChangeEndsOtherSessionsTickets() async throws {
@@ -230,10 +264,10 @@ import TestSupport
         let mine = try ticketOf(in: await bridge.owner.send("POST", "/api/v1/hls/tickets", json: body))
         let changed = await bridge.owner.send("POST", "/api/v1/auth/password", json: ["current": "correct horse", "new": "another horse staple"])
         #expect(changed.status == 204 || changed.status == 200, "\(changed.text)")
-        #expect(await bridge.harness.app.hlsTickets.touch(theirs, now: bridge.clock.now) != nil)
+        #expect(await bridge.harness.app.hlsTickets.touch(theirs, now: bridge.clock.uptime) != nil)
         #expect((await fetch(bridge, theirs)).status == 404)
-        #expect(await bridge.harness.app.hlsTickets.touch(theirs, now: bridge.clock.now) == nil)
-        #expect(await bridge.harness.app.hlsTickets.touch(mine, now: bridge.clock.now) != nil, "the browser that changed it stays signed in")
+        #expect(await bridge.harness.app.hlsTickets.touch(theirs, now: bridge.clock.uptime) == nil)
+        #expect(await bridge.harness.app.hlsTickets.touch(mine, now: bridge.clock.uptime) != nil, "the browser that changed it stays signed in")
     }
 
     @Test func aTicketKeepsWhatItWasMintedFor() async throws {
@@ -241,17 +275,17 @@ import TestSupport
         let live = try ticketOf(in: await mint(bridge, body: ["camera": bridge.camera.id.uuidString, "kind": "live", "stream": "main", "audio": true]))
         let recorded = try ticketOf(in: await mint(bridge, body: ["camera": bridge.camera.id.uuidString, "kind": "recorded", "from": NVRRig.base, "to": NVRRig.base + 9_000]))
         let tickets = bridge.harness.app.hlsTickets
-        let a = try #require(await tickets.touch(live, now: bridge.clock.now))
+        let a = try #require(await tickets.touch(live, now: bridge.clock.uptime))
         #expect(a.camera == bridge.camera.id && a.viewer == bridge.tv.id && a.kind == .live(stream: .main, audio: true))
-        let b = try #require(await tickets.touch(recorded, now: bridge.clock.now))
+        let b = try #require(await tickets.touch(recorded, now: bridge.clock.uptime))
         #expect(b.camera == bridge.camera.id && b.viewer == bridge.tv.id && b.kind == .recorded(from: NVRRig.base, to: NVRRig.base + 9_000))
     }
 
     @Test func anOversizedTicketIsNotLookedUp() async throws {
         let bridge = try await makeBridge()
         let real = try ticketOf(in: await mint(bridge))
-        #expect(await bridge.harness.app.hlsTickets.touch(real + "0", now: bridge.clock.now) == nil)
-        #expect(await bridge.harness.app.hlsTickets.touch(String(repeating: "a", count: 100_000), now: bridge.clock.now) == nil)
+        #expect(await bridge.harness.app.hlsTickets.touch(real + "0", now: bridge.clock.uptime) == nil)
+        #expect(await bridge.harness.app.hlsTickets.touch(String(repeating: "a", count: 100_000), now: bridge.clock.uptime) == nil)
         #expect((await fetch(bridge, String(repeating: "a", count: 5_000))).status == 404)
     }
 

@@ -69,10 +69,12 @@ actor HLSLivePackager {
         guard !stopped, pump == nil else { return }
         let (key, backend) = (key, backend)
         let sink: @Sendable (WebApp.LiveCameraOutput) async -> Void = { [weak self] output in await self?.take(output) }
+        let soundSwitch: (@Sendable () async -> Bool)? = key.audio ? { @Sendable [weak self] in await self?.keepsItsSound() ?? false } : nil
         // Nothing queues here, so nothing is ever backlogged: the sink awaits this actor, and a packager that falls behind leaves the frames in the
         // subscription, whose own bounded queue drops whole key intervals for a slow reader.
         pump = Task {
-            await WebApp.pumpLiveCamera(id: key.camera, stream: key.stream, width: nil, audio: key.audio, backend: backend, backlogged: { false }, sink: sink)
+            await WebApp.pumpLiveCamera(id: key.camera, stream: key.stream, width: nil, audio: key.audio, soundSwitch: soundSwitch, backend: backend,
+                                        backlogged: { false }, sink: sink)
         }
         idleWatch = Task { [weak self] in
             while !Task.isCancelled {
@@ -81,6 +83,15 @@ actor HLSLivePackager {
                 await self.stopIfIdle()
             }
         }
+    }
+
+    /// Before a packager with sound subscribes again after its camera restarted: true while the camera's "Camera audio" switch is still on. Turning
+    /// it off restarts the camera; the packager then stops instead of going on without the sound its playlist promises, so the player asks for a
+    /// new ticket, which has none (a ticket's sound is the switch's at mint).
+    func keepsItsSound() async -> Bool {
+        if await WebApp.soundSwitch(of: key.camera, backend: backend) { return true }
+        await stop()
+        return false
     }
 
     /// Takes what the camera's live loop hands on. Only the video counts: after a restart, its new init segment starts the discontinuity by itself.
@@ -203,7 +214,17 @@ actor HLSLivePackagers {
         entries[key]?.packager
     }
 
-    /// `viewer` is gone (a TV removed, a browser signed out): the packagers only it used stop now, the others go on.
+    /// `viewer` no longer holds a ticket for the packager `id` (the ninth ticket pushed its last one out): it is no longer one of its users, and the
+    /// packager stops now if nobody else uses it. A packager that already stopped, or a newer one of the same key, is left alone.
+    func release(_ id: UUID, viewer: String) async {
+        guard let found = entries.first(where: { $0.value.packager.id == id }) else { return }
+        entries[found.key]?.users.remove(viewer)
+        guard found.value.users.subtracting([viewer]).isEmpty else { return }
+        entries[found.key] = nil   // before the await: from here on a new ticket starts a new packager
+        await found.value.packager.stop()
+    }
+
+    /// `viewer` is gone (a device removed, a browser signed out): the packagers only it used stop now, the others go on.
     func viewerLeft(_ viewer: String) async {
         var unused: [HLSLivePackager] = []
         for (key, entry) in entries where entry.users.contains(viewer) {

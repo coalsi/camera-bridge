@@ -5,15 +5,15 @@ import MediaCore
 import HAPCore
 
 extension BridgeEngine {
-    /// Static fake data for SwiftUI previews and the app's `-previewEngine YES` mode; never starts networking.
+    /// Static fake data for `camerabridged --preview` (the web interface without cameras) and the tests; never starts networking.
     ///
     /// A running bridge with five sample cameras that together cover every state the UI renders (live and recording,
     /// an unpaired doorbell, offline with an error, connecting, disabled), a paired sensors bridge, sample logs and
     /// settings. Identifiers, setup codes and configurations are fixed so previews are stable; event and log dates
     /// are relative to the call. Hosts are RFC 5737 documentation addresses (192.0.2.0/24) so nothing can reach a
     /// real device, and the engine runs on the inert environment (every transport/codec call throws). The engine is
-    /// never started: callers must not invoke operations on it that would start runtimes (the app skips them in
-    /// preview mode).
+    /// never started: callers must not invoke operations on it that would start runtimes (`camerabridged --preview` never
+    /// calls `start()`, and the engine's operations do nothing in a preview).
     public static func preview(scenario: PreviewScenario = .standard) -> BridgeEngine {
         let directory = FileManager.default.temporaryDirectory.appending(path: "CameraBridgePreview", directoryHint: .isDirectory)
         let environment = BridgeEnvironment.preview(directory: directory)
@@ -26,7 +26,7 @@ extension BridgeEngine {
     }
 }
 
-/// Which sample bridge `BridgeEngine.preview(scenario:)` shows (the app's `-demoScenario` launch argument, for screenshots
+/// Which sample bridge `BridgeEngine.preview(scenario:)` shows (`camerabridged --preview <scenario>`, for screenshots
 /// and UI review of states a healthy bridge never shows). Sample data only.
 public enum PreviewScenario: String, Sendable, CaseIterable {
     /// Five cameras covering every camera state (live, recording, offline, connecting, disabled, unpaired doorbell).

@@ -19,7 +19,6 @@ public struct NestDeviceAccess: Sendable {
     public static let defaultRedirect = "https://www.google.com"
     public static let consoleURL = URL(string: "https://console.nest.google.com/device-access")!
     public static let cloudCredentialsURL = URL(string: "https://console.cloud.google.com/apis/credentials")!
-    public static let sdmAPIURL = URL(string: "https://console.cloud.google.com/apis/library/smartdevicemanagement.googleapis.com")!
     static let tokenEndpoint = "https://www.googleapis.com/oauth2/v4/token"
     static let devicesEndpoint = "https://smartdevicemanagement.googleapis.com/v1/enterprises"
 

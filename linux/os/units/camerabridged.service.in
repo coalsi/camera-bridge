@@ -58,7 +58,6 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-ProtectClock=yes
 ProtectHostname=yes
 # No PrivateDevices: ffmpeg needs the GPU render node for VA-API. Everything else in /dev stays closed.
 DevicePolicy=closed
@@ -70,6 +69,11 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# Recordings are aged only once the kernel says the clock is synchronized: the daemon reads that with adjtimex(2), which glibc makes with
+# clock_adjtime; both are outside @system-service. Reading needs no privilege. Setting the clock with them needs CAP_SYS_TIME, which the daemon
+# never has (an unprivileged user, NoNewPrivileges, the bounding set below), and the calls that only set it (clock_settime, settimeofday) stay
+# refused. So there is no ProtectClock=: it would refuse the read as well.
+SystemCallFilter=adjtimex clock_adjtime
 SystemCallErrorNumber=EPERM
 # Port 80 without root.
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE

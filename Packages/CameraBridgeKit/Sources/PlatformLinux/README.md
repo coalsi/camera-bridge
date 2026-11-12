@@ -16,5 +16,14 @@ Every file is wrapped in `#if os(Linux)`, so the module builds empty on macOS. `
 | `HelperLaunching` | `ProcessHelperLauncher` | `Foundation.Process`; starts the child with an empty signal mask (libdispatch worker threads block all signals, which a child inherits). |
 | `MediaCodecs` | `UnavailableMediaCodecs` | Placeholder that throws `MediaCodecError.unsupported`; the ffmpeg-based codecs live in `Codecs/`. |
 
+Beside the protocols: `KernelClock.synchronization()` (public; `KernelClock.Synchronization`: `synchronized`, `unsynchronized`, `unknown(errno:)`)
+reads the kernel's clock state with `adjtimex` and no mode bits (`CTimex` system library target: `<sys/timex.h>`, which Swift's Glibc module leaves
+out). Synchronized is neither `TIME_ERROR` nor `STA_UNSYNC`, which chrony with `rtcsync` clears. The daemon hands it to the NVR's age rule
+(`ArchivePlatformPolicy.isClockSynchronized`); a call a sandbox refuses is `unknown`, which the age rule treats as not synchronized.
+
 Tests: `Tests/PlatformLinuxTests`, run by `Tools/linux-test.sh` (a Swift 6.4 container; it grants `CAP_NET_ADMIN` so the netlink test can add
 a dummy interface).
+
+## Additions beyond the contract
+
+`KernelClock`, `KernelClock.synchronization`, `KernelClock.Synchronization` (2026-11-11, docs/CONTRACT_CHANGES.md).

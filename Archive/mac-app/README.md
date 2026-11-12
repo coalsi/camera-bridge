@@ -28,9 +28,8 @@ The layout is the same as it was in the repository root, so paths inside this fo
 | `docs/distribution.md` | `Archive/mac-app/docs/distribution.md`: signing, entitlements, notarization, Sparkle |
 
 What stayed where it was: `Packages/` (including `PlatformApple`, which the macOS package tests use and a Mac version will
-use again), `Interop/`, `linux/`, `docs/brand/`, `Tools/fetch-go2rtc.sh` (the engine's real-binary tests use it), and
-`Tools/render_brand_assets.sh` with `Tools/compose_brand_assets.py`, which now read the logos from and write the app icon
-into `Archive/mac-app/App/Resources`.
+use again), `Interop/`, `linux/`, `docs/brand/` and `Tools/fetch-go2rtc.sh` (the engine's real-binary tests use it). `render_brand_assets.sh` and `compose_brand_assets.py` moved into `Archive/mac-app/Tools/`: they read the logos from and write the app icon
+into `Archive/mac-app/App/Resources`, and their two preview pictures are in `Archive/mac-app/docs/brand-previews/`.
 
 To make the Xcode project again, from this folder: `xcodegen generate`.
 
@@ -51,7 +50,7 @@ Take it from commit `a51878b` (the commit on `main` before the archive): `git sh
 2. Undo the path changes made for this folder: `../../Packages/CameraBridgeKit` back to `Packages/CameraBridgeKit` and
    `$(SRCROOT)/../../build/helpers/go2rtc` back to `$(SRCROOT)/build/helpers/go2rtc` in `project.yml`; the same go2rtc path
    in `Tools/embed-go2rtc.sh`; `APP_ROOT` and `REPO_ROOT` in `Tools/nvr-soak.sh`. Then run `xcodegen generate`.
-3. Point `Tools/render_brand_assets.sh` and `Tools/compose_brand_assets.py` back at `App/Resources`, and the two scans of
+3. Point `render_brand_assets.sh` and `compose_brand_assets.py` (in `Archive/mac-app/Tools/`) back at `App/Resources`, and the two scans of
    `App/Sources` (and the expected file key) in `Packages/CameraBridgeKit/Tests/PortabilityTests/PortabilityTests.swift` back at `App/Sources`.
 4. Put the `app` job back into `.github/workflows/ci.yml` from `a51878b`.
 

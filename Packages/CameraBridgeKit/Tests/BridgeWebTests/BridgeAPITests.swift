@@ -138,11 +138,11 @@ import TestSupport
         #expect(before.json["webhookEnabled"] as? Bool == false)
         #expect(before.json["logLevel"] as? String == "info")
         #expect((before.json["webhookToken"] as? String)?.count == 32)
-        let after = await session.send("PATCH", "/api/v1/settings", json: ["bridgeName": "Garage", "basePort": 22_000, "sensorsBridgePort": 22_099, "motionShadowTest": true,
+        let after = await session.send("PATCH", "/api/v1/settings", json: ["bridgeName": "Garage", "basePort": 21_150, "sensorsBridgePort": 21_095, "motionShadowTest": true,
                                                                           "logLevel": "debug"])
         #expect(after.status == 200)
         #expect(after.json["bridgeName"] as? String == "Garage")
-        #expect(after.json["basePort"] as? Int == 22_000)
+        #expect(after.json["basePort"] as? Int == 21_150 && after.json["sensorsBridgePort"] as? Int == 21_095)
         #expect(after.json["motionShadowTest"] as? Bool == true)
         #expect(after.json["logLevel"] as? String == "debug")
         #expect(await session.get("/api/v1/status").json["name"] as? String == "Garage")
@@ -173,6 +173,49 @@ import TestSupport
         #expect(await session.send("PATCH", "/api/v1/settings", json: ["bridgeName": "  "]).status == 400)
         #expect(await session.send("PATCH", "/api/v1/settings", json: ["basePort": "high"]).status == 400)
         #expect(await session.get("/api/v1/settings").json["basePort"] as? Int == 21_100, "nothing changed")
+    }
+
+    /// Camera Bridge OS's firewall opens 21090 to 21199 (the webhook, the sensors bridge, and the cameras' HomeKit accessories from 21100): a new
+    /// port outside that would not reach the bridge, so the settings refuse it there, with a sentence. What is saved already is left alone.
+    @Test func portsTheBoxsFirewallClosesAreRefused() {
+        var saved = BridgeSettings()
+        let problem = { (base: Int?, sensors: Int?, webhook: Int?) in
+            WebApp.firewallProblem(basePort: base, sensorsBridgePort: sensors, webhookPort: webhook, saved: saved)
+        }
+        for port in [21_090, 21_099, 21_150, 21_199] {
+            #expect(problem(nil, port, nil) == nil && problem(nil, nil, port) == nil, "\(port)")
+        }
+        for port in [0, 1_024, 8_080, 21_089, 21_200, 51_900] {
+            #expect(problem(nil, port, nil)?.field == "sensorsBridgePort", "\(port)")
+            #expect(problem(nil, nil, port)?.field == "webhookPort", "\(port)")
+        }
+        #expect(problem(nil, nil, 8_080)?.message == "Use a port from 21090 to 21199: the box’s firewall lets only those through.")
+        // The base port anywhere in HomeKit's part of the range: new cameras take the lowest free port from it, and a camera keeps the one it has.
+        for base in [21_100, 21_150, 21_195, 21_199] { #expect(problem(base, nil, nil) == nil, "\(base)") }
+        for base in [1_024, 21_090, 21_099, 21_200, 22_000, 51_100] { #expect(problem(base, nil, nil)?.field == "basePort", "\(base)") }
+        #expect(problem(22_000, nil, nil)?.message == "Use a HomeKit base port from 21100 to 21199: the box’s firewall lets HomeKit through on those only.")
+        // Values saved before the limits are left alone, and may be sent back unchanged (the page sends both ports of its form together).
+        saved.basePort = 51_100
+        saved.sensorsBridgePort = 51_900
+        saved.webhookPort = 8_080
+        #expect(problem(51_100, 51_900, 8_080) == nil)
+        #expect(problem(51_100, 51_901, nil)?.field == "sensorsBridgePort", "a new one must be in the range")
+        #expect(problem(51_101, nil, nil)?.field == "basePort")
+    }
+
+    /// The rule follows the system mode (what the page uses too), not the platform: the same on a Mac and on Linux.
+    @Test func theSettingsKeepTheFirewallsPortsOnTheBoxOnly() async throws {
+        let installed = try await Harness(systemMode: "installed").signIn()
+        let outside = await installed.send("PATCH", "/api/v1/settings", json: ["webhookPort": 8_080])
+        #expect(outside.status == 400 && outside.json["field"] as? String == "webhookPort", "\(outside.text)")
+        #expect(await installed.get("/api/v1/settings").json["webhookPort"] as? Int == 21_090, "nothing changed")
+        #expect(await installed.send("PATCH", "/api/v1/settings", json: ["webhookPort": 21_091, "basePort": 21_199]).status == 200)
+        let base = await installed.send("PATCH", "/api/v1/settings", json: ["basePort": 21_200])
+        #expect(base.status == 400 && base.json["field"] as? String == "basePort", "\(base.text)")
+
+        let development = try await Harness(systemMode: "development").signIn()
+        #expect(await development.send("PATCH", "/api/v1/settings", json: ["webhookPort": 8_080, "basePort": 22_000]).status == 200,
+                "a development daemon has no firewall to meet, on any platform")
     }
 
     @Test func theEnginesRefusalIsShown() async throws {

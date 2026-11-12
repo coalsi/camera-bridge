@@ -52,24 +52,8 @@ concurrency:
 jobs:
   static:
     name: Static checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: shellcheck, nft -c, systemd-analyze verify, repart, mkosi summary
-        run: linux/os/test-static.sh
-      - name: Self-test of the NVR test client (linux/os/test-nvr.py)
-        run: python3 -I linux/os/test-nvr.py selftest
-      - name: Self-test of the beta clean-up (linux/os/prune-betas.sh)
-        run: |
-          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck; }
-          shellcheck linux/os/prune-betas.sh linux/os/test-prune-betas.sh
-          bash linux/os/test-prune-betas.sh
-      - name: Self-test of the internet guard (linux/os/test-guard.sh, cb-guard against recorded dnsmasq lines)
-        run: |
-          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck; }
-          shellcheck -x linux/os/test-guard.sh linux/os/mkosi.extra/usr/sbin/cb-guard
-          bash linux/os/test-guard.sh
+    # The same checks as every push (ci.yml): linux/os/test-static.sh and the other self-tests.
+    uses: ./.github/workflows/os-static.yml
 
   build:
     name: Build image (amd64)
@@ -79,7 +63,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Work out the version
         id: v
         env:
@@ -109,7 +93,7 @@ jobs:
           linux/os/build.sh --version "$VERSION" --arch amd64 --out "$PWD/out" "${flags[@]}"
       - name: Show what was built
         run: ls -la out && cat out/SHA256SUMS
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: camera-bridge-os-${{ steps.v.outputs.version }}-amd64
           path: out/
@@ -121,13 +105,15 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    outputs:
+      tests: ${{ steps.vm.outputs.tests }}   # the tests that ran: the release text names only what was tested
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: camera-bridge-os-${{ needs.build.outputs.version }}-amd64
           path: out
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'   # linux/web-dev/conformance.mjs (the nvr test runs it against the box)
       - name: Install QEMU and OVMF
@@ -141,14 +127,16 @@ jobs:
           sudo udevadm trigger --name-match=kvm || true
           if [ -w /dev/kvm ]; then echo "KVM available"; else echo "::warning::no /dev/kvm on this runner; the boot test runs in slow emulation and is limited to the basic tests"; fi
       - name: Boot the image and check it
+        id: vm
         env:
           VERSION: ${{ needs.build.outputs.version }}
           SMOKE_TESTS: ${{ github.event.inputs.smoke_tests }}
         run: |
           # daemon, nvr, nvr-archive and nvr-faults skip themselves on an image with the stub daemon.
-          tests=${SMOKE_TESTS:-boot,ssh-off,system,persist,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,installer,install-boot}
+          tests=${SMOKE_TESTS:-boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,installer,install-boot}
           case $tests in *[!a-z,-]*) echo "::error::the test list may only hold letters, commas and hyphens"; exit 1 ;; esac
           if [ ! -w /dev/kvm ]; then tests=boot,ssh-off; fi
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
           cpus=$(nproc); if [ "$cpus" -gt 4 ]; then cpus=4; fi
           linux/os/test-vm.sh --image "out/camera-bridge-os-$VERSION-amd64.img.xz" --arch amd64 --tests "$tests" --disk-size 32G --cpus "$cpus" \
               --work "$RUNNER_TEMP/vm" --keep
@@ -157,7 +145,7 @@ jobs:
         run: tail -n 200 "$RUNNER_TEMP/vm/serial.log" || true
       - name: Keep the VM logs of a failed run
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: smoke-logs-${{ needs.build.outputs.version }}
           path: |
@@ -176,15 +164,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The notes, the public key the boxes check updates with, and the beta clean-up.
+          # (linux/package.json says the page's .js files are modules, so any Node reads release-notes.js as one.)
           sparse-checkout: |
+            linux/package.json
             linux/web/js/release-notes.js
             linux/os/mkosi.extra/usr/share/camera-bridge/update-key.pub
             linux/os/prune-betas.sh
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: camera-bridge-os-${{ needs.build.outputs.version }}-amd64
           path: out
@@ -206,7 +196,15 @@ jobs:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.build.outputs.version }}
           PRUNE_OS_BETAS: ${{ vars.PRUNE_OS_BETAS }}
+          TESTS_RAN: ${{ needs.smoke.outputs.tests }}
         run: |
+          # What this build was tested for, from the tests the smoke job ran. The update and rollback tests need a second, newer release
+          # (test-vm.sh --update-dir), which this workflow does not build: the text does not claim them.
+          TESTED=""
+          case ",$TESTS_RAN," in *,install-boot,*) TESTED="installing itself to a disk and starting from it" ;; esac
+          case ",$TESTS_RAN," in *,rescue,*) TESTED="${TESTED:+$TESTED, and }restarting by itself from rescue mode" ;; esac
+          if [ -n "$TESTED" ]; then TESTED="and this build passed automated tests on a virtual machine, including $TESTED"
+          else TESTED="and this build started on a virtual machine in an automated test"; fi
           # Versions before 1.0 are betas, published as pre-releases: a box on a beta takes the next one (cb-update's beta channel), a box on
           # 1.0 or later only full releases. A beta is one product, "Camera Bridge OS beta"; the version is its build number.
           PRERELEASE=()
@@ -217,7 +215,7 @@ jobs:
             PRERELEASE=(--prerelease)
             TITLE="Camera Bridge OS beta $VERSION"
             FIRST_LINE="Camera Bridge OS beta, build $VERSION (amd64)."
-            WARNING="**Beta.** Camera Bridge OS runs every day on the reference box (Beelink Mini S, Intel N150, 12 GB) and passes automated tests on virtual machines, including install to a disk, updates and automatic rollback. The interface is still being refined before 1.0. Please report what you find in an issue."
+            WARNING="**Beta.** Camera Bridge OS runs every day on the reference box (Beelink Mini S, Intel N150, 12 GB), $TESTED. The interface is still being refined before 1.0. Please report what you find in an issue."
             if [ "$PRUNE_OS_BETAS" = on ]; then
               WARNING="$WARNING Only the two newest beta builds are listed here. Older builds keep their git tags, and their package lists and source offers are kept in the release os-sources."
             fi

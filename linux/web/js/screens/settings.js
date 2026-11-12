@@ -14,6 +14,68 @@ import { monitorCardFor } from './monitor-card.js';
 import { createSessionsCard } from './sessions-card.js';
 import { createViewersCard } from './viewers-card.js';
 
+/**
+ * The ports Camera Bridge OS's firewall opens to the local network (linux/os/mkosi.extra/etc/nftables.conf: TCP 21090 to 21199). The webhook and
+ * the sensors bridge may use any of them; the cameras' Apple Home accessories use 21100 to 21199, one port each from the first camera port upward.
+ * A new port outside its range is refused (as the bridge refuses it, WebApp+Bridge.swift `firewallProblem`); one saved before is kept as it is, and
+ * the page says the network can't reach it. A development daemon (a Mac, or the daemon run as a plain program) has no such firewall.
+ */
+export const OPEN_PORTS = Object.freeze({ low: 21090, high: 21199 });
+export const CAMERA_PORTS = Object.freeze({ low: 21100, high: 21199 });
+/** Any port a program may listen on without root: the ports of a development daemon, which has no firewall to keep to. */
+const ANY_PORT = Object.freeze({ low: 1024, high: 65535 });
+
+const inRange = (port, { low, high }) => Number.isInteger(port) && port >= low && port <= high;
+
+/**
+ * The ports the page accepts: `{ base, open }`, the first camera port's range and the webhook's and sensors bridge's. On Camera Bridge OS
+ * (`onTheBox`) they are the firewall's: the first camera port anywhere from 21100 to 21199 (cameras keep the ports they have; a new one gets the
+ * lowest free port from there up), the other two from 21090 to 21199, as the bridge rules. Elsewhere any port from 1024.
+ */
+export function portRanges({ onTheBox = true } = {}) {
+  return onTheBox ? { base: CAMERA_PORTS, open: OPEN_PORTS } : { base: ANY_PORT, open: ANY_PORT };
+}
+
+/**
+ * What a ports form sends: `{ changes }`, the fields whose value changed (each inside its range), or `{ error }`, the sentence for the first
+ * that is not a port of its range. A field that still holds its saved value is left out, so a saved port outside the range stays as it is.
+ * `fields`: [{ key (the setting), value (the input's text), range, name (for the sentence) }]; `saved`: the settings as the bridge sent them.
+ */
+export function portChanges(fields, saved) {
+  const changes = {};
+  for (const { key, value, range, name } of fields) {
+    const text = String(value ?? '').trim();
+    const port = /^\d{1,5}$/.test(text) ? Number(text) : NaN;
+    if (port === saved?.[key]) continue;
+    if (!inRange(port, range)) return { error: `Choose a ${name} from ${range.low} to ${range.high}.` };
+    changes[key] = port;
+  }
+  return { changes };
+}
+
+/**
+ * The saved ports the network can't reach, each as its sentence: the first camera port outside 21100-21199, the sensors bridge's port and (while
+ * the webhook is on) the webhook's outside 21090-21199. Port 0 (any free port, which only development runs use) is not judged, nor is anything off
+ * the box (`onTheBox` false: a development daemon has no firewall).
+ */
+export function unreachablePorts(settings, { onTheBox = true } = {}) {
+  if (!onTheBox) return {};
+  const out = (port, range) => Number.isInteger(port) && port !== 0 && !inRange(port, range);
+  const sentences = {};
+  if (out(settings?.basePort, CAMERA_PORTS)) {
+    sentences.basePort = `New cameras would get ports from ${settings.basePort} upward, which your network can’t reach: the bridge’s firewall keeps them closed, so Apple Home could not add those cameras. Choose a first camera port from ${CAMERA_PORTS.low} to ${CAMERA_PORTS.high}.`;
+  }
+  if (out(settings?.sensorsBridgePort, OPEN_PORTS)) {
+    sentences.sensorsBridgePort = `Your network can’t reach the sensors bridge on port ${settings.sensorsBridgePort}: the bridge’s firewall keeps that port closed, so Apple Home can’t add it or use it. Choose a port from ${OPEN_PORTS.low} to ${OPEN_PORTS.high}.`;
+  }
+  if (settings?.webhookEnabled && out(settings?.webhookPort, OPEN_PORTS)) {
+    sentences.webhookPort = `Your network can’t reach the webhook on port ${settings.webhookPort}: the bridge’s firewall keeps that port closed, so requests from other systems don’t arrive. Choose a port from ${OPEN_PORTS.low} to ${OPEN_PORTS.high}.`;
+  }
+  return sentences;
+}
+
+const portWarning = (text) => h('div', { class: 'banner warning', role: 'status' }, icon('alert'), h('div', { class: 'text' }, text));
+
 export function renderSettings({ params, setTitle }) {
   const root = h('div', { class: 'settings' });
   const recordingHost = h('div', { id: 'recording' });
@@ -26,12 +88,15 @@ export function renderSettings({ params, setTitle }) {
   let monitorShown = false;               // the monitoring token is shown (Show), across the draws of Settings
   let aiCard = null;      // the AI descriptions card: { el, update }, made once (it keeps what is being typed and Try it's answer)
   let settings = null;
+  let onTheBox = true;   // Camera Bridge OS, whose firewall decides which ports work; false for a development daemon (GET system's mode)
   let destroyed = false;
   let wanted = params?.[0] ?? null;   // the address #/settings/recording or #/settings/ai scrolls to that card; #/pair/<code> ('apple-tv', the code) to the Apple TV and iPhone card
 
   async function load() {
     try {
-      settings = await get('settings');
+      const [loaded, system] = await Promise.all([get('settings'), get('system').catch(() => null)]);
+      settings = loaded;
+      onTheBox = system?.mode !== 'development';
     } catch (error) {
       replace(root, inlineError(error.message));
       return;
@@ -122,28 +187,56 @@ export function renderSettings({ params, setTitle }) {
     h('button', { class: 'btn', type: 'submit' }, 'Change password'));
   }
 
+  /** Sends what a ports form changed, or says why it can't (in `errors`). Every port is checked here: a saved one outside the range is kept. */
+  function savePorts(fields, errors, message) {
+    replace(errors);
+    const { changes, error } = portChanges(fields, settings);
+    if (error) return replace(errors, inlineError(error));
+    if (!Object.keys(changes).length) return toast('Nothing to save.');
+    change(changes, message);
+  }
+
   function portsCard() {
-    const base = h('input', { type: 'number', min: 1024, max: 65535, value: settings.basePort });
-    const sensors = h('input', { type: 'number', min: 0, max: 65535, value: settings.sensorsBridgePort });
-    return h('form', { class: 'card', onsubmit: (e) => { e.preventDefault(); change({ basePort: Number(base.value), sensorsBridgePort: Number(sensors.value) }, 'Ports saved.'); } },
+    const ranges = portRanges({ onTheBox });
+    const base = h('input', { type: 'number', inputmode: 'numeric', min: ranges.base.low, max: ranges.base.high, step: 1, value: settings.basePort });
+    const sensors = h('input', { type: 'number', inputmode: 'numeric', min: ranges.open.low, max: ranges.open.high, step: 1, value: settings.sensorsBridgePort });
+    const errors = h('div');
+    const unreachable = unreachablePorts(settings, { onTheBox });
+    return h('form', { class: 'card', novalidate: true, onsubmit: (e) => {
+      e.preventDefault();
+      savePorts([{ key: 'basePort', value: base.value, range: ranges.base, name: 'first camera port' },
+        { key: 'sensorsBridgePort', value: sensors.value, range: ranges.open, name: 'sensors bridge port' }], errors, 'Ports saved.');
+    } },
       h('h2', null, 'Apple Home ports'),
-      h('p', { class: 'desc' }, 'Each camera is its own accessory with its own port. The bridge allows them through its firewall from 21100 to 21199.'),
+      h('p', { class: 'desc' }, onTheBox
+        ? `Each camera is its own accessory with its own port, from ${CAMERA_PORTS.low} to ${CAMERA_PORTS.high}. The sensors bridge and the webhook use ports from ${OPEN_PORTS.low} to ${OPEN_PORTS.high}. These are the ports the bridge’s firewall lets in from your network.`
+        : 'Each camera is its own accessory with its own port.'),
+      unreachable.basePort ? portWarning(unreachable.basePort) : null,
+      unreachable.sensorsBridgePort ? portWarning(unreachable.sensorsBridgePort) : null,
       h('div', { class: 'inline-fields' },
-        field('First camera port', base, { hint: 'New cameras get ports from here upward. Cameras you already added keep theirs.' }),
-        field('Sensors bridge port', sensors, { hint: 'The accessory that carries all the sensors.' })),
+        field('First camera port', base, { hint: [onTheBox ? `From ${ranges.base.low} to ${ranges.base.high}.` : '', 'New cameras get ports from here upward. Cameras you already added keep theirs.'].filter(Boolean).join(' ') }),
+        field('Sensors bridge port', sensors, { hint: [onTheBox ? `From ${ranges.open.low} to ${ranges.open.high}.` : '', 'The accessory that carries all the sensors.'].filter(Boolean).join(' ') })),
+      errors,
       h('div', { class: 'row' }, h('button', { class: 'btn', type: 'submit' }, 'Save ports'), h('a', { class: 'btn ghost', href: '#/pair/sensors' }, icon('home'), 'Add the sensors bridge to Apple Home')));
   }
 
   function webhookCard() {
-    const port = h('input', { type: 'number', min: 1024, max: 65535, value: settings.webhookPort });
+    const { open } = portRanges({ onTheBox });
+    const port = h('input', { type: 'number', inputmode: 'numeric', min: open.low, max: open.high, step: 1, value: settings.webhookPort });
+    const portErrors = h('div');
+    const unreachable = unreachablePorts(settings, { onTheBox });
     const token = h('code', null, settings.webhookToken);
     return h('div', { class: 'card' }, h('h2', null, 'Webhook'),
       h('p', { class: 'desc' }, 'Lets Home Assistant, Frigate or another system tell Camera Bridge about motion, doorbell rings and detections.'),
       settings.webhookProblem ? inlineError(settings.webhookProblem) : null,
       switchRow({ title: 'Listen for webhook requests', checked: settings.webhookEnabled, onchange: (v) => change({ webhookEnabled: v }, v ? 'The webhook is on.' : 'The webhook is off.') }),
       settings.webhookEnabled ? h('div', { class: 'stack' },
-        h('form', { onsubmit: (e) => { e.preventDefault(); change({ webhookPort: Number(port.value) }, 'Webhook port saved.'); } },
-          field('Port', port), h('button', { class: 'btn small', type: 'submit' }, 'Save port')),
+        unreachable.webhookPort ? portWarning(unreachable.webhookPort) : null,
+        h('form', { novalidate: true, onsubmit: (e) => {
+          e.preventDefault();
+          savePorts([{ key: 'webhookPort', value: port.value, range: open, name: 'webhook port' }], portErrors, 'Webhook port saved.');
+        } },
+          field('Port', port, { hint: onTheBox ? `From ${open.low} to ${open.high}.` : undefined }), portErrors, h('button', { class: 'btn small', type: 'submit' }, 'Save port')),
         h('div', { class: 'field' }, h('span', { class: 'label' }, 'Token'),
           h('div', { class: 'token' }, token,
             h('button', { class: 'btn small', type: 'button', onclick: async () => { try { await navigator.clipboard.writeText(settings.webhookToken); toast('Copied.'); } catch { toast('Select the token and copy it.'); } } }, icon('copy'), 'Copy'),

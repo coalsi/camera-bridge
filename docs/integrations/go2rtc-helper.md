@@ -1,6 +1,6 @@
 # The go2rtc streaming helper
 
-[go2rtc](https://github.com/AlexxIT/go2rtc) (MIT, version pinned in `Tools/fetch-go2rtc.sh`) is a program that speaks the protocols of cloud cameras and consoles (Ring, Google Nest, Wyze, Tuya, UniFi's RTSPS, Kasa, Xiaomi, …) and republishes each camera as RTSP. Camera Bridge bundles it as `Camera Bridge.app/Contents/Helpers/go2rtc` and runs it as a child process. The licence text is in [../third-party/go2rtc.md](../third-party/go2rtc.md).
+[go2rtc](https://github.com/AlexxIT/go2rtc) (MIT, version pinned in `linux/os/fetch-go2rtc.sh`) is a program that speaks the protocols of cloud cameras and consoles (Ring, Google Nest, Wyze, Tuya, UniFi's RTSPS, Kasa, Xiaomi, …) and republishes each camera as RTSP. On Camera Bridge OS it is part of the system image, at `/usr/lib/camera-bridge/helpers/go2rtc`, built by `linux/os/fetch-go2rtc.sh` from a pinned commit; the box starts it as a child process when a camera needs it. (The archived Mac app bundled it as `Camera Bridge.app/Contents/Helpers/go2rtc`.) The sections below were first written for the Mac app: where they say "this Mac" or the app's data folder, read the box instead; [../linux/ARCHITECTURE.md](../linux/ARCHITECTURE.md) has the box's paths. The licence text is in [../third-party/go2rtc.md](../third-party/go2rtc.md).
 
 ## What runs
 
@@ -39,10 +39,19 @@ Tools/fetch-go2rtc.sh        # downloads the pinned release, checks its SHA-256,
 
 ## Updating go2rtc
 
+On Camera Bridge OS, where go2rtc is built from a pinned commit by `linux/os/fetch-go2rtc.sh`:
+
+1. Choose the commit on <https://github.com/AlexxIT/go2rtc>, and read go2rtc's release notes and commits since the pinned one for changes to the `ring`, `nest`, `tuya` and `wyze` sources.
+2. In `linux/os/fetch-go2rtc.sh`, change `GO2RTC_COMMIT` (the full hash) and `GO2RTC_VERSION` to what the new build prints for `go2rtc -version`.
+3. Build it for both architectures (`linux/os/fetch-go2rtc.sh --arch arm64`, then `--arch amd64`). On a mismatch the script prints the new build's SHA-256 and installs nothing: set `SHA256_ARM64`, `SHA256_AMD64` and, if the licence changed, `SHA256_LICENSE` to the new values. Build on two machines and compare before committing.
+4. Run `linux/os/fetch-go2rtc.sh --arch arm64 --test` (go2rtc's own tests of `pkg/tutk` and `pkg/wyze`).
+5. Update `docs/third-party/go2rtc.md` (version, commit, checksums), `NOTICE`, `THIRD_PARTY_LICENSES.md` and `docs/linux/LICENSES.md`, and the commit in the Eufy helper's integration test (`linux/helpers/eufy-bridge/test/integration/Dockerfile`).
+
+For the archived Mac app (`Tools/fetch-go2rtc.sh`, which takes the official release; the engine's real-binary tests on a Mac use it too):
+
 1. Choose the release on <https://github.com/AlexxIT/go2rtc/releases>; note the SHA-256 GitHub shows for `go2rtc_mac_arm64.zip` and `go2rtc_mac_amd64.zip` and check them against the downloaded files.
-2. Change `VERSION` and both checksums in `Tools/fetch-go2rtc.sh`, and the version in `docs/third-party/go2rtc.md`.
+2. Change `VERSION` and both checksums in `Tools/fetch-go2rtc.sh`, and the archived Mac app's bullet in `docs/third-party/go2rtc.md`.
 3. Run `Tools/test-fetch-go2rtc.sh <folder with the two zips>` and the real-binary tests: `CAMERABRIDGE_GO2RTC_DIR=build/helpers swift test --filter Go2RTCRealBinaryTests` in `Packages/CameraBridgeKit` (they start the helper on loopback, check it listens on nothing else, that its API wants the password, that the secret never reaches a file, and that the sign-in page serves; no cloud is contacted).
-4. Read go2rtc's release notes for changes to the `ring`, `nest`, `tuya` and `wyze` sources.
 
 ## Troubleshooting
 

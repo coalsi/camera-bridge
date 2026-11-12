@@ -134,7 +134,7 @@ public final class BridgeEngine {
     private nonisolated let identityAccess = Mutex(Set<UUID>())
     /// The NVR behind its one handle (`NVRCoordinator`): the store and the recorders. The hook points below are its only callers.
     @ObservationIgnored let nvr: NVRCoordinator
-    /// Where recorded video is read from (the app's player, the web interface's routes). Not ready until the store has loaded its catalog
+    /// Where recorded video is read from (the web interface's routes; the archived Mac app's player). Not ready until the store has loaded its catalog
     /// after `start()`; `ArchiveReading.isReady`.
     public nonisolated let archive: any ArchiveReading
     /// The recordings folder as numbers, nil before the first measurement (refreshed with the cameras' status, at most every 5 s).
@@ -216,12 +216,12 @@ public final class BridgeEngine {
         var configurationRecoveredFrom: URL?
         var networkNotices: [NetworkNotice] = []
         var macVPN: MacVPNStatus?
-        /// A preview engine's synthetic archive and storage numbers (`-demoScenario nvr`).
+        /// A preview engine's synthetic archive and storage numbers (`PreviewScenario.nvr`).
         var archive: (any ArchiveReading)?
         var nvrStorage: ArchiveStorageStatus?
     }
 
-    /// An engine that shows `snapshot` (SwiftUI previews); its operations do nothing.
+    /// An engine that shows `snapshot` (the preview engine, `camerabridged --preview`); its operations do nothing.
     init(environment: BridgeEnvironment, snapshot: Snapshot) {
         self.environment = environment
         tuning = .standard
@@ -262,7 +262,7 @@ public final class BridgeEngine {
 
     /// What became of a damaged `config.json` when the engine loaded it: where it was set aside (`config.corrupt-<time>.json`), and
     /// whether the copy kept before the last save took its place (the cameras are back) or the bridge started with the defaults, without
-    /// the cameras. The app and the web page say so until the person dismisses it (`acknowledgeConfigurationRecovery()`), also across
+    /// the cameras. The web page says so until the person dismisses it (`acknowledgeConfigurationRecovery()`), also across
     /// relaunches: the notice is saved next to `config.json` (`config.recovered`) and read at `init`, since the configuration saved
     /// after the recovery loads normally. nil when nothing was set aside or the person dismissed it.
     public private(set) var configurationRecovery: ConfigurationRecovery?
@@ -1235,7 +1235,7 @@ public final class BridgeEngine {
         return "The camera says \(streams) H.264 but still sends \(codecs.count == 1 ? codecs.first! : codecs.sorted().joined(separator: " and "))."
     }
 
-    /// Reboots the camera (ONVIF `SystemReboot`). The app confirms with the person before calling this.
+    /// Reboots the camera (ONVIF `SystemReboot`). The archived Mac app confirmed with the person before calling this; nothing on the box calls it.
     public func rebootCamera(cameraID: UUID) async throws {
         guard !isPreview else { throw EngineError.cameraNotRunning }
         guard let camera = configurations.first(where: { $0.id == cameraID }) else { throw EngineError.unknownCamera }
@@ -1858,8 +1858,8 @@ public final class BridgeEngine {
         await router.triggerMotion(for: cameraID)
     }
 
-    /// The app forwards `NSWorkspace.didWakeNotification` (AppKit stays in the app target): restart ingest and
-    /// re-advertise, `networkSettle` after the wake and the network changes it brings (a Mac rejoining Wi-Fi reports a
+    /// The archived Mac app forwarded `NSWorkspace.didWakeNotification` here; nothing calls it on Camera Bridge OS, whose box does not sleep.
+    /// Restarts ingest and re-advertises, `networkSettle` after the wake and the network changes it brings (a Mac rejoining Wi-Fi reports a
     /// path update with it): one reconnect for both (`scheduleReconnect`). Runs in turn with the lifecycle and
     /// configuration operations, so a reconnect never overlaps a pause, stop or camera change.
     public func systemDidWake() async {
@@ -1872,7 +1872,7 @@ public final class BridgeEngine {
         scheduleReconnect(woke: true)
     }
 
-    /// The app forwards `NSWorkspace.willSleepNotification`: the Mac is going to sleep (logged, so a gap in the log and a camera
+    /// The archived Mac app forwarded `NSWorkspace.willSleepNotification` here: the Mac is going to sleep (logged, so a gap in the log and a camera
     /// that was "not responding" in Home have a visible cause; the wake path uses how long it slept).
     public func systemWillSleep() {
         guard !isPreview else { return }

@@ -19,11 +19,6 @@ const MOTIONISH = /motion/i;
 
 const history = [];   // newest first: { at, endAt, id, name, text, level: 'motion' | 'detection' | 'doorbell' } (at, endAt: server time)
 
-/** The live events seen so far (newest first). */
-export function wallHistory() {
-  return history;
-}
-
 /** A small play mark for a row that can be played (inline: icons.js belongs to another part of the page). */
 function playMark() {
   return svg('svg', { class: 'mon-event-play', viewBox: '0 0 12 12', width: 12, height: 12, 'aria-hidden': 'true', focusable: 'false' },

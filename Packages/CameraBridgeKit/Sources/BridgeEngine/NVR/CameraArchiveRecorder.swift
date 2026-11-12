@@ -725,8 +725,6 @@ final class OneShot: Sendable {
 
     private let state = Mutex(State())
 
-    var isFired: Bool { state.withLock { $0.fired } }
-
     func fire() {
         let waiters = state.withLock { state -> [CheckedContinuation<Void, Never>] in
             state.fired = true

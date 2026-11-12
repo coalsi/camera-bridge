@@ -3,7 +3,7 @@ Description=Camera Bridge OS update check (installs the update too when automati
 Documentation=https://github.com/coalsi/camera-bridge/blob/main/docs/linux/UPDATES.md
 After=network-online.target var-lib-camera\x2dbridge.mount
 Wants=network-online.target
-# Only one system job at a time: cb-update takes the lock of cb-system's heavy jobs (the web UI's "Update now" holds the same lock), and a
+# Only one system job at a time: cb-update takes the lock of cb-system's heavy jobs (the web UI's "Install update" holds the same lock), and a
 # daily run that finds it taken waits for tomorrow.
 ConditionPathExists=/usr/share/camera-bridge/update-key.pub
 

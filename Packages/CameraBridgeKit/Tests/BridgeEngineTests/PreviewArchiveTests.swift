@@ -5,7 +5,7 @@ import Synchronization
 import Testing
 @testable import BridgeEngine
 
-/// The sample recordings of `-demoScenario nvr`: where fragments are, the gap, the ids, the activity, and (on the Mac, with real codecs) the video.
+/// The sample recordings of the preview engine's NVR scenario (the archived Mac app showed them with a launch argument): where fragments are, the gap, the ids, the activity, and (on the Mac, with real codecs) the video.
 @Suite(.timeLimit(.minutes(1))) struct PreviewArchiveTests {
     private let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
     private let camera = UUID()

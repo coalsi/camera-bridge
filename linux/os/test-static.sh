@@ -34,7 +34,7 @@ helper_scripts=(../helpers/wyze-lake/build.sh ../helpers/wyze-lake/test/run.sh
                 ../helpers/eufy-bridge/build.sh ../helpers/eufy-bridge/scripts/build-inner.sh
                 ../helpers/eufy-bridge/test/integration/run.sh ../helpers/eufy-bridge/test/integration/container.sh
                 ../helpers/eufy-bridge/test/integration/go2rtc.sh)
-scripts=(build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken
+scripts=(build.sh build-image.sh build-boot-fallback.sh fetch-go2rtc.sh build-helpers.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken
          mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk mkosi.extra/usr/sbin/cb-guard mkosi.extra/usr/sbin/cb-tls mkosi.extra/usr/sbin/cb-wifi
          mkosi.extra/usr/sbin/cb-recording-drive test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh
          mkosi.extra/usr/lib/camera-bridge/lib.sh "${helper_scripts[@]}")
@@ -44,8 +44,20 @@ for f in "${scripts[@]}"; do [ -f "$f" ] || continue; check "bash -n $f" bash -n
 # (C.UTF-8: shellcheck cannot print the non-ASCII characters some scripts contain in the C locale)
 check "shellcheck (all scripts)" env LC_ALL=C.UTF-8 shellcheck -x "${scripts[@]}"
 check "stub daemon parses" python3 -c "import ast; ast.parse(open('stub/camerabridged-stub').read())"
-check "scripts are executable" bash -c 'for f in build.sh build-image.sh fetch-go2rtc.sh build-helpers.sh '"${helper_scripts[*]}"' test-static.sh test-vm.sh test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
+check "scripts are executable" bash -c 'for f in build.sh build-image.sh build-boot-fallback.sh fetch-go2rtc.sh build-helpers.sh '"${helper_scripts[*]}"' test-static.sh test-vm.sh test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
 
+# --- build-image.sh's checks of the finished image: debugfs exits 0 whether it finds a file or not, so they read its answer ---------------
+check "build-image.sh's image checks tell a file in the image from a missing one (or a folder of that name)" bash -c '
+    d=$(mktemp -d)
+    mkdir -p "$d/root/usr/share/camera-bridge/web/js" && echo page >"$d/root/usr/share/camera-bridge/web/index.html"
+    truncate -s 8M "$d/root.raw" && mkfs.ext4 -q -d "$d/root" "$d/root.raw" || exit 1
+    eval "$(grep "^in_image() {" build-image.sh)"
+    work=$d
+    in_image /usr/share/camera-bridge/web/index.html || { echo "a file in the image was not found"; exit 1; }
+    ! in_image /usr/share/camera-bridge/web/README.md || { echo "a missing file was found"; exit 1; }
+    ! in_image /usr/share/camera-bridge/web/js || { echo "a folder was taken for a file"; exit 1; }'
+check "the web page's developer notes (linux/web/README.md) stay out of the image" bash -c '
+    grep -qF "rm -f \"\$stage\$CB_WEB_ROOT/README.md\"" build-image.sh && grep -qF "! in_image \"\$CB_WEB_ROOT/README.md\"" build-image.sh'
 # --- the go2rtc helper: a pinned commit, toolchain digest and checksums; installed where the engine looks ---------------------
 check "fetch-go2rtc.sh pins a full commit hash" grep -Eq '^GO2RTC_COMMIT="[0-9a-f]{40}"' fetch-go2rtc.sh
 check "fetch-go2rtc.sh pins a version" grep -Eq '^GO2RTC_VERSION="[0-9]+\.[0-9]+\.[0-9]+[^"]*"' fetch-go2rtc.sh
@@ -100,6 +112,21 @@ useradd -r -u 932 -g 932 -s /usr/sbin/nologin cbupdate 2>/dev/null || true
 useradd -r -s /usr/sbin/nologin _chrony 2>/dev/null || true
 for g in video render; do getent group "$g" >/dev/null || groupadd -r "$g"; done
 
+# The age rule of recordings waits for the kernel's word that the clock is synchronized, which the daemon reads with adjtimex (glibc: clock_adjtime).
+# Its unit must let it read that and still keep it from setting the clock: the calls allowed (@system-service expanded, plus the unit's own) hold
+# adjtimex and clock_adjtime and none of the calls that only set it, it has no ProtectClock= turned on (which refuses the read too, in any spelling) and no SystemCallFilter=~ list, and it runs as an
+# unprivileged user without new privileges and without CAP_SYS_TIME, which setting the clock through adjtimex needs (systemd's own analysis says so).
+check "the daemon can read whether the clock is synchronized (adjtimex) and cannot set the clock" bash -c '
+    u=/usr/lib/systemd/system/camerabridged.service
+    ! grep -Eiq "^[[:space:]]*ProtectClock[[:space:]]*=[[:space:]]*(yes|true|on|1)" $u || { echo "ProtectClock= on refuses adjtimex, to read as well"; exit 1; }
+    ! grep -Eq "^[[:space:]]*SystemCallFilter[[:space:]]*=.*~" $u || { echo "a SystemCallFilter=~ list denies calls, and could deny adjtimex or hide a denied setter"; exit 1; }
+    expand() { systemd-analyze syscall-filter --no-pager "$1" | sed "1d; s/#.*//; s/^[[:space:]]*//; /^\$/d" | while read -r x; do case $x in @*) expand "$x" ;; *) echo "$x" ;; esac; done; }
+    allowed=$(sed -n "s/^SystemCallFilter=//p" $u | tr " " "\n" | sed "/^\$/d" | while read -r x; do case $x in @*) expand "$x" ;; *) echo "$x" ;; esac; done | sort -u)
+    for c in adjtimex clock_adjtime; do grep -qx "$c" <<<"$allowed" || { echo "$c is not allowed"; exit 1; }; done
+    for c in clock_settime clock_settime64 settimeofday stime; do ! grep -qx "$c" <<<"$allowed" || { echo "$c is allowed: it sets the clock"; exit 1; }; done
+    grep -qx "User=camerabridge" $u && grep -qx "NoNewPrivileges=yes" $u || { echo "not an unprivileged user without new privileges"; exit 1; }
+    ! grep -E "^(CapabilityBoundingSet|AmbientCapabilities)=" $u | grep -q CAP_SYS_TIME || { echo "CAP_SYS_TIME is given"; exit 1; }
+    systemd-analyze security --offline=true --no-pager $u 2>/dev/null | grep -q "^✓ CapabilityBoundingSet=~CAP_SYS_TIME " || { echo "systemd does not see a unit that cannot change the clock"; exit 1; }'
 units=()
 while IFS= read -r u; do units+=("$u"); done < <(cd /usr/lib/systemd/system && ls camerabridged.service camera-bridge-*.service camera-bridge-*.timer camera-bridge-*.path var-log-journal.mount var-lib-chrony.mount 'var-lib-camera\x2dbridge.mount')
 for u in "${units[@]}"; do
@@ -110,6 +137,35 @@ for u in "${units[@]}"; do
     if [ -z "$out" ]; then pass "systemd-analyze verify $u"; else bad "systemd-analyze verify $u"; sed 's/^/        /' <<<"$out"; fi
 done
 
+# --- a boot that stops early (emergency or rescue mode: the root or the data partition could not be mounted) restarts after 30 seconds, ---------
+# in the system and in the initrd, so boot counting can try again and fall back. A normal boot never starts the unit. (That it really restarts a
+# box is the release workflow's VM test to show: nothing here boots.)
+check "emergency and rescue mode restart the box after 30 seconds (drop-ins of both targets, the unit waits 30 s and reboots)" bash -c '
+    for t in emergency rescue; do
+        grep -qx "Wants=camera-bridge-emergency-reboot.service" "/usr/lib/systemd/system/$t.target.d/10-camera-bridge.conf" || { echo "no drop-in for $t.target"; exit 1; }
+    done
+    u=/usr/lib/systemd/system/camera-bridge-emergency-reboot.service
+    grep -qx "ExecStart=/usr/bin/sleep 30" $u && grep -qx "ExecStart=/usr/bin/systemctl --force reboot" $u && grep -qx "Type=oneshot" $u && grep -qx "DefaultDependencies=no" $u \
+        || { echo "the unit does not wait 30 seconds and then restart"; exit 1; }
+    ! grep -q "^\[Install\]" $u || { echo "the unit can be enabled: only the two targets may pull it in"; exit 1; }
+    systemd-analyze verify --man=no /usr/lib/systemd/system/emergency.target /usr/lib/systemd/system/rescue.target $u'
+check "a normal boot never starts it: only the drop-ins of emergency.target and rescue.target name the unit" bash -c '
+    ! grep -rl "camera-bridge-emergency-reboot" mkosi.extra mkosi.postinst.chroot mkosi.finalize units \
+        | grep -v -e "/emergency\.target\.d/10-camera-bridge\.conf$" -e "/rescue\.target\.d/10-camera-bridge\.conf$" -e "/camera-bridge-emergency-reboot\.service$"'
+check "the initrd gets the same unit and drop-ins (build-boot-fallback.sh, InitrdPackages=, --package-directory, reprepro)" bash -c '
+    d=$(mktemp -d); trap "rm -rf $d" EXIT
+    ./build-boot-fallback.sh --version 0.1 --out "$d" >/dev/null || exit 1
+    deb=$d/camera-bridge-boot-fallback_0.1_all.deb
+    dpkg-deb -x "$deb" "$d/x" || exit 1
+    for f in camera-bridge-emergency-reboot.service emergency.target.d/10-camera-bridge.conf rescue.target.d/10-camera-bridge.conf; do
+        cmp -s "mkosi.extra/usr/lib/systemd/system/$f" "$d/x/usr/lib/systemd/system/$f" || { echo "not the same in the package: $f"; exit 1; }
+    done
+    [ "$(dpkg-deb -c "$deb" | awk "{ print \$1, \$2 }" | sort -u | tr "\n" ";")" = "-rw-r--r-- root/root;drwxr-xr-x root/root;" ] || { echo "odd owners or modes in the package:"; dpkg-deb -c "$deb"; exit 1; }
+    grep -qx "InitrdPackages=camera-bridge-boot-fallback" mkosi.conf || { echo "mkosi.conf does not put it in the initrd"; exit 1; }
+    mkosi --directory "$PWD" --architecture x86-64 --image-version 0.1 summary 2>/dev/null | grep -Eq "^ *Initrd Packages: camera-bridge-boot-fallback$" || { echo "mkosi does not read it as an initrd package"; exit 1; }
+    grep -qF "\"\$HERE/build-boot-fallback.sh\" --version \"\$version\" --out \"\$work/packages\"" build-image.sh && grep -qF -- "--package-directory \"\$work/packages\"" build-image.sh \
+        || { echo "build-image.sh does not build it or give its folder to mkosi"; exit 1; }
+    command -v reprepro >/dev/null || { echo "no reprepro in the builder: mkosi needs it for --package-directory"; exit 1; }'
 check "the boot waits for Ethernet or Wi-Fi with our unit; networkd's wait-online and pcrlock are masked (they left the box degraded)" bash -c '
     p=mkosi.postinst.chroot
     grep -q "^    camera-bridge-wait-online.service \\\\$" "$p" || { echo "camera-bridge-wait-online.service is not enabled"; exit 1; }
@@ -143,7 +199,7 @@ check "the secure address's scripts pass their self-test (test-tls.sh)" bash tes
 check "the 5 GHz preference passes its self-test (test-wifi.sh)" bash test-wifi.sh
 check "the recording and archive drives pass their self-test (test-recording-drive.sh)" bash test-recording-drive.sh
 check "the request dispatcher and the jobs pass their self-test (test-system.sh)" bash test-system.sh
-check "the update safety net passes its self-test (test-update.sh: the boot health check, a rollback remembered, the job lock)" bash test-update.sh
+check "the update safety net passes its self-test (test-update.sh: the boot health check, a rollback remembered, the job lock, a failed staging installs nothing)" bash test-update.sh
 check "the TLS front's configuration is valid (nginx -t, with a throw-away certificate)" bash -c '
     d=$(mktemp -d) && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout $d/k.pem -out $d/c.pem -days 1 -subj /CN=t 2>/dev/null &&
     sed -e "s|/srv/system/tls/fullchain.pem|$d/c.pem|; s|/srv/system/tls/privkey.pem|$d/k.pem|; s|^pid .*|pid $d/nginx.pid;|" mkosi.extra/etc/nginx/nginx.conf >$d/nginx.conf &&
@@ -154,6 +210,9 @@ check "the certificate status is published before the daemon starts and nginx wa
 tmp=$(mktemp -d)
 check "sysusers.d snippet" systemd-sysusers --root="$tmp" /usr/lib/sysusers.d/camera-bridge.conf
 check "tmpfiles.d snippet" systemd-tmpfiles --dry-run --create /usr/lib/tmpfiles.d/camera-bridge.conf
+# systemd-repart formats through a loop device. A container's /dev holds only the loop nodes that existed when it started, and on a shared
+# Docker host the only one may be taken (repart then fails with "Device or resource busy"): make the first eight in this throwaway container.
+for i in 0 1 2 3 4 5 6 7; do [ -e "/dev/loop$i" ] || mknod -m 0660 "/dev/loop$i" b 7 "$i" 2>/dev/null || true; done
 check "runtime repart.d (first-boot growth) is valid" systemd-repart --definitions=mkosi.extra/usr/lib/repart.d --dry-run=yes --empty=create --size=16G --seed=random "$tmp/runtime.img"
 rendered=$(mktemp -d)
 for f in repart/image/*.conf; do sed -e 's|@VERSION@|0.1|g' -e 's|@ROOT_SIZE@|2560M|g' "$f" >"$rendered/$(basename "$f")"; done

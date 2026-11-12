@@ -481,6 +481,35 @@ private struct Frames {
         #expect(slotIsFree(bridge))
     }
 
+    /// Review of 2026-11-09, M2: a ninth ticket pushed the viewer's oldest out and left its packager running for 30 s more, so a device minting
+    /// across cameras could hold every live slot. A packager no ticket of the viewer refers to any more now lets its slot go at once.
+    @Test func aTicketPushedOutLetsItsPackagerGoAtOnce() async throws {
+        let bridge = try await makeBridge(liveSlots: 9)
+        var cameras = [bridge.porch]
+        for number in 1...8 { cameras.append(try await bridge.addCamera("Camera \(number)", audio: false)) }
+        for camera in cameras.prefix(8) {
+            #expect((await mint(bridge, camera: camera.id)).status == 200)
+            bridge.clock.advance(1)
+        }
+        #expect(await bridge.packager() != nil && slotIsFree(bridge), "eight packagers, eight of nine slots")
+        #expect((await mint(bridge, camera: cameras[8].id)).status == 200, "the ninth ticket pushes out the Porch's")
+        #expect(await bridge.packager() == nil, "nobody can fetch from the Porch's packager any more: it stopped")
+        #expect(slotIsFree(bridge), "and gave its slot back at once")
+    }
+
+    @Test func aPackagerAnotherViewerStillUsesGoesOnWhenATicketIsPushedOut() async throws {
+        let bridge = try await makeBridge()
+        let other = try await bridge.harness.pairAppleTV(owner: bridge.owner, name: "Bedroom", from: "192.0.2.41")
+        _ = try ticket(in: await mint(bridge))
+        _ = try ticket(in: await mint(bridge, key: other.key))
+        for number in 1...8 {
+            let camera = try await bridge.addCamera("Camera \(number)", audio: false)
+            bridge.clock.advance(1)
+            #expect((await mint(bridge, camera: camera.id)).status == 200)
+        }
+        #expect(await bridge.packager() != nil, "my Porch ticket is gone, the other device's is not")
+    }
+
     @Test func aBrowserSignedOutStopsAPackagerNobodyElseUses() async throws {
         let bridge = try await makeBridge(liveSlots: 1)
         let body: [String: Any] = ["camera": bridge.porch.id.uuidString, "kind": "live"]
@@ -776,6 +805,32 @@ private struct Frames {
         #expect(media.text.contains("#EXT-X-MAP:URI=\"init-0.mp4\"\n") && !media.text.contains("init-1.mp4"), "\(media.text)")
     }
 
+    /// Review of 2026-11-09, M2: a stream that had its sound kept it after the owner turned "Camera audio" off. Turning it restarts the camera; a
+    /// packager with sound then stops instead of subscribing again, so its player asks for a new ticket, which has none.
+    @Test func turningTheSoundOffEndsALiveStreamThatHadIt() async throws {
+        let bridge = try await makeBridge()
+        let loud = try await bridge.addCamera("Garage", audio: true)
+        let ticket = try ticket(in: await mint(bridge, camera: loud.id, audio: true))
+        let key = HLSLivePackager.Key(camera: loud.id, stream: .sub, audio: true)
+        #expect(await eventually { bridge.camera.opened == 1 })
+        #expect(await bridge.packager(key) != nil)
+        bridge.camera.endNewest()   // a restart with the switch still on: it subscribes again, with sound
+        #expect(await eventually { bridge.camera.opened == 2 })
+        #expect(bridge.harness.backend.read { $0.liveCalls.last?.audio } == true)
+
+        bridge.harness.backend.write { state in
+            if let index = state.configurations.firstIndex(where: { $0.id == loud.id }) { state.configurations[index].audioEnabled = false }
+        }
+        bridge.camera.endNewest()   // the switch restarts the camera
+        #expect(await eventually { await bridge.packager(key) == nil }, "it stops instead of going on without the sound its playlist promises")
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(bridge.camera.opened == 2, "no subscription after the switch went off")
+        #expect((await fetch(bridge, ticket, "media.m3u8")).status == 404)
+        let again = try self.ticket(in: await mint(bridge, camera: loud.id, audio: true))
+        let held = await bridge.app.hlsTickets.touch(again, now: bridge.clock.uptime)
+        #expect(held?.kind == .live(stream: .sub, audio: false), "the player's new ticket has no sound")
+    }
+
     /// The "Camera audio" switch is the owner's word on whether a camera is heard, whatever a ticket asks for.
     @Test func aCameraWithItsSoundOffIsNotHeardWhateverTheTicketAsks() async throws {
         let bridge = try await makeBridge(liveSlots: 1)
@@ -783,7 +838,7 @@ private struct Frames {
         let asked = try ticket(in: await mint(bridge, camera: quiet.id, audio: true))
         #expect(await eventually { bridge.camera.opened == 1 })
         #expect(bridge.harness.backend.read { $0.liveCalls.last?.audio } == false)
-        let held = await bridge.app.hlsTickets.touch(asked, now: bridge.clock.now)
+        let held = await bridge.app.hlsTickets.touch(asked, now: bridge.clock.uptime)
         #expect(held?.kind == .live(stream: .sub, audio: false))
         #expect((await mint(bridge, camera: quiet.id, audio: false)).status == 200, "the same packager as a ticket without sound")
     }

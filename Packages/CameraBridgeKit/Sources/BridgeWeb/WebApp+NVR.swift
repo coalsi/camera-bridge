@@ -7,8 +7,8 @@ import Synchronization
 // The NVR's web API: where recordings are stored, the per-camera Record switch, the catalog and the activity waveform, and the video-only
 // fragments the page plays through MediaSource. Contract: docs/superpowers/plans/2026-10-10-nvr/T00-contracts.md, part C.
 //
-// Every route needs a session; the seven a TV plays recordings with (the catalog, activity, events, fragment plans, fragments, init segments
-// and key pictures) also take an Apple TV's key (`Route.Access.viewer`). A media route meets the gates of C.3 in this order, so a malformed
+// Every route needs a session; the seven a device plays recordings with (the catalog, activity, events, fragment plans, fragments, init segments
+// and key pictures) also take a paired device's key (`Route.Access.viewer`). A media route meets the gates of C.3 in this order, so a malformed
 // request never uses a slot: it is validated, the backend must have an archive, the archive must be ready, and an admission slot must be free.
 // Nothing here touches the disk on the cooperative pool: `ArchiveReading.read` runs on the store's own queue, and folder checks on the
 // engine's probe queue.

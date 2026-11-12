@@ -22,6 +22,7 @@ extension ArchiveStore {
     /// connected, loaded and answering, the size rule moves files there instead of deleting them (`RetentionPlanner.plan(_:archive:)`; the mover
     /// does the moves, one at a time, `ArchiveMover+Store.swift`), and the archive's own files go by its rules; without one it is today's pass.
     func runRetention(_ run: ArchiveRun) async {
+        let (ageRuleRuns, now) = checkAgeRule()
         let plan = state.withLock { state -> (folder: URL, archiveFolder: URL?, plan: RetentionPlanner.TieredPlan, ageCutoffMs: Int64)? in
             guard state.isCurrent(run), state.isReady, let folder = state.folder, state.pause != .noFolder, state.pause != .folderMissing,
                   !state.stalled, let space = state.space, space.total > 0 else { return nil }
@@ -47,11 +48,13 @@ extension ArchiveStore {
                 .flatMap { $0.tier == .main && !$0.isOpen ? $0.bytes : nil } ?? 0
             let leftBytes = state.drive.pendingMainRemovals.values.reduce(movingBytes) { $0 + $1.bytes } + keptMain.reduce(0) { $0 + $1.bytes }
             let input = RetentionPlanner.Input(closed: closed, openBytes: state.catalog.openFiles.reduce(leftBytes) { $0 + $1.bytes },
-                                               newestStartMs: state.catalog.newestStartMs, nowMs: ArchiveTime.ms(tuning.now()),
+                                               ageRuleRuns: ageRuleRuns, nowMs: ArchiveTime.ms(now),
                                                keepDays: state.keepDays, maximumBytes: maximumBytes)
             let plan = RetentionPlanner.plan(input, archive: archive)
             if archive == nil { state.drive.plannedMoves = [] }
-            return (folder, archive != nil ? state.drive.folder : nil, plan, input.nowMs - Int64(input.keepDays) * 86_400_000)
+            // While the age rule waits, whatever goes, goes by size.
+            let ageCutoffMs = ageRuleRuns ? input.nowMs - Int64(input.keepDays) * 86_400_000 : Int64.min
+            return (folder, archive != nil ? state.drive.folder : nil, plan, ageCutoffMs)
         }
         guard let plan else { return }
         defer {
@@ -177,6 +180,51 @@ extension ArchiveStore {
             return false
         }
         return true
+    }
+
+    /// Looks at the clocks for the age rule (`AgeRuleClock`), once at the start of each pass of retention and of the events' pruning, and at a start:
+    /// `runs` when the age rule may delete now, and `now`, the reading of the wall clock that was judged, which is the one the pass must age by (a
+    /// clock that jumps after the look is seen at the next one). Says when a pause or a wait starts and ends (once each), and publishes the storage
+    /// status then.
+    @discardableResult
+    func checkAgeRule() -> (runs: Bool, now: Date) {
+        let wall = tuning.now(), monotonic = tuning.monotonic(), uptime = tuning.uptime()
+        // Asked outside the lock, and only while the answer matters (on the box a system call).
+        let asks = state.withLock { $0.ageRule.needsSynchronization(uptime: uptime) }
+        let synchronized = asks ? (environment.archivePolicy?.isClockSynchronized?() ?? true) : false
+        let (allows, changes) = state.withLock { state in
+            let changes = state.ageRule.check(wall: wall, monotonic: monotonic, uptime: uptime, synchronized: synchronized)
+            return (state.ageRule.allowsAging, changes)
+        }
+        for change in changes {
+            switch change {
+            case .pauseStarted(let jump, _):
+                log.warning("The clock jumped forward by \(Self.minutes(jump)): for the next 24 hours nothing is deleted for its age (recordings, camera "
+                            + "events, Sky Watcher logs), so a wrong clock cannot delete them; the size limit still applies")
+            // The end of one hold is not the end of the other: a look can end the wait and start a jump's pause at once (a flat clock battery: the
+            // box comes up on its last saved time, then chrony steps it forward and says it is synchronized), and only `allows` says which is true.
+            case .pauseEnded:
+                log.info(allows ? "24 hours have passed since the clock jumped: recordings are deleted for their age again"
+                                : "24 hours have passed since the clock jumped; nothing is deleted for its age until the clock is known to be right")
+            case .waitStarted:
+                log.info("The clock is not known to be right yet: nothing is deleted for its age until the system says the clock is synchronized, "
+                         + "or after a day of running; the size limit still applies")
+            case .waitEnded(let synchronized):
+                let cause = synchronized ? "The clock is synchronized" : "The system has been running for a day"
+                log.info(allows ? cause + ": recordings are deleted for their age again" + (synchronized ? "" : ", by this clock")
+                                : cause + ", but the 24-hour pause after the clock's jump goes on until its end")
+            }
+        }
+        if !changes.isEmpty { publishStatus(force: true) }
+        return (allows, wall)
+    }
+
+    /// "75 minutes", "3 days": a jump as people read it.
+    static func minutes(_ seconds: TimeInterval) -> String {
+        let minutes = Int((seconds / 60).rounded())
+        if minutes < 120 { return "\(minutes) minutes" }
+        let hours = Int((seconds / 3_600).rounded())
+        return hours < 48 ? "\(hours) hours" : "\(Int((seconds / 86_400).rounded())) days"
     }
 
     /// What retention needs of the archive drive, or nil when there is none to use now (not chosen, away, not answering, failing, not loaded,

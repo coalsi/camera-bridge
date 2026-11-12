@@ -63,7 +63,9 @@ The recorder and the store are in `BridgeEngine/NVR`; the daemon only says where
 - `DaemonArchivePolicy` is the `ArchivePlatformPolicy` set as `BridgeEnvironment.archivePolicy` on Linux and on the Mac development daemon: `space` from `statvfs`
   (`total = f_blocks x f_frsize`, `free = f_bavail x f_frsize`, on the nearest existing parent while the folder is not there), `isSystemVolume` by `st_dev` equal to the
   data directory's (what cannot be measured counts as the system volume), the system floor `max(8 GiB, 5%)`, folders named by camera UUID. This is the only place that
-  calls `statvfs` or `stat`: `Glibc` and `Darwin` are allowed in this module (and three named files elsewhere, `PortabilityTests`).
+  calls `statvfs` or `stat`: `Glibc` and `Darwin` are allowed in this module (and three named files elsewhere, `PortabilityTests`). `isClockSynchronized` is the
+  kernel's word on Linux (`DaemonArchivePolicy.kernelClockIsSynchronized()`, PlatformLinux's `KernelClock`; a reading the system refuses counts as not synchronized
+  and is logged once) and none on a Mac, whose clock counts as synchronized: the NVR's age rule waits for it, or for a day of uptime.
 - `WebConfiguration.archiveLocations` holds one location, id `builtin`, labelled "This box’s storage" (Linux) or "Development folder" (Mac), with the normalized path of
   that folder. The browser sends the id; the path is display only.
 - Starting never waits for the archive: `engine.start()` returns at once as far as the NVR is concerned (the store repairs and loads in the background), so the web

@@ -450,6 +450,63 @@ def storage(client):
     return client.api("GET", "/api/v1/nvr/storage").json()
 
 
+def age_rule_pause(client):
+    """Why "keep N days" deletes nothing now: GET nvr/storage's ageRulePause ({reason, until}; reason clockNotSynchronized or clockJumped), or
+    None while the age rule runs. A status without numbers yet (before the box's first measurement) says nothing, so it counts as a pause."""
+    body = storage(client)
+    if not body.get("totalBytes"):
+        return {"reason": "no measurement yet", "until": None}
+    return body.get("ageRulePause")
+
+
+def age_rule_runs(client, seconds=10):
+    """Asked after recordings past "keep N days" were found gone: whether the box says its age rule runs. It says so before it deletes anything,
+    but GET nvr/storage answers with the engine's copy of that, which follows within a few seconds, so this asks again for up to `seconds`."""
+    return bool(wait_until(lambda: age_rule_pause(client) is None, seconds, "the age rule", every=1.0)[0])
+
+
+def pause_text(pause):
+    if not pause:
+        return "it runs"
+    until = pause.get("until")
+    return "%s until %s" % (pause.get("reason"), "?" if not isinstance(until, int) else
+                            datetime.datetime.fromtimestamp(until / 1000, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+
+
+def chrony_now(client):
+    """Asks the box's chrony once more through DIR/ask-chrony, which test-vm.sh writes (over ssh, chronyc waitsync 1): it prints "synchronized" or
+    "unsynchronized", then the box's uptime in seconds. Returns (synchronized, uptime), or None when it cannot be asked."""
+    path = os.path.join(client.directory, "ask-chrony")
+    try:
+        words = subprocess.run([path], capture_output=True, text=True, timeout=60).stdout.split()
+        return words[0] == "synchronized", int(words[1])
+    except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+        return None
+
+
+def box_runs_ok(client):
+    """The box says its age rule runs: right when chrony said the clock is synchronized (the state's "clock"). Otherwise chrony is asked again,
+    and the box is right only if chrony is synchronized by now or the box has been up a day; a FAIL line says so when it is not (a daemon whose
+    age rule no longer waits for the clock would otherwise pass a run without internet time)."""
+    if client.state.get("clock") == "synchronized":
+        return True
+    answer = chrony_now(client)
+    if answer is None:
+        bad("the box says its age rule runs, and its chrony could not be asked whether the clock is synchronized")
+        return False
+    synchronized, uptime = answer
+    if synchronized:
+        client.state["clock"] = "synchronized"
+        client.save()
+        note("chrony on the box is synchronized now")
+        return True
+    if uptime >= 86_400:
+        note("chrony on the box is not synchronized, but the box has been up %.1f days, after which the age rule runs by its own clock" % (uptime / 86_400))
+        return True
+    bad("the box says its age rule runs, but chrony on the box is not synchronized and the box has been up only %d min" % (uptime // 60))
+    return False
+
+
 def phase_session(client, args):
     how = client.login()
     ok("signed in" if how == "login" else "the first-run setup set the password and signed in")
@@ -832,7 +889,7 @@ def plan_seed(closed_directory, out_directory, now_ms, wanted, camera_dir, byte_
     tear = len(records) // 2
     plan = {
         "camera": camera_dir, "count": count, "baseSize": base_size, "seedMs": seed_ms, "step": step, "initLength": template["initLength"],
-        "seedStarts": seeds, "seedRelatives": manifest[:len(seeds)], "oldRelatives": old_names,
+        "seedStarts": seeds, "seedRelatives": manifest[:len(seeds)], "oldRelatives": old_names, "oldStarts": old,
         "firstRecord": first, "template": {"relative": template["relative"], "start": template["start"], "records": len(records)},
         "tear": {"index": tear, "truncateTo": records[tear]["offset"] + records[tear]["length"] // 2,
                  "keep": records[tear - 1]["offset"] + records[tear - 1]["length"], "relative": template["relative"],
@@ -883,12 +940,84 @@ def phase_wait_ready(client, args):
 
 
 def phase_wait_oldest(client, args):
+    """Retention and the seeded archive's three 9 day old recordings and one 10 day old one ("Keep for" is 7 days).
+
+    "Keep N days" deletes nothing until the box knows its clock is right, that is until the kernel says the clock is synchronized or the box has
+    been up a day, nor for a day after its clock jumps forward (the engine's AgeRuleClock; GET nvr/storage says why in ageRulePause). In the VM
+    only chrony can make the clock synchronized, by reaching a time server on the internet: test-vm.sh waits up to 90 s for that and passes what
+    it saw as --clock. When chrony is synchronized (and the box is not waiting out the day after a jump, which keeps them whatever chrony says) or
+    the box says its age rule runs, retention must remove the old recordings within 150 s (the box looks at its clock at least once a minute).
+    Otherwise they must all still be there after the same 150 s while the box says it waits: that proves the clock rule, and aging itself is not
+    tested in this run, which a note says. If the box learns its clock during that wait, they must go after all. A box that deletes them while it
+    says its age rule waits fails, and so does one that says its age rule runs while chrony, asked again, is not synchronized (box_runs_ok).
+    The state keeps the outcome as "aging" for the checks after this phase ("waited" when the box kept them, "ran" when they were to go), and
+    what chrony said as "clock"."""
     plan = load_plan(client)
-    wanted = plan["seedStarts"][0]
+    wanted, kept = plan["seedStarts"][0], min(plan["oldStarts"])
+    pause = age_rule_pause(client)
+    waits = pause is not None and (args.clock != "synchronized" or pause.get("reason") == "clockJumped")
+    client.state.update(aging="waited" if waits else "ran", clock=args.clock)
+    client.save()
+    if pause is None and not box_runs_ok(client):
+        return
+    if waits:
+        note("%s (chrony %s after up to 90 s; the box's age rule: %s): the 9 and 10 day old recordings must stay" % (
+            "the box waits out a day after its clock jumped forward" if pause.get("reason") == "clockJumped" else "the box does not know its clock is right",
+            "synchronized" if args.clock == "synchronized" else "not synchronized", pause_text(pause)))
+
+        def watch():   # the catalog first, then the status: the box says its age rule runs before it deletes anything
+            oldest = (client.extent()[1] or {}).get("oldest")
+            if age_rule_pause(client) is None:
+                return "runs"
+            if oldest is not None and abs(oldest - kept) > 1500:
+                return "runs" if age_rule_runs(client) else "gone"
+            return None
+
+        seen, seconds = wait_until(watch, 150, "the age rule")
+        if seen is None:   # the oldest is still the 10 day old one after the wait: all four there, and the box still waiting?
+            missing = [start for start in plan["oldStarts"] if not client.plan(start + 500, 0).json().get("found")]
+            seen = "kept" if not missing else "runs" if age_rule_runs(client) else "gone"
+        if seen == "kept":
+            ok("after %.0f s the %d expired recordings (9 and 10 days old) are all still there, and the box still says its age rule waits (%s)"
+               % (seconds, len(plan["oldStarts"]), pause_text(age_rule_pause(client))))
+            note("aging itself was not tested in this run: the box's age rule waited throughout (its clock was not known to be right, or had jumped "
+                 "forward), so only the rule that keeps the recordings meanwhile was")
+            return
+        client.state["aging"] = "ran"
+        client.save()
+        if seen == "gone":
+            bad("the 9 and 10 day old recordings were deleted while the box says its age rule waits (%s)" % pause_text(age_rule_pause(client)))
+            return
+        if not box_runs_ok(client):
+            return
+        note("the box says its age rule runs %.0f s into the wait (it learned its clock): the 9 and 10 day old recordings must go now" % seconds)
+    elif pause is not None:
+        note("chrony is synchronized; the box still says its age rule waits (%s) until it looks at its clock again, at least once a minute" % pause_text(pause))
     got, seconds = wait_until(lambda: (client.extent()[1] or {}).get("oldest") is not None and abs(client.extent()[1]["oldest"] - wanted) <= 1500, 150, "retention")
     entry = client.extent()[1] or {}
     check(got, "after %.0f s the oldest recording is the oldest seed: retention removed the 9 and 10 day old ones" % seconds,
-          "the oldest recording is %s s from the oldest seed after %.0f s" % ("?" if not entry else (entry["oldest"] - wanted) // 1000, seconds))
+          "the oldest recording is %s s from the oldest seed after %.0f s (the box's age rule: %s)" % (
+              "?" if not entry else (entry["oldest"] - wanted) // 1000, seconds, pause_text(age_rule_pause(client))))
+
+
+def phase_expired(client, args):
+    """While the box keeps the recordings past "keep N days" (wait-oldest saw it wait for its clock), test-vm.sh counts their files on the box's
+    disk (--on-disk: .mp4 and .cbidx) right after wait-oldest and again right before the reboot, and this asks the box afterwards. All there is the
+    clock rule holding. Fewer is right only if the box says its age rule runs now, in this boot (it learned its clock since), which it says before
+    it deletes anything, so asking after the count is safe; and chrony must agree (box_runs_ok). Then the state's "aging" becomes "ran": the
+    checks after this one, persisted after the reboot included, expect them gone (after a reboot the box's rule waits again until it sees chrony
+    synchronized, so it could not vouch there for a deletion made in this boot)."""
+    wanted = 2 * len(load_plan(client)["oldRelatives"])
+    if args.on_disk == wanted:
+        ok("the %d expired recordings and their sidecars are still on the disk" % (wanted // 2))
+        return
+    client.state["aging"] = "ran"
+    client.save()
+    if not age_rule_runs(client):
+        bad("%d of the %d files of the expired recordings are on the disk, while the box says its age rule waits (%s)"
+            % (args.on_disk, wanted, pause_text(age_rule_pause(client))))
+    elif box_runs_ok(client):
+        ok("%d of the %d files of the expired recordings are on the disk: the box learned its clock since, and retention removes them" % (args.on_disk, wanted))
 
 
 def load_plan(client):
@@ -937,7 +1066,16 @@ def phase_verify_seed(client, args):
     check(reply.status == 404 and reply.code() == "gap" and reply.header("x-cb-next") == str(plan["seedStarts"][middle + 1]),
           "keyframe?at= in a gap: 404 gap with X-CB-Next", "keyframe in a gap answered %d %s next=%r" % (reply.status, reply.code(), reply.header("x-cb-next")))
     before = client.plan(plan["seedStarts"][0] - 3_600_000, 0).json()
-    check(before.get("found") is False and before.get("reason") == "beforeStart", "before the oldest seed: beforeStart", "before the oldest seed: %r" % (before,))
+    if client.state.get("aging") != "waited":
+        check(before.get("found") is False and before.get("reason") == "beforeStart", "before the oldest seed: beforeStart", "before the oldest seed: %r" % (before,))
+    elif before.get("found") is False and before.get("reason") == "gap" and before.get("next") == plan["seedStarts"][0]:
+        ok("before the oldest seed: a gap back to the expired recordings, which the box keeps while it does not know its clock is right")
+    elif before.get("reason") != "beforeStart" or not age_rule_runs(client):   # they went since wait-oldest: right only while the box says it runs
+        bad("before the oldest seed: %r (the box's age rule: %s)" % (before, pause_text(age_rule_pause(client))))
+    elif box_runs_ok(client):
+        client.state["aging"] = "ran"
+        client.save()
+        ok("before the oldest seed: beforeStart (the box learned its clock since the wait, and retention removed the expired recordings)")
     verify_torn(client, plan, head)
 
 
@@ -1066,17 +1204,38 @@ def phase_notices(client, args):
 
 
 def phase_persisted(client, args):
-    """After a reboot: the choices survived and the catalog (once it has loaded) still starts where the seeded archive starts."""
+    """After a reboot: the choices survived and the catalog (once it has loaded) still starts where the seeded archive starts. (What chrony said
+    before the reboot no longer holds: box_runs_ok asks it again.)"""
+    client.state.pop("clock", None)
+    client.save()
     body = storage(client)
     check(body.get("location") == "builtin" and body.get("keepDays") == 7 and body.get("maxSizeGB") == 500, "the folder and the limits survived the reboot",
           "storage after the reboot: %r" % ({k: body.get(k) for k in ("location", "keepDays", "maxSizeGB")},))
     camera = client.camera_json() or {}
     check(camera.get("nvrEnabled") is True, "Record is still on after the reboot", "nvrEnabled is %r after the reboot" % camera.get("nvrEnabled"))
     path = os.path.join(client.directory, "seed", "plan.json")
-    if os.path.exists(path):
+    if os.path.exists(path) and client.state.get("aging") != "waited":
         wanted = load_plan(client)["seedStarts"][0]
         got, seconds = wait_until(lambda: abs((client.extent()[1] or {}).get("oldest", 0) - wanted) <= 1500, 120, "catalog", every=1.0)
         check(got, "the catalog is back after %.0f s and starts at the oldest seed" % seconds, "the catalog does not start at the oldest seed after %.0f s" % seconds)
+    elif os.path.exists(path):   # wait-oldest saw the box keep the expired recordings; after the reboot it may have learned its clock
+        plan = load_plan(client)
+        starts = {"kept": min(plan["oldStarts"]), "removed": plan["seedStarts"][0]}
+
+        def start():
+            oldest = (client.extent()[1] or {}).get("oldest", 0)
+            return next((name for name, at in starts.items() if abs(oldest - at) <= 1500), None)
+
+        got, seconds = wait_until(start, 120, "catalog", every=1.0)
+        if got == "kept":
+            ok("the catalog is back after %.0f s and starts at the oldest expired recording, which the box still keeps" % seconds)
+        elif got != "removed" or not age_rule_runs(client):   # removed since the count before the reboot: in this boot, while the box says it runs
+            bad("the catalog does not start at the oldest expired recording after %.0f s (%s; the box's age rule: %s)" % (
+                seconds, "it starts at the oldest seed" if got else "nor at the oldest seed", pause_text(age_rule_pause(client))))
+        elif box_runs_ok(client):
+            client.state["aging"] = "ran"
+            client.save()
+            ok("the catalog is back after %.0f s and starts at the oldest seed: the box learned its clock and removed the expired recordings" % seconds)
 
 
 def phase_check_sidecar(client, args):
@@ -1160,8 +1319,8 @@ PHASES = {
     "session": phase_session, "add-camera": phase_add_camera, "folder-required": phase_folder_required, "choose-folder": phase_choose_folder,
     "record-on": phase_record_on, "wait-recording": phase_wait_recording, "fetch": phase_fetch, "security": phase_security,
     "sound-on": phase_sound_on, "record-off": phase_record_off, "plan-seed": phase_plan_seed, "wait-ready": phase_wait_ready,
-    "wait-oldest": phase_wait_oldest, "verify-seed": phase_verify_seed, "burst": phase_burst, "notices": phase_notices, "leakscan": phase_leakscan,
-    "persisted": phase_persisted, "check-sidecar": phase_check_sidecar,
+    "wait-oldest": phase_wait_oldest, "expired": phase_expired, "verify-seed": phase_verify_seed, "burst": phase_burst, "notices": phase_notices,
+    "leakscan": phase_leakscan, "persisted": phase_persisted, "check-sidecar": phase_check_sidecar,
 }
 OFFLINE = {"check-sidecar"}   # phases that never talk to the box
 
@@ -1221,6 +1380,7 @@ class FakeBox:
         self.password, self.sessions, self.camera = None, {}, None
         self.folder, self.enabled, self.sound, self.audio = None, False, False, False
         self.notice, self.flaws, self.sound_listed, self.ready = None, set(), False, True
+        self.age_rule = None   # GET nvr/storage's ageRulePause: None while "keep N days" runs, else {reason, until}
         self.recorder = None   # called when the camera list is read: the recorder of a box that writes while it is being polled (GrowingRecording)
         self.busy, self.lock = 0, threading.Lock()
         owner = self
@@ -1511,7 +1671,7 @@ class FakeBox:
         return {"location": self.folder, "label": "This box’s storage" if self.folder else None, "state": "diskFull" if self.notice == "full" else "ok" if self.folder else "noFolder",
                 "message": None, "recordingCameras": 1 if self.enabled else 0, "keepDays": 7, "maxSizeGB": 500, "limits": {"keepDays": [1, 365], "maxSizeGB": [10, 100000]},
                 "usedBytes": used, "freeBytes": free, "totalBytes": total, "floorBytes": floor, "roomBytes": used + max(0, free - floor),
-                "effectiveMaxBytes": min(500 * 10**9, max(0, total - 2 * floor)), "oldest": None, "newest": None}
+                "effectiveMaxBytes": min(500 * 10**9, max(0, total - 2 * floor)), "oldest": None, "newest": None, "ageRulePause": self.age_rule}
 
     def notices(self):
         if not self.enabled or self.notice is None:
@@ -1559,7 +1719,7 @@ def run_phase(name, client, **options):
     global REPORT
     REPORT = Report()
     args = argparse.Namespace(camera_name="Smoke camera", recordings_path="/var/lib/camera-bridge/recordings", seconds=6, seed_files=40, expect="none", journal="",
-                              file="", size=0, inside_box=False)
+                              file="", size=0, inside_box=False, clock="unsynchronized", on_disk=-1)
     for key, value in options.items():
         setattr(args, key, value)
     out = io.StringIO()
@@ -1703,11 +1863,114 @@ def selftest():
                 with open(torn + ".cbidx", "wb") as handle:
                     handle.write(repaired)
                 shutil.copy(torn + ".cbidx", os.path.join(work, "repaired.cbidx"))
-                # what retention does (T02): the expired recordings and their empty day
-                for relative in plan["oldRelatives"]:
-                    for extension in (".mp4", ".cbidx"):
-                        os.remove(os.path.join(folder, relative + extension))
-                os.rmdir(os.path.join(folder, plan["oldRelatives"][3].split("/")[0]))
+                aside = os.path.join(tmp, "expired")
+
+                def expire(back=False):
+                    """What retention does (T02): the expired recordings and their day that became empty go (aside, so that they can come back)."""
+                    for relative in plan["oldRelatives"]:
+                        for extension in (".mp4", ".cbidx"):
+                            source, target = os.path.join(folder, relative + extension), os.path.join(aside, relative + extension)
+                            source, target = (target, source) if back else (source, target)
+                            os.makedirs(os.path.dirname(target), exist_ok=True)
+                            os.replace(source, target)
+                    if not back:
+                        os.rmdir(os.path.join(folder, plan["oldRelatives"][3].split("/")[0]))
+
+                def at_look(n, frees, deletes):
+                    """For FakeBox.recorder: at the n-th look at the catalog the box says its age rule runs (`frees`) and retention runs (`deletes`)."""
+                    looks = 0
+
+                    def look():
+                        nonlocal looks
+                        looks += 1
+                        if looks == n:
+                            if frees:
+                                fake.age_rule = None
+                            if deletes:
+                                expire()
+                    return look
+
+                def chrony_says(answer, uptime=600):
+                    """DIR/ask-chrony as test-vm.sh writes it, where it asks the box's chrony over ssh: what it says, and the box's uptime."""
+                    path = os.path.join(work, "ask-chrony")
+                    with open(path, "w") as handle:
+                        handle.write("#!/bin/sh\necho %s %d\n" % (answer, uptime))
+                    os.chmod(path, 0o700)
+
+                fails = lambda lines: " ".join(line for line in lines if line.startswith("FAIL"))
+                chrony_says("synchronized")   # (asked whenever the box says its age rule runs while chrony was not seen synchronized)
+                # The clock rule: a box that does not know its clock is right keeps the expired recordings, and the phases check that instead.
+                fake.age_rule, fake.enabled = {"reason": "clockNotSynchronized", "until": now_ms() + 86_400_000}, True   # (persisted wants Record on)
+                for name, options in (("wait-ready", {}), ("wait-oldest", {}), ("expired", {"on_disk": 8}), ("verify-seed", {}), ("persisted", {})):
+                    lines, failed = run_phase(name, client, **options)
+                    assert failed == 0, "%s: %s" % (name, fails(lines))
+                    if name == "wait-oldest":
+                        assert client.state["aging"] == "waited" and any("not tested in this run" in line for line in lines), lines
+                lines, failed = run_phase("expired", client, on_disk=6)
+                assert failed == 1 and "while the box says its age rule waits" in fails(lines), lines
+                # chrony is synchronized and the box goes on waiting: it cannot read its clock's state, and nothing is aged
+                lines, failed = run_phase("wait-oldest", client, clock="synchronized")
+                assert failed == 1 and "the box's age rule: clockNotSynchronized" in fails(lines), lines
+                # the box says during the wait that its age rule runs, and keeps them all the same
+                waiting, fake.recorder = fake.age_rule, at_look(2, frees=True, deletes=False)
+                lines, failed = run_phase("wait-oldest", client)
+                fake.recorder, fake.age_rule = None, waiting
+                assert failed == 1 and "the box's age rule: it runs" in fails(lines), lines
+                # a box that deletes them while it says it waits fails, and so do the phases after it that find them gone
+                fake.recorder = at_look(2, frees=False, deletes=True)
+                lines, failed = run_phase("wait-oldest", client)
+                fake.recorder = None
+                assert failed == 1 and "deleted while the box says its age rule waits" in fails(lines), lines
+                client.state["aging"] = "waited"
+                for name in ("verify-seed", "persisted"):
+                    lines, failed = run_phase(name, client)
+                    assert failed == 1 and "the box's age rule: clockNotSynchronized" in fails(lines), (name, lines)
+                expire(back=True)
+                # NTP comes up late: after wait-oldest saw them kept, the box learns its clock and deletes them before the reboot. The count right before
+                # the reboot finds them gone while the box (and chrony) say its age rule runs, so after the reboot, where the rule waits again until it
+                # sees chrony synchronized, persisted expects the catalog at the oldest seed instead of asking the box about the boot before
+                client.state.update(aging="waited", clock="unsynchronized")
+                fake.age_rule = None
+                expire()
+                lines, failed = run_phase("expired", client, on_disk=0)
+                assert failed == 0 and client.state["aging"] == "ran" and any("chrony on the box is synchronized now" in line for line in lines), lines
+                fake.age_rule = waiting
+                lines, failed = run_phase("persisted", client)
+                assert failed == 0, fails(lines)
+                expire(back=True)
+                # the box says its age rule runs while chrony, asked again, is not synchronized and the box has been up 10 minutes: the phases fail
+                # (a daemon whose age rule no longer waits for the clock); after a day of uptime the rule runs by the box's own clock, and they pass
+                chrony_says("unsynchronized")
+                fake.age_rule = None
+                lines, failed = run_phase("wait-oldest", client)
+                assert failed == 1 and "chrony on the box is not synchronized and the box has been up only 10 min" in fails(lines), lines
+                client.state.update(aging="waited", clock="unsynchronized")
+                lines, failed = run_phase("expired", client, on_disk=6)
+                assert failed == 1 and "chrony on the box is not synchronized" in fails(lines), lines
+                expire()
+                for name, said in (("verify-seed", "unsynchronized"), ("persisted", "synchronized")):   # (persisted: what chrony said before the reboot)
+                    client.state.update(aging="waited", clock=said)
+                    lines, failed = run_phase(name, client)
+                    assert failed == 1 and "chrony on the box is not synchronized" in fails(lines), (name, lines)
+                expire(back=True)
+                fake.age_rule, fake.recorder = waiting, at_look(2, frees=True, deletes=True)   # (the same, said during the wait)
+                lines, failed = run_phase("wait-oldest", client)
+                fake.recorder = None
+                assert failed == 1 and "chrony on the box is not synchronized and the box has been up only 10 min" in fails(lines), lines
+                expire(back=True)
+                chrony_says("unsynchronized", uptime=90_000)
+                fake.recorder = at_look(1, frees=False, deletes=True)
+                lines, failed = run_phase("wait-oldest", client)
+                fake.recorder = None
+                assert failed == 0 and any("up 1.0 days" in line for line in lines), lines
+                expire(back=True)
+                chrony_says("synchronized")
+                fake.age_rule, fake.enabled = waiting, False
+                # a box that learns its clock during the wait: they must go then, and do
+                fake.recorder = at_look(2, frees=True, deletes=True)
+                lines, failed = run_phase("wait-oldest", client)
+                fake.recorder = None
+                assert failed == 0 and client.state["aging"] == "ran" and any("learned its clock" in line for line in lines), lines
                 fake.ready = False
                 lines, failed = run_phase("wait-ready", client)
                 assert failed == 1 and any("503 archive_unavailable" in line for line in lines), lines
@@ -1915,6 +2178,9 @@ def main(argv):
     parser.add_argument("--file", default="", help="check-sidecar: the sidecar")
     parser.add_argument("--size", type=int, default=0, help="check-sidecar: the size of its mp4")
     parser.add_argument("--inside-box", action="store_true", help="burst: this program runs inside the box (test-vm.sh --burst-from guest); only changes what it says")
+    parser.add_argument("--clock", choices=["synchronized", "unsynchronized"], default="unsynchronized",
+                        help="wait-oldest: whether chrony on the box said its clock is synchronized (test-vm.sh waits up to 90 s for it)")
+    parser.add_argument("--on-disk", type=int, default=-1, help="expired: the files (.mp4 and .cbidx) of the expired recordings on the box's disk")
     parser.add_argument("--key", default="camera", help="state: the value to print")
     parser.add_argument("--name", choices=sorted(VM_SCRIPTS), default="seed", help="vm-script: which script to print")
     args = parser.parse_args(argv)

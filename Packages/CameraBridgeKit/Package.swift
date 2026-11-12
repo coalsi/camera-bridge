@@ -17,29 +17,21 @@ let platformLinux: Target.Dependency = .target(name: "PlatformLinux", condition:
 let package = Package(
     name: "CameraBridgeKit",
     platforms: [.macOS("15.0")],
+    // Targets of this package need no products. The libraries are the seven the archived Mac app (Archive/mac-app/project.yml) builds against.
     products: [
         .library(name: "BridgeSupport", targets: ["BridgeSupport"]),
-        .library(name: "HAPCore", targets: ["HAPCore"]),
-        .library(name: "HAP", targets: ["HAP"]),
-        .library(name: "HDS", targets: ["HDS"]),
-        .library(name: "HAPCamera", targets: ["HAPCamera"]),
         .library(name: "MediaCore", targets: ["MediaCore"]),
         .library(name: "FMP4", targets: ["FMP4"]),
-        .library(name: "RTP", targets: ["RTP"]),
         .library(name: "RTSP", targets: ["RTSP"]),
         .library(name: "CameraAdapters", targets: ["CameraAdapters"]),
         .library(name: "PlatformApple", targets: ["PlatformApple"]),
-        .library(name: "PlatformLinux", targets: ["PlatformLinux"]),
         .library(name: "BridgeEngine", targets: ["BridgeEngine"]),
-        .library(name: "BridgeWeb", targets: ["BridgeWeb"]),
-        .library(name: "BridgeDaemon", targets: ["BridgeDaemon"]),
-        .library(name: "TestSupport", targets: ["TestSupport"]),
         .executable(name: "cbctl", targets: ["cbctl"]),
         .executable(name: "camerabridged", targets: ["camerabridged"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/attaswift/BigInt.git", from: "5.4.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        .package(url: "https://github.com/attaswift/BigInt.git", from: "6.0.1"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "5.1.1"),
     ],
     targets: [
         .target(name: "BridgeSupport", dependencies: [crypto], exclude: ["README.md"], swiftSettings: swift6),
@@ -52,7 +44,7 @@ let package = Package(
         .target(name: "FMP4", dependencies: ["MediaCore"], exclude: ["README.md"], swiftSettings: swift6),
         .target(name: "RTP", dependencies: ["MediaCore", "BridgeSupport", crypto, cryptoExtrasOnLinux], exclude: ["README.md"], swiftSettings: swift6),
         .target(name: "RTSP", dependencies: ["RTP", "MediaCore", "BridgeSupport"], exclude: ["README.md"], swiftSettings: swift6),
-        .target(name: "CameraAdapters", dependencies: ["RTSP", "RTP", "MediaCore", "BridgeSupport"], exclude: ["README.md"], swiftSettings: swift6),
+        .target(name: "CameraAdapters", dependencies: ["RTSP", "MediaCore", "BridgeSupport"], exclude: ["README.md"], swiftSettings: swift6),
         // macOS only: Network, dnssd, Security, IOKit, CoreMedia, CoreVideo, VideoToolbox, AudioToolbox, Accelerate, CoreImage, CoreGraphics, CoreText, ImageIO.
         .target(name: "PlatformApple", dependencies: ["BridgeSupport", "MediaCore"], exclude: ["README.md"], swiftSettings: swift6),
         // Linux: the dns_sd API (libavahi-compat-libdnssd) as a C module; PlatformLinux imports it on Linux only.
@@ -60,11 +52,14 @@ let package = Package(
                        providers: [.apt(["libavahi-compat-libdnssd-dev"])]),
         // <sys/epoll.h> for the socket reactor (Glibc's module leaves it out).
         .systemLibrary(name: "CEpoll", path: "Sources/CEpoll"),
-        // Linux services: POSIX sockets + Dispatch, dns_sd, netlink, flock, encrypted file secrets, Foundation.Process. Codecs/ drives ffmpeg child
+        // <sys/timex.h> for the kernel's word on whether the clock is synchronized (Glibc's module leaves it out too).
+        .systemLibrary(name: "CTimex", path: "Sources/CTimex"),
+        // Linux services: POSIX sockets + Dispatch, dns_sd, netlink, flock, encrypted file secrets, Foundation.Process, the clock's sync state. Codecs/ drives ffmpeg child
         // processes (portable Swift; it builds on macOS too, so its logic is unit-tested there).
         .target(name: "PlatformLinux",
                 dependencies: ["BridgeSupport", "MediaCore", crypto, .target(name: "CDNSSD", condition: .when(platforms: [.linux])),
-                               .target(name: "CEpoll", condition: .when(platforms: [.linux]))],
+                               .target(name: "CEpoll", condition: .when(platforms: [.linux])),
+                               .target(name: "CTimex", condition: .when(platforms: [.linux]))],
                 exclude: ["README.md", "Codecs/README.md"], swiftSettings: swift6),
         .target(name: "BridgeEngine",
                 dependencies: ["BridgeSupport", "HAPCore", "HAP", "HDS", "HAPCamera", "MediaCore", "FMP4", "RTP", "RTSP", "CameraAdapters",
@@ -73,9 +68,9 @@ let package = Package(
         // The web interface of Camera Bridge OS: an HTTP/1.1 server over the injected `NetworkTransport`, the JSON API, sessions.
         .target(name: "BridgeWeb", dependencies: ["BridgeEngine", "CameraAdapters", "RTSP", "MediaCore", "BridgeSupport", crypto],
                 exclude: ["README.md"], swiftSettings: swift6),
-        .target(name: "TestSupport", dependencies: ["HAPCore", "HAP", "HDS", "RTP", "RTSP", "MediaCore", "FMP4", "BridgeSupport", platformApple, platformLinux],
+        .target(name: "TestSupport", dependencies: ["HAPCore", "HAP", "HDS", "RTP", "MediaCore", "BridgeSupport", platformApple, platformLinux],
                 exclude: ["README.md"], swiftSettings: swift6),
-        .executableTarget(name: "cbctl", dependencies: ["TestSupport", "BridgeSupport"], exclude: ["README.md"], swiftSettings: swift6),
+        .executableTarget(name: "cbctl", dependencies: ["TestSupport"], exclude: ["README.md"], swiftSettings: swift6),
         // The Camera Bridge OS daemon: the engine and its web interface in one process. The logic is a library (testable); the
         // executable is its `main`.
         .target(name: "BridgeDaemon", dependencies: ["BridgeWeb", "BridgeEngine", "CameraAdapters", "BridgeSupport", platformLinux],

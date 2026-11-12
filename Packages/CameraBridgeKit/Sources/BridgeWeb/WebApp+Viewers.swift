@@ -2,8 +2,8 @@ import BridgeEngine
 import Foundation
 import MediaCore
 
-// The Apple TVs: one asks for a code, the owner types it into Settings while signed in, and the TV, asking again, is handed its key once
-// (`AuthStore` holds the requests in memory and keeps the TVs in `auth.json`). Requests and answers are JSON.
+// Paired devices (Apple TVs, iPhones): one asks for a code, the owner types it into Settings while signed in, and the device, asking again, is
+// handed its key once (`AuthStore` holds the requests in memory and keeps the devices in `auth.json`). Requests and answers are JSON.
 //   POST   /viewers/pair          open: { name?, device? } -> { request, secret, code, expiresIn, interval }; 429 too_many_pairings + Retry-After
 //   POST   /viewers/pair/status   open: { request, secret } -> { state: "waiting" }, or, once, { state: "approved", token, viewer: { id, name } };
 //                                 404 pairing_gone (ended, unknown, a wrong secret, collected already, or the TV removed meanwhile)
@@ -220,7 +220,7 @@ extension WebApp {
         return .empty()
     }
 
-    /// The bridge and its cameras as an Apple TV draws them, in the owner's order. `id` is the box's identity for life, `version` what About shows.
+    /// The bridge and its cameras as a paired device draws them, in the owner's order. `id` is the box's identity for life, `version` what About shows.
     /// A camera says `recordingNow` while the box's own recorder writes it, `sound` while its "Camera audio" switch is on, `main` and `sub` once
     /// that stream has shown a picture, and `lastEvent` with the kind and time of the latest event.
     func viewerOverview() async -> HTTPResponse {

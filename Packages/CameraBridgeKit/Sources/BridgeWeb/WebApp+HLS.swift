@@ -11,13 +11,15 @@ import Foundation
 //                      no recordings in the range is 404 `gap`, more than 2 hours (after a `to` past now is cut to now) is 400 `range_too_long`. Its
 //                      files are `index.m3u8`, `media.m3u8` (VOD), `init-<n>.mp4` (one per recording file) and `seg-<n>.m4s` (a key fragment and the
 //                      continuation fragments after it); the last two take an archive slot each (429 `busy`). A camera whose "Camera audio" switch is off is sent without sound, whatever the ticket asks.
+//                      A ninth ticket pushes out the viewer's oldest; when that was the viewer's last ticket on a live packager, the viewer leaves the
+//                      packager, which stops at once when nobody else uses it (`HLSLivePackagers.release`). Tickets end on a clock nobody sets.
 //   GET  /hls/:ticket/:file  open: the files of that ticket's playlist. A ticket that is unknown, ended or of a viewer that was removed, and
 //                      a file that does not exist, are all the same empty 404. So is a live ticket whose packager stopped: a ticket plays only the
 //                      packager it was minted against, because a newer one numbers from 0 again, and the player takes a new ticket. A live playlist
 //                      waits up to `hlsFirstPlaylistWait` for three segments, then is 503 with Retry-After, but for a master with one to write it from.
 //                      Files are answered whole and never stored: a live segment that slid out of the playlist is gone.
 // The ticket in the path is the one deliberate exception to "no token in an address": it opens one camera, read-only, for minutes, and the
-// viewer's key itself stays refused in any address. A viewer is the TV that minted it, or, for the `viewer` route's session fallback, the
+// viewer's key itself stays refused in any address. A viewer is the device that minted it, or, for the `viewer` route's session fallback, the
 // browser's session: signing that browser out, removing it from the list or a password change that ends it ends its tickets at the next request.
 extension WebApp {
     static let hlsRoutes: [Route] = [
@@ -85,8 +87,10 @@ extension WebApp {
                 try await planRecording(camera: camera.id, from: from, to: to, keepSound: camera.audioEnabled, archive: archive)
             }
         }
-        let ticket = await hlsTickets.mint(viewer: viewer, camera: camera.id, kind: kind, packager: packager, recording: recording, now: configuration.now())
-        return .json(TicketAnswer(url: "/api/v1/hls/\(ticket)/index.m3u8", expiresIn: Int(HLSTickets.idleLifetime)))
+        let minted = await hlsTickets.mint(viewer: viewer, camera: camera.id, kind: kind, packager: packager, recording: recording, now: configuration.uptime())
+        // The ticket the ninth one pushed out may have been the viewer's last on a packager: nobody can fetch from it now.
+        if let released = minted.released { await hlsPackagers.release(released, viewer: viewer) }
+        return .json(TicketAnswer(url: "/api/v1/hls/\(minted.ticket)/index.m3u8", expiresIn: Int(HLSTickets.idleLifetime.components.seconds)))
     }
 
     /// Finds the packager of `key` or starts one in a live slot of its own; nil when none is free. `viewer` becomes one of its users.
@@ -129,8 +133,8 @@ extension WebApp {
 
     private func hlsFile(_ ctx: RequestContext) async -> HTTPResponse {
         guard let presented = ctx.params["ticket"], let name = ctx.params["file"],
-              let ticket = await hlsTickets.touch(presented, now: configuration.now()) else { return Self.hlsNotFound() }
-        // A TV removed from the list, or a browser signed out, loses its tickets at its next request (no timer): this is the whole recheck.
+              let ticket = await hlsTickets.touch(presented, now: configuration.uptime()) else { return Self.hlsNotFound() }
+        // A device removed from the list, or a browser signed out, loses its tickets at its next request (no timer): this is the whole recheck.
         let listed = if let session = HLSTickets.sessionID(of: ticket.viewer) { await auth.isSessionListed(session) } else { await auth.isViewerListed(ticket.viewer) }
         if !listed {
             await hlsTickets.drop(viewer: ticket.viewer)

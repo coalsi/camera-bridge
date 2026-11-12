@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
   <!-- Menu bar template mark (single colour, alpha only; macOS tints it): a lens ring and a simple suspension bridge.
-       Rendered at 18 pt by Tools/render_brand_assets.sh. Hand-drawn for legibility, not derived from the full logo. -->
+       Rendered at 18 pt by Archive/mac-app/Tools/render_brand_assets.sh. Hand-drawn for legibility, not derived from the full logo. -->
   <defs>
     <clipPath id="lens"><circle cx="100" cy="100" r="78"/></clipPath>
   </defs>

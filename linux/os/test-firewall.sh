@@ -30,11 +30,33 @@ basics='^(iifname "lo" accept|ct state invalid drop|ct state \{ established, rel
 expect "the input chain accepts nothing but the basics by itself, and jumps to the lan chain for local sources only" \
     "$(grep -Ev "$basics" <<<"$input" | tr '\n' ';')" "ip saddr @lan4 jump lan;ip6 saddr @lan6 jump lan;ip saddr @onlink4 jump lan;ip6 saddr @onlink6 jump lan;"
 lan=$(chain lan)
-for rule in "udp dport 5353 accept" "tcp dport { 80, 443 } accept" "tcp dport 21100-21199 accept" "tcp dport @ssh_port ct state new limit rate 10/minute accept" \
-            "udp dport 123 accept" "udp sport 37020 udp dport 37020 accept" "udp dport 32768-60999 accept" "tcp dport 32768-60999 accept"; do
-    if grep -qxF "$rule" <<<"$lan"; then pass "the lan chain has: $rule"; else bad "the lan chain lacks: $rule"; fi
+# Exactly what the box offers its network, in this order, and nothing else: a rule added here must be added to this list on purpose.
+expect "the lan chain is exactly: mDNS, the web page, the bridge's listeners (21090-21199), SSH when on, NTP, SADP's answers, the media ports" \
+    "$(tr '\n' ';' <<<"$lan")" \
+    "udp dport 5353 accept;tcp dport { 80, 443 } accept;tcp dport 21090-21199 accept;tcp dport @ssh_port ct state new limit rate 10/minute accept;udp dport 123 accept;udp sport 37020 udp dport 37020 accept;udp dport 32768-60999 accept;tcp dport 32768-60999 accept;"
+# The bridge's own listeners at their defaults (the engine's BridgeSettings) are inside the range the lan chain opens for them: the webhook, the
+# sensors bridge and the first camera's HomeKit accessory. (The firewall once opened only 21100-21199, so the first two were dropped.)
+read -r open_low open_high < <(grep -E '^tcp dport 2[0-9]{4}-2[0-9]{4} accept$' <<<"$lan" | sed -E 's/^tcp dport ([0-9]+)-([0-9]+) accept$/\1 \2/')
+CONFIG=$HERE/../../Packages/CameraBridgeKit/Sources/BridgeEngine/Configuration/Configuration.swift
+for name in webhookPort sensorsBridgePort basePort; do
+    value=$(sed -nE "s/^ +$name = ([0-9_]+)$/\1/p" "$CONFIG" | tr -d _ | head -1)
+    if [ -n "$value" ] && [ -n "${open_low:-}" ] && [ "$value" -ge "$open_low" ] && [ "$value" -le "$open_high" ]; then
+        pass "the default $name ($value) is inside the open range ${open_low:-?}-${open_high:-?}"
+    else
+        bad "the default $name (${value:-not found in $CONFIG}) is outside the open range ${open_low:-?}-${open_high:-?}"
+    fi
 done
-expect "the lan chain only accepts" "$(grep -cv ' accept$' <<<"$lan" || true)" "0"
+# The ports a person can choose on the web page (linux/web/js/screens/settings.js): the webhook's and the sensors bridge's are the open range,
+# the cameras' are inside it.
+PAGE=$HERE/../web/js/screens/settings.js
+page_range() { sed -nE "s/^export const $1 = Object\.freeze\(\{ low: ([0-9]+), high: ([0-9]+) \}\);$/\1 \2/p" "$PAGE"; }
+expect "the page offers the webhook and the sensors bridge the range the firewall opens" "$(page_range OPEN_PORTS)" "${open_low:-?} ${open_high:-?}"
+read -r camera_low camera_high <<<"$(page_range CAMERA_PORTS)"
+if [ -n "${camera_low:-}" ] && [ -n "${open_low:-}" ] && [ "$camera_low" -ge "$open_low" ] && [ "$camera_high" -le "$open_high" ] && [ "$camera_low" -le "$camera_high" ]; then
+    pass "the page's camera ports ($camera_low-$camera_high) are inside the open range"
+else
+    bad "the page's camera ports (${camera_low:-?}-${camera_high:-?}) are not inside the open range ${open_low:-?}-${open_high:-?}"
+fi
 expect "no rule accepts by a source port alone (anyone can choose a source port)" "$(sed 's/#.*//' "$RULES" | grep 'sport' | grep -Ev 'sport [0-9]+ udp dport [0-9]+ accept' || true)" ""
 expect "the lan sets are the private and link-local ranges" "$(sed -n '/set lan4 {/,/}/p; /set lan6 {/,/}/p' "$RULES" | grep elements | sed 's/^[[:space:]]*//' | tr '\n' ';')" \
     "elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 };elements = { fe80::/10, fc00::/7 };"

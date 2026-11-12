@@ -33,6 +33,22 @@ import TestSupport
         #expect(DaemonArchivePolicy.threadID(fromThreadSelf: "1234/task/0") == nil)
     }
 
+    // MARK: The clock
+
+    /// The age rule waits for a clock the system says is synchronized (rulings of 2026-11-11): on Linux the kernel's word, on a Mac none (it counts
+    /// as synchronized).
+    @Test func theClockIsTheKernelsWordOnLinuxAndNoneOnAMac() {
+        #if os(Linux)
+        #expect(DaemonArchivePolicy.kernelClockIsSynchronized() != nil)
+        #else
+        #expect(DaemonArchivePolicy.kernelClockIsSynchronized() == nil)
+        #endif
+        let unsynchronized = DaemonArchivePolicy.make(dataDirectory: dataDirectory, deviceOf: { _ in 1 }, spaceOf: { _ in nil }, clockIsSynchronized: { false })
+        #expect(unsynchronized.isClockSynchronized?() == false)
+        let said = DaemonArchivePolicy.SaidOnce()
+        #expect(said.first() && !said.first() && !said.first())
+    }
+
     // MARK: Numbers
 
     @Test func spaceIsBlocksTimesFragmentSizeAndFreeIsWhatAWriterMayUse() {

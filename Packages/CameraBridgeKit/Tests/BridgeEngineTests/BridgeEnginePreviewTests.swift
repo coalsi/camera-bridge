@@ -5,7 +5,7 @@ import HAPCore
 import Testing
 @testable import BridgeEngine
 
-/// `BridgeEngine.preview()` (task W1-8): static sample data for SwiftUI previews and the app's `-previewEngine YES` mode.
+/// `BridgeEngine.preview()` (task W1-8): static sample data for SwiftUI previews and for tests (the archived Mac app also used it through a launch argument).
 @MainActor @Suite struct BridgeEnginePreviewTests {
     @Test func previewShowsARunningBridgeWithSampleCameras() {
         let engine = BridgeEngine.preview()

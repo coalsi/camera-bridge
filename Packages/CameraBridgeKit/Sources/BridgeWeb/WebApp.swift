@@ -48,15 +48,15 @@ public struct WebConfiguration: Sendable {
     public var maximumArchiveReadsPerAddress: Int
     /// The largest media answer: a fragment is at most 16 MiB (`ArchiveConstants.fragmentMaximumBytes`); a bigger one is `502 unreadable`.
     public var maximumSegmentBytes: Int
-    /// How often an Apple TV's live view checks that the TV is still added: one removed while it watches loses its picture within this long.
+    /// How often a paired device's live view checks that the device is still added: one removed while it watches loses its picture within this long.
     /// Never more often than every 100 ms (a smaller value counts as 100 ms).
     public var viewerRecheckInterval: Duration
-    /// Announces the bridge to Apple TVs as `_camera-bridge._tcp` (`ViewerAnnouncer`) through this advertiser. nil announces nothing: the default, and
+    /// Announces the bridge to Apple TVs and iPhones as `_camera-bridge._tcp` (`ViewerAnnouncer`) through this advertiser. nil announces nothing: the default, and
     /// what development runs, the Mac and the tests keep.
     public var viewerAdvertiser: (any ServiceAdvertiser)? = nil
-    /// The time of day, for what expires (HLS tickets); tests move it.
+    /// The time of day (where a recorded HLS range ends at most); tests move it.
     public var now: @Sendable () -> Date = { Date() }
-    /// A clock nobody sets, for how long something has been idle (an HLS packager); tests move it.
+    /// A clock nobody sets, for what expires and how long something has been idle (HLS tickets, an HLS packager); tests move it.
     public var uptime: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     /// How long a request for a camera's first HLS playlist waits for three finished segments before it is answered 503 (the master: 200 if one is out).
     /// Under AVPlayer's own 20 s for a playlist, past which the item fails without an answer (CoreMediaErrorDomain -12884).
@@ -102,7 +102,7 @@ struct RequestContext: Sendable {
     var params: [String: String]
     var session: AuthStore.Session?
     var sessionToken: String?
-    /// The Apple TV whose key opened a `viewer` route; nil for a browser (a request with a key has no session, whatever cookie it sent).
+    /// The paired device whose key opened a `viewer` route; nil for a browser (a request with a key has no session, whatever cookie it sent).
     var viewer: AuthStore.ViewerInfo?
 
     func uuid(_ name: String) throws -> UUID {
@@ -172,12 +172,12 @@ extension HTTPResponse {
 /// 3. **Session.** Every other API call needs the session cookie (256 random bits, `HttpOnly`, `SameSite=Strict`): `cb_session`, and over
 ///    HTTPS `__Host-cb_session` (a sibling name under camera-bridge.app cannot set a `__Host-` cookie, so it cannot shadow it; a browser
 ///    that signed in over HTTPS before has `cb_session`, which is still read and moved to the new name on its next request).
-///    The twelve `viewer` routes (`Route.Access.viewer`: live and recorded video, pictures, `GET viewer` and moving a camera) also take an
-///    Apple TV's key, as `Authorization: Bearer <key>`. A key that is there decides alone: a wrong, expired or removed one is
+///    The twelve `viewer` routes (`Route.Access.viewer`: live and recorded video, pictures, `GET viewer` and moving a camera) also take a
+///    paired device's key (an Apple TV's, an iPhone's), as `Authorization: Bearer <key>`. A key that is there decides alone: a wrong, expired or removed one is
 ///    `401 viewer_key`, even beside a valid cookie. A key in the address (`token=`, `access_token=`) is refused even with a good header,
 ///    and every other route never looks at one.
 /// 4. **Cross-site requests.** A request that changes anything must have an `Origin` (or `Sec-Fetch-Site`) of this same site, and a
-///    signed-in one must carry the session's `X-CSRF-Token` (a TV's key needs none: unlike a cookie, no browser sends it by itself); a body
+///    signed-in one must carry the session's `X-CSRF-Token` (a device's key needs none: unlike a cookie, no browser sends it by itself); a body
 ///    must be `application/json`.
 /// 5. **Headers on every answer.** A strict Content-Security-Policy (own files only), `nosniff`, no referrer, no framing, no
 ///    cross-origin reads; API answers are `no-store`.
@@ -440,7 +440,7 @@ public final class WebApp: Sendable {
         }
     }
 
-    // MARK: Apple TVs' keys
+    // MARK: Paired devices' keys
 
     /// The query names a key might be put under, refused on the viewer routes (an address ends up in logs and histories).
     static let addressTokenNames: Set<String> = ["token", "access_token"]
@@ -473,7 +473,7 @@ public final class WebApp: Sendable {
     // MARK: Request checks
 
     /// The token of `Authorization: Bearer <token>` ("Bearer" in any case, the token trimmed); nil without that header or with nothing in it.
-    /// `GET monitor` reads its token this way, and the viewer routes an Apple TV's key.
+    /// `GET monitor` reads its token this way, and the viewer routes a paired device's key.
     static func bearerToken(in request: HTTPRequest) -> String? {
         guard let header = request.headers["Authorization"], header.prefix(7).lowercased() == "bearer " else { return nil }
         let token = header.dropFirst(7).trimmingCharacters(in: .whitespaces)
@@ -561,7 +561,7 @@ public final class WebApp: Sendable {
 // MARK: - Routes
 
 struct Route: Sendable {
-    /// Who may call the route: anybody (`open`), a signed-in browser (`session`), or a signed-in browser or an Apple TV with its key
+    /// Who may call the route: anybody (`open`), a signed-in browser (`session`), or a signed-in browser or a paired device with its key
     /// (`viewer`; see `WebApp`'s security notes).
     enum Access { case open, session, viewer }
 

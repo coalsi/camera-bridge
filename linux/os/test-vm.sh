@@ -15,7 +15,7 @@
 #                      only way this script reaches the box, resets connections that arrive together on a macOS host (40 at once lose 12 to 16,
 #                      two at once lose one). guest runs the burst inside the box over ssh, on its own loopback, with the box's python3, and
 #                      leaves the burst out of conformance.mjs; host sends it from this computer. auto: guest on macOS, host elsewhere.
-#   --tests LIST       comma separated subset of: boot,ssh-off,system,persist,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,wifi,recording-drive,
+#   --tests LIST       comma separated subset of: boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,wifi,recording-drive,
 #                      installer,install-boot,update (default: all but update). update needs --update-dir. daemon and the three nvr tests need an image
 #                      with the real camerabridged (they are skipped for --stub-daemon). nvr, nvr-archive and nvr-faults are documented in
 #                      docs/linux/BUILDING.md; their web client is linux/os/test-nvr.py.
@@ -64,7 +64,7 @@ die() { echo "error: $*" >&2; exit 1; }
 if [ -z "$arch" ]; then
     case $image in *arm64*) arch=arm64 ;; *amd64*) arch=amd64 ;; *) die "cannot tell the architecture from the file name; use --arch" ;; esac
 fi
-[ -n "$tests" ] || tests="boot,ssh-off,system,persist,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,wifi,recording-drive,installer,install-boot"
+[ -n "$tests" ] || tests="boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,wifi,recording-drive,installer,install-boot"
 case $seed_files in ''|*[!0-9]*) die "--seed-files must be a number" ;; esac
 case $cpus in ''|*[!0-9]*) die "--cpus must be a number" ;; esac
 for tool in qemu-img curl ssh ssh-keygen; do command -v "$tool" >/dev/null || die "$tool is required"; done
@@ -272,6 +272,9 @@ selected() { case ",$tests," in *",$1,"*) return 0 ;; esac; return 1; }
 
 # --- helpers of the nvr tests (their web client is test-nvr.py; docs/linux/BUILDING.md describes the tests) ---------------------
 nvr_dir="$work/nvr" nvr_ready=0 admin_pw=""
+# nvr-archive: find(1) tests that leave out the days of its expired recordings, which a box that does not know its clock is right keeps and
+# deletes as soon as it does (at any time, also during a later test); and whether aging itself went untested (said at the end).
+not_expired="" aging_untested=0
 rec=/var/lib/camera-bridge/recordings
 
 ensure_admin_pw() { [ -n "$admin_pw" ] || admin_pw=$(openssl rand -hex 16); }
@@ -375,6 +378,27 @@ nvr_diag() {
 
 # nvr_journal_lines: lines the daemon has logged in this boot.
 nvr_journal_lines() { ssh_run 'journalctl -u camerabridged -b --no-pager -o cat | wc -l' | tr -d ' '; }
+
+# nvr_ask_chrony: writes $nvr_dir/ask-chrony, which test-nvr.py runs when the box says its age rule runs although chrony was not seen
+# synchronized: it asks the box's chrony once more (chronyc waitsync 1) and prints "synchronized" or "unsynchronized", then the box's uptime in
+# seconds. (The same ssh options as ssh_run, so it shares the multiplexed connection, and works again after a reboot.)
+nvr_ask_chrony() {
+    local opts=() o
+    while IFS= read -r o; do opts+=("$o"); done < <(ssh_opts)
+    mkdir -p "$nvr_dir"
+    {
+        echo '#!/bin/bash'
+        printf 'exec ssh'
+        printf ' %q' "${opts[@]}" root@127.0.0.1 'if chronyc -n waitsync 1 >/dev/null 2>&1; then echo synchronized; else echo unsynchronized; fi; cut -d. -f1 /proc/uptime'
+        echo
+    } >"$nvr_dir/ask-chrony"
+    chmod 0700 "$nvr_dir/ask-chrony"
+}
+
+# nvr_expired_files: how many files (.mp4 and .cbidx) of nvr-archive's expired recordings are on the box's disk.
+nvr_expired_files() {
+    ssh_run "find $rec/$CAM_DIR/$OLD_FOREIGN_DAY $rec/$CAM_DIR/$OLD_EMPTY_DAY -type f \\( -name '*.mp4' -o -name '*.cbidx' \\) 2>/dev/null | wc -l" | tr -d ' '
+}
 
 
 # --- the update test ------------------------------------------------------------------------------------------------------
@@ -630,6 +654,10 @@ if selected persist; then
     echo "==> persistence across a reboot"
     key_before=$(ssh_run 'sha256sum /var/lib/camera-bridge/secrets/master.key | cut -d" " -f1')
     ssh_run 'echo persistent > /var/lib/camera-bridge/testfile; sync'
+    # A line in the journal before the reboot. The VM's firmware has no product UUID, so each boot gets a new machine id and the journal a new
+    # folder: only --merge (every folder) finds the line afterwards; --list-boots and -b see the current folder alone.
+    journal_mark="cb-persist-$(date +%s)-$RANDOM"
+    ssh_run "logger -t cb-test-persist $journal_mark && journalctl --flush && sync" >/dev/null 2>&1 || true
     ssh_run 'systemctl reboot' >/dev/null 2>&1 || true
     drop_ssh_master
     sleep 15
@@ -638,9 +666,27 @@ if selected persist; then
     key_after=$(ssh_run 'sha256sum /var/lib/camera-bridge/secrets/master.key | cut -d" " -f1')
     [ "$key_before" = "$key_after" ] && ok "secrets key survived the reboot" || no "secrets key changed on reboot"
     [ "$(ssh_run 'cat /var/lib/camera-bridge/testfile')" = persistent ] && ok "data survived the reboot" || no "data lost on reboot"
-    boots=$(ssh_run 'journalctl --list-boots --no-pager | wc -l')
-    [ "$boots" -ge 2 ] && ok "the journal is persistent ($boots boots visible)" || no "journal not persistent ($boots boots)"
+    ssh_has 'journalctl --merge -t cb-test-persist -o cat --no-pager' "^$journal_mark\$" \
+        && ok "the journal is persistent (a line written before the reboot is still there)" || no "journal not persistent (the line written before the reboot is gone)"
     ssh_run 'ls /var/log/journal | wc -l' | sed 's/^/        journal folders: /'
+fi
+
+# A boot that stops in emergency or rescue mode restarts by itself after 30 seconds (camera-bridge-emergency-reboot.service, pulled in by the
+# targets' drop-ins), so boot counting can fall back. Rescue mode is entered on purpose here, from the running system; nobody touches the VM.
+if selected rescue; then
+    echo "==> rescue mode restarts the box by itself after 30 seconds"
+    boot_before=$(ssh_run 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
+    ssh_run 'systemctl --no-block isolate rescue.target' >/dev/null 2>&1 || true
+    drop_ssh_master
+    sleep 35
+    wait_http "$boot_timeout" || { no "the box did not come back from rescue mode by itself"; dump_serial; exit 1; }
+    wait_ssh || { no "ssh did not come back after the restart from rescue mode"; exit 1; }
+    boot_after=$(ssh_run 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
+    [ -n "$boot_before" ] && [ -n "$boot_after" ] && [ "$boot_before" != "$boot_after" ] && ok "rescue mode restarted the box by itself" \
+        || no "the box did not restart from rescue mode (boot id ${boot_before:-?} then ${boot_after:-?})"
+    # The boot id is the proof. What the unit logged is shown for the record: the boot before is in another journal folder (a new machine id
+    # each boot, see persist), so only --merge reads it.
+    ssh_run 'journalctl --merge -u camera-bridge-emergency-reboot.service --no-pager -o cat | tail -n 3' 2>/dev/null | sed 's/^/        journal: /' || true
 fi
 
 if selected daemon; then
@@ -855,6 +901,11 @@ if selected nvr; then
                 ssh_run 'journalctl -b --no-pager -k -o cat | grep -E "traps: .* in camerabridged\[|camerabridged.*(invalid opcode|trap)"' 2>/dev/null | cut -c1-240 | sed 's/^/          | /' || true
                 ssh_run 'journalctl -b --no-pager -t systemd-coredump -o cat | head -20' 2>/dev/null | cut -c1-240 | sed 's/^/          | /' || true
             fi
+            # "Keep N days" waits until the kernel says the clock is synchronized, which the daemon reads with adjtimex (glibc makes it with
+            # clock_adjtime); if its unit refused that, it says so once, at its first retention pass, long done by now.
+            ssh_has 'journalctl -b --no-pager -u camerabridged -o cat' 'does not let Camera Bridge read whether its clock is synchronized' \
+                && no "the daemon cannot read whether the clock is synchronized (its unit refuses adjtimex or clock_adjtime)" \
+                || ok "the daemon can read whether the clock is synchronized (no refusal in its log)"
             if [ "$conformance_status" -eq 0 ]; then
                 ok "conformance.mjs (T07) finds the box within the contract"
             else
@@ -893,6 +944,7 @@ if selected nvr-archive; then
         nvr_phase plan-seed --seed-files "$seed_files"
         # shellcheck disable=SC1091
         . "$nvr_dir/seed/plan.env"
+        not_expired="-not -path '*/$OLD_FOREIGN_DAY/*' -not -path '*/$OLD_EMPTY_DAY/*'"
         ssh_run 'systemctl stop camerabridged' >/dev/null 2>&1 || true
         ssh_run 'rm -rf /var/lib/camera-bridge/nvr-seed; runuser -u camerabridge -- mkdir -m 700 /var/lib/camera-bridge/nvr-seed'
         tar --format=ustar -C "$nvr_dir/seed" -cf - manifest.txt sidecars | ssh_run 'runuser -u camerabridge -- tar -C /var/lib/camera-bridge/nvr-seed -xf -'
@@ -918,23 +970,44 @@ if selected nvr-archive; then
         [ "$(ssh_run "wc -c <$torn.mp4 | tr -d ' '")" = "$TEAR_KEEP" ] && ok "the torn recording was cut back to its last whole fragment ($TEAR_KEEP bytes)" || no "the torn recording is $(ssh_run "wc -c <$torn.mp4 | tr -d ' '") bytes, expected $TEAR_KEEP"
         [ "$(ssh_run "sha256sum $torn.mp4 | cut -d' ' -f1")" = "$sha_before" ] && ok "the bytes that were kept are the bytes that were recorded" || no "the repair changed the bytes it kept"
         ssh_run "cat $torn.cbidx" >"$nvr_dir/repaired.cbidx" 2>/dev/null || no "the torn recording has no sidecar after the repair"
-        nvr_phase wait-oldest
-        ssh_has "ls -A $rec/$CAM_DIR/$OLD_FOREIGN_DAY | tr '\n' ' '" '^00-00-01\.mp4 keep-me\.txt $' && ok "retention removed the expired recordings and left a foreign file and a link alone" || no "the expired day holds: $(ssh_run "ls -A $rec/$CAM_DIR/$OLD_FOREIGN_DAY" | tr '\n' ' ')"
+        # Retention and the 9 and 10 day old recordings. "Keep N days" deletes nothing until the box knows its clock is right (the kernel says the
+        # clock is synchronized, or the box has been up a day), nor for a day after its clock jumps forward. In this VM only chrony can make it
+        # synchronized, by reaching a time server on the internet through QEMU's user network, which a runner or a computer offline may not allow.
+        # So: up to 90 s for chrony, then wait-oldest expects retention to remove them, or, while the box says it waits, to keep them; it keeps
+        # which as "aging". When the box says its age rule runs although chrony was not seen synchronized, test-nvr.py asks chrony again (ask-chrony).
+        nvr_ask_chrony
+        if ssh_run 'chronyc -n waitsync 45 0 0 2' >"$nvr_dir/chrony.txt" 2>&1; then clock=synchronized; else clock=unsynchronized; fi
+        echo "        chrony after up to 90 s: $clock ($(tail -n 1 "$nvr_dir/chrony.txt" | cut -c1-120))"
+        nvr_phase wait-oldest --clock "$clock"
+        if [ "$(nvr_state aging)" = waited ]; then
+            # The opposite: the expired recordings are still on the disk (counted before test-nvr.py asks the box why).
+            nvr_phase expired --on-disk "$(nvr_expired_files)"
+        else
+            ssh_has "ls -A $rec/$CAM_DIR/$OLD_FOREIGN_DAY | tr '\n' ' '" '^00-00-01\.mp4 keep-me\.txt $' && ok "retention removed the expired recordings and left a foreign file and a link alone" || no "the expired day holds: $(ssh_run "ls -A $rec/$CAM_DIR/$OLD_FOREIGN_DAY" | tr '\n' ' ')"
+            ssh_run "test ! -e $rec/$CAM_DIR/$OLD_EMPTY_DAY" && ok "a day folder that became empty was removed" || no "the empty day folder is still there"
+        fi
         ssh_run "test -L $rec/$CAM_DIR/$OLD_FOREIGN_DAY/00-00-01.mp4 && test -f $rec/$CAM_DIR/$OLD_FOREIGN_DAY/keep-me.txt" && ok "the link and the foreign file are still what they were" || no "the link or the foreign file changed"
-        ssh_run "test ! -e $rec/$CAM_DIR/$OLD_EMPTY_DAY" && ok "a day folder that became empty was removed" || no "the empty day folder is still there"
         [ "$(ssh_run "find $rec/$CAM_DIR -type f -name '*.mp4' | wc -l" | tr -d ' ')" -ge $((SEED_N + 1)) ] && ok "no recent recording was deleted (the size cap and the age rule left $SEED_N seeds alone)" || no "recent recordings are missing"
         nvr_phase verify-seed
-        # Record again, then a clean reboot: everything closed before is still there, byte for byte, and Record is still on.
+        # Record again, then a clean reboot: everything closed before is still there, byte for byte, and Record is still on (the expired recordings
+        # aside: a box that kept them may learn its clock after the reboot; persisted checks them).
         nvr_phase record-on --seconds 6
-        ssh_run "cd $rec/$CAM_DIR && find . -name '*.cbidx' -printf '%p %s\n' | sort" >"$nvr_dir/before.txt"
+        ssh_run "cd $rec/$CAM_DIR && find . -name '*.cbidx' $not_expired -printf '%p %s\n' | sort" >"$nvr_dir/before.txt"
+        if [ "$(nvr_state aging)" = waited ]; then
+            # Still kept? Counted again right before the reboot: a box that learned its clock in this boot and deleted them must say so now, in
+            # this boot. After the reboot its age rule waits again until it sees chrony synchronized, so persisted then expects the oldest seed.
+            echo "        (the expired recordings, right before the reboot)"
+            nvr_phase expired --on-disk "$(nvr_expired_files)"
+        fi
         ssh_run 'systemctl reboot' >/dev/null 2>&1 || true
         drop_ssh_master
         sleep 15
         wait_http "$boot_timeout" || { no "web UI did not come back after the reboot"; dump_serial; exit 1; }
         wait_ssh || { no "ssh did not come back after the reboot"; exit 1; }
-        ssh_run "cd $rec/$CAM_DIR && find . -name '*.cbidx' -printf '%p %s\n' | sort" >"$nvr_dir/after.txt"
+        ssh_run "cd $rec/$CAM_DIR && find . -name '*.cbidx' $not_expired -printf '%p %s\n' | sort" >"$nvr_dir/after.txt"
         [ -z "$(LC_ALL=C comm -23 <(LC_ALL=C sort "$nvr_dir/before.txt") <(LC_ALL=C sort "$nvr_dir/after.txt"))" ] && ok "after a reboot every recording that was closed before is there with the same size ($(wc -l <"$nvr_dir/before.txt" | tr -d ' ') sidecars)" || no "recordings changed or went missing across the reboot"
         nvr_phase persisted
+        [ "$(nvr_state aging)" != waited ] || aging_untested=1   # kept to the end: said above the result
         nvr_phase wait-recording --seconds 6
         nvr_diag nvr-archive
     fi
@@ -950,13 +1023,13 @@ if selected nvr-faults; then
         total=$(ssh_run "df -B1 --output=size /srv | tail -1" | tr -d ' ')
         floor=$(( total / 20 > 8589934592 ? total / 20 : 8589934592 ))
         avail=$(ssh_run "df -B1 --output=avail /srv | tail -1" | tr -d ' ')
-        files_before=$(ssh_run "find $rec -name '*.mp4' | wc -l" | tr -d ' ')
+        files_before=$(ssh_run "find $rec -name '*.mp4' $not_expired | wc -l" | tr -d ' ')   # (not nvr-archive's expired recordings)
         # 3 GiB above the floor: the low-space notice. Half a GiB below it: recording pauses, and nothing is deleted to make room.
         ssh_run "fallocate -l $((avail - floor - 3221225472)) /srv/system/nvr-ballast" && ok "free space is now about 3 GiB above the floor" || no "could not fill the data partition for the low-space check"
         nvr_phase notices --expect low
         ssh_run "fallocate -l $((avail - floor + 536870912)) /srv/system/nvr-ballast" || no "could not fill the data partition any further"
         nvr_phase notices --expect full
-        [ "$(ssh_run "find $rec -name '*.mp4' | wc -l" | tr -d ' ')" -ge "$files_before" ] && ok "nothing was deleted to make room" || no "recordings disappeared while the disk was full"
+        [ "$(ssh_run "find $rec -name '*.mp4' $not_expired | wc -l" | tr -d ' ')" -ge "$files_before" ] && ok "nothing was deleted to make room" || no "recordings disappeared while the disk was full"
         ssh_run 'rm -f /srv/system/nvr-ballast'
         nvr_phase notices --expect none
         nvr_phase wait-recording --seconds 6
@@ -1232,5 +1305,10 @@ if selected update; then
 fi
 
 echo
+if [ "$aging_untested" -eq 1 ]; then
+    untested="nvr-archive did not test that expired recordings are deleted: the box's age rule waited throughout this run (its clock was not known to be right, or had jumped forward; see wait-oldest above), so it checked that the box kept them instead"
+    echo "NOTE: $untested"
+    [ "${GITHUB_ACTIONS:-}" != true ] || echo "::notice::$untested"
+fi
 echo "RESULT: $pass passed, $failed failed"
 [ "$failed" -eq 0 ]

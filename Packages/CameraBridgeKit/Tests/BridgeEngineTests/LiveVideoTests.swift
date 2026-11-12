@@ -204,6 +204,24 @@ import Testing
         await fixture.tearDown()
     }
 
+    /// The "Camera audio" switch is the owner's word on whether a camera is heard: a live view of a camera whose switch is off has no sound, whatever
+    /// it asks for (review of 2026-11-09, M2).
+    @MainActor @Test(.timeLimit(.minutes(2))) func aCameraWhoseSoundIsOffIsNotHeardLiveWhateverTheViewAsks() async throws {
+        let fixture = try await EngineFixture(tuning: .testing)
+        let engine = fixture.engine
+        var camera = EngineFixture.demoCamera(name: "Quiet")
+        camera.audioEnabled = false
+        try await engine.addCamera(camera, password: nil)
+        await engine.start()
+        #expect(await fixture.waitFor { fixture.status(camera.id)?.connection == .online })
+        let main = try await engine.liveVideo(cameraID: camera.id, stream: .main, audio: true)
+        let samples = await Self.take(40, from: main.samples, timeout: .seconds(10))
+        #expect(samples.count == 40)
+        #expect(!samples.contains { if case .audio = $0 { true } else { false } }, "no sound from a camera whose switch is off")
+        main.cancel()
+        await fixture.tearDown()
+    }
+
     @MainActor @Test(.timeLimit(.minutes(2))) func anAppViewerSharesTheSubStreamWithAHomeKitLeaseAndOutlivesItsRelease() async throws {
         var tuning = EngineTuning.testing
         tuning.subStreamIdleStop = .milliseconds(300)

@@ -331,7 +331,6 @@
 .sky-ai { margin: 0; padding: 8px 12px; border-left: 3px solid var(--brand-accent); border-radius: 8px; background: var(--surface-2); overflow-wrap: anywhere; unicode-bidi: isolate; }
 .sky-ai-label { margin-right: 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em; color: var(--text-3); }
 .sky-details-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.sky-tag { display: inline-block; padding: 1px 9px; border: 1px solid var(--border-strong); border-radius: 99px; background: var(--surface-2); font-size: 0.75rem; font-weight: 650; }
 
 /* One-tap corrections. */
 .sky-correct { padding-top: 12px; border-top: 1px solid var(--border); }

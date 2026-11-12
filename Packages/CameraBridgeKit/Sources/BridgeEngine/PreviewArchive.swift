@@ -3,7 +3,7 @@ import Foundation
 import MediaCore
 import Synchronization
 
-/// Made-up recordings for the preview engine's `nvr` scenario (`-previewEngine YES -demoScenario nvr`; sample data, nothing on disk): a daily rhythm
+/// Made-up recordings for the preview engine's `nvr` scenario (`BridgeEngine.preview(scenario: .nvr)`, which the tests read; sample data, nothing on disk): a daily rhythm
 /// of activity with bursts, a gap, and a camera that stopped recording, so the timeline, the grid and every tile state can be looked at. The video is
 /// real: a short synthetic clip (two groups of pictures) is encoded and muxed once, and served for every fragment. The player takes the times of
 /// the frames from the fragment, not from the bytes, so one clip fills every second of the archive. Hosts, names and times are sample data.

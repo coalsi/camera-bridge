@@ -1,7 +1,7 @@
 import Foundation
 
 /// What the engine cannot find out portably, supplied by the host (`BridgeEnvironment.archivePolicy`). BridgeDaemon builds one
-/// from statvfs (Glibc is allowed only there); the Mac app passes none and the engine uses Foundation's volume attributes.
+/// from statvfs (Glibc is allowed only there); the archived Mac app passed none, and then the engine uses Foundation's volume attributes.
 public struct ArchivePlatformPolicy: Sendable {
     public enum DirectoryNaming: String, Sendable, Equatable {
         /// The camera's sanitized name (the Mac), made unique with " (2)".
@@ -27,6 +27,10 @@ public struct ArchivePlatformPolicy: Sendable {
     /// Drops what the kernel holds in memory of the file at `url` (on the box `posix_fadvise(POSIX_FADV_DONTNEED)` after its data was synced), so
     /// the archive move's read-back reads the drive, not the pages it has just written. nil: the read-back may come from memory.
     public var dropCachedPages: (@Sendable (URL) -> Void)?
+    /// Whether the system says its clock is synchronized (on the box the kernel's word, which chrony keeps). Until it does, or until the system
+    /// has been running for a day, nothing is deleted for its age (`AgeRuleClock`). nil (the archived Mac app, a Mac's development daemon, tests): the
+    /// clock counts as synchronized.
+    public var isClockSynchronized: (@Sendable () -> Bool)?
 
     public init(space: @escaping @Sendable (URL) -> (total: UInt64, free: UInt64)?, isSystemVolume: @escaping @Sendable (URL) -> Bool,
                 systemFloor: @escaping @Sendable (_ total: UInt64) -> UInt64, directoryNaming: DirectoryNaming) {

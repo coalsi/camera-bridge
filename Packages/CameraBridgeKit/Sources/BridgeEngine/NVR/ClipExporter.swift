@@ -2,7 +2,7 @@ import Foundation
 
 /// Exports a stretch of one camera's recordings as an ordinary MP4 (export-clip design, section 3): `plan` is a dry run that reads fragment headers
 /// only and says exactly what the files will be, `export` writes one part of a plan to a sink in one pass, without re-encoding. One portable type:
-/// the Mac app calls it in process and writes a file, the daemon's routes stream it to a browser.
+/// the daemon's routes stream it to a browser (the archived Mac app called it in process and wrote a file).
 public struct ClipExporter: ClipExporting {
     private let planner: ClipPlanner
     private let writer: ClipWriter

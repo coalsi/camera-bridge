@@ -1,6 +1,7 @@
 import Foundation
 import BridgeEngine
 import CameraAdapters
+import MediaCore
 import Testing
 import TestSupport
 @testable import BridgeWeb
@@ -75,6 +76,81 @@ import TestSupport
         #expect(browser == [porch.id: true, garage.id: false], "the owner's page: the Porch keeps its sound, the Garage has none")
         let appleTV = await soundAsked { StreamCollector(await harness.raw("GET", $0, headers: [("Authorization", "Bearer \(tv.key)")])) }
         #expect(appleTV == [porch.id: true, garage.id: false], "an Apple TV that lists the Garage's sound gets no more than the page")
+    }
+}
+
+extension LiveVideoRouteTests {
+    /// Review of 2026-11-09, M2: a view that was open kept the sound after the owner turned "Camera audio" off. Turning the switch restarts the
+    /// camera; the view's next subscription follows it, off and on again, for the cameras the view asked to hear.
+    @Test func aRunningViewFollowsTheSoundSwitchWhenTheCameraRestarts() async throws {
+        let harness = try Harness()
+        let owner = try await harness.signIn()
+        var porch = CameraConfiguration(name: "Porch", kind: .camera, vendor: .rtsp, endpoint: CameraEndpoint(host: "192.0.2.20"), username: "")
+        porch.audioEnabled = true
+        try await harness.backend.addCamera(porch, password: nil)
+        let feeds = Box<[AsyncStream<MediaSample>.Continuation]>([])
+        harness.backend.write {
+            $0.liveAnswer = { _, stream, _ in
+                let (samples, feed) = AsyncStream<MediaSample>.makeStream()
+                feeds.update { $0.append(feed) }
+                return LiveVideoSubscription(samples: samples, stream: stream) { feed.finish() }
+            }
+        }
+        func calls() -> [Bool] { harness.backend.read { $0.liveCalls.map(\.audio) } }
+        func turnSound(_ on: Bool) {
+            harness.backend.write { state in
+                if let index = state.configurations.firstIndex(where: { $0.id == porch.id }) { state.configurations[index].audioEnabled = on }
+            }
+        }
+        let stream = await owner.stream("/api/v1/live?cameras=\(porch.id.uuidString)&audio=\(porch.id.uuidString)")
+        defer { stream.cancel() }
+        #expect(await eventually { calls() == [true] })
+        turnSound(false)
+        feeds.value.last?.finish()   // the switch restarts the camera
+        #expect(await eventually { calls() == [true, false] }, "off: the next subscription has no sound, \(calls())")
+        turnSound(true)
+        feeds.value.last?.finish()
+        #expect(await eventually { calls() == [true, false, true] }, "on again: sound again, \(calls())")
+    }
+}
+
+extension LiveVideoRouteTests {
+    /// The camera may still be starting when its subscription is tried again after a restart, and the switch may move meanwhile: it is read
+    /// again before every try until one subscribes.
+    @Test func aSwitchTurnedWhileTheCameraIsStillStartingIsReadAgainAtTheNextTry() async throws {
+        let harness = try Harness()
+        let owner = try await harness.signIn()
+        var porch = CameraConfiguration(name: "Porch", kind: .camera, vendor: .rtsp, endpoint: CameraEndpoint(host: "192.0.2.20"), username: "")
+        porch.audioEnabled = true
+        try await harness.backend.addCamera(porch, password: nil)
+        let feeds = Box<[AsyncStream<MediaSample>.Continuation]>([])
+        let tries = Box(0)
+        harness.backend.write {
+            $0.liveAnswer = { _, stream, _ in
+                let attempt = tries.update { (count: inout Int) -> Int in
+                    count += 1
+                    return count
+                }
+                if attempt == 2 { throw EngineError.cameraNotRunning }   // the camera is still starting
+                let (samples, feed) = AsyncStream<MediaSample>.makeStream()
+                feeds.update { $0.append(feed) }
+                return LiveVideoSubscription(samples: samples, stream: stream) { feed.finish() }
+            }
+        }
+        func calls() -> [Bool] { harness.backend.read { $0.liveCalls.map(\.audio) } }
+        func turnSound(_ on: Bool) {
+            harness.backend.write { state in
+                if let index = state.configurations.firstIndex(where: { $0.id == porch.id }) { state.configurations[index].audioEnabled = on }
+            }
+        }
+        let stream = await owner.stream("/api/v1/live?cameras=\(porch.id.uuidString)&audio=\(porch.id.uuidString)")
+        defer { stream.cancel() }
+        #expect(await eventually { calls() == [true] })
+        turnSound(false)
+        feeds.value.last?.finish()   // the switch restarts the camera
+        #expect(await eventually { calls() == [true, false] }, "read after the restart: off, and the camera is not up yet")
+        turnSound(true)              // and on again while it starts
+        #expect(await eventually(timeout: .seconds(10)) { calls() == [true, false, true] }, "the next try reads it again: \(calls())")
     }
 }
 

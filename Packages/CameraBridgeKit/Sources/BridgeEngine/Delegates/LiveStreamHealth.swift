@@ -311,9 +311,13 @@ struct TranscodeFailureLadder: Sendable {
 /// wedged call would otherwise take for good: with as many wedged calls as the Mac has cores the whole runtime, HomeKit's
 /// handlers included, stops. A call that overruns its deadline is abandoned, left to finish on its own thread.
 enum CodecOffload {
-    /// The label of the queue (its threads are named after it in a backtrace; tests read it to see where a call ran).
+    /// The label of the queues (their threads are named after it in a backtrace; tests read it to see where a call ran).
     static let queueLabel = "CameraBridge.LiveCodecOffload"
-    private static let queue = DispatchQueue(label: queueLabel, qos: .userInitiated, attributes: .concurrent)
+
+    /// A serial queue of its own for each call, which libdispatch gives a thread at once. Not one concurrent queue: on Linux the threads of every
+    /// concurrent queue of a priority, and of Swift concurrency's tasks of that priority, are about as many as the cores (four on the box), and
+    /// libdispatch adds one a second past that, so a few corrections waiting for their ffmpeg child held up every task of their priority.
+    private static func ownQueue() -> DispatchQueue { DispatchQueue(label: queueLabel, qos: .userInitiated) }
 
     /// `work` on its own thread; throws `DeadlineExceeded` once `deadline` passes, however long `work` goes on.
     /// `discard` receives what `work` returns after the deadline passed (nobody uses it: tear it down).
@@ -321,7 +325,7 @@ enum CodecOffload {
                                      _ work: @escaping @Sendable () throws -> Value) async throws -> Value {
         try await withDeadline(deadline) {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Value, any Error>) in
-                queue.async { continuation.resume(with: Result { try work() }) }
+                ownQueue().async { continuation.resume(with: Result { try work() }) }
             }
         } late: { result in
             if case .success(let value) = result { discard?(value) }
@@ -330,7 +334,7 @@ enum CodecOffload {
 
     /// `work` on its own thread; nobody waits for it (tearing down a transcoder).
     static func fireAndForget(_ work: @escaping @Sendable () -> Void) {
-        queue.async(execute: work)
+        ownQueue().async(execute: work)
     }
 }
 

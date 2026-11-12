@@ -123,7 +123,6 @@ public actor Go2RTCManager: Go2RTCStreamProviding {
     private var recentByStream: [String: [String]] = [:]
     private var lastFailure = ""
     private var setup: SetupSession?
-    private var runCount = 0
     private var lineContinuation: AsyncStream<String>.Continuation?
     private var logPump: Task<Void, Never>?
 
@@ -148,13 +147,8 @@ public actor Go2RTCManager: Go2RTCStreamProviding {
     /// Whether the helper runs and answers.
     public var isRunning: Bool { phase == .running }
 
-    /// How many times the helper was started.
-    public var startCount: Int { runCount }
-
     /// The ports of the running (or last) helper: API and RTSP, both on 127.0.0.1.
     public var currentPorts: (api: UInt16, rtsp: UInt16)? { ports }
-
-    public var streamIDs: [String] { streams.keys.sorted() }
 
     /// Warnings and errors of the helper that are not about one stream, newest last.
     public var generalProblems: [String] { recent }
@@ -341,7 +335,6 @@ public actor Go2RTCManager: Go2RTCStreamProviding {
             removeConfigurationFile()
             return .failed("it could not be started (\(error))")
         }
-        runCount += 1
         log.info("go2rtc started for \(snapshot.count) stream\(snapshot.count == 1 ? "" : "s") (API and RTSP on 127.0.0.1)")
         guard await waitHealthy(run, port: ports.api, password: password) else {
             let exit = run.exit

@@ -13,10 +13,9 @@ import Testing
         RetentionPlannerTests.file(camera, hoursAgo: hoursAgo, megabytes: megabytes, name: name)
     }
 
-    static func input(_ closed: [RetentionCandidate], open: UInt64 = 0, newestStart: Int64? = nil, keepDays: Int = 7, maximum: UInt64 = .max,
+    static func input(_ closed: [RetentionCandidate], open: UInt64 = 0, ageRule: Bool = true, keepDays: Int = 7, maximum: UInt64 = .max,
                       also archive: [RetentionCandidate] = []) -> RetentionPlanner.Input {
-        RetentionPlanner.Input(closed: closed, openBytes: open, newestStartMs: newestStart ?? (closed + archive).map(\.startMs).max(), nowMs: now, keepDays: keepDays,
-                               maximumBytes: maximum)
+        RetentionPlanner.Input(closed: closed, openBytes: open, ageRuleRuns: ageRule, nowMs: now, keepDays: keepDays, maximumBytes: maximum)
     }
 
     static func drive(_ closed: [RetentionCandidate] = [], maximum: UInt64 = 10_000 * mb, free: UInt64 = 10_000 * mb, floor: UInt64 = 100 * mb,
@@ -62,9 +61,12 @@ import Testing
     @Test func theClockGuardKeepsAgedFilesOnBothDrives() {
         let aged = Self.file(0, hoursAgo: 24 * 30)
         let agedArchive = Self.file(1, hoursAgo: 24 * 40)
-        let future = Self.now + 3_600_000
-        let plan = RetentionPlanner.plan(Self.input([aged], newestStart: future, also: [agedArchive]), archive: Self.drive([agedArchive]))
-        #expect(plan.deletions.isEmpty && plan.archiveDeletions.isEmpty && plan.moves.isEmpty, "a clock that jumped deletes nothing for age, on either drive")
+        let plan = RetentionPlanner.plan(Self.input([aged], ageRule: false, also: [agedArchive]), archive: Self.drive([agedArchive]))
+        #expect(plan.deletions.isEmpty && plan.archiveDeletions.isEmpty && plan.moves.isEmpty, "a clock not trusted deletes nothing for age, on either drive")
+        // A file dated in the future on either drive holds up nothing.
+        let future = Self.file(2, hoursAgo: -24 * 30)
+        let both = RetentionPlanner.plan(Self.input([aged, future], also: [agedArchive]), archive: Self.drive([agedArchive]))
+        #expect(both.deletions == [aged] && both.archiveDeletions == [agedArchive])
     }
 
     @Test func openFilesCountButAreNeverCandidates() {

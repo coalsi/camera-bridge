@@ -6,7 +6,7 @@ Camera Bridge is licensed under the PolyForm Noncommercial License 1.0.0 (see LI
 Required Notice: Copyright 2026 Corey Silvia (https://www.camera-bridge.app)
 
 This product includes software developed by third parties. Their notices follow; the full license texts and the
-complete list are in THIRD_PARTY_LICENSES.md (and, inside the app, About > Acknowledgements).
+complete list are in THIRD_PARTY_LICENSES.md (and, in the archived Mac app, About > Acknowledgements).
 
 --------------------------------------------------------------------------------
 HAP-NodeJS (Apache License 2.0)
@@ -48,7 +48,29 @@ This product contains a derivation of various files from SwiftNIO.
     * https://github.com/apple/swift-nio
 
 (On macOS, Camera Bridge uses swift-crypto's "Crypto" module, which re-exports Apple CryptoKit. swift-crypto's BoringSSL
-sources are compiled in only on other platforms, e.g. Linux.)
+sources, and the XKCP sources below, are compiled in only on other platforms, e.g. Linux.)
+
+--------------------------------------------------------------------------------
+XKCP, the eXtended Keccak Code Package (vendored inside swift-crypto; Linux only)
+--------------------------------------------------------------------------------
+https://github.com/XKCP/XKCP
+
+swift-crypto 5 compiles a vendored copy of XKCP (target CXKCP, SHA-3 and SHAKE) into the engine built for Linux, so it is in the
+Camera Bridge OS daemon. Keccak was designed by Guido Bertoni, Joan Daemen, Michael Peeters and Gilles Van Assche. Nearly all of the
+files carry the dedication "To the extent possible under law, the implementer has waived all copyright and related or neighboring
+rights to the source code in this file" (CC0 1.0, http://creativecommons.org/publicdomain/zero/1.0/). One file, brg_endian.h, is
+Brian Gladman's and has its own terms, which this notice repeats as they require:
+
+  Copyright (c) 1998-2008, Brian Gladman, Worcester, UK. All rights reserved.
+
+  The redistribution and use of this software (with or without changes) is allowed without the payment of fees or royalties
+  provided that: 1. source code distributions include the above copyright notice, this list of conditions and the following
+  disclaimer; 2. binary distributions include the above copyright notice, this list of conditions and the following disclaimer in
+  their documentation; 3. the name of the copyright holder is not used to endorse products built using this software without
+  specific written permission.
+
+  DISCLAIMER: This software is provided 'as is' with no explicit or implied warranties in respect of its properties, including, but
+  not limited to, correctness and/or fitness for purpose.
 
 --------------------------------------------------------------------------------
 swift-asn1 (Apache License 2.0)
@@ -94,7 +116,7 @@ Kornel Lesiński, Mayur Pawashe and others; includes bsdiff (Colin Percival), sa
 go2rtc (MIT License)
 --------------------------------------------------------------------------------
 Copyright (c) 2022 Alexey Khit. https://github.com/AlexxIT/go2rtc
-The macOS app bundles the unmodified go2rtc 1.9.14 program as a helper (Contents/Helpers/go2rtc); it runs as a separate
+The archived macOS app bundled the unmodified go2rtc 1.9.14 program as a helper (Contents/Helpers/go2rtc); it ran as a separate
 program. Camera Bridge OS contains go2rtc 1.9.14+dev.c245815, built unmodified from commit
 c245815e75e2a5fd60b4290f12bfc04e55a984d3, at /usr/lib/camera-bridge/helpers/go2rtc (its license text is in
 /usr/share/doc/go2rtc/copyright). License text and checksums: docs/third-party/go2rtc.md.
@@ -109,7 +131,7 @@ github.com/google/uuid and github.com/wlynxg/anet (BSD-3-Clause), github.com/gor
 github.com/pion WebRTC modules (MIT). Texts: linux/helpers/wyze-lake/LICENSES, in the image /usr/share/doc/wyze-lake/.
 
 eufy-bridge (/usr/lib/camera-bridge/helpers/eufy-bridge and helpers/eufy/; source linux/helpers/eufy-bridge) runs on
-Node.js 24.21.0 (Copyright Node.js contributors, MIT License, with the bundled components named in its LICENSE file), the
+Node.js 24.22.3 (Copyright Node.js contributors, MIT License, with the bundled components named in its LICENSE file), the
 unmodified official linux-x64 binary. Bundled into eufy-bridge.js: @mega-yfue/eufy-sdk 0.4.0, Copyright 2026 mega-yfue,
 licensed under the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0); it ships no NOTICE file. One
 change is made to it at bundle time: its lazy protobufjs loader (createRequire(import.meta.url)("protobufjs")) is replaced

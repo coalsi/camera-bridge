@@ -5,7 +5,7 @@ import Foundation
 import MediaCore
 import RTSP
 
-// The Add Camera page's rules: the Mac app's wizard (`AddCameraWizardModel`) as a stateless service. The page sends everything it
+// The Add Camera page's rules: the archived Mac app's wizard (`AddCameraWizardModel`) as a stateless service. The page sends everything it
 // has collected with each request; the server validates it, checks the camera, and builds the configuration to add.
 
 /// A request the page can fix: the sentence says what is wrong, `field` which input it belongs to.

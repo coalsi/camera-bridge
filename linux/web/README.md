@@ -105,9 +105,7 @@ The image installs these files in `/usr/share/camera-bridge/web`.
 | `make-fixtures.sh` | Builds the fixture files with ffmpeg |
 | `conformance.mjs <base-url>` | Signs in and checks the shape of every recording route against a dev server, a daemon on a Mac or a box (the password comes from the environment and is never printed) |
 | `lint.mjs` | Rejects what the Content-Security-Policy forbids: `innerHTML`, `style="…"`, `eval`, `fetch` outside `api.js` and the like |
-| `spike/` | The browser test pages for plain HTTP (secure context, Media Source Extensions) |
 | `soak/` | The Node side of the soak and fault tests: scripted clients, the sampler, the analyzer and the file verifier (`Tools/nvr-soak/README.md` says how a run goes) |
-| `t10-run.mjs`, `t10-drive.js`, `t10-checks.js`, `t10-open-at.js`, `t10-smoke/` | Checks of the Watch screen in a throwaway headless Chrome: `node linux/web-dev/t10-run.mjs <url> <file.js>` evaluates the files in the page, and the first lines of each file say what it does |
 
 Both directories live outside `linux/web/` because the image copies that whole directory (`linux/os/build-image.sh`).
 
@@ -124,6 +122,6 @@ Then open `http://nvr.test:8081` in that Chrome. `--dev` keeps the web interface
 
 ## Screenshots
 
-Taken from the daemon on a Mac with the demo camera (a test pattern) and documentation addresses: `docs/linux/screenshots/` (cameras, add a camera, a camera, pairing, log, phone, system in light mode).
+`docs/screenshots/os/`: the page on a real box with real cameras, in the dark appearance; its README says what each picture shows, how they are taken, and that each keeps its name so a website can link to it.
 
 Notifications (2026-10-22): a notice is not a banner any more. `js/notifications.js` shows each new one once as a toast at the top right (6 s, a warning 10 s, held by the pointer or the keyboard focus, at most 3, a swipe or the close button puts it away) after asking the bridge (`POST notifications/shown`: the bridge hands each to one browser, so nothing comes back on a reload and the phone and the Mac agree; nothing is kept in the browser; a wall display asks for none, so they stay for the owner's other devices), and counts the unread ones for the menu's bell. `js/screens/notifications.js` is the Notifications page (`#/notifications`: the bridge's log, a filter by section, "Mark all as read"; opening it marks what it shows as read). A notice whose action is `dismiss` (2026-10-31: the damaged configuration's, "Settings Restored From a Backup" or "Settings Could Not Be Read") stays until it is put away: its toast and its line on the page have Dismiss (`POST notifications/dismiss {id}` with the notice's id; a refusal is said in the bridge's words), on the page only while it is one of the bridge's notices (`store.notices`), and the line stays in the log. `js/screens/banners.js` keeps only the bridge's own state (paused, starting, not running) as a slim line.

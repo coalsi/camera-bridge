@@ -55,14 +55,6 @@ extension SkyLogStore {
         jpeg.count >= 4 && jpeg.count <= maximumThumbnailBytes && jpeg.prefix(2) == Data([0xFF, 0xD8]) && jpeg.suffix(2) == Data([0xFF, 0xD9])
     }
 
-    /// The entry's thumbnail when it is there, a regular file in real folders, good, and stamped with the picture's time (it was made from the picture that is
-    /// there); else nil. Blocking disk work.
-    func keptThumbnail(camera: UUID, night: String, entryID: String, folder: URL) -> Data? {
-        guard Self.isValidNight(night), SkyEntry.isValidID(entryID), Self.picturesAreReal(folder: folder, camera: camera, night: night),
-              let still = Self.stamp(of: Self.stillFile(folder: folder, camera: camera, night: night, id: entryID)) else { return nil }
-        return Self.thumbnail(folder: folder, camera: camera, night: night, id: entryID, matching: still.modified)
-    }
-
     private static func picturesAreReal(folder: URL, camera: UUID, night: String) -> Bool {
         isReal(skyFolder(folder)) && isReal(cameraFolder(folder: folder, camera: camera)) && isReal(stillsFolder(folder: folder, camera: camera, night: night))
     }

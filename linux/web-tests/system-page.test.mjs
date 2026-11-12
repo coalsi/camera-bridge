@@ -1,6 +1,8 @@
 // The System page (screens/system.js): the factory reset says the box also forgets its Wi-Fi, SSH keys and update settings, and the Updates
-// card says when an update did not start and the box went back to the version before (`update.state` "rolled-back", docs/linux/UPDATES.md), in
-// the bridge's own sentence when it has one. In the fake browser, with a made-up bridge.
+// card says when an update did not start and the box went back to the version before (docs/linux/UPDATES.md), in the bridge's own sentence when
+// it has one. The bridge says that with `update.failedVersion` and the sentence in `message`, its state staying "idle" (cb-update's "rolled-back"
+// is mapped to it: BridgeDaemon/RequestFileSystemControl.swift and its test aVersionThatDidNotStartIsReportedWithTheBoxsSentence); the updates
+// below are what it sends. In the fake browser, with a made-up bridge.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { installFakeBrowser } from './support/fake-browser.mjs';
@@ -45,24 +47,43 @@ async function open(update) {
   return page;
 }
 
-test('a rolled-back update: the Updates card says the bridge’s own sentence instead of "You have the latest version"', async () => {
-  const sentence = 'Version 0.1.131 did not start properly, so the box went back to version 0.1.130 by itself.';
-  const page = await open({ state: 'rolled-back', available: false, current: '0.1.130', failedVersion: '0.1.131', message: sentence, checked: new Date().toISOString() });
+// What the box sends after it went back from 0.1.131 by itself (cb-update boot, then a check that found 0.1.131 again).
+const SENTENCE = 'Version 0.1.131 did not start properly, so the box went back to version 0.1.130 by itself. It will not be offered again; a newer version will be.';
+const ROLLED_BACK = { state: 'idle', available: false, current: '0.1.130', latest: '0.1.131', notes: '', checked: new Date().toISOString(), message: SENTENCE,
+  rebootRequired: false, failedVersion: '0.1.131' };
+
+test('a version that did not start: the Updates card says the bridge’s own sentence instead of "You have the latest version"', async () => {
+  const page = await open(ROLLED_BACK);
   try {
     const text = visibleText(updatesCard(page));
-    assert.ok(text.includes(sentence), text);
+    assert.ok(text.includes(SENTENCE), text);
+    assert.doesNotMatch(text, /You have the latest version/);
+    assert.equal(all(updatesCard(page), (node) => node.classList?.contains('banner') && node.classList.contains('warning')).length, 1, 'as a warning');
+  } finally {
+    page.destroy();
+  }
+});
+
+test('a version that did not start, without a sentence of the bridge’s: the page says it in its own words', async () => {
+  const { message, ...withoutSentence } = ROLLED_BACK;
+  assert.ok(message);
+  const page = await open(withoutSentence);
+  try {
+    const text = visibleText(updatesCard(page));
+    assert.ok(text.includes('Version 0.1.131 did not start, so the box went back to 0.1.130. It won’t install that version again.'), text);
     assert.doesNotMatch(text, /You have the latest version/);
   } finally {
     page.destroy();
   }
 });
 
-test('a rolled-back update without a sentence of the bridge’s: the page says it in its own words', async () => {
-  const page = await open({ state: 'rolled-back', available: false, current: '0.1.130', failedVersion: '0.1.131', checked: new Date().toISOString() });
+test('a newer version after a rollback is offered as usual (the bridge names no failed version then)', async () => {
+  const page = await open({ state: 'idle', available: true, current: '0.1.130', latest: '0.1.132', notes: '', checked: new Date().toISOString(),
+    message: 'version 0.1.132 is available (you have 0.1.130)', rebootRequired: false });
   try {
     const text = visibleText(updatesCard(page));
-    assert.ok(text.includes('Version 0.1.131 did not start, so the box went back to 0.1.130. It won’t install that version again.'), text);
-    assert.doesNotMatch(text, /You have the latest version/);
+    assert.match(text, /0\.1\.132 is available/);
+    assert.doesNotMatch(text, /did not start/);
   } finally {
     page.destroy();
   }

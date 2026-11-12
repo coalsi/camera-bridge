@@ -27,7 +27,7 @@ extension WebApp {
     static let maximumLiveCameras = 32
     /// Bytes queued for the browser beyond which a camera skips to its next keyframe (the network is slower than the cameras).
     static let liveBacklogLimit = 24 << 20
-    /// The shortest wait between two looks at whether an Apple TV that watches live is still added. A `WebConfiguration.viewerRecheckInterval`
+    /// The shortest wait between two looks at whether a paired device that watches live is still added. A `WebConfiguration.viewerRecheckInterval`
     /// below it counts as this long, so a zero or tiny setting cannot turn the look into a loop that never sleeps.
     static let minimumViewerRecheck = Duration.milliseconds(100)
 
@@ -69,15 +69,16 @@ extension WebApp {
         }
         let width = ctx.request.queryValue("width").flatMap(Int.init).map { min(max($0, 64), 8192) }
         // Sound costs a converter per camera (G.711 to AAC), so only the cameras the page plays aloud carry it. And never a camera whose "Camera audio"
-        // switch is off, however the request lists it: the page does not ask for those, but an Apple TV's key opens this route too, and the switch is
-        // the owner's word on whether a camera is heard. Such a camera is sent without sound; that is no error.
+        // switch is off, however the request lists it: the page does not ask for those, but a paired device's key opens this route too, and the switch
+        // is the owner's word on whether a camera is heard. Such a camera is sent without sound; that is no error. A switch turned while the view is
+        // open restarts the camera, and the camera's loop reads it again before it subscribes again (`soundSwitch`): the sound goes, or comes.
         let asked = Set((ctx.request.queryValue("audio") ?? "").split(separator: ",").compactMap { UUID(uuidString: String($0).trimmingCharacters(in: .whitespaces)) })
         let audible = asked.intersection(configurations.filter(\.audioEnabled).map(\.id))
         guard takeLiveSlot() else { throw Self.tooManyLiveViews }
         var headers = HTTPHeaders()
         headers["Cache-Control"] = "no-store"
         let backend = backend
-        // An Apple TV's view (its key opened the route): the TV is looked for in the list while it watches.
+        // A paired device's view (its key opened the route): the device is looked for in the list while it watches.
         let (auth, viewer, recheck) = (auth, ctx.viewer?.id, Self.viewerRecheckWait(configuration.viewerRecheckInterval))
         let release = ReleaseOnce { [self] in releaseLiveSlot() }
         var answer = HTTPResponse.stream(contentType: "application/octet-stream", headers: headers) { response in
@@ -99,9 +100,10 @@ extension WebApp {
                     }
                 }
                 for (index, id) in ids.enumerated() {
+                    let soundSwitch = asked.contains(id) ? Self.soundSwitchReader(of: id, backend: backend) : nil
                     group.addTask {
-                        await Self.pumpLiveCamera(id: id, index: index, stream: stream, width: width, audio: audible.contains(id), backend: backend, send: send,
-                                              backlogged: backlogged)
+                        await Self.pumpLiveCamera(id: id, index: index, stream: stream, width: width, audio: audible.contains(id), soundSwitch: soundSwitch,
+                                                  backend: backend, send: send, backlogged: backlogged)
                     }
                 }
                 // A TV removed while it watches: its key is refused from then on, and its view ends within `viewerRecheckInterval`, as when
@@ -132,10 +134,20 @@ extension WebApp {
         case reconnecting
     }
 
+    /// Whether the camera's "Camera audio" switch is on now (false for a camera the bridge no longer has).
+    static func soundSwitch(of camera: UUID, backend: any BridgeBackend) async -> Bool {
+        await backend.overview().configurations.first { $0.id == camera }?.audioEnabled ?? false
+    }
+
+    /// `soundSwitch(of:backend:)` as a loop's `soundSwitch`.
+    static func soundSwitchReader(of camera: UUID, backend: any BridgeBackend) -> @Sendable () async -> Bool {
+        { await soundSwitch(of: camera, backend: backend) }
+    }
+
     /// One camera of a live request, until the request ends, as the messages of `GET live`.
-    static func pumpLiveCamera(id: UUID, index: Int, stream: LiveVideoStream, width: Int?, audio: Bool = false, backend: any BridgeBackend,
-                               send: @escaping @Sendable (Data) -> Void, backlogged: @escaping @Sendable () -> Bool) async {
-        await pumpLiveCamera(id: id, stream: stream, width: width, audio: audio, backend: backend, backlogged: backlogged) { output in
+    static func pumpLiveCamera(id: UUID, index: Int, stream: LiveVideoStream, width: Int?, audio: Bool = false, soundSwitch: (@Sendable () async -> Bool)? = nil,
+                               backend: any BridgeBackend, send: @escaping @Sendable (Data) -> Void, backlogged: @escaping @Sendable () -> Bool) async {
+        await pumpLiveCamera(id: id, stream: stream, width: width, audio: audio, soundSwitch: soundSwitch, backend: backend, backlogged: backlogged) { output in
             switch output {
             case .part(.initialization(let data, let mime, let width, let height), let stream):
                 send(liveFrame(.meta, camera: index, payload: liveJSON(["mime": mime, "width": width, "height": height, "stream": stream.rawValue])))
@@ -151,11 +163,21 @@ extension WebApp {
     }
 
     /// One camera's live loop, until its task is cancelled: subscribes, remuxes and hands on; says when there is no picture and tries again. While
-    /// `backlogged`, frames are dropped up to the next keyframe, which starts a new init segment.
-    static func pumpLiveCamera(id: UUID, stream: LiveVideoStream, width: Int?, audio: Bool, backend: any BridgeBackend,
-                               backlogged: @escaping @Sendable () -> Bool, sink: @escaping @Sendable (LiveCameraOutput) async -> Void) async {
+    /// `backlogged`, frames are dropped up to the next keyframe, which starts a new init segment. `audio` is whether the first subscription carries
+    /// the camera's sound; after a subscription ended (the camera restarted, as a changed "Camera audio" switch makes it do), `soundSwitch`, when
+    /// given, is asked before each try until one subscribes, and says whether it carries the sound.
+    static func pumpLiveCamera(id: UUID, stream: LiveVideoStream, width: Int?, audio: Bool, soundSwitch: (@Sendable () async -> Bool)? = nil,
+                               backend: any BridgeBackend, backlogged: @escaping @Sendable () -> Bool,
+                               sink: @escaping @Sendable (LiveCameraOutput) async -> Void) async {
         var announcedWaiting = false
+        var audio = audio
+        var restarted = false
         while !Task.isCancelled {
+            // Read before every try after a restart until one subscribes: the camera may still be starting, and the switch may move meanwhile.
+            if restarted, let soundSwitch {
+                audio = await soundSwitch()
+                if Task.isCancelled { return }   // the switch's reader may end the loop (an HLS packager that had sound stops)
+            }
             let subscription: LiveVideoSubscription
             do {
                 subscription = try await backend.liveVideo(cameraID: id, stream: stream, displayWidth: width, audio: audio)
@@ -167,6 +189,7 @@ extension WebApp {
                 try? await Task.sleep(for: .seconds(5))
                 continue
             }
+            restarted = false
             announcedWaiting = false
             var remuxer = LiveMP4Remuxer(audio: audio)
             var skipping = false
@@ -197,6 +220,7 @@ extension WebApp {
             if Task.isCancelled { return }
             // The subscription ended (the camera restarted or was reconfigured): say so, then subscribe again.
             await sink(.reconnecting)
+            restarted = true
             try? await Task.sleep(for: .seconds(1))
         }
     }

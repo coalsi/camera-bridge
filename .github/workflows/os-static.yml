@@ -1,0 +1,34 @@
+name: Camera Bridge OS static checks
+
+# The OS's static checks (linux/os/test-static.sh, in a Debian 13 container: shellcheck, nft -c, systemd-analyze verify, repart, mkosi summary
+# and the OS self-tests) and its other self-tests. No image, no VM. Called by ci.yml (every push to main and every pull request) and by
+# os-image.yml (before an image is built), so a firewall or unit mistake shows on the push that makes it, not first at release time.
+# Action versions are pinned by commit SHA, read from the GitHub API for the tag named in the comment.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck, nft -c, systemd-analyze verify, repart, mkosi summary and the self-tests (linux/os/test-static.sh)
+        run: linux/os/test-static.sh
+      - name: Self-test of the NVR test client (linux/os/test-nvr.py)
+        run: python3 -I linux/os/test-nvr.py selftest
+      - name: Self-test of the beta clean-up (linux/os/prune-betas.sh)
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck; }
+          shellcheck linux/os/prune-betas.sh linux/os/test-prune-betas.sh
+          bash linux/os/test-prune-betas.sh
+      - name: Self-test of the internet guard (linux/os/test-guard.sh, cb-guard against recorded dnsmasq lines)
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck; }
+          shellcheck -x linux/os/test-guard.sh linux/os/mkosi.extra/usr/sbin/cb-guard
+          bash linux/os/test-guard.sh

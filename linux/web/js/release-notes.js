@@ -15,6 +15,22 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.135',
+    date: '2026-11-11',
+    title: 'Safer recordings, updates and ports',
+    items: [
+      'Recordings are no longer deleted for their age when the box’s clock jumps forward. After a jump, and after a restart until the box knows its clock is right, nothing is deleted for its age for up to a day; the storage limit still applies.',
+      'A recording saved while the clock was wrong no longer stops older recordings from being deleted on time.',
+      'The sensors bridge and the webhook can now be reached on their usual ports, 21099 and 21090. Settings only accepts ports the box’s firewall lets through, and says so.',
+      'After the box goes back to the previous version by itself, the System page now says so instead of “You have the latest version”.',
+      'An update that hits a disk error while it is written now stops, and nothing is installed. A box that can’t finish starting restarts by itself after 30 seconds, so it can go back to the version that worked.',
+      'Turning off a camera’s sound now takes it off live views that are already open.',
+      'While the archive drive is slow or not answering, recordings on the box’s own drive still play at once instead of after a few seconds. Straightening several snapshots at once no longer holds up the rest of the box.',
+      'The log calls every paired iPhone, iPad or Apple TV a device.',
+      'The helpers that talk to some cameras are built with current, supported Go and Node.',
+    ],
+  },
+  {
     version: '0.1.134',
     date: '2026-11-08',
     title: 'Ready for the iPhone and iPad app',

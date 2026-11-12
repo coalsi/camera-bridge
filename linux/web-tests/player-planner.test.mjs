@@ -422,7 +422,7 @@ describe('what this browser can do', () => {
     assert.deepEqual([pad.maxTiles, pad.keySteps, pad.canPlay], [4, false, true]);
   });
 
-  it('is the decision of the spike (T06, linux/web-dev/spike/DECISION.json): key steps for Chrome only, the init again after every abort, iPhone off', () => {
+  it('is the decision of the browser spike (T06, 2026-10-11): key steps for Chrome only, the init again after every abort, iPhone off', () => {
     const column = (name) => Object.fromEntries(Object.entries(POLICY_TABLE).map(([browser, entry]) => [browser, entry[name]]));
     assert.deepEqual(column('keySteps'), { chromium: true, safari: false, firefox: false, ipad: false, iphone: false, other: false });
     assert.deepEqual(column('play'), { chromium: true, safari: true, firefox: true, ipad: true, iphone: false, other: true });

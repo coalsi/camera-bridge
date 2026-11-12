@@ -20,7 +20,7 @@ credited if you wish. Please give a reasonable period to fix a problem before yo
 ## Scope
 
 In scope: Camera Bridge OS and the engine in this repository, including the HomeKit Accessory Protocol server (pairing,
-sessions, HomeKit Data Stream), the web interface, its sign-in and the Apple TVs' keys, camera credential handling, the local webhook server,
+sessions, HomeKit Data Stream), the web interface, its sign-in and the Apple TVs' keys, camera credential handling, the local webhook server, the secure address and its certificate handling,
 the diagnostics export and redaction, the update mechanism and release signing, and the build scripts.
 
 Out of scope: vulnerabilities in cameras or their firmware, in Apple's Home app, hubs or operating systems, in third-party
@@ -50,7 +50,14 @@ box or network that is already compromised, or physical access to the box.
   itself is never accepted in an address. It is for the home network only for now.
 - Camera Bridge OS sends no telemetry. It talks to the cameras on your network and to the paired Home hub, to GitHub to
   check for updates, to a time server for the clock, to a camera maker's cloud only if you add a cloud camera, and to the AI
-  service you choose, only for cameras with AI descriptions on, and only still pictures.
+  service you choose, only for cameras with AI descriptions on, and only still pictures. While the secure address is on (it is
+  by default), it also talks to www.camera-bridge.app and Let's Encrypt, see the next item.
+- The secure address (`https://<random name>.box.camera-bridge.app`): the box registers once with www.camera-bridge.app, sending its
+  public key (the website sees the home's public internet address), tells the website its private home-network address whenever that changes
+  (the website publishes it as the public DNS record of the box's name), and asks Let's Encrypt for a certificate, with the website
+  answering the DNS challenge. Certificates are listed in public Certificate Transparency logs, so the random name can be found there.
+  Video, the web page and passwords never go through the website. Turning off **Use the secure address** on the System page stops
+  all of these calls.
 - AI descriptions are the one feature that sends pictures from your cameras to a cloud service. They are off until you choose
   a service in Settings, save your own key for it (a model at home may need none) and switch AI descriptions on for a camera. Then each event on that camera
   sends at most 5 small still pictures from around it (JPEGs up to 768 pixels wide), the camera's name, the kind of event and

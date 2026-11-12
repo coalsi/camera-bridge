@@ -22,8 +22,9 @@ import Testing
         let answer = await rig.get("nvr/storage")
         #expect(answer.status == 200)
         #expect(Set(answer.json.keys) == ["location", "label", "state", "message", "recordingCameras", "keepDays", "maxSizeGB", "limits", "usedBytes", "freeBytes",
-                                          "totalBytes", "floorBytes", "roomBytes", "effectiveMaxBytes", "oldest", "newest", "archive"])
+                                          "totalBytes", "floorBytes", "roomBytes", "effectiveMaxBytes", "oldest", "newest", "archive", "ageRulePause"])
         #expect(answer.json["archive"] is NSNull, "no archive drive where the system has none")
+        #expect(answer.json["ageRulePause"] is NSNull)
         #expect(answer.json["location"] is NSNull && answer.json["label"] is NSNull && answer.json["oldest"] is NSNull && answer.json["newest"] is NSNull)
         #expect(answer.json["state"] as? String == "noFolder")
         #expect(answer.json["message"] as? String == "Choose where to store recordings.")
@@ -48,6 +49,27 @@ import Testing
         #expect(answer.int("roomBytes") == 395_000_000_000, "used + (free - floor)")
         #expect(answer.int("effectiveMaxBytes") == 450_000_000_000, "min(500 GB, total - 2 x floor)")
         #expect(answer.int("oldest") == NVRRig.base && answer.int("newest") == NVRRig.base + 86_400_000)
+    }
+
+    /// The age rule's pause (rulings of 2026-11-11): why "keep N days" deletes nothing for now, and until when at the latest.
+    @Test func theAgeRulesPauseIsInTheAnswer() async throws {
+        let rig = try await NVRRig.make()
+        let until = Date(timeIntervalSince1970: Double(NVRRig.base) / 1000 + 86_400)
+        rig.backend.write {
+            var status = storage()
+            status.ageRulePause = ArchiveAgeRulePause(reason: .clockJumped, until: until)
+            $0.nvrStorage = status
+        }
+        var answer = await rig.get("nvr/storage")
+        #expect(answer.object("ageRulePause")["reason"] as? String == "clockJumped")
+        #expect((answer.object("ageRulePause")["until"] as? NSNumber)?.int64Value == NVRRig.base + 86_400_000)
+        #expect(answer.json["state"] as? String == "ok", "recording goes on: this is no pause of recording")
+        rig.backend.write { $0.nvrStorage?.ageRulePause = ArchiveAgeRulePause(reason: .clockNotSynchronized, until: until) }
+        answer = await rig.get("nvr/storage")
+        #expect(answer.object("ageRulePause")["reason"] as? String == "clockNotSynchronized")
+        rig.backend.write { $0.nvrStorage?.ageRulePause = nil }
+        answer = await rig.get("nvr/storage")
+        #expect(answer.json["ageRulePause"] is NSNull)
     }
 
     @Test func theArchiveDriveIsInTheAnswerWithWhatMovesNow() async throws {

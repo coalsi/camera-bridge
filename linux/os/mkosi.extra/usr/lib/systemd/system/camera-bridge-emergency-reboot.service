@@ -1,0 +1,22 @@
+# A boot that stops in emergency or rescue mode restarts by itself after 30 seconds: the new root or the data partition could not be mounted, or
+# a unit the boot needs failed, in the initrd or in the system. A new version that does that uses up its three tries this way, and systemd-boot
+# then starts the previous one (docs/linux/UPDATES.md); a box with a passing problem (a slow disk) gets another try. Nobody can use those modes
+# anyway: the root account is locked, so they would only leave the box with no network and no web page.
+#
+# Pulled in only by emergency.target and rescue.target (their drop-ins, 10-camera-bridge.conf), in the system and, through the package
+# camera-bridge-boot-fallback (build-boot-fallback.sh, InitrdPackages= in mkosi.conf), in the initrd. A normal boot never starts it. To stay in
+# one of those modes on purpose, mask it: systemctl mask --runtime camera-bridge-emergency-reboot.service, or on the kernel command line
+# systemd.mask=camera-bridge-emergency-reboot.service (rd.systemd.mask= for the initrd).
+[Unit]
+Description=Restart the box if it stops in emergency or rescue mode
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/docs/linux/UPDATES.md
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+# Stopped before the 30 seconds are up (a shutdown already under way), it restarts nothing.
+ExecStart=/usr/bin/sleep 30
+# --force: straight to the final shutdown (processes ended, file systems unmounted), without waiting on the stop jobs of a boot that failed.
+ExecStart=/usr/bin/systemctl --force reboot

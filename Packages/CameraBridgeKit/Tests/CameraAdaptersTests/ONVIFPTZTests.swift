@@ -46,8 +46,9 @@ import TestSupport
 
 #if os(macOS) || os(Linux)
 /// Review Oct 31 (adapters F1, F2): a step whose ContinuousMove (or Stop) failed left the camera turning, and a held arrow on a slow camera
-/// queued steps that kept turning it for seconds after the button was let go.
-@Suite(.timeLimit(.minutes(1))) struct ONVIFPanTiltStepTests {
+/// queued steps that kept turning it for seconds after the button was let go. On Linux through `PlainHTTP`, as the daemon asks a camera
+/// (`.plainHTTPRoute`: the camera drops a move or a stop).
+@Suite(.timeLimit(.minutes(1)), .plainHTTPRoute) struct ONVIFPanTiltStepTests {
     private func started() async throws -> (MockONVIFCamera, ONVIFPanTilt, String) {
         let camera = try await MockONVIFCamera.start()
         camera.ptz.set(true)

@@ -152,14 +152,6 @@ public final class DiagnosticsCenter: Sendable {
         }
     }
 
-    /// Forgets every session (tests).
-    public func resetSessions() {
-        state.withLock { state in
-            state.records.removeAll()
-            state.order.removeAll()
-        }
-    }
-
     func register(_ record: SessionRecord) {
         state.withLock { state in
             if state.records[record.id] == nil { state.order.append(record.id) }

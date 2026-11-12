@@ -617,11 +617,11 @@ fragment tables are read from their sidecars when a lookup needs them (the 256 m
 open handles and a 64 MB cache, and a file that is unlinked while it is read stays readable through its handle. A drive probe every 5 s sets the pause recorders obey (`ArchivePause`: no
 folder, folder missing, below the floor with 1 GiB of hysteresis, writes refused, drive not answering) and publishes `BridgeEngine.nvrStorage`; a probe that hangs blocks one thread and
 nothing else. Retention (at start, every 60 s, after each file close and after a settings change) deletes closed own-pattern files with a valid sidecar in every camera directory that
-holds a `camera.json`: first those that ended before `nvrKeepDays`, then the oldest starts across all cameras down to `min(nvrMaxSizeGB x 1e9, total - 2 x floor)`; free space never causes
+holds a `camera.json`: first those that ended before `nvrKeepDays` (only while the clock can be trusted: "the age rule waits for a clock it can trust" below), then the oldest starts across all cameras down to `min(nvrMaxSizeGB x 1e9, total - 2 x floor)`; free space never causes
 a deletion, and a file a recorder has open is never touched. `ArchiveFolderCheck.inspect(_:policy:)` checks a folder on a probe queue of its own. No public or package symbol is added
 beyond the list above.
 
-Preview data for the NVR (2026-10-10, docs/CONTRACT_CHANGES.md): `PreviewScenario.nvr` (`-previewEngine YES -demoScenario nvr`, `camerabridged --preview nvr`) shows the eight fleet
+Preview data for the NVR (2026-10-10, docs/CONTRACT_CHANGES.md): `PreviewScenario.nvr` (`BridgeEngine.preview(scenario: .nvr)`; the archived Mac app showed it with `-demoScenario nvr`; `camerabridged --preview nvr` shows its cameras and hides the archive behind `NoArchiveBackend`) has the eight fleet
 cameras with recordings: `BridgeEngine.preview(scenario:)` gives the engine an `archive` of made-up recordings (a daily rhythm of activity with bursts, a gap, a camera that stopped
 recording, real playable video from one synthetic clip), `nvrStorage` numbers and an NVR folder in the settings. Internal: `PreviewArchive`, `PreviewClip`.
 
@@ -1840,4 +1840,24 @@ kept; the three are in `SkyEntry.init` with defaults. Internal:
 sentence for the person). `ArchiveStore` keeps them in `<recordings>/.kept.json`; retention never deletes or moves a file a kept stretch overlaps and
 counts its bytes, the archive's planner counts kept bytes there (`RetentionPlanner.ArchiveInput.keptBytes`), and `ArchiveEventLog.prune` keeps the
 event days they touch (`keep:`). At most 24 hours a stretch, 200 stretches, and a quarter of the box's limit in all.
+
+## Additions beyond the contract: the age rule waits for a clock it can trust (2026-11-11, docs/CONTRACT_CHANGES.md)
+
+The age rule ("keep recordings for N days") deletes every file that ended before now minus the keep time, on both drives, with the camera events
+and the Sky Watcher's nights, and nothing undoes it, so a clock that jumps ahead deleted everything (review of 2026-11-09, C1). `AgeRuleClock`
+(internal, `NVR/AgeRuleClock.swift`) decides each pass whether it may run; the store looks at the clocks at a start and at the start of each pass
+of `runRetention` and `pruneEvents` (`ArchiveStore.checkAgeRule()`):
+- At each look it keeps the wall clock minus a clock nobody sets (`ArchiveStoreTuning.monotonic`, `ContinuousClock`). When the wall clock has moved
+  more than 10 minutes further than that clock since the last look, the age rule pauses for 24 hours of the monotonic clock (another jump in that
+  time starts the day again). A jump back pauses nothing: an earlier "now" ages out less.
+- It waits until the system says its clock is synchronized (`ArchivePlatformPolicy.isClockSynchronized`; the daemon's is the kernel's word on
+  Linux, `KernelClock`, and none on a Mac, which counts as synchronized), or until the system has been running for a day
+  (`ArchiveStoreTuning.uptime`), whichever comes first; after that it no longer asks.
+- A file dated in the future is simply not aged until its time comes. The old guard, which skipped the age rule for every file while the newest
+  started more than 5 minutes ahead (`ArchiveConstants.futureFileGuard`, removed), let one such file turn "keep N days" off for as long as its date
+  was ahead (review I1).
+The size rule, and the events that go with what it deletes, run throughout. Each pause and each wait is logged once when it starts and once when it
+ends, and `ArchiveStorageStatus.ageRulePause` (an `ArchiveAgeRulePause`: `reason`, `Reason.clockJumped` or `.clockNotSynchronized`, and `until`,
+when it ends at the latest by the box's clock) says so while it lasts (`GET nvr/storage` has it as `ageRulePause`). If a jump was a correction,
+footage is kept up to a day longer than the keep time. `RetentionPlanner.Input.ageRuleRuns` replaces `newestStartMs`.
 

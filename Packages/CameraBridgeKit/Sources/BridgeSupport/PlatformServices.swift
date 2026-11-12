@@ -2,7 +2,7 @@ import Foundation
 import Synchronization
 
 // Platform service protocols. Portable modules reach the OS only through these (contracts: portability rule);
-// PlatformApple implements them on macOS, a future Linux edition with SwiftNIO/Avahi/etc.
+// PlatformApple implements them on macOS, PlatformLinux on Camera Bridge OS (POSIX sockets, epoll, Avahi, netlink).
 
 /// One TCP connection (accepted by a `TCPListener` or opened by `NetworkTransport.connect`).
 public protocol TCPConnection: AnyObject, Sendable {

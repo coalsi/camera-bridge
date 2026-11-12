@@ -160,16 +160,16 @@ struct LoginLimiter: Sendable {
     }
 }
 
-/// The administrator: one password, the bridge's name, the signed-in browsers and the Apple TVs, and the box's identity. Kept in
-/// `<data>/web/auth.json` (0600 in a 0700 directory): the password as a PBKDF2 hash, a session as the SHA-256 of its token (the token
-/// itself is only in the browser's cookie), an Apple TV as the SHA-256 of its key (the key is only on the TV), so a copy of the file signs
+/// The administrator: one password, the bridge's name, the signed-in browsers and the paired devices (Apple TVs, iPhones), and the box's
+/// identity. Kept in `<data>/web/auth.json` (0600 in a 0700 directory): the password as a PBKDF2 hash, a session as the SHA-256 of its token
+/// (the token itself is only in the browser's cookie), a device as the SHA-256 of its key (the key is only on the device), so a copy of the file signs
 /// nobody in.
 ///
 /// - `configure` runs once (first-run setup); a second attempt fails. Nothing else works until it has.
 /// - A session lasts 7 days after its last use and 30 days at most. Changing the password signs every other browser out.
-/// - An Apple TV is added with a code the owner types while signed in (`ViewerPairing` holds the requests, in memory only) and is handed
+/// - A device is added with a code the owner types while signed in (`ViewerPairing` holds the requests, in memory only) and is handed
 ///   its key once. At most 20 are kept, a key unused for a year stops working, and changing the password keeps them all.
-/// - `bridgeID()` is the box's identity, made the first time anyone asks and kept in the same file as the TVs. Both are optional in the
+/// - `bridgeID()` is the box's identity, made the first time anyone asks and kept in the same file as the devices. Both are optional in the
 ///   file: one written before them still reads.
 /// - Passwords are 8 to 256 bytes long; hashing happens off the actor, one at a time, so guesses cannot pile up on the CPU.
 /// - A file that is there but cannot be read or decoded is not a new bridge (offering setup would let anyone on the network claim it):
@@ -177,8 +177,8 @@ struct LoginLimiter: Sendable {
 ///   be right, until a factory reset. The damaged file is never written over. The store does not make the `.bak` itself (`persist` does
 ///   not ask `PrivateFiles` to keep the version it replaces): it is a copy that somebody put there.
 /// - A sign-in works while the file cannot be written (a full or read-only data partition): the session is kept in memory and saved
-///   once the disk takes it again, as are the box's identity and the removal of an Apple TV. A first-run setup that cannot be saved is
-///   undone, and so is the adding of an Apple TV, so neither holds only until the next restart.
+///   once the disk takes it again, as are the box's identity and the removal of a device. A first-run setup that cannot be saved is
+///   undone, and so is the adding of a device, so neither holds only until the next restart.
 public actor AuthStore {
     public enum Failure: Error, Equatable, Sendable {
         case alreadyConfigured
@@ -201,11 +201,11 @@ public actor AuthStore {
         var address: String?
     }
 
-    /// An Apple TV as the file keeps it.
+    /// A paired device as the file keeps it.
     struct StoredViewer: Codable, Equatable {
         /// 32 random hex characters of its own, not derived from the key (`ViewerInfo.id`).
         var id: String
-        /// The SHA-256 of the key, in hex: the key itself is only on the TV.
+        /// The SHA-256 of the key, in hex: the key itself is only on the device.
         var tokenHash: String
         var name: String
         var device: String?
@@ -218,7 +218,7 @@ public actor AuthStore {
             ViewerInfo(id: id, name: name, device: device, created: created, lastSeen: lastSeen, address: address)
         }
 
-        /// Its key has gone unused for a year (counted from when the TV was added until it is first used), so it stops working.
+        /// Its key has gone unused for a year (counted from when the device was added until it is first used), so it stops working.
         func isIdle(at date: Date) -> Bool {
             date.timeIntervalSince(lastSeen ?? created) > AuthStore.viewerIdleLifetime
         }
@@ -234,8 +234,8 @@ public actor AuthStore {
         var monitorToken: String?
         /// The box's identity (`bridgeID()`), nil until it is first asked for.
         var bridgeID: String?
-        /// The Apple TVs. Optional, like `bridgeID`: a synthesized `Decodable` throws on a key that is missing even when the property has a
-        /// default, and a file that cannot be decoded is taken for a damaged one, so a file written before Apple TVs would lock the owner out.
+        /// The paired devices. Optional, like `bridgeID`: a synthesized `Decodable` throws on a key that is missing even when the property has a
+        /// default, and a file that cannot be decoded is taken for a damaged one, so a file written before paired devices would lock the owner out.
         var viewers: [StoredViewer]?
     }
 
@@ -284,9 +284,9 @@ public actor AuthStore {
     static let persistInterval: TimeInterval = 3_600
     /// A burst of wrong passwords is forgotten after this long without one.
     static let quietDay: TimeInterval = 86_400
-    /// The Apple TVs the box keeps; one has to be removed before another can be added.
+    /// The paired devices the box keeps; one has to be removed before another can be added.
     static let maximumViewers = 20
-    /// A TV's key stops working after this long unused.
+    /// A device's key stops working after this long unused.
     static let viewerIdleLifetime: TimeInterval = 365 * 86_400
     /// What a device (an Apple TV, an iPhone) is called when it did not say.
     static let defaultViewerName = "Device"
@@ -306,13 +306,13 @@ public actor AuthStore {
     private var configuring = false
     private var limiter: LoginLimiter
     private var lastPersisted = Date.distantPast
-    /// A change that could not be written yet (a new session, the box's identity, an Apple TV removed): saved on the next use of a session or
-    /// of a TV's key (`saveOrRetryLater`).
+    /// A change that could not be written yet (a new session, the box's identity, a device removed): saved on the next use of a session or
+    /// of a device's key (`saveOrRetryLater`).
     private var unsaved = false
     /// Wrong passwords of the last day, oldest first (at most `maximumFailuresKept`), and the burst they are in.
     private var failures: [(date: Date, address: String)] = []
     private var alert: SignInAlert?
-    /// The Apple TVs that are asking to be added: in memory only.
+    /// The devices that are asking to be added: in memory only.
     private var pairing = ViewerPairing()
     private static let maximumFailuresKept = 5_000
     private let damaged: Bool
@@ -616,14 +616,14 @@ public actor AuthStore {
         return right ? .right : .wrong
     }
 
-    // MARK: Apple TVs
+    // MARK: Paired devices (Apple TVs, iPhones)
 
-    /// An Apple TV that was added with a pairing code, as the Apple TV card lists it. Never its key: the box keeps only the key's SHA-256.
+    /// A device that was added with a pairing code, as the page's card lists it. Never its key: the box keeps only the key's SHA-256.
     public struct ViewerInfo: Sendable, Equatable {
-        /// 32 random hex characters of its own, not derived from the key: it names the TV in the list and signs nobody in.
+        /// 32 random hex characters of its own, not derived from the key: it names the device in the list and signs nobody in.
         public var id: String
         public var name: String
-        /// The model as the TV sent it ("Apple TV 4K (3rd generation)"), shown as it came.
+        /// The model as the device sent it ("Apple TV 4K (3rd generation)"), shown as it came.
         public var device: String?
         public var created: Date
         /// When its key was last used, nil while it never was.
@@ -632,7 +632,7 @@ public actor AuthStore {
         public var address: String?
     }
 
-    /// What a TV is given when it asks to be added: `request` and `secret` to ask again with, and the `code` to show on its screen.
+    /// What a device is given when it asks to be added: `request` and `secret` to ask again with, and the `code` to show on its screen.
     public struct PairingStart: Sendable, Equatable {
         public var request: String
         public var secret: String
@@ -640,16 +640,16 @@ public actor AuthStore {
         public var code: String
         /// Seconds the request lasts.
         public var expiresIn: Int
-        /// Seconds the TV waits between questions.
+        /// Seconds the device waits between questions.
         public var interval: Int
     }
 
-    /// The answer to a TV asking whether its code was entered.
+    /// The answer to a device asking whether its code was entered.
     public enum PairingStatus: Sendable, Equatable {
         case waiting
-        /// The TV's key, plain, this once: the request is over with this answer.
+        /// The device's key, plain, this once: the request is over with this answer.
         case approved(token: String, viewer: ViewerInfo)
-        /// Ended, removed, never there, or asked with a wrong secret: the TV starts again with a new code.
+        /// Ended, removed, never there, or asked with a wrong secret: the device starts again with a new code.
         case gone
     }
 
@@ -659,12 +659,12 @@ public actor AuthStore {
         case busy(retryAfter: Int)
         /// The code opens nothing: unknown, ended, approved already, or not a code.
         case noSuchCode
-        /// The box takes no more Apple TVs: one has to be removed first.
+        /// The box takes no more devices: one has to be removed first.
         case tooManyViewers
     }
 
-    /// The box's identity: 32 lowercase hex characters, made the first time anyone asks and kept in `auth.json` from then on. An Apple
-    /// TV knows the box by it, so it outlives restarts, updates and new passwords, and goes only with a factory reset.
+    /// The box's identity: 32 lowercase hex characters, made the first time anyone asks and kept in `auth.json` from then on. A paired
+    /// device knows the box by it, so it outlives restarts, updates and new passwords, and goes only with a factory reset.
     public func bridgeID() -> String {
         if let id = stored.bridgeID { return id }
         let id = Secrets.hex(Secrets.randomBytes(16))
@@ -673,7 +673,7 @@ public actor AuthStore {
         return id
     }
 
-    /// A TV asks to be added from `address`. Its `name` and `device` are cleaned as the bridge's name is ("Apple TV" for no name). Throws
+    /// A device asks to be added from `address`. Its `name` and `device` are cleaned as the bridge's name is ("Device" for no name). Throws
     /// `busy` when that address, or everyone together, has too many requests open.
     public func beginPairing(name: String?, device: String?, address: String) throws -> PairingStart {
         let date = now()
@@ -684,11 +684,11 @@ public actor AuthStore {
                             expiresIn: Int(pairing.policy.lifetime), interval: pairing.policy.interval)
     }
 
-    /// The owner types the code a TV shows. The TV is added at once, and its next question is answered with its new key, which the box
-    /// keeps only as a hash. Throws `noSuchCode` (the code stays as it was), `tooManyViewers`, `storageFailed` when the TV cannot be
+    /// The owner types the code a device shows. The device is added at once, and its next question is answered with its new key, which the box
+    /// keeps only as a hash. Throws `noSuchCode` (the code stays as it was), `tooManyViewers`, `storageFailed` when the device cannot be
     /// saved (it is not added then, and the code still waits), and `unreadable` while `auth.json` is damaged (`isDamaged`: nothing can be saved).
     public func approvePairing(code: String) throws -> ViewerInfo {
-        // One reading of the clock for the whole call: a request found open here is still open when it is approved below, so a saved TV
+        // One reading of the clock for the whole call: a request found open here is still open when it is approved below, so a saved device
         // always has its key waiting for it.
         let date = now()
         removeLapsedViewers(date)
@@ -705,12 +705,12 @@ public actor AuthStore {
             stored = before   // not added in memory only: it would be gone at the next restart, with the key it was just given
             throw error
         }
-        log.notice("an Apple TV was added (\(viewer.name))")
+        log.notice("a device was added (\(viewer.name))")
         pairing.approve(requestID: request.id, token: token, viewer: viewer.info, now: date)
         return viewer.info
     }
 
-    /// What a TV that asks with its `request` and `secret` is told. Values that cannot be ours are `.gone` without a look.
+    /// What a device that asks with its `request` and `secret` is told. Values that cannot be ours are `.gone` without a look.
     public func pairingStatus(request: String, secret: String) -> PairingStatus {
         guard Self.isLowercaseHex(request, count: 32), Self.isLowercaseHex(secret, count: 64) else { return .gone }
         let date = now()
@@ -718,13 +718,13 @@ public actor AuthStore {
         return pairing.status(request: request, secret: secret, now: date)
     }
 
-    /// The Apple TVs, the one used last first (one not used yet counts from when it was added).
+    /// The paired devices, the one used last first (one not used yet counts from when it was added).
     public func viewers() -> [ViewerInfo] {
         removeLapsedViewers(now())
         return viewerList.sorted { ($0.lastSeen ?? $0.created) > ($1.lastSeen ?? $1.created) }.map(\.info)
     }
 
-    /// The Apple TV a key belongs to; nil when there is none, or when the TV went unused for a year (it is removed then). A key is 64
+    /// The device a key belongs to; nil when there is none, or when the device went unused for a year (it is removed then). A key is 64
     /// lowercase hex characters: anything else is refused at once. The use is kept, when and from `address`, and written to the file at
     /// most hourly, as a session's is.
     public func viewer(token: String, address: String?) -> ViewerInfo? {
@@ -742,41 +742,41 @@ public actor AuthStore {
         return viewerList[index].info
     }
 
-    /// Whether the TV that `ViewerInfo.id` names is still in the list (a live view asks every few seconds).
+    /// Whether the device that `ViewerInfo.id` names is still in the list (a live view asks every few seconds).
     public func isViewerListed(_ id: String) -> Bool {
         viewerList.contains { $0.id == id }
     }
 
-    /// Removes the TV that `ViewerInfo.id` names, with the key that was waiting for it if one was. False when there is no such TV.
+    /// Removes the device that `ViewerInfo.id` names, with the key that was waiting for it if one was. False when there is no such device.
     public func removeViewer(id: String) -> Bool {
         removeLapsedViewers(now())
         guard let viewer = viewerList.first(where: { $0.id == id }) else { return false }
         viewerList.removeAll { $0.id == id }
         pairing.forget(viewerID: id)
-        log.notice("an Apple TV was removed (\(viewer.name))")
+        log.notice("a device was removed (\(viewer.name))")
         saveOrRetryLater()
         return true
     }
 
-    /// Takes out the TVs nobody can use any more: those an approval added whose key nobody collected (`ViewerPairing.expire` names them),
+    /// Takes out the devices nobody can use any more: those an approval added whose key nobody collected (`ViewerPairing.expire` names them),
     /// and those unused for a year. Every pairing call starts with this.
     private func removeLapsedViewers(_ date: Date) {
         var removed = false
         for id in pairing.expire(now: date) {
             guard let viewer = viewerList.first(where: { $0.id == id }) else { continue }
             viewerList.removeAll { $0.id == id }
-            log.notice("an Apple TV whose key was never collected was removed (\(viewer.name))")
+            log.notice("a device whose key was never collected was removed (\(viewer.name))")
             removed = true
         }
         for viewer in viewerList where viewer.isIdle(at: date) {
             viewerList.removeAll { $0.id == viewer.id }
-            log.notice("an Apple TV unused for a year was removed (\(viewer.name))")
+            log.notice("a device unused for a year was removed (\(viewer.name))")
             removed = true
         }
         if removed { saveOrRetryLater() }
     }
 
-    /// The TVs as the file holds them: `Stored.viewers` is nil in a file from before Apple TVs.
+    /// The devices as the file holds them: `Stored.viewers` is nil in a file from before paired devices.
     private var viewerList: [StoredViewer] {
         get { stored.viewers ?? [] }
         set { stored.viewers = newValue }

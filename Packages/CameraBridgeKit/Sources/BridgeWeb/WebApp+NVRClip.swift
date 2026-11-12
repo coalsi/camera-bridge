@@ -36,7 +36,7 @@ extension WebApp {
         var durationMs: Int64
     }
 
-    /// The sentences of the web page for what can go wrong with a clip (the Mac app says the same ones).
+    /// The sentences of the web page for what can go wrong with a clip (the archived Mac app said the same ones).
     static func clipAPIError(_ error: any Error) -> APIError {
         switch error {
         case let error as APIError: return error

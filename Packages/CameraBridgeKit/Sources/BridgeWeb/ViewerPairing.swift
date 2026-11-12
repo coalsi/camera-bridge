@@ -1,8 +1,8 @@
 import Foundation
 
-/// The Apple TVs that are asking to be added, held in memory only. Modeled on how TV apps sign in (RFC 8628's device flow), local only: the TV
-/// asks and shows the code it is given, the owner types that code into the page while signed in, and the TV, asking again every couple of
-/// seconds, is handed its key once.
+/// The devices (Apple TVs, iPhones) that are asking to be added, held in memory only. Modeled on how TV apps sign in (RFC 8628's device flow),
+/// local only: the device asks and shows the code it is given, the owner types that code into the page while signed in, and the device, asking
+/// again every couple of seconds, is handed its key once.
 ///
 /// - A code is 8 letters from an alphabet without vowels, so it spells no word, shown as `BCDF-GHJK`. Typed codes match ignoring case,
 ///   spaces and the dash, and no two open requests share one.

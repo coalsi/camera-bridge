@@ -602,4 +602,24 @@ import Testing
         #expect(throws: MediaCodecError.self) { _ = try codecs.resizeJPEG(Data(), maxWidth: 1, maxHeight: 1) }
     }
 }
+
+/// The kernel's word on the clock (`KernelClock`), which the NVR's age rule waits for.
+@Suite struct KernelClockTests {
+    /// <sys/timex.h>: TIME_OK 0, TIME_INS 1, TIME_ERROR 5; STA_PLL 0x0001, STA_UNSYNC 0x0040 (the kernel's ABI).
+    @Test func synchronizedIsNeitherTimeErrorNorUnsync() {
+        #expect(KernelClock.isSynchronized(state: 0, status: 0))
+        #expect(KernelClock.isSynchronized(state: 1, status: 0x0001))
+        #expect(!KernelClock.isSynchronized(state: 5, status: 0))
+        #expect(!KernelClock.isSynchronized(state: 0, status: 0x0040))
+        #expect(!KernelClock.isSynchronized(state: 0, status: 0x0041))
+    }
+
+    /// Reading changes nothing and needs no privilege; a container or a sandbox may still refuse it, which is "unknown", never a crash.
+    @Test func aRealReadingAnswers() {
+        switch KernelClock.synchronization() {
+        case .synchronized, .unsynchronized: break
+        case .unknown(let code): #expect(code != 0)
+        }
+    }
+}
 #endif

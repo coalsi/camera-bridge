@@ -49,6 +49,29 @@ import Testing
         #expect(await eventually(timeout: archiveStorePatience) { (try? await queue.run { 3 }) == 3 }, "the queue works again once the stuck read returns")
     }
 
+    /// A drive that stopped answering, with more reads hung on it than the machine has cores: a read of another queue and a task of their priority
+    /// still start at once, and every hung read runs (each holds a thread of its own). On Linux the threads of a concurrent Dispatch queue are about
+    /// as many as the cores, shared with every other such queue and with Swift concurrency's tasks of the same priority, and libdispatch adds one a
+    /// second past that: run there, each hung read beyond the cores waited a second for a thread and these two waited behind them, as the box's own
+    /// reads waited behind the archive's.
+    @Test func hungReadsHoldUpNoOtherReadAndNoTask() async throws {
+        let hung = ProcessInfo.processInfo.processorCount + 6
+        let stuck = ArchiveReadQueue(width: hung, deadline: .seconds(30))
+        let running = Box(0)
+        let gate = DispatchSemaphore(value: 0)
+        defer { for _ in 0..<hung { gate.signal() } }
+        for _ in 0..<hung { Task.detached { _ = try? await stuck.run { running.update { $0 += 1 }; gate.wait() } } }
+        #expect(await eventually(timeout: archiveStorePatience) { stuck.load.running == hung }, "every hung read has its slot")
+        // Asked at the same moment: how long each waited to start.
+        let asked = ContinuousClock.now
+        let other = ArchiveReadQueue(width: 1, deadline: .seconds(30))
+        async let read = other.run { asked.duration(to: .now) }
+        async let task = Task(priority: .userInitiated) { asked.duration(to: .now) }.value
+        #expect(try await read < .seconds(3), "a read of another queue")
+        #expect(await task < .seconds(3), "a task of the reads' priority")
+        #expect(await eventually(timeout: archiveStorePatience) { running.value == hung }, "every hung read is running: \(running.value) of \(hung)")
+    }
+
     @Test func errorsOfTheWorkPassThrough() async {
         struct Boom: Error, Equatable {}
         let queue = ArchiveReadQueue(width: 2, deadline: .seconds(5))

@@ -62,8 +62,6 @@ public enum ArchiveConstants {
     public static let storageStatusRefresh: TimeInterval = 5
     /// The janitor runs at start, at this interval, after each file close and after a settings change.
     public static let retentionInterval: TimeInterval = 60
-    /// Age deletion is skipped while the newest file starts more than this far in the future (a clock that jumped).
-    public static let futureFileGuard: TimeInterval = 300
     /// An unowned file is repaired only when it has not been written for this long.
     public static let repairQuietPeriod: TimeInterval = 60
 

@@ -179,7 +179,7 @@ Layout:
 | `Packages/CameraBridgeKit` | The engine: HomeKit Accessory Protocol server, HomeKit Secure Video, RTSP/RTP, camera drivers, media pipeline. Portable Swift; Apple frameworks only in `PlatformApple`. |
 | `linux` | Camera Bridge OS: the image (`linux/os`), the web interface (`linux/web`) and their tests and tools. |
 | `Archive/mac-app` | The archived macOS app (SwiftUI), its Xcode project and release tools. CI does not build it. |
-| `Tools` | Test and capture scripts, brand asset scripts, the go2rtc fetch script, `cbctl`. |
+| `Tools` | Test and capture scripts, the go2rtc fetch script, `cbctl`. |
 | `Interop` | Node-based test oracles (dev only, never shipped). |
 | `docs` | Integration guides, interop notes, third-party notices and the engine contract changes. |
 

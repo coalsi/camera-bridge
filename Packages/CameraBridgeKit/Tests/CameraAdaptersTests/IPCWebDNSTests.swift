@@ -9,8 +9,9 @@ import Testing
 /// The internet guard's Watch on an ONVIF camera that speaks the IP camera web API (Jennov "Backyard PTZ", JM800S5): its DNS servers are
 /// read, set, read back and restored through the camera's own network settings (`getNetworkConfig`'s `LANConfig`, written back whole with
 /// `setNetworkLANConfig` and only `DNS1` and `DNS2` changed), because its ONVIF reports DNS changes it does not keep. ONVIF stays the way for
-/// a camera that does not speak that API. Against fakes only, with documentation addresses.
-@Suite(.timeLimit(.minutes(1))) struct IPCWebDNSTests {
+/// a camera that does not speak that API. Against fakes only, with documentation addresses; on Linux through `PlainHTTP`, as the daemon asks
+/// a camera (`.plainHTTPRoute`: the fake drops requests while it restarts its network).
+@Suite(.timeLimit(.minutes(1)), .plainHTTPRoute) struct IPCWebDNSTests {
     private let bridge = "192.0.2.10"
     /// The read-back after a restart, short for the fakes (a camera gets 30 s).
     private let quick = DNSReadBackTiming(limit: .seconds(10), interval: .milliseconds(20))
@@ -389,6 +390,22 @@ import Testing
         #expect(camera.web.state.value.lan == FakeIPCWebCamera.lan(dhcp: 1, dns1: local, dns2: local, gateway: "127.0.0.254"),
                 "Mode DHCP again; the slots as they were left (the camera takes DHCP's)")
         #expect(camera.onvif.setDNSBodies.value.isEmpty && camera.onvif.setNetworkInterfacesBodies.value.isEmpty, "its ONVIF is not written to")
+    }
+
+    // MARK: The way the camera is asked
+
+    /// On Linux the camera is asked the way the daemon asks it: through `PlainHTTP`, one connection per request (`.plainHTTPRoute`), so a
+    /// request it drops while it restarts its network is no answer at once. Through URLSession, Ubuntu 24.04's libcurl sent such a request
+    /// again without its body and waited out the client's 10 s (`PlainHTTPRouteTrait`).
+    @Test func theCameraIsAskedTheWayTheDaemonAsksIt() async throws {
+        let camera = try await Family.start()
+        defer { camera.stop() }
+        _ = try await camera.service().readDNS()
+        let requests = camera.web.server.requests
+        #expect(!requests.isEmpty)
+        if PlainHTTPRouteTrait.isOn {
+            #expect(requests.allSatisfy { $0.head.headers["Connection"]?.lowercased() == "close" }, "one connection per request, as PlainHTTP sends")
+        }
     }
 
     // MARK: The write

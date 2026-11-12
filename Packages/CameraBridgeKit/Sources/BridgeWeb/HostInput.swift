@@ -2,7 +2,7 @@ import Foundation
 
 /// A camera address as typed or pasted into the Add Camera page: `192.0.2.20`, `camera.local:8000`,
 /// `http://admin:pw@192.0.2.20/doc/page.html`, `[fe80::1%en0]:80` or a bare `fe80::1`. Path, query and fragment are
-/// dropped; user info is split off so the page can move it into the credential fields. (The Mac app's `HostInput`.)
+/// dropped; user info is split off so the page can move it into the credential fields. (The archived Mac app's `HostInput`, carried over.)
 struct HostInput: Equatable {
     static let schemes: Set<String> = ["http", "https", "rtsp", "rtsps"]
 

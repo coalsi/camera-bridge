@@ -16,7 +16,7 @@
 #      systemd-boot counts the three tries; systemd-bless-boot keeps the new version only if the boot turns out healthy.
 #   4. A version whose tries ran out is remembered (/srv/system/update-failed) and never offered again; update.json says
 #      "rolled-back" with its version. Only a newer one is offered.
-#   5. Installing takes the lock of cb-system's heavy jobs: the daily run and the web page's "Update now" never write at once.
+#   5. Installing takes the lock of cb-system's heavy jobs: the daily run and the web page's "Install update" never write at once.
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export CB_TAG=cb-update
@@ -32,6 +32,7 @@ FORCE=0
 FAILED=$CB_SYSTEM/update-failed   # versions that were installed and did not start (one a line, the newest last)
 LOCK=$CB_RUN/jobs/.lock           # the lock of cb-system's heavy jobs (HEAVY_JOBS)
 VERSION_RE='^[0-9]+(\.[0-9]+)*$'
+ROOT_SLOT_BYTES=2684354560        # 2560 MiB, a root slot (build-image.sh --root-size): the size of an update's unpacked system image
 
 require_root() { [ "$(id -u)" -eq 0 ] || cb_die "run as root"; }
 
@@ -167,10 +168,26 @@ do_check() {
     AVAILABLE=$available
 }
 
+# stage_room VERSION: what staging VERSION needs on the data partition and what it has there, in MB ("NEED FREE"). Staging copies the two
+# downloaded files and unpacks the system image from one of them. Unpacked it is a whole root slot (build-image.sh cuts root.raw out of the
+# image at the slot's size), so its size is known without reading the download, which root has not checked yet.
+stage_room() {
+    local a dir uki_bytes root_bytes free_kb
+    a=$(arch) || return 1
+    dir=$CACHE/$1
+    uki_bytes=$(stat -c %s -- "$dir/cb-os_${1}_${a}.efi") || return 1
+    root_bytes=$(stat -c %s -- "$dir/cb-os_${1}_${a}_root.raw.zst") || return 1
+    free_kb=$(df --output=avail -k -- "$STAGE" | tail -n 1 | tr -d ' ') || return 1
+    [[ $free_kb =~ ^[0-9]+$ ]] || return 1
+    printf '%s %s\n' $(( (uki_bytes + root_bytes + ROOT_SLOT_BYTES + 999999) / 1000000 )) $(( free_kb * 1024 / 1000000 ))
+}
+
 verify_and_stage() {
     # verify_and_stage VERSION: re-verify the signature and hashes as root and copy the files into the root-only stage.
+    # do_apply runs it in a subshell whose status it tests, where set -e stops nothing: every step is checked here, and a failed one ends it with
+    # cb_die, so a stage that could not be written in full (the data partition full, a disk error) never reaches systemd-sysupdate.
     local version=$1 a dir name want got uki root
-    a=$(arch)
+    a=$(arch) || exit 1
     dir=$CACHE/$version
     uki="cb-os_${version}_${a}.efi"
     root="cb-os_${version}_${a}_root.raw.zst"
@@ -178,28 +195,35 @@ verify_and_stage() {
     key_is_placeholder && cb_die "this image has no update signing key (a development build); updates are disabled"
     if [ ! -d "$dir" ] || [ -L "$dir" ]; then cb_die "nothing downloaded for $version"; fi
 
-    find "$STAGE" -mindepth 1 -delete
+    find "$STAGE" -mindepth 1 -delete || cb_die "could not empty the staging folder; refusing to install"
     # Copy the list and its signature first, then verify the copies (the cache is owned by an unprivileged user).
-    cat -- "$dir/SHA256SUMS" >"$STAGE/SHA256SUMS"
-    cat -- "$dir/SHA256SUMS.sig" >"$STAGE/SHA256SUMS.sig"
+    cat -- "$dir/SHA256SUMS" >"$STAGE/SHA256SUMS" || cb_die "could not copy SHA256SUMS into the staging folder; refusing to install"
+    cat -- "$dir/SHA256SUMS.sig" >"$STAGE/SHA256SUMS.sig" || cb_die "could not copy SHA256SUMS.sig into the staging folder; refusing to install"
     minisign -V -q -p "$PUBKEY" -m "$STAGE/SHA256SUMS" -x "$STAGE/SHA256SUMS.sig" || cb_die "signature check FAILED; refusing to install"
 
     for name in "$uki" "$root"; do
         want=$(awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }' "$STAGE/SHA256SUMS")
         [ -n "$want" ] || cb_die "$name is not in the signed list"
-        # Hash exactly the bytes that are written to the stage.
-        got=$(tee "$STAGE/$name" <"$dir/$name" | sha256sum | cut -d' ' -f1)
-        [ "$got" = "$want" ] || cb_die "SHA-256 mismatch for $name; refusing to install"
+        # Hash exactly the bytes that are written to the stage. When a write to the stage fails, tee still passes every byte on to sha256sum (the
+        # hash alone would match a short file) and says so only in its status, which pipefail makes the pipe's.
+        got=$(tee -- "$STAGE/$name" <"$dir/$name" | sha256sum) \
+            || cb_die "could not copy $name into the staging folder (is the data partition full?); refusing to install"
+        [ "${got%% *}" = "$want" ] || cb_die "SHA-256 mismatch for $name; refusing to install"
     done
 
     # Names the sysupdate transfer definitions expect (no architecture in them).
-    mv "$STAGE/$uki" "$STAGE/cb-os_${version}.efi"
-    zstd -d -q --sparse -f "$STAGE/$root" -o "$STAGE/cb-os_${version}_root.raw"
-    rm -f "$STAGE/$root"
+    mv -- "$STAGE/$uki" "$STAGE/cb-os_${version}.efi" || cb_die "could not rename $uki in the staging folder; refusing to install"
+    # zstd checks the frame's checksum while it unpacks, and fails on a damaged file or a failed write.
+    zstd -d -q --sparse -f "$STAGE/$root" -o "$STAGE/cb-os_${version}_root.raw" \
+        || cb_die "could not unpack $root into the staging folder (is the data partition full?); refusing to install"
+    rm -f -- "$STAGE/$root" || cb_die "could not remove $root from the staging folder; refusing to install"
+    # On the disk before systemd-sysupdate reads them: a write error that shows only when the data is written back fails the stage here.
+    sync -- "$STAGE/cb-os_${version}.efi" "$STAGE/cb-os_${version}_root.raw" \
+        || cb_die "could not write the staged files to the disk (a disk error?); refusing to install"
 }
 
 do_apply() {
-    local version avail_kb need_kb
+    local version avail_kb need_kb room need_mb free_mb
     do_check || return 1
     if [ "$AVAILABLE" != true ] && [ "$FORCE" != 1 ]; then
         case $(jq -r '.state' "$CB_STATUS/$STATUS.json" 2>/dev/null) in
@@ -216,6 +240,9 @@ do_apply() {
     version=$LATEST
     [[ $version =~ $VERSION_RE ]] || cb_die "odd version string"
 
+    # What an interrupted earlier try left in the stage would count against the room checked below: it goes first (the lock makes this the only
+    # install running).
+    find "$STAGE" -mindepth 1 -delete 2>/dev/null || true
     avail_kb=$(df --output=avail -k /srv | tail -1 | tr -d ' ')
     need_kb=$((4 * 1024 * 1024))
     if [ "$avail_kb" -lt "$need_kb" ]; then
@@ -227,6 +254,17 @@ do_apply() {
     set_channel
     if ! run_fetch download "$version" "$(arch)" "${CHANNEL[@]}"; then
         status failed "download or verification of version $version failed"
+        return 1
+    fi
+
+    # Room to stage it, now that the files are here (the recordings may have taken some of the room checked before the download). Without it
+    # the download is dropped too, and the stage emptied: a later try fetches it again.
+    find "$STAGE" -mindepth 1 -delete 2>/dev/null || true
+    room=$(stage_room "$version") || room=""
+    read -r need_mb free_mb <<<"$room"
+    if [[ ${need_mb:-} =~ ^[0-9]+$ ]] && [[ ${free_mb:-} =~ ^[0-9]+$ ]] && [ "$free_mb" -lt "$need_mb" ]; then
+        status failed "not enough free space on the data partition to install version $version ($need_mb MB needed, $free_mb MB free); nothing was installed"
+        find "$STAGE" "$CACHE" -mindepth 1 -delete 2>/dev/null || true
         return 1
     fi
 
@@ -271,7 +309,7 @@ schedule_reboot() {
 
 do_auto() {
     if ! take_lock; then
-        # The web page's "Update now" (or another heavy job) runs: its update.json is left alone, and the next daily run looks again.
+        # The web page's "Install update" (or another heavy job) runs: its update.json is left alone, and the next daily run looks again.
         cb_log "another system job is running; the daily update check waits for tomorrow"
         return 0
     fi

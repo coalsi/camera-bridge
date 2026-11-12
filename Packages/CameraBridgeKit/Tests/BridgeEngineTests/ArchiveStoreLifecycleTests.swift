@@ -6,6 +6,9 @@ import Testing
 
 /// A store over a fixture folder, with a fake drive (its free space is a number the test sets), a clock the test moves and a log of what
 /// retention deleted. Probes every 50 ms, so a drive that stops answering is noticed within a third of a second.
+///
+/// Moving `clock` is time passing: the store's monotonic clock and the system's uptime move with it. `stepClock(by:)` sets the wall clock alone, as
+/// chrony or a person setting the time does. The clock counts as synchronized and the system as up for days, unless the test says otherwise.
 final class ArchiveStoreHarness: Sendable {
     static let gb: UInt64 = 1_000_000_000
     /// The default clock: one hour after the default fixture file starts.
@@ -16,6 +19,10 @@ final class ArchiveStoreHarness: Sendable {
     let dataDirectory: TemporaryDirectory
     let space: Box<VolumeMonitor.Space?>
     let clock: Box<Date>
+    /// How far the wall clock was set without time passing (`stepClock(by:)`).
+    let stepped = Box<TimeInterval>(0)
+    /// What the system says of its clock (`ArchivePlatformPolicy.isClockSynchronized`).
+    let synchronized: Box<Bool>
     let removed = Box<[String]>([])
     let failRemoval = Box<Set<String>>([])
     let spaceCalls = Box(0)
@@ -34,7 +41,8 @@ final class ArchiveStoreHarness: Sendable {
          spaceGate: DispatchSemaphore? = nil, readDeadline: Duration = .seconds(5), probeInterval: Duration = .milliseconds(50), statusRefresh: Duration = .milliseconds(50), probeStallAfter: Duration = .seconds(5), retentionAtStart: Bool = false,
          deletedHandleGrace: Duration = .zero, logs: Bool = false, skyStillBytes: UInt64? = nil,
          archive: Bool = false, archiveTotal: UInt64 = 2_000 * ArchiveStoreHarness.gb, archiveFree: UInt64 = 1_900 * ArchiveStoreHarness.gb,
-         movePause: Duration = .milliseconds(1), moveBytesPerSecond: Int = 0,
+         movePause: Duration = .milliseconds(1), moveBytesPerSecond: Int = 0, uptime: TimeInterval = 200_000, synchronized: Bool = true,
+         log: ArchiveStoreLog? = nil,
          populate: (URL) throws -> Void = { _ in }, populateArchive: (URL) throws -> Void = { _ in },
          repair: (@Sendable (URL, URL, UUID) throws -> IndexScanOutcome)? = nil, moveCrash: (@Sendable (ArchiveMoveStep) -> Bool)? = nil) throws {
         root = try TemporaryDirectory()
@@ -50,6 +58,9 @@ final class ArchiveStoreHarness: Sendable {
         let archiveSpace = Box<VolumeMonitor.Space?>(VolumeMonitor.Space(total: archiveTotal, free: archiveFree))
         self.archiveSpace = archiveSpace
         let clock = Box(now)
+        let stepped = self.stepped
+        let synchronized = Box(synchronized)
+        self.synchronized = synchronized
         let spaceCalls = self.spaceCalls
         let removed = self.removed, failRemoval = self.failRemoval
         self.space = space
@@ -69,13 +80,16 @@ final class ArchiveStoreHarness: Sendable {
                 return space.value.map { (total: $0.total, free: $0.free) }
             },
             isSystemVolume: { url in onArchive(url) ? false : isSystemVolume }, systemFloor: ArchivePlatformPolicy.linuxSystemFloor, directoryNaming: .cameraID)
+        environment.archivePolicy?.isClockSynchronized = { synchronized.value }
         environment.archiveDriveFolder = archiveRoot?.url
         var tuning = ArchiveStoreTuning()
         tuning.now = { clock.value }
+        tuning.monotonic = { clock.value.timeIntervalSince(now) - stepped.value }
+        tuning.uptime = { uptime + clock.value.timeIntervalSince(now) - stepped.value }
         tuning.probeInterval = probeInterval
         tuning.statusRefresh = statusRefresh
         tuning.retentionAtStart = retentionAtStart
-        tuning.log = logs ? .standard : .silent
+        tuning.log = log ?? (logs ? .standard : .silent)
         tuning.probeStallAfter = probeStallAfter
         tuning.retentionInterval = .seconds(3_600)
         tuning.readDeadline = readDeadline
@@ -102,6 +116,17 @@ final class ArchiveStoreHarness: Sendable {
         root.remove()
         dataDirectory.remove()
         archiveRoot?.remove()
+    }
+
+    /// Time passes: the wall clock, the monotonic clock and the uptime all move on by `seconds`.
+    func advance(by seconds: TimeInterval) {
+        clock.update { $0 = $0.addingTimeInterval(seconds) }
+    }
+
+    /// The wall clock is set `seconds` forward (or back) without time passing: a clock that jumps.
+    func stepClock(by seconds: TimeInterval) {
+        stepped.update { $0 += seconds }
+        clock.update { $0 = $0.addingTimeInterval(seconds) }
     }
 
     /// The archive drive's marker, as `cb-recording-drive --archive` writes it.

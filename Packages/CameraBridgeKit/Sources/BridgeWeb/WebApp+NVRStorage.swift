@@ -32,6 +32,15 @@ extension WebApp {
         var newest: OrNull<Int64>
         /// The archive drive; null where the system has none.
         var archive: OrNull<ArchiveDriveResource>
+        /// Why "keep recordings for N days" deletes nothing for now (`ArchiveStorageStatus.ageRulePause`); null while it runs.
+        var ageRulePause: OrNull<AgeRulePauseResource>
+    }
+
+    /// `{reason: "clockJumped" | "clockNotSynchronized", until}`: the clock jumped forward, or is not known to be right yet; `until` (milliseconds)
+    /// is when the pause ends at the latest, by the box's clock. The size limit applies throughout.
+    private struct AgeRulePauseResource: Encodable {
+        var reason: String
+        var until: Int64
     }
 
     /// `ArchiveDriveStatus` for the page: the state's code, its sentence, the numbers, how far back it goes and what moves now.
@@ -87,7 +96,8 @@ extension WebApp {
             usedBytes: storage?.usedBytes ?? 0, freeBytes: storage?.freeBytes ?? 0, totalBytes: storage?.totalBytes ?? 0, floorBytes: storage?.floorBytes ?? 0,
             roomBytes: storage?.roomBytes ?? 0, effectiveMaxBytes: storage?.effectiveMaximumBytes(maxSizeGB: settings.nvrMaxSizeGB) ?? 0,
             oldest: OrNull(storage?.oldest.map(Self.milliseconds)), newest: OrNull(storage?.newest.map(Self.milliseconds)),
-            archive: OrNull(storage?.archive.map { archiveResource($0, cameras: overview.configurations) }))
+            archive: OrNull(storage?.archive.map { archiveResource($0, cameras: overview.configurations) }),
+            ageRulePause: OrNull(storage?.ageRulePause.map { AgeRulePauseResource(reason: $0.reason.rawValue, until: Self.milliseconds($0.until)) }))
     }
 
     func nvrStorage() async -> HTTPResponse {

@@ -25,9 +25,9 @@ set -euo pipefail
 
 GO2RTC_COMMIT="c245815e75e2a5fd60b4290f12bfc04e55a984d3"   # master, 2026-07-13 (head on 2026-10-15)
 GO2RTC_VERSION="1.9.14+dev.c245815"                         # what `go2rtc -version` prints for this build
-GO_IMAGE="golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437"
-SHA256_AMD64="260d20fa932ec302f49ddb94bfe0669b357e902d15232f2b154e1972998ba363"   # go2rtc, linux/amd64
-SHA256_ARM64="7c1cefffbe19548580c60df6c03b41dcbd7b08deed64161aa6f79deb26323729"   # go2rtc, linux/arm64
+GO_IMAGE="golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea"   # go1.27.4, as go.dev publishes it
+SHA256_AMD64="ae6091ca45a607ba0cdcac96e336b8ff535111c27380b291f868086c0d68ec10"   # go2rtc, linux/amd64
+SHA256_ARM64="16370666fdbdea3c1532f03385e13b3ae3b2677c6c8e06cff0ae55ad46e61a03"   # go2rtc, linux/arm64
 SHA256_LICENSE="b0dcf4855af5a72b4dfbd9117c207b330f4cc35658576a0b5351d6e2becac546" # LICENSE at GO2RTC_COMMIT
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

@@ -141,12 +141,6 @@ enum StreamAddress {
         return "\(address)%\(interface)"
     }
 
-    /// Whether `localAddress` needs the interface list to answer a request of the `ipv6` family.
-    static func needsInterfaces(localAddress: String, ipv6: Bool) -> Bool {
-        let local = canonical(localAddress)
-        return local.contains(":") != ipv6 || (ipv6 && isLinkLocal(local))
-    }
-
     /// IPv6 address flags (`SIOCGIFAFLAG_IN6`): `IN6_IFF_DEPRECATED` and `IN6_IFF_TEMPORARY`. Darwin only; elsewhere every
     /// address counts as stable (Linux keeps the same flags in /proc/net/if_inet6, which a port reads here).
     private struct AddressFlags {

@@ -1,12 +1,12 @@
 # Camera Bridge OS: user guide
 
-Camera Bridge OS turns a small PC into a bridge between your IP cameras (ONVIF / RTSP) and Apple Home. You plug in the box, open a web page, add your cameras, and Apple Home records them with HomeKit Secure Video. No Mac and no NVR are needed. If you also want recordings of your own to watch in the web page, the box can keep them (section 11); that is optional and separate from HomeKit Secure Video.
+Camera Bridge OS turns a small PC into a recorder for your IP cameras (ONVIF / RTSP). You plug in the box, open a web page, add your cameras, and the box shows them live, records them and lets you scrub back through the recordings (section 11). No Mac and no separate NVR are needed. Apple Home is optional: if you want it, the box also shows your cameras there, and Apple Home can record clips with HomeKit Secure Video (section 6). That is separate from the box's own recordings.
 
-You need: a mini PC (see HARDWARE.md), a USB stick or SSD (16 GB or more), an Ethernet cable to your router, an Apple Home hub (Apple TV or HomePod) and an iCloud+ plan for HomeKit Secure Video.
+You need: a mini PC (see HARDWARE.md), a USB stick or SSD (16 GB or more), and an Ethernet cable to your router (or Wi-Fi, see the Wi-Fi section). Only if you want your cameras in Apple Home: an Apple Home hub (Apple TV or HomePod) and, for HomeKit Secure Video, an iCloud+ plan.
 
 > Menu names in this guide ("System" and so on) follow the web UI design and may differ slightly in the build you have.
 
-> Status: this is a first version. The system image has been tested in virtual machines, not yet on many real mini PCs. Photos of what you see and hardware reports are welcome.
+> Status: this is a beta. The system runs on a real mini PC every day and every release is tested in virtual machines, but few models of mini PC have been tried so far. Photos of what you see and hardware reports are welcome.
 
 ## 1. Download
 
@@ -134,7 +134,7 @@ cb-install-to-disk --device /dev/nvme0n1 --copy-data      # asks you to type: ER
 
 ## 8. Updates
 
-The box checks GitHub for a newer `os-v...` release every day. In **System** you can switch on **automatic updates** (the box then installs and restarts at 3 AM in the bridge's time zone, set in **Settings**; UTC until one is set) or press **Update now**. A new version is checked (signature and SHA-256), written next to the current one, and the current one stays as a fallback: if the new version does not start properly three times, the box returns to the old one by itself. Details: UPDATES.md.
+The box checks GitHub for a newer `os-v...` release every day. In **System** you can switch on **automatic updates** (the box then installs and restarts at 3 AM in the bridge's time zone, set in **Settings**; UTC until one is set) or press **Install update**. A new version is checked (signature and SHA-256), written next to the current one, and the current one stays as a fallback: if the new version does not start properly three times, the box returns to the old one by itself. Details: UPDATES.md.
 
 ## 9. Factory reset
 
@@ -170,7 +170,7 @@ The first time, the page asks **Where should recordings be stored?** and lists t
 
 Turning Record on or off does not restart the camera, so Apple Home live view and HomeKit Secure Video carry on undisturbed.
 
-**Record sound** is a second switch under Record. It is off by default, and it records sound only while **Camera audio** (the Audio card on the camera's page) is on. The sound is stored in the files, but this version of the page does not play it yet; the picture plays as usual.
+**Record sound** is a second switch under Record. It is off by default, and it records sound only while **Camera audio** (the Audio card on the camera's page) is on. The page plays the sound at normal speed (1×): press the speaker on a camera to hear it. It is silent while you drag the timeline, while paused and at other speeds.
 
 A camera that is recording shows **REC**. If Record is on but the camera is not sending video, the page shows it as waiting, and recording carries on by itself when video returns. When recording has to stop, a banner says why and what to do (see Troubleshooting).
 
@@ -181,7 +181,7 @@ A camera that is recording shows **REC**. If Record is on but the camera is not 
 * **Keep for**: 1, 3, 7 (the default), 14, 30 or 90 days.
 * **Maximum size**: 100, 250, 500 (the default), 1000, 2000, 4000 or 8000 GB. Gigabytes here are decimal: 1 GB is 1,000,000,000 bytes.
 
-Recordings older than **Keep for** are deleted, and then the oldest recordings go until the total is under **Maximum size**. The box does this about once a minute, only ever deletes its own recording files, and never deletes anything just because the disk is getting full. If you lower a limit so that recordings would be deleted, the page tells you roughly how many gigabytes and asks first. On a small disk the box may keep less than you chose; Settings shows the real limit.
+Recordings older than **Keep for** are deleted, and then the oldest recordings go until the total is under **Maximum size**. The box does this about once a minute, only ever deletes its own recording files, and never deletes anything just because the disk is getting full. Nothing is deleted for its age until the box knows its clock is right (it has set the clock from the internet, or it has been running for a day), nor for a day after its clock jumps forward; **Maximum size** still applies all the time. So a box without the internet keeps recordings up to a day longer than **Keep for** each time it starts. If you lower a limit so that recordings would be deleted, the page tells you roughly how many gigabytes and asks first. On a small disk the box may keep less than you chose; Settings shows the real limit.
 
 The size limit usually decides first. Video costs about 10.8 GB a day for each megabit per second of the camera's bit rate:
 
@@ -245,14 +245,14 @@ The note under the timeline on the Watch screen also has a button, **Make scrubb
 
 ### Browsers
 
-Recordings are played by your browser's own video player, and the box serves plain HTTP, so what plays depends on the browser:
+Recordings are played by your browser's own video player, so what plays depends on the browser:
 
 * **Safari and Chrome on a Mac** are the supported browsers. In Chrome the picture follows you while you drag the timeline; in Safari it catches up when you pause.
 * **Safari on an iPad** should work too. **An iPhone cannot play recordings yet**: the page says "Recordings can’t be played on an iPhone yet. Open this page on a Mac or an iPad." and keeps showing snapshots.
 * **Firefox** should play H.264 recordings. Cameras that send H.265 (HEVC) should play in Safari; Chrome plays them only if your computer can decode H.265 in hardware.
 * If your browser cannot play a recording, the page says so and keeps showing snapshots. The switches, the settings and the storage numbers still work.
 
-Open the box with `http://`, not `https://`, as in section 4.
+This is the same at the plain address (`http://camera-bridge.local`) and at the secure address (see "The secure address"). The plain address sends browsers on to the secure one while the secure address works, so you may find yourself on `https://` without asking for it. Both play the same.
 
 ## 12. AI descriptions of events
 
@@ -315,12 +315,12 @@ The Camera Bridge app for iPhone and iPad is coming and is not available yet, so
 | Problem | What to try |
 |---|---|
 | The PC does not boot from the stick | Boot menu key (section 3); Secure Boot off; UEFI mode; try another USB port (USB 2 ports are fine for booting but slow); write the image again. |
-| `camera-bridge.local` does not open | Wait two minutes after power-on (the first start sets up the disk). Use the address shown on the box's screen or find it in your router. Make sure your computer is on the same network (not a guest network). Try `http://` explicitly (not `https://`). |
+| `camera-bridge.local` does not open | Wait two minutes after power-on (the first start sets up the disk). Use the address shown on the box's screen or find it in your router. Make sure your computer is on the same network (not a guest network). Type `http://camera-bridge.local` with `http://`: `https://camera-bridge.local` has no certificate. The secure address is a different name, shown on the System page. |
 | The box has no address | Check the Ethernet cable and the router's DHCP. If you connected it straight to a Mac, wait up to a minute for the 169.254.x.x link-local address and open `http://camera-bridge.local`. |
 | The page loads but cameras are not found | The box and the cameras must be on the same network segment (or the router must allow traffic between them). Add the camera by hand with its address. Use the **Test** button to see the error. |
 | Home says "No Response" | The box must be on and reachable; the iPhone must be on the same network for the first pairing; a home hub (Apple TV / HomePod) is needed for remote access and recording. If you reinstalled the box without copying the settings, remove the old accessory from Home and pair again. |
 | The picture is jerky or the box is hot | Too many cameras for the CPU (see HARDWARE.md), or the cameras send H.265. Lower the camera's bit rate; use H.264. |
-| The clock is wrong | The box sets its clock from the internet (NTP). It needs internet access for that; wait a few minutes after a power cut. **System > Box health** says whether the clock is in sync. Without the internet the box keeps its own time, and it never goes back before the last time it knew (a computer with a flat clock battery). |
+| The clock is wrong | The box sets its clock from the internet (NTP). It needs internet access for that; wait a few minutes after a power cut. **System > Box health** says whether the clock is in sync. Without the internet the box keeps its own time, and it never goes back before the last time it knew (a computer with a flat clock battery). Until the box knows its clock is right, or has run for a day, it deletes no recording for its age (section 11). |
 | It runs, but slowly, from a USB stick | Use a USB 3 port and a better stick, or install to the internal SSD (section 7). |
 | After an update the old version came back | That is the safety net working: the new version did not start properly. See UPDATES.md; the web UI (or `cb-update status`) says why. Try again later or report it with the diagnostics export. |
 | Logs | Web UI > Logs, or the diagnostics export. Over SSH: `journalctl -u camerabridged -b`, `journalctl -b -p warning`. |
@@ -336,14 +336,12 @@ The Camera Bridge app for iPhone and iPad is coming and is not available yet, so
 
 ## What this version does not do
 
-* No Wi-Fi setup (wired only).
 * No Secure Boot, no disk encryption (the secrets file on the data partition is protected by file permissions, not by a TPM yet).
 * Only amd64 mini PCs; Raspberry Pi 5 is planned.
 * The box is for your local network only. Do not forward ports to it from the internet. The iPhone, iPad and CarPlay apps, and the HLS streams they use, work on the home network only for now. Apple Home reaches it through your home hub.
-* Recordings go only to the box's own storage. Recording to a separate USB drive comes in a later version.
-* The page does not play recorded sound yet (it is stored when Record sound is on).
+* The page plays recorded sound at normal speed only, not while you drag the timeline or at other speeds.
 * No motion or person markers on the timeline: the wave shows how much was going on, not what.
-* The web page is plain HTTP; an HTTPS option comes later.
+* The plain address `http://camera-bridge.local` is not encrypted. The secure address (see "The secure address") is, and needs the internet and a router that lets the name through.
 * AI descriptions are a sentence on the web page only: Apple Home's notifications do not show them, they cannot be searched, older events are not described afterwards, and the box does not tell who a person is.
 
 ## Recording to an attached drive
@@ -366,6 +364,24 @@ With a network cable the box needs nothing else. For Wi-Fi there are three ways:
 3. **System > Wi-Fi** in the web page: find networks, join one (the box restarts), forget one.
 
 A box that knows a network does not open its hotspot when that network goes away for a while (a router restarting): it waits for it, and opens the hotspot only after 10 minutes without a network. While the hotspot is open, the box looks for its saved networks again every minute when nobody is using the hotspot, so it comes back by itself after a Wi-Fi outage. A box on a network cable never opens it, even on a camera network without a router.
+
+## The secure address
+
+The box has two addresses. The plain one, `http://camera-bridge.local`, is not encrypted. The secure one is a name like `https://<random letters>.box.camera-bridge.app` with a real certificate, so every browser at home trusts it and nothing needs installing. It is on by default and shown on the **System** page, under **Secure address**.
+
+How it works. The first time the box has internet, it registers with www.camera-bridge.app, the project's website, and gets its random name. It then asks Let's Encrypt for a certificate for that name and renews it by itself. The name points to the box's address on your home network, so it only works for devices at home. Video and the web page never go through the website: they travel from the box to your browser inside your home. Getting the certificate takes a few minutes. Until it is ready, and whenever the box has no internet, the plain address keeps working.
+
+What this publishes:
+
+* The website learns the box's public key, and sees your home's public internet address when the box calls it.
+* The box tells the website its home-network address whenever that changes. The website publishes it as the public DNS record of the box's name, so anyone can look up that address. It is a private address that does not work from outside your home.
+* Let's Encrypt lists certificates in public Certificate Transparency logs, so the box's random name can be found there.
+
+No camera name, picture or password is sent.
+
+Some routers refuse to resolve a name that points to a home address ("DNS rebind protection"). The **Test this address** button tells you if yours does, and the page lists where to allow `box.camera-bridge.app` in common routers.
+
+By default `http://camera-bridge.local` sends browsers on to the secure address once it works. To keep using the plain address, turn off **Send camera-bridge.local to the secure address**. To stop the secure address altogether, turn off **Use the secure address**. The box then calls neither camera-bridge.app nor Let's Encrypt, and the plain address works as before.
 
 ## Moving from Camera Bridge for Mac
 

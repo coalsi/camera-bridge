@@ -10,7 +10,7 @@ import Testing
 /// message to exactly the pictures that went in, with the codec string ffprobe 8.1 prints for it (made from the avcC by an older ffprobe). Skipped without
 /// ffmpeg and ffprobe (`CB_FFMPEG`, `CB_FFPROBE`, or Homebrew and system locations).
 ///
-/// With `CB_ARCHIVE_MEDIA_EXPORT=<an existing directory>` the files of every fixture are also written there, for the browser spike and the dev server
+/// With `CB_ARCHIVE_MEDIA_EXPORT=<an existing directory>` the files of every fixture are also written there, for looking at them in a browser (the browser spike that used them has been removed)
 /// (`<label>.stored.mp4` as the recorder writes it, `<label>.init.mp4`, `<label>.segment-NNN.m4s` as the routes serve them, `<label>.key-picture-NNN.m4s` as
 /// `?picture=1` serves the fragments that start with a key picture, `<label>.video-only.mp4` as a browser sees the segments joined, and `<label>.json` with the
 /// codec string and the counts). Fixtures made from the private capture are never exported.

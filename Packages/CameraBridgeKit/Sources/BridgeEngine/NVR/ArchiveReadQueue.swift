@@ -5,6 +5,10 @@ import Synchronization
 /// Runs blocking disk reads on their own threads, `width` at a time, each with a deadline (Mac spec 3 and 7: nothing on the cooperative pool
 /// touches the disk). A read that is still waiting for a slot or running when its deadline passes is reported as `ArchiveError.timedOut`;
 /// a waiting one is dropped, a running one finishes on its own thread (its result is discarded) and keeps its slot until it returns.
+///
+/// Each slot is a serial Dispatch queue of its own, which libdispatch gives a thread whenever it has work. Not one concurrent queue: on Linux
+/// the threads of every concurrent queue of a priority, and of Swift concurrency's tasks of that priority, are about as many as the cores, and
+/// libdispatch adds one a second past that, so reads hung on a drive that stopped answering held up the box's own reads for seconds.
 final class ArchiveReadQueue: Sendable {
     private struct Job {
         var id: UInt64
@@ -14,18 +18,22 @@ final class ArchiveReadQueue: Sendable {
 
     private struct State {
         var nextID: UInt64 = 0
-        var running = 0
+        /// The slots no job holds.
+        var free: [Int]
         var waiting: [Job] = []
     }
 
-    private let state = Mutex(State())
-    private let queue = DispatchQueue(label: "CameraBridge.NVR.reads", qos: .userInitiated, attributes: .concurrent)
+    private let state: Mutex<State>
+    /// A job runs on its slot's queue.
+    private let slots: [DispatchQueue]
     let width: Int
     let deadline: Duration
 
     init(width: Int = ArchiveConstants.maximumConcurrentReads, deadline: Duration = .seconds(ArchiveConstants.readDeadline)) {
         self.width = max(1, width)
         self.deadline = deadline
+        slots = (0..<self.width).map { _ in DispatchQueue(label: "CameraBridge.NVR.reads", qos: .userInitiated) }
+        state = Mutex(State(free: Array((0..<self.width).reversed())))
     }
 
     /// Reads (or runs anything blocking) with the queue's width and deadline. Throws `ArchiveError.timedOut` after the deadline, otherwise what
@@ -49,36 +57,35 @@ final class ArchiveReadQueue: Sendable {
     }
 
     /// Jobs running and waiting (tests).
-    var load: (running: Int, waiting: Int) { state.withLock { ($0.running, $0.waiting.count) } }
+    var load: (running: Int, waiting: Int) { state.withLock { (width - $0.free.count, $0.waiting.count) } }
 
     private func submit(_ job: Job) {
-        let startNow = state.withLock { state -> Bool in
-            if state.running < width {
-                state.running += 1
-                return true
+        let slot = state.withLock { state -> Int? in
+            guard let slot = state.free.popLast() else {
+                state.waiting.append(job)
+                return nil
             }
-            state.waiting.append(job)
-            return false
+            return slot
         }
-        if startNow { launch(job) }
+        if let slot { launch(job, on: slot) }
     }
 
-    private func launch(_ job: Job) {
-        queue.async {
+    private func launch(_ job: Job, on slot: Int) {
+        slots[slot].async {
             job.start()
-            self.finished()
+            self.finished(slot)
         }
     }
 
-    private func finished() {
+    private func finished(_ slot: Int) {
         let next = state.withLock { state -> Job? in
             guard !state.waiting.isEmpty else {
-                state.running -= 1
+                state.free.append(slot)
                 return nil
             }
             return state.waiting.removeFirst()   // the slot passes to the next job
         }
-        if let next { launch(next) }
+        if let next { launch(next, on: slot) }
     }
 
     private func cancel(_ id: UInt64) {

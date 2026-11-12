@@ -63,7 +63,7 @@ public enum CameraSecurityFeature: String, Sendable, Codable, CaseIterable {
 }
 
 /// What the Internet guard (Camera Bridge OS: the camera's DNS pointed at the box) saw of one camera, for its level. The guard fills it in;
-/// nil where there is no guard (the Mac app), and then green is the best level.
+/// nil where there is no guard (a Mac), and then green is the best level.
 public struct GuardEvidence: Sendable, Codable, Equatable {
     /// The guard watches this camera: it is on the guard's list here (`listed`), the box watches its address, and the camera's DNS, as last
     /// read, asks the bridge's address now (`asksBridge`).
@@ -157,7 +157,7 @@ public struct CameraSecurity: Sendable, Codable, Equatable {
     /// Worst first.
     public var findings: [CameraSecurityFinding]
     public var checkedAt: Date
-    /// What the Internet guard saw of the camera; nil where there is no guard (the Mac app).
+    /// What the Internet guard saw of the camera; nil where there is no guard (a Mac).
     public var internetGuard: CameraGuardActivity?
 
     public init(level: CameraSecurityLevel, title: String, summary: String, findings: [CameraSecurityFinding], checkedAt: Date,

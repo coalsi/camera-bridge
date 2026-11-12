@@ -120,9 +120,13 @@ public struct ArchiveStorageStatus: Sendable, Equatable {
         return totalBytes > reserve ? totalBytes - reserve : 0
     }
 
-    /// The archive drive (nil where the host has none: the Mac app, a box without one chosen in its image). Older recordings move there when this
+    /// The archive drive (nil where the host has none: a Mac, a box without one chosen in its image). Older recordings move there when this
     /// drive fills, instead of being deleted.
     public var archive: ArchiveDriveStatus?
+
+    /// Why "keep recordings for N days" deletes nothing for now, on either drive and for the camera events and Sky Watcher logs too (the clock jumped
+    /// forward, or it is not known to be right yet: `AgeRuleClock`); nil while it runs. The size limit applies throughout.
+    public var ageRulePause: ArchiveAgeRulePause?
 }
 
 /// The archive drive as numbers and a state (`ArchiveStorageStatus.archive`): refreshed with the storage status, at most every 5 s, bytes rounded

@@ -279,8 +279,9 @@ export function browserClass({ userAgent = '', maxTouchPoints = 0 } = {}) {
 }
 
 /**
- * What each browser class is allowed to do. The values are the decision of the browser spike (task T06: linux/web-dev/spike/DECISION.json and RESULTS.md,
- * decided 2026-10-11 from one device run, Chrome on a Mac). Where a class has no run the spike's rule applies: key steps off, the addendum's tile cap.
+ * What each browser class is allowed to do. The values are the decision of the browser spike (task T06, decided 2026-10-11 from one device run, Chrome
+ * on a Mac; its test pages and results were removed on 2026-11-11 and are in the repository's history). Where a class has no run the spike's rule
+ * applies: key steps off, the addendum's tile cap.
  *   play            false: recordings are not offered in this class at all (the page says so and keeps the snapshot)
  *   keySteps        a drag shows key pictures (false: the picture arrives after the pointer stops)
  *   mimeChange      'recreate' builds a new MediaSource when the codec string changes, 'changeType' keeps the buffer and calls changeType()

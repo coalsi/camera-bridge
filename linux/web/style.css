@@ -265,7 +265,6 @@ small, .small { font-size: 0.875rem; }
 .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .row.spread { justify-content: space-between; }
 .grid { display: grid; gap: 14px; }
-.grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 /* Pages made of cards (System, Settings) fill the width with columns of cards instead of one stretched column. */
 .card-columns { columns: 3 440px; column-gap: 16px; }
 .card-columns > * { break-inside: avoid; margin: 0 0 16px; }
@@ -617,7 +616,6 @@ dialog .dialog-problem { color: var(--danger); font-weight: 550; margin: 8px 0 0
 .update-bar[hidden] { display: none; }
 .reconnect { position: fixed; top: 0; left: 0; right: 0; z-index: 50; background: var(--warning); color: #151517; text-align: center; padding: 6px 12px; font-weight: 600; font-size: 0.9rem; }
 hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
-.link-button { background: none; border: 0; padding: 0; font: inherit; color: var(--link); text-decoration: underline; cursor: pointer; }
 
 .kv + .row, .kv + .stack { margin-top: 16px; }
 .phrase { display: block; font-family: var(--mono); font-size: 0.95rem; padding: 10px 12px; margin: 6px 0 14px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border-strong); overflow-wrap: anywhere; user-select: all; }

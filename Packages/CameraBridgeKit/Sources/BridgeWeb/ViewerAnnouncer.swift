@@ -128,7 +128,7 @@ actor ViewerAnnouncer {
             nextDelay = retryDelay
             lastFailure = nil
             watch(created)
-            log.notice("Apple TVs can find this bridge: “\(target.name)” (\(Self.serviceType)) on port \(target.port)")
+            log.notice("Apple TVs and iPhones can find this bridge: “\(target.name)” (\(Self.serviceType)) on port \(target.port)")
         }
         registration = nil
     }
@@ -165,7 +165,7 @@ actor ViewerAnnouncer {
         let message = ErrorText.logDescription(error)
         if message != lastFailure {
             lastFailure = message
-            log.warning("Apple TVs cannot find this bridge yet: \(message); trying again")
+            log.warning("Apple TVs and iPhones cannot find this bridge yet: \(message); trying again")
         }
         scheduleRetry()
     }

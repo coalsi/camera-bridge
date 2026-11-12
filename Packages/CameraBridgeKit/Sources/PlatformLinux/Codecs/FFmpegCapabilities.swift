@@ -76,8 +76,6 @@ struct FFmpegCapabilities: Sendable, Equatable {
     var hasOpus: Bool { encoders.contains("libopus") }
     var hasAACEncoder: Bool { encoders.contains("aac") || encoders.contains("libfdk_aac") }
     var hasAACELDEncoder: Bool { encoders.contains("libfdk_aac") }
-    /// `-encoders` of an ffmpeg that has all the pieces the codecs need.
-    var hasMJPEG: Bool { encoders.contains("mjpeg") }
 
     /// Names in the second column of `ffmpeg -encoders` / `-decoders` / `-filters` (the first is the flag column: letters and dots,
     /// like `V....D` or `T.C`). The legend lines before the list (`V..... = Video`) and headings are skipped.

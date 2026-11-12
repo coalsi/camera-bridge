@@ -4,10 +4,10 @@ import CameraAdapters
 import Foundation
 import MediaCore
 
-// The JSON the API answers with. Types follow the Mac app's models (`CameraConfiguration`, `CameraStatus`, `DiscoveredCamera`,
-// `NetworkNotice`); the words are the Mac app's too (`StatusText`), so the two interfaces say the same things.
+// The JSON the API answers with. Types follow the engine's models (`CameraConfiguration`, `CameraStatus`, `DiscoveredCamera`,
+// `NetworkNotice`); the words are those of the archived Mac app's `StatusText`, so the box says what the app said.
 
-/// Names and sentences for engine values, as the Mac app's `StatusText` words them.
+/// Names and sentences for engine values, as the archived Mac app's `StatusText` worded them.
 enum StatusText {
     static func connectionName(_ state: ConnectionState) -> String {
         switch state {
@@ -223,7 +223,7 @@ struct EventResource: Encodable {
     var date: Date
 }
 
-/// A camera's live state: what the Mac app's camera page and menu show. The HomeKit setup code is not part of it (`/pairing`).
+/// A camera's live state: what the camera page shows. The HomeKit setup code is not part of it (`/pairing`).
 struct CameraStatusResource: Encodable {
     var connection: String
     var connectionReason: String?
@@ -633,7 +633,7 @@ struct NoticeResource: Encodable {
                               date: now, action: "open-settings")
     }
 
-    /// The notices that apply and have something to say (the Mac app's `NetworkNoticeMessage`, in this bridge's words).
+    /// The notices that apply and have something to say (the archived Mac app's `NetworkNoticeMessage`, in this bridge's words).
     static func resources(for notices: [NetworkNotice], now: Date = Date()) -> [NoticeResource] {
         notices.filter { $0.isActive(at: now) }.compactMap { make(for: $0) }.sorted {
             $0.severity != $1.severity ? $0.severity == "warning" : $0.date > $1.date
@@ -817,7 +817,7 @@ struct PairingResource: Encodable {
     var blockerAction: String?
 }
 
-/// Why a camera's QR code and setup code aren't offered, and the fix (the Mac app's `PairingBlocker`).
+/// Why a camera's QR code and setup code aren't offered, and the fix (the archived Mac app's `PairingBlocker`).
 enum PairingBlocker: String {
     case cameraDisabled, bridgePaused, bridgeNotRunning, bridgeStarting, accessoryNotRunning
 

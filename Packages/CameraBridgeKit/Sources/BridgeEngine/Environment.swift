@@ -19,23 +19,23 @@ public struct BridgeEnvironment: Sendable {
     public var loopbackOnly: Bool
     /// Tests may disable Bonjour.
     public var advertise: Bool
-    /// What the NVR needs from the host to find free space and to name folders (statvfs lives in BridgeDaemon only). nil on the Mac app: the
+    /// What the NVR needs from the host to find free space and to name folders (statvfs lives in BridgeDaemon only). nil in the archived Mac app: the
     /// engine then reads Foundation's volume attributes and names camera folders after the camera.
     public var archivePolicy: ArchivePlatformPolicy?
     /// The archive drive's folder (archive-tier brief): where older recordings move when the recordings drive fills, instead of being deleted. Only
     /// a folder that holds the drive's marker (`.camera-bridge-archive`, written by the OS) and is not on the box's own disk is ever written.
-    /// /var/lib/camera-bridge/archive on Camera Bridge OS; nil (the Mac app, a plain program): no archive, retention deletes as it always did.
+    /// /var/lib/camera-bridge/archive on Camera Bridge OS; nil (the archived Mac app, a plain program): no archive, retention deletes as it always did.
     public var archiveDriveFolder: URL?
     /// Development only (the daemon's hidden `--demo-keyframe-seconds`, accepted with `--dev` or `--preview`): the demo camera's main stream
     /// keys every this many seconds instead of every 2, so the smart-codec path (the keyframe note above 10 s, the coarse caption above 4 s,
     /// `typicalGOP`) runs through the real engine. nil, or a value outside 1...120, keeps 2 s.
     public var demoKeyframeSeconds: Double?
     /// This machine serves time (NTP) to the local network: Camera Bridge OS's chrony does. "Set up for Camera Bridge" then points cameras'
-    /// clocks at the bridge's address; elsewhere (the Mac app) that step is not offered. Off by default.
+    /// clocks at the bridge's address; elsewhere (a Mac) that step is not offered. Off by default.
     public var servesTime: Bool = false
     /// This machine has Camera Bridge OS's internet guard: it answers the DNS of the cameras it watches with "does not exist" and keeps what
     /// they asked for (docs/superpowers/specs/2026-10-17-internet-guard-design.md). The daemon sets it where the guard is installed; elsewhere
-    /// (the Mac app) "Watch its internet" is not offered. Off by default.
+    /// (a Mac) "Watch its internet" is not offered. Off by default.
     public var hasInternetGuard: Bool = false
     /// Replaces the list of cameras the internet guard watches; an empty list turns it off. Throws a sentence the person can read. nil where
     /// there is no guard.
@@ -105,8 +105,8 @@ public struct BridgeEnvironment: Sendable {
         return environment
     }
 
-    /// Portable environment that can never touch the network or a codec (every transport/codec call throws):
-    /// SwiftUI previews and platforms without a PlatformApple equivalent yet.
+    /// Portable environment that can never touch the network or a codec (every transport/codec call throws): the preview engine
+    /// (`camerabridged --preview`) and the tests.
     static func inert(directory: URL) -> BridgeEnvironment {
         BridgeEnvironment(dataDirectory: directory,
                           platform: PlatformServices(transport: InertTransport(), advertiser: NullServiceAdvertiser(),

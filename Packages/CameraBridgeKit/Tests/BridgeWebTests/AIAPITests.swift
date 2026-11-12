@@ -82,7 +82,7 @@ import TestSupport
         #expect(backend.read { $0.settings.ai } == AIDescriptionSettings(), "nothing was saved")
 
         // A refusal stops the whole request: the name and the port in the same patch are not applied.
-        let mixed = await session.send("PATCH", "/api/v1/settings", json: ["bridgeName": "Garage", "basePort": 22_000, "ai": ["dailyLimit": 0]])
+        let mixed = await session.send("PATCH", "/api/v1/settings", json: ["bridgeName": "Garage", "basePort": 21_150, "ai": ["dailyLimit": 0]])
         #expect(mixed.status == 400)
         let after = await session.get("/api/v1/settings")
         #expect(after.json["basePort"] as? Int == 21_100 && after.json["bridgeName"] as? String == "Hallway")

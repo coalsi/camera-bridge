@@ -268,9 +268,6 @@ struct CatalogState: Sendable {
     /// The closed files on one drive (retention candidates there).
     func closedFiles(on tier: StorageTier) -> [CatalogFile] { files.values.flatMap { $0 }.filter { !$0.isOpen && $0.tier == tier } }
 
-    /// The newest start of any file, on either drive (the clock-jump guard of the age rule).
-    var newestStartMs: Int64? { files.values.compactMap { $0.last?.startMs }.max() }
-
     /// The oldest start of any file, on either drive.
     var oldestStartMs: Int64? { files.values.compactMap { $0.first?.startMs }.min() }
 

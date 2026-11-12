@@ -1,6 +1,6 @@
 import Foundation
 
-/// The reading side of the NVR: what the Mac app's player and the box's web routes use to find and read recorded video. The one
+/// The reading side of the NVR: what the box's web routes (and the archived Mac app's player) use to find and read recorded video. The one
 /// seam between the recorder/store (BridgeEngine/NVR) and every consumer. Foundation only; implemented by `ArchiveStore`.
 public protocol ArchiveReading: Sendable {
     /// Activity per bin over `range`: `binCount` bins of equal length (the caller aligns `range.lowerBound` to a multiple of the bin length).

@@ -17,4 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (nginx, the TLS front of the secure address: nginx -t checks its configuration; the service is never started here.)
 RUN apt-get update && apt-get install -y --no-install-recommends dnsmasq-base nginx \
     && rm -rf /var/lib/apt/lists/*
+# mkosi makes its local package repository (--package-directory) with reprepro: build-image.sh puts the initrd's boot fallback there
+# (build-boot-fallback.sh, InitrdPackages= in mkosi.conf).
+RUN apt-get update && apt-get install -y --no-install-recommends reprepro \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src

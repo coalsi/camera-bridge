@@ -1,7 +1,7 @@
 import CameraAdapters
 import Foundation
 
-/// How a type of camera is added, as the Add Camera page lists it: the same types, words and steps as the Mac app's Camera Type page
+/// How a type of camera is added, as the Add Camera page lists it: the same types, words and steps as the archived Mac app's Camera Type page
 /// (`CameraType`), so the two stay in step. ONVIF/RTSP with automatic detection, brand presets for cameras that speak a vendor API,
 /// consoles and cloud services. Brand names are used here (and in the docs) only to say what is compatible.
 public struct CameraTypeSpec: Sendable, Encodable, Equatable {
@@ -96,8 +96,6 @@ public struct CameraTypeSpec: Sendable, Encodable, Equatable {
 
     /// The vendor the engine is asked to use (nil: detect).
     var cameraVendor: CameraVendor? { vendor.flatMap { CameraVendor(rawValue: $0) } }
-
-    var isCloud: Bool { group == .cloud }
 
     /// The service of a cloud or console type (`IntegrationSettings.service`).
     var service: IntegrationService? {
