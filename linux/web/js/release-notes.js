@@ -15,6 +15,14 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.136',
+    date: '2026-11-12',
+    title: 'A quieter system log',
+    items: [
+      'The system log no longer gets a line about thread priority several times a minute. The line came with 0.1.135 and was harmless.',
+    ],
+  },
+  {
     version: '0.1.135',
     date: '2026-11-11',
     title: 'Safer recordings, updates and ports',

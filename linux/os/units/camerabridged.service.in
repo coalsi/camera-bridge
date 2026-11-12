@@ -78,6 +78,10 @@ SystemCallErrorNumber=EPERM
 # Port 80 without root.
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
+# libdispatch gives each new worker thread the nice value of its priority, -2 for user-initiated work, which this service may not set (no
+# CAP_SYS_NICE): the thread runs at the normal priority, and libdispatch writes a line for it to the journal, several a minute on a busy box.
+# Only that line is dropped.
+LogFilterPatterns=~^Failed to set thread priority for worker thread
 UMask=0077
 LimitNOFILE=65536
 OOMScoreAdjust=-300

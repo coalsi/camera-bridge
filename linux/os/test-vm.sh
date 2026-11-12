@@ -906,6 +906,11 @@ if selected nvr; then
             ssh_has 'journalctl -b --no-pager -u camerabridged -o cat' 'does not let Camera Bridge read whether its clock is synchronized' \
                 && no "the daemon cannot read whether the clock is synchronized (its unit refuses adjtimex or clock_adjtime)" \
                 || ok "the daemon can read whether the clock is synchronized (no refusal in its log)"
+            # libdispatch writes a line for every new worker thread whose priority (nice -2 for user-initiated work) the unit may not set, and the
+            # reads above made such threads; the unit's LogFilterPatterns= keeps the line out of the journal.
+            ssh_has 'journalctl -b --no-pager -u camerabridged -o cat' 'Failed to set thread priority' \
+                && no "libdispatch's 'Failed to set thread priority' lines reach the journal (the unit's LogFilterPatterns= did not drop them)" \
+                || ok "libdispatch's line for each new worker thread stays out of the journal"
             if [ "$conformance_status" -eq 0 ]; then
                 ok "conformance.mjs (T07) finds the box within the contract"
             else

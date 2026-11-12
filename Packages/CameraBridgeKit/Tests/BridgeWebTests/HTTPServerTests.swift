@@ -312,7 +312,11 @@ final class RawClient: Sendable {
         let rig = Rig(limits: limits)
         let client = try await rig.connect()
         try await client.send("GET / HTTP/1.1\r\n")
-        for _ in 0..<5 { try await client.send(String(repeating: "a", count: 400)) }
+        // The server may answer and close as soon as the head passes the limit (during the third piece), before the last pieces are
+        // sent. A send then fails with `closed`: that is the refusal arriving early, not a failure, and the answer is still there to read.
+        for _ in 0..<5 {
+            do { try await client.send(String(repeating: "a", count: 400)) } catch TransportError.closed { break }
+        }
         #expect(try await client.reply()?.status == 431)
         await rig.server.stop()
     }
