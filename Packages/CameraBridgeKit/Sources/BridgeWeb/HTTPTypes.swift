@@ -92,6 +92,9 @@ public struct HTTPResponse: Sendable {
     /// ended first. A handler that took something for the body (a live or event slot, an archive slot) gives it back here as well as in
     /// the body's own `defer`, through one `ReleaseOnce`, so it is given back exactly once whichever way the answer goes.
     public var onDiscard: (@Sendable () -> Void)?
+    /// Runs once the server has written a buffered answer to the connection, and never when the write fails. For a route that must not act on
+    /// the system until its caller has the answer, such as dropping the VPN key of the very tunnel the request came through.
+    public var afterSend: (@Sendable () -> Void)?
 
     public init(status: Int, headers: HTTPHeaders = HTTPHeaders(), body: Body = .data(Data())) {
         self.status = status

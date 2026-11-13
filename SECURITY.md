@@ -47,17 +47,27 @@ box or network that is already compromised, or physical access to the box.
 - For AirPlay and CarPlay the app trades its key for an HLS ticket, which goes in the address of the video it opens
   (`/api/v1/hls/<ticket>/...`). That is a deliberate exception to "no token in an address": a ticket opens one camera, read-only, is random
   (256 bits), lives in memory only, ends 5 minutes after its last use (6 hours at most) and is lost when its device is removed; the key
-  itself is never accepted in an address. It is for the home network only for now.
+  itself is never accepted in an address. It reaches the box from away only through Away from home (next items).
 - Camera Bridge OS sends no telemetry. It talks to the cameras on your network and to the paired Home hub, to GitHub to
   check for updates, to a time server for the clock, to a camera maker's cloud only if you add a cloud camera, and to the AI
   service you choose, only for cameras with AI descriptions on, and only still pictures. While the secure address is on (it is
-  by default), it also talks to www.camera-bridge.app and Let's Encrypt, see the next item.
+  by default), it also talks to www.camera-bridge.app and Let's Encrypt, see the next item. While Away from home is on, it also tells www.camera-bridge.app its IPv6 address (the item after that).
 - The secure address (`https://<random name>.box.camera-bridge.app`): the box registers once with www.camera-bridge.app, sending its
   public key (the website sees the home's public internet address), tells the website its private home-network address whenever that changes
   (the website publishes it as the public DNS record of the box's name), and asks Let's Encrypt for a certificate, with the website
   answering the DNS challenge. Certificates are listed in public Certificate Transparency logs, so the random name can be found there.
   Video, the web page and passwords never go through the website. Turning off **Use the secure address** on the System page stops
   all of these calls.
+- Away from home (off by default; `docs/linux/USER-GUIDE.md`, section 14) is the box's own VPN, so a paired iPhone or a device with the WireGuard
+  app can reach it from away over IPv6. While it is on, the box opens one port to the internet: UDP 51820. WireGuard answers nobody without a
+  known key, so to a stranger the port looks closed. What arrives through the tunnel reaches only the box's HTTPS page (TCP 443) and ICMP, and
+  never the rule set for the home network; the box forwards nothing, so the tunnel is no way into the rest of the home, and the viewer key
+  and the pinned HTTPS name are still needed for every request. The box's WireGuard key is readable by root only (and a copy inline in the tunnel's netdev file in `/run`, readable by systemd-network); the box keeps only each device's
+  public key, and a WireGuard-app device's private key exists only in the daemon's memory and in the one answer that shows its QR code. Turning it
+  off, or removing a device, deletes the keys at once (unless the system fails to take a removal, in which case the card says so and the box tries again). The website, camera-bridge.app, only publishes one DNS record, a random away name whose
+  text is the box's IPv6 address and nothing else (never an address record, so nothing can be hosted under it); nothing of ours carries video, keys
+  or requests, and if the website is broken into it can only point the name elsewhere, which makes phones fail to connect because the box's key is
+  pinned. Someone who learns the away name learns the home's IPv6 address, and nothing answers them but the VPN port, which answers no one without a known key.
 - AI descriptions are the one feature that sends pictures from your cameras to a cloud service. They are off until you choose
   a service in Settings, save your own key for it (a model at home may need none) and switch AI descriptions on for a camera. Then each event on that camera
   sends at most 5 small still pictures from around it (JPEGs up to 768 pixels wide), the camera's name, the kind of event and

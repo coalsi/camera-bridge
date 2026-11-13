@@ -42,7 +42,7 @@ struct InterfaceAddress: Sendable, Equatable {
 /// interface's first IPv4 address, or its best IPv6 address without a scope (`preferredIPv6`; a link-local one only when
 /// there is no other). Without such an address the connection's address is answered (RTPStreamManagement then refuses the
 /// setup).
-enum StreamAddress {
+package enum StreamAddress {
     /// `controller`: the address the controller put in SetupEndpoints, which an IPv6 answer prefers to share a /64 with.
     static func accessoryAddress(localAddress: String, ipv6: Bool, interfaces: [InterfaceAddress], controller: String? = nil) -> String {
         let local = canonical(localAddress)
@@ -253,7 +253,7 @@ enum StreamAddress {
     }
 
     /// The address without a zone (`%en0`), IPv4-mapped IPv6 as IPv4, IPv6 in its canonical text form.
-    static func canonical(_ address: String) -> String {
+    package static func canonical(_ address: String) -> String {
         var bare = address
         if bare.hasPrefix("["), bare.hasSuffix("]") { bare = String(bare.dropFirst().dropLast()) }
         if let percent = bare.firstIndex(of: "%") { bare = String(bare[..<percent]) }
@@ -277,7 +277,7 @@ enum StreamAddress {
     // MARK: - Choosing where a stream goes
 
     /// The raw bytes of a numeric address: 4 (IPv4) or 16 (IPv6), nil when it is not one.
-    static func addressBytes(_ address: String) -> [UInt8]? {
+    package static func addressBytes(_ address: String) -> [UInt8]? {
         let text = canonical(address)
         if text.contains(":") {
             var raw = in6_addr()
@@ -290,7 +290,7 @@ enum StreamAddress {
     }
 
     /// Whether the first `bits` bits of both byte strings agree (and they are of one family).
-    static func samePrefix(_ lhs: [UInt8], _ rhs: [UInt8], bits: Int) -> Bool {
+    package static func samePrefix(_ lhs: [UInt8], _ rhs: [UInt8], bits: Int) -> Bool {
         guard lhs.count == rhs.count, bits >= 0, bits <= lhs.count * 8 else { return false }
         let whole = bits / 8
         guard lhs.prefix(whole) == rhs.prefix(whole) else { return false }

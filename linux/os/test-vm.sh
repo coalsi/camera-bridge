@@ -15,10 +15,10 @@
 #                      only way this script reaches the box, resets connections that arrive together on a macOS host (40 at once lose 12 to 16,
 #                      two at once lose one). guest runs the burst inside the box over ssh, on its own loopback, with the box's python3, and
 #                      leaves the burst out of conformance.mjs; host sends it from this computer. auto: guest on macOS, host elsewhere.
-#   --tests LIST       comma separated subset of: boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,wifi,recording-drive,
-#                      installer,install-boot,update (default: all but update). update needs --update-dir. daemon and the three nvr tests need an image
-#                      with the real camerabridged (they are skipped for --stub-daemon). nvr, nvr-archive and nvr-faults are documented in
-#                      docs/linux/BUILDING.md; their web client is linux/os/test-nvr.py.
+#   --tests LIST       comma separated subset of: boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,away,factory-reset,wifi,
+#                      recording-drive,installer,install-boot,update (default: all but update). update needs --update-dir. daemon and the three nvr tests
+#                      need an image with the real camerabridged (they are skipped for --stub-daemon), and so does away's check of the Settings card.
+#                      nvr, nvr-archive and nvr-faults are documented in docs/linux/BUILDING.md; their web client is linux/os/test-nvr.py.
 #   --update-dir DIR   release files (SHA256SUMS, SHA256SUMS.sig, cb-os_*) of a NEWER version, built with the same --pubkey as the
 #                      image; served from a fake "GitHub API" on the host. See docs/linux/BUILDING.md ("Testing updates").
 #   --broken-dir DIR   (optional, with the update test) release files of a still newer version whose daemon never starts:
@@ -64,7 +64,7 @@ die() { echo "error: $*" >&2; exit 1; }
 if [ -z "$arch" ]; then
     case $image in *arm64*) arch=arm64 ;; *amd64*) arch=amd64 ;; *) die "cannot tell the architecture from the file name; use --arch" ;; esac
 fi
-[ -n "$tests" ] || tests="boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,wifi,recording-drive,installer,install-boot"
+[ -n "$tests" ] || tests="boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,away,factory-reset,wifi,recording-drive,installer,install-boot"
 case $seed_files in ''|*[!0-9]*) die "--seed-files must be a number" ;; esac
 case $cpus in ''|*[!0-9]*) die "--cpus must be a number" ;; esac
 for tool in qemu-img curl ssh ssh-keygen; do command -v "$tool" >/dev/null || die "$tool is required"; done
@@ -398,6 +398,615 @@ nvr_ask_chrony() {
 # nvr_expired_files: how many files (.mp4 and .cbidx) of nvr-archive's expired recordings are on the box's disk.
 nvr_expired_files() {
     ssh_run "find $rec/$CAM_DIR/$OLD_FOREIGN_DAY $rec/$CAM_DIR/$OLD_EMPTY_DAY -type f \\( -name '*.mp4' -o -name '*.cbidx' \\) 2>/dev/null | wc -l" | tr -d ' '
+}
+
+# --- the away test --------------------------------------------------------------------------------------------------------
+# Away from home (docs/superpowers/specs/2026-11-12-away-from-home-design.md; linux/os/README.md, "Away from home"): cb-away keeps the WireGuard
+# interface wg-away and UDP 51820 in the firewall's set away_port. The test sends the away-set job the way the daemon sends it, and a WireGuard
+# peer in a network namespace inside the box (cbpeer, joined to the box by the veth pair cbv0/cbv1) plays a device away from home. The peer's
+# outer address, 2001:db8:cb::2, is reached through a link-local gateway, and cb-lan-prefixes leaves routes through a gateway out of the local
+# network, so the firewall treats that address like one on the internet.
+away_status=/run/camera-bridge/status/away.json
+away_job=/run/camera-bridge/status/away-set.json
+away_keys=/run/cb-away-test               # the test peers' keys: root only, on the box's /run
+away_box=10.123.45.1 away_peer_ip=10.123.45.2
+away_a="" away_b="" away_box_key="" away_box_ipv4="" away_handshake=0 away_cert=0 away_tls_dir=0
+
+# away_request JSON: the away-set request, written as the daemon writes it (as camerabridge, into its request folder), then up to 30 s for its
+# job. Succeeds when status/away-set.json says ok. The status the request before left is removed first: its "ok" would otherwise be read as
+# this request's before the job has even run.
+away_request() {
+    local n state=""
+    ssh_run "rm -f $away_job" || return 1
+    ssh_run "runuser -u camerabridge -- sh -c 'printf \"%s\\n\" \"\$1\" >/run/camera-bridge/requests/away-set.json' sh '$1'" || return 1
+    for ((n = 0; n < 30; n++)); do
+        state=$(ssh_run "jq -r .state $away_job 2>/dev/null" 2>/dev/null || true)
+        case $state in ok) return 0 ;; failed) break ;; esac
+        sleep 1
+    done
+    echo "        away-set: ${state:-no status}; away.json: $(ssh_run "jq -c '{state, message}' $away_status" 2>&1 || true)"
+    return 1
+}
+
+# away_on KEY: the request that turns Away from home on with one device, KEY at the peer's address, in the subnet 10.123.45.0/24.
+away_on() { printf '{"on": true, "port": 51820, "subnet": "10.123.45.0/24", "peers": [{"publicKey": "%s", "address": "%s"}]}' "$1" "$away_peer_ip"; }
+
+# away_script: runs the bash script on stdin on the box, with the test's values in its environment: A and B (the peers' public keys), KEY (the
+# box's), BOX and PEER (the tunnel addresses), IPV4 (the box's home address), KEYS (the folder of the peers' keys) and S (status/away.json).
+# It prints what the script printed and never fails: each check compares that output with what it expects, so a box that could not be
+# reached fails the check.
+away_script() {
+    ssh_run "export A='$away_a' B='$away_b' KEY='$away_box_key' BOX=$away_box PEER=$away_peer_ip IPV4='$away_box_ipv4' KEYS=$away_keys S=$away_status; bash -s" 2>&1 || true
+}
+
+# away_wait SECONDS COMMAND PATTERN: ssh_has, asked again every second until the output matches or the time is up.
+away_wait() {
+    local n
+    for ((n = 0; n < $1; n++)); do ssh_has "$2" "$3" && return 0; sleep 1; done
+    return 1
+}
+
+# away_ping: two pings from the peer to the box's tunnel address; succeeds when one is answered.
+away_ping() { ssh_run "ip netns exec cbpeer ping -c 2 -W 2 $away_box" >/dev/null 2>&1; }
+
+# away_peer_as a|b: the peer in cbpeer takes that test key and starts afresh. Its box peer is removed and added again, which drops the session
+# it holds: after the box's interface was made again, a session from before would wait some 15 s before shaking hands anew.
+away_peer_as() {
+    ssh_run "ip netns exec cbpeer wg set wgpeer private-key $away_keys/$1.key peer '$away_box_key' remove && ip netns exec cbpeer wg set wgpeer peer '$away_box_key' endpoint '[2001:db8:cb::1]:51820' allowed-ips $away_box/32,$away_box_ipv4/32" >/dev/null 2>&1
+}
+
+# away_id UNIT: the unit's invocation id, which every start of a unit renews.
+away_id() { ssh_run "systemctl show -p InvocationID --value $1" 2>/dev/null || true; }
+
+# away_restarted UNIT ID: waits up to 15 s for UNIT to run under an invocation id other than ID, which only a new start gives it. A unit that a
+# restart of the firewall reaches through PartOf= starts again after the firewall itself, so it may lag behind the command.
+away_restarted() {
+    local n id
+    for ((n = 0; n < 15; n++)); do
+        id=$(away_id "$1")
+        [ -n "$2" ] && [ -n "$id" ] && [ "$id" != "$2" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# away_reload_mark UNIT: the process id of UNIT's last ExecReload= run as systemd records it (0 before the first one).
+away_reload_mark() { ssh_run "systemctl show -p ExecReload --value $1 | sed -n 's/.* pid=\\([0-9]*\\) .*/\\1/p'" 2>/dev/null || true; }
+
+# away_reloaded UNIT MARK: waits up to 15 s for UNIT's ExecReload= to have run since MARK (away_reload_mark) and to have ended well.
+away_reloaded() {
+    local n mark
+    for ((n = 0; n < 15; n++)); do
+        mark=$(away_reload_mark "$1")
+        if [ -n "$2" ] && [ -n "$mark" ] && [ "$mark" != 0 ] && [ "$mark" != "$2" ]; then
+            ssh_has "systemctl show -p ExecReload --value $1" ' code=exited ; status=0[/ ]'
+            return
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# away_firewall ACTION UNIT...: runs systemctl ACTION UNIT... for the firewall, then restarts camera-bridge-ssh.service, which puts port 22 back
+# for this script's new connections (that unit does not follow the firewall). Both run in a unit of their own (systemd-run), so they finish
+# even if this SSH session were cut while the rules are loaded again. It fails as systemctl ACTION did (systemd-run --wait ends with the
+# status of the unit's command), and then prints the firewall's last log lines.
+away_firewall() {
+    ssh_run "systemd-run --wait --quiet --collect -- sh -c 'systemctl $*; rc=\$?; systemctl restart camera-bridge-ssh.service; exit \$rc'" >/dev/null 2>&1 && return 0
+    ssh_run 'journalctl -u nftables.service -n 5 --no-pager -o cat' 2>&1 | tr '\n' ' ' || true
+    return 1
+}
+
+# away_curl URL: curl from the peer's namespace; prints curl's exit status (0: an answer; 7: refused; 28: no answer within 4 s).
+away_curl() { ssh_run "ip netns exec cbpeer curl -skg -o /dev/null --max-time 4 '$1'; echo \$?" 2>/dev/null | tail -n 1 || true; }
+
+# away_dropped WHAT URL CONTROL PATTERN: WHAT, asked from the peer (curl URL), gets no answer at all: curl times out (28), so the firewall
+# dropped it, where a closed port would have refused it (7). That counts only when the box itself gets an answer from the same place (CONTROL,
+# run on the box, where lo lets it in, matches PATTERN) and the tunnel answers a ping right after: a missing listener or a tunnel that went
+# dead would time out too. Fails (after the result) when WHAT was not shown to be dropped.
+away_dropped() {
+    local rc
+    rc=$(away_curl "$2")
+    if [ "$rc" != 28 ]; then no "$1 was not dropped (curl exited ${rc:-without a status}; 28 is a time-out)"; return 1; fi
+    if ! ssh_has "$3" "$4"; then no "$1 timed out, but the box itself gets no answer there either, so this proves nothing"; return 1; fi
+    if ! away_ping; then no "$1 timed out, but the tunnel stopped answering pings, so this proves nothing"; return 1; fi
+    ok "$1 is dropped: curl timed out after 4 s, while the box itself gets an answer there and the tunnel still answers pings"
+}
+
+# run_away_test: the tunnel from the root side, step by step (the plan's Task 10). A step that the later ones need ends the test when it fails.
+run_away_test() {
+    local out pub id_nft id_away mark_nft mark_away
+    # Off by default: the boot unit ran and wrote the off status, and nothing is open.
+    out=$(away_script <<'EOS'
+state=$(systemctl is-active camera-bridge-away.service)
+[ "$state" = active ] || { echo "camera-bridge-away.service is $state"; exit; }
+jq -e '.state == "off" and .publicKey == null and .peers == []' "$S" >/dev/null 2>&1 || { echo "away.json: $(head -c 300 "$S" 2>&1)"; exit; }
+if ip link show wg-away >/dev/null 2>&1; then echo "wg-away exists"; exit; fi
+listing=$(nft list set inet camera_bridge away_port 2>&1) || { echo "no set away_port: $listing"; exit; }
+if grep -q elements <<<"$listing"; then echo "away_port holds $(grep elements <<<"$listing")"; exit; fi
+if systemctl is-active --quiet camera-bridge-away-status.timer; then echo "the status timer runs"; exit; fi
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "Away from home is off by default: camera-bridge-away.service is active, away.json says off, no wg-away, an empty away_port, no status timer" \
+        || no "Away from home is not off as on a fresh box: $out"
+
+    # 1. The test peers' keys, made on the box as a device makes its own.
+    out=$(away_script <<'EOS'
+rm -rf "$KEYS" && install -d -m 0700 "$KEYS" && cd "$KEYS" || exit
+umask 077
+for k in a b; do wg genkey >"$k.key" && wg pubkey <"$k.key" >"$k.pub" || exit; done
+cat a.pub b.pub
+EOS
+)
+    away_a=$(sed -n 1p <<<"$out") away_b=$(sed -n 2p <<<"$out")
+    if [[ $away_a =~ ^[A-Za-z0-9+/]{43}=$ && $away_b =~ ^[A-Za-z0-9+/]{43}=$ && $away_a != "$away_b" ]]; then
+        ok "the test peers' keys A and B were made on the box (wg genkey and wg pubkey, umask 077, in $away_keys)"
+    else
+        no "the test peers' keys could not be made on the box: $out"; return
+    fi
+    # The box's home address: the peer routes it through the tunnel too, as a phone does with the address its secure name points at. It is
+    # read from the box's own network interface (Ethernet or Wi-Fi), so it does not depend on a default route.
+    away_box_ipv4=$(away_script <<'EOS'
+ip -4 -o addr show scope global | awk '$2 ~ /^(en|eth|wl)/ {split($4, a, "/"); print a[1]; exit}'
+EOS
+)
+    if ! [[ $away_box_ipv4 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then no "the box's home IPv4 address could not be read: $away_box_ipv4"; return; fi
+
+    # 2. On with A at 10.123.45.2.
+    if ! away_request "$(away_on "$away_a")"; then no "Away from home could not be turned on with A: the away-set job did not end ok"; return; fi
+    ok "the away-set job turned Away from home on with A at $away_peer_ip (subnet 10.123.45.0/24)"
+    away_box_key=$(ssh_run "jq -r .publicKey $away_status" 2>/dev/null || true)
+    out=$(away_script <<'EOS'
+mode=$(stat -c %a:%U:%G "$S" 2>&1)
+[ "$mode" = 640:root:camerabridge ] || { echo "away.json is $mode"; exit; }
+jq -e '.state == "ok" and .message == null and (.publicKey | test("^[A-Za-z0-9+/]{43}=$")) and .port == 51820 and any(.peers[]; .publicKey == env.A)' "$S" \
+    >/dev/null 2>&1 || { echo "away.json: $(head -c 400 "$S" 2>&1)"; exit; }
+[ "$KEY" = "$(wg show wg-away public-key 2>&1)" ] || { echo "its publicKey is not wg-away's"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "away.json says ok, is 640 root:camerabridge, and holds wg-away's 44-character public key and device A" \
+        || { no "away.json is not what turning on should write: $out"; return; }
+    out=$(away_script <<'EOS'
+link=$(ip -o link show dev wg-away 2>&1) || { echo "no wg-away: $link"; exit; }
+grep -Eq '[<,]UP[,>]' <<<"$link" || { echo "wg-away is not up: $link"; exit; }
+grep -q ' mtu 1280 ' <<<"$link" || { echo "wg-away's MTU is not 1280: $link"; exit; }
+ip -o -4 addr show dev wg-away | grep -q " inet $BOX/24 " || { echo "wg-away's address: $(ip -o -4 addr show dev wg-away 2>&1)"; exit; }
+[ "$(wg show wg-away listen-port 2>&1)" = 51820 ] || { echo "wg-away listens on $(wg show wg-away listen-port 2>&1)"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "wg-away is up with $away_box/24, MTU 1280 and listen port 51820" || no "wg-away is not as it should be: $out"
+    ssh_has 'nft list set inet camera_bridge away_port' 'elements = \{ 51820 \}' && ok "the firewall's set away_port holds 51820, and nothing else" \
+        || no "away_port does not hold 51820 alone: $(ssh_run 'nft list set inet camera_bridge away_port' 2>&1 | tr '\n' ' ')"
+    out=$(away_script <<'EOS'
+mode=$(stat -c %a:%U /srv/system/away/private.key 2>&1)
+[ "$mode" = 600:root ] || { echo "private.key is $mode"; exit; }
+if runuser -u camerabridge -- cat /srv/system/away/private.key >/dev/null 2>&1; then echo "the daemon user can read private.key"; exit; fi
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "/srv/system/away/private.key is 600 root, and the daemon user cannot read it" || no "the box's private key is not kept from the daemon user: $out"
+    out=$(away_script <<'EOS'
+f=/run/systemd/network/50-wg-away.netdev
+mode=$(stat -c %a:%U:%G "$f" 2>&1)
+[ "$mode" = 640:root:systemd-network ] || { echo "the netdev is $mode"; exit; }
+if runuser -u camerabridge -- cat "$f" >/dev/null 2>&1; then echo "the daemon user can read the netdev, which holds the box's key"; exit; fi
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "50-wg-away.netdev (it holds the key for networkd) is 640 root:systemd-network, and the daemon user cannot read it" \
+        || no "networkd's file with the box's key is not as it should be: $out"
+    away_wait 5 'systemctl is-active camera-bridge-away-status.timer' '^active$' && ok "camera-bridge-away-status.timer is active" \
+        || no "camera-bridge-away-status.timer is not active"
+    out=$(away_script <<'EOS'
+k=$(cat /srv/system/away/private.key 2>/dev/null)
+[ "${#k}" -eq 44 ] || { echo "private.key holds no key"; exit; }
+found=$(grep -rlF -- "$k" /run/camera-bridge/status 2>/dev/null)
+[ -z "$found" ] || { echo "the key is in $found"; exit; }
+[ "$(journalctl -b --no-pager -o cat 2>/dev/null | grep -cF -- "$k")" = 0 ] || { echo "the key is in this boot's journal"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "no file under /run/camera-bridge/status and no line of this boot's journal holds the box's private key" \
+        || no "the box's private key leaked: $out"
+
+    # 3. A peer in a network namespace. Its WireGuard interface is made inside the namespace, so its socket stays there and its packets take
+    # the veth pair; each side reaches the other's /128 through the other's link-local address.
+    out=$(away_script <<'EOS'
+set -e
+ip netns add cbpeer
+ip link add cbv0 type veth peer name cbv1 netns cbpeer
+ip addr add fe80::1/64 dev cbv0 nodad
+ip addr add 2001:db8:cb::1/128 dev cbv0 nodad
+ip link set cbv0 up
+ip -n cbpeer link set lo up
+ip -n cbpeer addr add fe80::2/64 dev cbv1 nodad
+ip -n cbpeer addr add 2001:db8:cb::2/128 dev cbv1 nodad
+ip -n cbpeer link set cbv1 up
+ip route add 2001:db8:cb::2/128 via fe80::2 dev cbv0
+ip -n cbpeer route add 2001:db8:cb::1/128 via fe80::1 dev cbv1
+ip -n cbpeer link add wgpeer type wireguard
+ip netns exec cbpeer wg set wgpeer private-key "$KEYS/a.key" peer "$KEY" endpoint '[2001:db8:cb::1]:51820' allowed-ips "$BOX/32,$IPV4/32"
+ip -n cbpeer addr add "$PEER/32" dev wgpeer
+ip -n cbpeer link set wgpeer up
+ip -n cbpeer route add "$BOX/32" dev wgpeer
+ip -n cbpeer route add "$IPV4/32" dev wgpeer
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "a WireGuard peer with key A runs in the namespace cbpeer: outer address 2001:db8:cb::2, the box's at [2001:db8:cb::1]:51820, routes to $away_box and $away_box_ipv4" \
+        || { no "the peer's namespace could not be set up: $(tr '\n' ' ' <<<"$out")"; return; }
+
+    # 4. The handshake: the first ping through the tunnel starts it.
+    ssh_run "ip netns exec cbpeer ping -c 3 -W 2 $away_box" >/dev/null 2>&1 && ok "a ping from the peer through the tunnel to $away_box is answered" \
+        || no "the peer's ping through the tunnel to $away_box was not answered"
+    out=$(away_script <<'EOS'
+t=$(wg show wg-away latest-handshakes 2>&1 | awk -v a="$A" '$1 == a {print $2}')
+[ "${t:-0}" -gt 0 ] 2>/dev/null || { echo "wg show wg-away latest-handshakes gives A '$t'"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "wg show wg-away latest-handshakes gives A a handshake" || no "wg-away had no handshake with A: $out"
+    ssh_run 'systemctl start camera-bridge-away-status.service' >/dev/null 2>&1 || true
+    out=$(away_script <<'EOS'
+jq -e 'any(.peers[]; .publicKey == env.A and .latestHandshake > 0 and .endpoint == "2001:db8:cb::2")' "$S" >/dev/null 2>&1 \
+    || { echo "its peers: $(jq -c .peers "$S" 2>&1)"; exit; }
+echo yes
+EOS
+)
+    if [ "$out" = yes ]; then
+        away_handshake=1
+        ok "after camera-bridge-away-status.service, away.json gives A a latestHandshake and the endpoint 2001:db8:cb::2 (without its port)"
+    else
+        no "away.json does not report A's handshake from 2001:db8:cb::2: $out"
+    fi
+
+    # 5. HTTPS through the tunnel. The TLS front (nginx) starts only once a certificate is installed: a box without one gets a throw-away
+    # self-signed certificate for this test, made as test-static.sh makes one for nginx -t, and loses it again at the end (away_cleanup).
+    if ssh_run 'test -s /srv/system/tls/fullchain.pem && test -s /srv/system/tls/privkey.pem' >/dev/null 2>&1; then
+        echo "        (the box has a certificate; nginx serves it)"
+    else
+        ssh_run 'test -d /srv/system/tls' >/dev/null 2>&1 || away_tls_dir=1
+        away_cert=1
+        ssh_run 'install -d -m 0700 /srv/system/tls && umask 077 && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /srv/system/tls/privkey.pem -out /srv/system/tls/fullchain.pem -days 1 -subj /CN=cb-away-test' >/dev/null 2>&1 || true
+    fi
+    ssh_run 'systemctl start nginx.service' >/dev/null 2>&1 || true
+    ssh_has 'systemctl is-active nginx.service' '^active$' && ok "the TLS front (nginx) runs$([ "$away_cert" -eq 0 ] || echo ' with a throw-away certificate')" \
+        || no "nginx does not run: $(ssh_run 'journalctl -u nginx.service -n 5 --no-pager -o cat' 2>&1 | tr '\n' ' ')"
+    ssh_has "ip netns exec cbpeer curl -sk --max-time 5 https://$away_box/api/v1/status | jq -e 'type == \"object\" and length > 0'" '^true$' \
+        && ok "https://$away_box/api/v1/status answers JSON through the tunnel" || no "https://$away_box/api/v1/status did not answer JSON through the tunnel"
+    ssh_has "ip netns exec cbpeer curl -sk --max-time 5 https://$away_box_ipv4/api/v1/status | jq -e 'type == \"object\" and length > 0'" '^true$' \
+        && ok "https://$away_box_ipv4/api/v1/status (the box's home address) answers JSON through the tunnel" \
+        || no "https://$away_box_ipv4/api/v1/status (the box's home address) did not answer JSON through the tunnel"
+
+    # 6. Nothing else through the tunnel, although the daemon listens on port 80 and SSH is on in the VM.
+    away_dropped "Plain HTTP to $away_box (the daemon's port 80) through the tunnel" "http://$away_box/api/v1/status" \
+        "curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://$away_box/api/v1/status" '^[1-5][0-9]{2}$' || true
+    away_dropped "SSH (TCP 22) at $away_box through the tunnel" "http://$away_box:22/" \
+        "timeout 4 bash -c 'exec 3<>/dev/tcp/$away_box/22 && head -c 4 <&3'" '^SSH-' || true
+    away_dropped "Plain HTTP to the box's home address $away_box_ipv4 through the tunnel" "http://$away_box_ipv4/api/v1/status" \
+        "curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://$away_box_ipv4/api/v1/status" '^[1-5][0-9]{2}$' || true
+
+    # 7. The outer address is not the local network: plain HTTP from it is dropped like any address on the internet, while its WireGuard
+    # handshake on UDP 51820, which is open to any address, got through above.
+    if away_dropped "Plain HTTP from the peer's outer address 2001:db8:cb::2 to the box's 2001:db8:cb::1 (outside the tunnel)" "http://[2001:db8:cb::1]/api/v1/status" \
+        "curl -sg -o /dev/null -w '%{http_code}' --max-time 4 'http://[2001:db8:cb::1]/api/v1/status'" '^[1-5][0-9]{2}$'; then
+        [ "$away_handshake" -eq 1 ] && ok "UDP 51820 is open to any address: the handshake came from 2001:db8:cb::2, which is not the local network" \
+            || no "no handshake from 2001:db8:cb::2 was reported, so UDP 51820 is not shown to be open to an address outside the local network"
+    fi
+
+    # 8. Another list of devices: B alone, at the address A had. A's key must stop working at once; B's works from the same place.
+    if ! away_request "$(away_on "$away_b")"; then no "Away from home could not be given another list of devices (B alone)"; return; fi
+    out=$(ssh_run 'wg show wg-away peers' 2>&1 || true)
+    [ "$out" = "$away_b" ] && ok "another list of devices: wg-away now holds exactly B" || no "wg-away holds these peers instead of B alone: $(tr '\n' ' ' <<<"$out")"
+    if ! away_peer_as a; then no "the peer could not take key A again"
+    elif away_ping; then no "A, the device that was removed, still reaches the box through the tunnel"
+    elif ! away_peer_as b; then no "the peer could not take key B"
+    elif ! away_ping; then no "B, the device now listed, does not reach the box through the tunnel"
+    else ok "A, the device that was removed, no longer reaches the box (its ping goes unanswered), while B gets through from the same place"
+    fi
+
+    # 9. What a boot does: networkd's files in /run are gone and the interface with them, and camera-bridge-away.service makes both again from
+    # what is kept. Each restart below must give the units a new invocation id, so no check passes on a unit that never ran again.
+    pub=$(ssh_run 'wg show wg-away public-key' 2>/dev/null || true)
+    id_away=$(away_id camera-bridge-away.service)
+    if ! out=$(ssh_run 'networkctl delete wg-away && systemctl restart camera-bridge-away.service' 2>&1); then
+        no "networkctl delete wg-away or the restart of camera-bridge-away.service failed: $(tr '\n' ' ' <<<"$out")"
+    elif ! away_restarted camera-bridge-away.service "$id_away"; then
+        no "camera-bridge-away.service did not start again (its invocation id stayed ${id_away:-unknown})"
+    elif away_wait 15 'ip -o link show dev wg-away' '[<,]UP[,>]' && [ -n "$pub" ] && [ "$(ssh_run 'wg show wg-away public-key' 2>/dev/null || true)" = "$pub" ] \
+        && [ "$(ssh_run 'wg show wg-away peers' 2>/dev/null || true)" = "$away_b" ]; then
+        ok "after networkctl delete wg-away, camera-bridge-away.service started again and made wg-away again with the same public key and B"
+    else
+        no "camera-bridge-away.service did not make wg-away again as it was (public key ${pub:-unknown}; now: $(ssh_run 'wg show wg-away public-key; wg show wg-away peers' 2>&1 | tr '\n' ' '))"
+    fi
+    away_peer_as b && away_ping && ok "B's ping through the tunnel is answered again" || no "B's ping through the tunnel is not answered after the restart"
+    # A restart of the firewall empties its sets. camera-bridge-away.service follows it (PartOf=nftables.service): it takes the tunnel down with
+    # the chain and puts the tunnel and the port back.
+    id_nft=$(away_id nftables.service) id_away=$(away_id camera-bridge-away.service)
+    if ! out=$(away_firewall restart nftables.service); then
+        no "systemctl restart nftables.service failed: $out"
+    elif ! away_restarted nftables.service "$id_nft" || ! away_restarted camera-bridge-away.service "$id_away"; then
+        no "a restart of the firewall did not start nftables.service and camera-bridge-away.service again (their invocation ids stayed)"
+    elif away_wait 15 "jq -r .state $away_status" '^ok$' && ssh_has 'nft list set inet camera_bridge away_port' 'elements = \{ 51820 \}' \
+        && ssh_has 'ip -o link show dev wg-away' '[<,]UP[,>]' && [ "$(ssh_run 'wg show wg-away peers' 2>/dev/null || true)" = "$away_b" ]; then
+        ok "a restart of the firewall (nftables.service, camera-bridge-away.service after it) brought wg-away with B, 51820 in away_port and the ok status back"
+    else
+        no "after a restart of the firewall the tunnel is not back: $(ssh_run "nft list set inet camera_bridge away_port | grep elements; ip -o link show dev wg-away; jq -c '{state, message}' $away_status" 2>&1 | tr '\n' ' ')"
+    fi
+    away_peer_as b && away_ping && ok "B's ping through the tunnel is answered after the firewall's restart" || no "B's ping through the tunnel is not answered after the firewall's restart"
+    # A reload of the firewall loads its rules again too, which empties away_port, and camera-bridge-away.service follows it
+    # (ReloadPropagatedFrom=nftables.service) with cb-away apply. systemd's record of both units' last ExecReload= run must change.
+    mark_nft=$(away_reload_mark nftables.service) mark_away=$(away_reload_mark camera-bridge-away.service)
+    if ! out=$(away_firewall reload nftables.service); then
+        no "systemctl reload nftables.service failed: $out"
+    elif ! away_reloaded nftables.service "$mark_nft" || ! away_reloaded camera-bridge-away.service "$mark_away"; then
+        no "a reload of the firewall did not run the ExecReload= of nftables.service and camera-bridge-away.service (marks ${mark_nft:-?} and ${mark_away:-?})"
+    elif away_wait 15 'nft list set inet camera_bridge away_port' 'elements = \{ 51820 \}' && away_peer_as b && away_ping; then
+        ok "a reload of the firewall, which camera-bridge-away.service followed, left 51820 in away_port, and B's ping is answered"
+    else
+        no "after a reload of the firewall: $(ssh_run "nft list set inet camera_bridge away_port | grep elements; jq -c '{state, message}' $away_status" 2>&1 | tr '\n' ' ')"
+    fi
+    # A stopped firewall flushes the chain that keeps the tunnel's devices to the HTTPS page, so the tunnel must go with it (cb-away down, run by
+    # camera-bridge-away.service's stop) and the status must say failed. A moment's wait first: networkd would make wg-away again shortly after
+    # a reload that still found its netdev file. Then the firewall and the units that stopped with it are started again.
+    id_nft=$(away_id nftables.service) id_away=$(away_id camera-bridge-away.service)
+    out=$(ssh_run 'systemctl stop nftables.service' 2>&1) || no "systemctl stop nftables.service failed: $(tr '\n' ' ' <<<"$out")"
+    sleep 3
+    out=$(away_script <<'EOS'
+state=$(systemctl is-active camera-bridge-away.service)
+[ "$state" = inactive ] || { echo "camera-bridge-away.service is $state"; exit; }
+if ip link show wg-away >/dev/null 2>&1; then echo "wg-away is still there"; exit; fi
+jq -e '.state == "failed"' "$S" >/dev/null 2>&1 || { echo "away.json: $(head -c 300 "$S" 2>&1)"; exit; }
+echo "yes $(jq -r .message "$S")"
+EOS
+)
+    case $out in
+        "yes "*) ok "with the firewall stopped, camera-bridge-away.service stopped too: no wg-away, and away.json says failed (\"${out#yes }\")" ;;
+        *) no "with the firewall stopped the tunnel did not go: $out" ;;
+    esac
+    if ! out=$(away_firewall start nftables.service camera-bridge-lan-prefixes.service camera-bridge-guard.service camera-bridge-away.service); then
+        no "the firewall and the units that stopped with it did not start again: $out"
+    elif ! away_restarted nftables.service "$id_nft" || ! away_restarted camera-bridge-away.service "$id_away"; then
+        no "nftables.service and camera-bridge-away.service did not start again (their invocation ids stayed)"
+    elif away_wait 15 "jq -r .state $away_status" '^ok$' && ssh_has 'nft list set inet camera_bridge away_port' 'elements = \{ 51820 \}' \
+        && [ "$(ssh_run 'wg show wg-away peers' 2>/dev/null || true)" = "$away_b" ] && away_peer_as b && away_ping; then
+        ok "the firewall started again and camera-bridge-away.service brought the tunnel back: B's ping is answered"
+    else
+        no "the tunnel did not come back after the firewall was started again: $(ssh_run "jq -c '{state, message}' $away_status" 2>&1)"
+    fi
+
+    # 10. Off removes everything: the files networkd reads go first, so its reload cannot make the interface again, which a moment's wait shows.
+    if ! away_request '{"on": false}'; then no "Away from home could not be turned off: the away-set job did not end ok"; return; fi
+    sleep 3
+    out=$(away_script <<'EOS'
+if ip link show wg-away >/dev/null 2>&1; then echo "wg-away is still there"; exit; fi
+listing=$(nft list set inet camera_bridge away_port 2>&1) || { echo "no set away_port: $listing"; exit; }
+if grep -q elements <<<"$listing"; then echo "away_port still holds $(grep elements <<<"$listing")"; exit; fi
+for f in /srv/system/away/private.key /srv/system/away/state.json; do [ ! -e "$f" ] || { echo "$f is still there"; exit; }; done
+if compgen -G '/run/systemd/network/50-wg-away.*' >/dev/null; then echo "$(echo /run/systemd/network/50-wg-away.*) still there"; exit; fi
+state=$(systemctl is-active camera-bridge-away-status.timer)
+[ "$state" = inactive ] || { echo "the status timer is $state"; exit; }
+jq -e '.state == "off" and .publicKey == null and .peers == []' "$S" >/dev/null 2>&1 || { echo "away.json: $(head -c 300 "$S" 2>&1)"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "turned off: no wg-away, an empty away_port, no private.key or state.json, no 50-wg-away.* for networkd, the timer inactive, away.json off" \
+        || no "turning Away from home off left something behind: $out"
+}
+
+# away_cleanup: the peer's namespace (its veth end, and with it the box's end and its WireGuard interface), the test keys and a throw-away
+# certificate with the nginx started for it go. Away from home is turned off first when the test stopped while it was on.
+away_cleanup() {
+    local out
+    if ! ssh_has "jq -r .state $away_status" '^off$'; then
+        away_request '{"on": false}' || no "Away from home could not be turned off after the test stopped early"
+    fi
+    ssh_run "ip netns del cbpeer; rm -rf $away_keys" >/dev/null 2>&1 || true
+    # The namespace's devices go when the kernel frees it, a moment after ip netns del.
+    away_wait 10 'ip link show cbv0 >/dev/null 2>&1 || echo gone' '^gone$' || true
+    out=$(away_script <<'EOS'
+if ip netns list | grep -qw cbpeer; then echo "the namespace cbpeer is still there"; exit; fi
+if ip link show cbv0 >/dev/null 2>&1; then echo "the veth end cbv0 is still there"; exit; fi
+if [ -e "$KEYS" ]; then echo "$KEYS is still there"; exit; fi
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "the peer's namespace, its veth pair and the test keys are gone" || no "the away test left something behind: $out"
+    [ "$away_cert" -eq 1 ] || return 0
+    # Only the test's own certificate goes, with the nginx started for it: the secure address may have installed a real one since, which stays.
+    out=$(away_script <<'EOS'
+f=/srv/system/tls/fullchain.pem k=/srv/system/tls/privkey.pem
+[ -e "$f" ] || { echo "the throw-away certificate went missing during the test"; exit; }
+openssl x509 -noout -subject -in "$f" 2>/dev/null | grep -Eq 'CN ?= ?cb-away-test$' || { echo other; exit; }
+systemctl stop nginx.service && rm -f "$f" "$k" || exit
+if [ -e "$f" ] || [ -e "$k" ] || systemctl is-active --quiet nginx.service; then echo "a certificate file or nginx is still there"; exit; fi
+echo removed
+EOS
+)
+    case $out in
+        removed)
+            [ "$away_tls_dir" -eq 0 ] || ssh_run 'rmdir /srv/system/tls' >/dev/null 2>&1 || true
+            ok "the throw-away certificate (CN=cb-away-test) is gone and nginx stopped again" ;;
+        other) echo "        (the certificate in /srv/system/tls is no longer the test's own: it stays, and so does nginx)" ;;
+        *) no "the throw-away certificate was not removed: $out" ;;
+    esac
+}
+
+# away_block_websites: while the card is turned on and off, the box reaches no web server on the internet. Turning Away from home off asks the
+# Camera Bridge website to delete the box's away record, and a test VM's secure address registers there by itself when it can. So a throw-away
+# table, cb_away_test, answers every connection the box opens to TCP 443 outside the private, link-local and loopback ranges with a reset: the
+# call fails at once and stays owed, and the factory reset after this test erases the debt. It matches nothing that leaves through lo (the
+# box's own 443) and no other port (SSH). A timer on the box deletes the table after 10 minutes should this script never get to it.
+away_block_websites() {
+    local out
+    out=$(away_script <<'EOS'
+systemctl stop cb-away-test-unblock.timer >/dev/null 2>&1
+systemctl reset-failed cb-away-test-unblock.timer cb-away-test-unblock.service >/dev/null 2>&1
+nft delete table inet cb_away_test >/dev/null 2>&1
+nft -f - <<'NFT' || exit
+table inet cb_away_test {
+	chain out {
+		type filter hook output priority filter; policy accept;
+		oifname "lo" accept
+		ip daddr != { 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 443 counter reject with tcp reset
+		ip6 daddr != { ::1, fc00::/7, fe80::/10, fec0::/10 } tcp dport 443 counter reject with tcp reset
+	}
+}
+NFT
+systemd-run --quiet --collect --unit=cb-away-test-unblock --on-active=10min nft delete table inet cb_away_test || exit
+[ "$(nft list chain inet cb_away_test out 2>/dev/null | grep -c 'tcp dport 443 counter packets [0-9]* bytes [0-9]* reject with tcp reset')" = 2 ] \
+    || { echo "the table is not as written: $(nft list chain inet cb_away_test out 2>&1 | tr '\n' ' ')"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "a throw-away table (cb_away_test) refuses the box's outbound HTTPS to the internet while the card is turned on and off" \
+        || { no "the throw-away table that keeps the box off the internet's web servers is not in place, so the card is not turned on and off: $out"; return 1; }
+}
+
+# away_unblock_websites: deletes the throw-away table and its timer, and says how many packets the table refused. It is run whatever happened
+# before it, and when there is no table it only checks that there is none.
+away_unblock_websites() {
+    local out
+    out=$(away_script <<'EOS'
+n=$(nft list chain inet cb_away_test out 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "packets") s += $(i + 1)} END {print s + 0}')
+nft delete table inet cb_away_test >/dev/null 2>&1
+systemctl stop cb-away-test-unblock.timer >/dev/null 2>&1
+if nft list table inet cb_away_test >/dev/null 2>&1; then echo "it is still there"; exit; fi
+echo "yes $n"
+EOS
+)
+    case $out in
+        "yes "*) ok "the throw-away table is gone again (it refused ${out#yes } packets to TCP 443 on the internet)" ;;
+        *) no "the throw-away table could not be removed: $out" ;;
+    esac
+}
+
+# away_card: the daemon's side, through the page's routes with the owner's session. The card shows the box's global IPv6 address only while
+# Away from home is on, so it is turned on and off as the page does, and the daemon's own away-set requests go through cb-away too. With an
+# address on the box the card names it; without one it says no_ipv6, which a VM without a global address shows whether the daemon could read
+# the IPv6 default route or not. So the read itself is checked first, inside the daemon's own sandbox: /proc/self/net/ipv6_route, since its
+# unit's ProcSubset=pid hides /proc/net. The card is turned on and off only behind the throw-away table (away_block_websites), which comes down
+# again whatever the card did.
+away_card() {
+    local out want
+    # nsenter joins the daemon's mount namespace, where /proc is its own (ProtectProc=invisible, ProcSubset=pid), as the daemon's user.
+    out=$(away_script <<'EOS'
+pid=$(systemctl show camerabridged -p MainPID --value)
+[[ $pid =~ ^[1-9][0-9]*$ ]] || { echo "camerabridged has no main process"; exit; }
+view=$(nsenter -t "$pid" -m -S "$(id -u camerabridge)" -G "$(id -g camerabridge)" -- sh -c \
+    'if [ -e /proc/net/ipv6_route ]; then echo visible; else echo hidden; fi; cat /proc/self/net/ipv6_route' 2>&1) \
+    || { echo "nsenter into the daemon's sandbox failed: $view"; exit; }
+[ "$(head -n 1 <<<"$view")" = hidden ] || { echo "/proc/net is visible in the daemon's sandbox (no ProcSubset=pid), so this is not the daemon's own view"; exit; }
+[ "$(tail -n +2 <<<"$view" | grep -c .)" -gt 0 ] || { echo "/proc/self/net/ipv6_route is empty in the daemon's sandbox"; exit; }
+inside=$(tail -n +2 <<<"$view" | awk '$1 ~ /^0+$/ && $2 == "00" && $10 != "lo" {print $10}' | sort -u | paste -sd ' ' -)
+outside=$(ip -6 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u | paste -sd ' ' -)
+[ "$inside" = "$outside" ] || { echo "the daemon's sandbox shows the IPv6 default route through '$inside', root through '$outside'"; exit; }
+echo "yes ${outside:-none}"
+EOS
+)
+    case $out in
+        "yes "*) ok "in the daemon's sandbox, where /proc/net is hidden, its user reads /proc/self/net/ipv6_route and sees the IPv6 default route root sees (through: ${out#yes })" ;;
+        *) no "the daemon's read of the IPv6 routes in its sandbox: $out" ;;
+    esac
+    if is_stub_daemon; then echo "  (the Settings card is skipped: this image has the stub daemon)"; return; fi
+    # What root sees: the global unicast (2000::/3) addresses on the interface of the IPv6 default route, where the daemon looks for them.
+    out=$(away_script <<'EOS'
+echo looked
+dev=$(ip -6 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+[[ $dev == eth* || $dev == en* || $dev == wl* ]] || exit
+ip -6 -o addr show dev "$dev" scope global -tentative -dadfailed | awk '{split($4, a, "/"); print a[1]}' | grep -Ei '^[23][0-9a-f]{0,3}:' || true
+EOS
+)
+    if [ "$(head -n 1 <<<"$out")" != looked ]; then no "root's look at the box's IPv6 addresses failed: $out"; return; fi
+    want=$(tail -n +2 <<<"$out")
+    echo "        global IPv6 addresses on the default route's interface: $(paste -sd ' ' - <<<"${want:-none}")"
+    if away_block_websites; then away_card_page "$want"; fi
+    away_unblock_websites
+}
+
+# away_card_page WANT: the page's client turns Away from home on and off and the card is checked against WANT, the box's global IPv6 addresses as
+# root sees them (none: no_ipv6). After each turn the system must have followed the daemon's own away-set request.
+away_card_page() {
+    local want=$1 out line code on state address
+    # The page's client: signs in (or sets the password on a box that has none) and prints one line per answer of the card:
+    # LABEL STATUS ON STATE ADDRESS PROBLEM ("-" for none).
+    cat >"$work/away-client.py" <<'PY'
+import http.cookiejar, json, sys, urllib.error, urllib.request
+port, password, phase = sys.argv[1], sys.argv[2], sys.argv[3]
+base = "http://127.0.0.1:%s" % port
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+csrf = ""
+def call(method, path, body=None):
+    headers = {"Origin": base, "X-CSRF-Token": csrf}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    try:
+        with opener.open(urllib.request.Request(base + path, data=data, headers=headers, method=method), timeout=100) as r:
+            code, raw = r.status, r.read()
+    except urllib.error.HTTPError as e:
+        code, raw = e.code, e.read()
+    try:
+        return code, json.loads(raw or b"{}")
+    except ValueError:
+        return code, {}
+code, info = call("GET", "/api/v1/session")
+how = "setup" if info.get("setupRequired") else "login"
+code, answer = call("POST", "/api/v1/auth/" + how, {"password": password})
+csrf = answer.get("csrfToken", "")
+print("signin", how, code)
+def show(label, code, card):
+    print(label, code, card.get("on"), card.get("state") or "-", card.get("address") or "-", card.get("problem") or card.get("message") or "-")
+if phase == "on":
+    show("before", *call("GET", "/api/v1/away"))
+    show("on", *call("POST", "/api/v1/away", {"on": True}))
+    show("again", *call("GET", "/api/v1/away"))
+else:
+    show("off", *call("POST", "/api/v1/away", {"on": False}))
+PY
+    ensure_admin_pw   # the daemon test and the nvr tests sign in with the same password
+    out=$(python3 -I "$work/away-client.py" "$http_port" "$admin_pw" on 2>&1 || true)
+    echo "$out" | sed 's/^/        /'
+    grep -Eq '^signin (setup 201|login 200)$' <<<"$out" || { no "the page's client could not sign in: $(grep '^signin' <<<"$out" || echo "$out" | tail -n 1)"; return; }
+    grep -q '^before 200 False off - -$' <<<"$out" && ok "GET /api/v1/away answers the Settings card with the owner's session: off" \
+        || no "GET /api/v1/away did not answer the off card: $(grep '^before' <<<"$out" || true)"
+    line=$(grep '^on ' <<<"$out" || true)
+    read -r _ code on state address _ <<<"$line" || true
+    if [ -z "$want" ]; then
+        [ "$line" = "on 200 True no_ipv6 - -" ] && grep -q '^again 200 True no_ipv6 - -$' <<<"$out" \
+            && ok "turned on through the page, the card says no_ipv6, as the box has no global IPv6 address on its default route's interface" \
+            || no "the card does not say no_ipv6 although the box has no global IPv6 address: ${line:-no answer}"
+    else
+        [ "$code" = 200 ] && [ "$on" = True ] && [[ $state =~ ^(setup|working|address_changed)$ ]] && grep -qxiF -- "$address" <<<"$want" \
+            && ok "turned on through the page, the card reports the box's global IPv6 address $address ($state)" \
+            || no "the card does not report one of the box's global IPv6 addresses ($(paste -sd ' ' - <<<"$want")): ${line:-no answer}"
+    fi
+    out=$(away_script <<'EOS'
+jq -e '.state == "ok" and .peers == [] and (.publicKey | length) == 44' "$S" >/dev/null 2>&1 || { echo "away.json: $(head -c 300 "$S" 2>&1)"; exit; }
+ip -o -4 addr show dev wg-away 2>/dev/null | grep -Eq ' inet 10\.[0-9]{1,3}\.[0-9]{1,3}\.1/24 ' || { echo "wg-away: $(ip -o -4 addr show dev wg-away 2>&1)"; exit; }
+nft list set inet camera_bridge away_port 2>/dev/null | grep -Eq 'elements = \{ 51820 \}' || { echo "51820 is not in away_port"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "the daemon's own away-set request reached cb-away: wg-away is up in the subnet the daemon chose, with no devices yet, and 51820 is open" \
+        || no "the daemon turned Away from home on, but the system did not follow: $out"
+    out=$(python3 -I "$work/away-client.py" "$http_port" "$admin_pw" off 2>&1 || true)
+    echo "$out" | sed 's/^/        /'
+    grep -q '^off 200 False off - -$' <<<"$out" && ok "turned off through the page, the card says off" || no "turning Away from home off through the page answered: $(grep '^off' <<<"$out" || echo "$out" | tail -n 1)"
+    sleep 3   # (as after the test's own off: networkd would make wg-away again a moment after a reload that still found its file)
+    out=$(away_script <<'EOS'
+if ip link show wg-away >/dev/null 2>&1; then echo "wg-away is still there"; exit; fi
+listing=$(nft list set inet camera_bridge away_port 2>&1) || { echo "no set away_port: $listing"; exit; }
+if grep -q elements <<<"$listing"; then echo "away_port still holds $(grep elements <<<"$listing")"; exit; fi
+jq -e '.state == "off"' "$S" >/dev/null 2>&1 || { echo "away.json: $(head -c 300 "$S" 2>&1)"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "the daemon's off reached cb-away too: no wg-away, an empty away_port, away.json off" || no "the daemon turned Away from home off, but the system did not follow: $out"
 }
 
 
@@ -1092,6 +1701,17 @@ if selected requests; then
     ssh_run 'runuser -u camerabridge -- cat /srv/system/ssh/authorized_keys' 2>/dev/null && no "daemon user can read the SSH keys folder" || ok "daemon user cannot read the SSH folder"
 fi
 
+if selected away; then
+    echo "==> Away from home: the WireGuard tunnel, a peer from away in a network namespace, the firewall, the Settings card"
+    away_pid=$(ssh_run 'systemctl show camerabridged -p MainPID --value' 2>/dev/null || true)
+    run_away_test
+    away_cleanup
+    away_card
+    # The firewall stopped and started, the tunnel came and went, and the daemon read the routes in its sandbox: it must have kept running.
+    [ -n "$away_pid" ] && [ "$away_pid" != 0 ] && [ "$(ssh_run 'systemctl show camerabridged -p MainPID --value' 2>/dev/null || true)" = "$away_pid" ] \
+        && ok "the daemon is still the same process after the away test" || no "the daemon was restarted during the away test (it was pid ${away_pid:-unknown})"
+fi
+
 if selected factory-reset; then
     echo "==> factory reset through the marker file on the boot partition"
     key_before=$(ssh_run 'sha256sum /var/lib/camera-bridge/secrets/master.key | cut -d" " -f1')
@@ -1104,6 +1724,10 @@ if selected factory-reset; then
     fi
     # A saved Wi-Fi network (its password is in the file) and a test update source must not survive either.
     ssh_run "printf '[connection]\\nid=Maple Cottage\\n[wifi-security]\\npsk=not-a-real-password\\n' > /srv/system/network-connections/test.nmconnection; chmod 0600 /srv/system/network-connections/test.nmconnection" >/dev/null 2>&1 || true
+    # Nor Away from home's request and the box's VPN key. The request put here is a valid "on" one: cb-away's own apply at boot removes an
+    # "off" or damaged state.json together with the key, which would pass the check after the reset without the reset.
+    ssh_run "install -d -m 0700 /srv/system/away && umask 077 && printf '%s\\n' '{\"on\":true,\"port\":51820,\"subnet\":\"10.123.46.0/24\",\"peers\":[]}' >/srv/system/away/state.json && wg genkey >/srv/system/away/private.key && test -s /srv/system/away/private.key" >/dev/null 2>&1 \
+        && ok "Away from home's request and the box's key are in /srv/system/away before the reset" || no "Away from home's request and key could not be put into /srv/system/away"
     ssh_run "echo keepme > /var/lib/camera-bridge/testfile; touch $esp/camera-bridge-factory-reset; sync; systemctl reboot" >/dev/null 2>&1 || true
     drop_ssh_master
     sleep 15
@@ -1116,6 +1740,19 @@ if selected factory-reset; then
     [ "$key_before" != "$key_after" ] && ok "a new secrets key was generated" || no "secrets key unchanged"
     ssh_run 'test -e /var/lib/camera-bridge/first-run' && ok "first-run marker is back" || no "first-run marker missing after reset"
     [ "$(ssh_run 'find /srv/system/network-connections -mindepth 1 | wc -l' | tr -d ' ')" = 0 ] && ok "the saved Wi-Fi networks (and their passwords) were erased" || no "a saved Wi-Fi network survived the factory reset"
+    # A real daemon's first look turns a kept "on" state off and deletes it (its own state is erased), which would hide a reset that missed
+    # /srv/system/away. So no away-set job may have run in this boot either, and networkd may not have heard of wg-away.
+    out=$(ssh_run 'bash -s' <<'EOS' 2>&1 || true
+left=$(find /srv/system/away -mindepth 1 2>/dev/null | tr '\n' ' ')
+[ -z "$left" ] || { echo "still in /srv/system/away: $left"; exit; }
+[ ! -e /run/camera-bridge/status/away-set.json ] || { echo "an away-set job ran in this boot: $(head -c 200 /run/camera-bridge/status/away-set.json | tr -s '\n ' ' ')"; exit; }
+n=$(journalctl -b -u systemd-networkd --no-pager -o cat 2>/dev/null | grep -c wg-away)
+[ "$n" = 0 ] || { echo "networkd logged $n lines about wg-away in this boot"; exit; }
+echo yes
+EOS
+)
+    [ "$out" = yes ] && ok "Away from home's keys were erased: /srv/system/away is empty or gone, no away-set job ran and networkd made no wg-away in this boot" \
+        || no "Away from home's request or key survived the factory reset: $out"
     [ "$(ssh_run 'journalctl --list-boots --no-pager 2>/dev/null | grep -c .' | tr -d ' ')" -le 2 ] && ok "the log of earlier boots was erased" || no "the log of earlier boots survived the factory reset"
 fi
 

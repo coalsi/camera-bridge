@@ -28,13 +28,13 @@ if ! mv --help 2>&1 | grep -q -- '--no-target-directory'; then echo "skip  (need
 
 BIN=$tmp/bin ROOT=$tmp/root
 mkdir -p "$ROOT/journal/0123456789abcdef0123456789abcdef" "$BIN" "$ROOT/run/requests" "$ROOT/run/status" "$ROOT/run/jobs" "$ROOT/data" "$ROOT/system/ssh" "$ROOT/system/network-connections" \
-    "$ROOT/update/cache" "$ROOT/update/stage"
+    "$ROOT/update/cache" "$ROOT/update/stage" "$ROOT/system/away"
 export ROOT
 : >"$ROOT/calls"
 for tool in systemctl nmcli journalctl; do printf '#!/bin/bash\necho "%s $*" >>"$ROOT/calls"\n' "$tool" >"$BIN/$tool"; done
 printf '#!/bin/bash\nexit 0\n' >"$BIN/logger"
 # The helpers: each records its call; $ROOT/fails-<name> makes it fail.
-for helper in cb-update cb-wifi cb-tls; do
+for helper in cb-update cb-wifi cb-tls cb-away; do
     printf '#!/bin/bash\ncat >/dev/null 2>&1 <&0 || true\necho "%s $*" >>"$ROOT/calls"\n[ ! -e "$ROOT/fails-%s" ]\n' "$helper" "$helper" >"$BIN/$helper"
 done
 chmod +x "$BIN"/*
@@ -64,6 +64,12 @@ expect "the FIFO, the link and the directory started nothing" "$(grep -c 'camera
 expect "the file the link pointed to is untouched" "$(cat "$ROOT/secret.json")" '{"x": 1}'
 expect "a request that is not JSON says so" "$(status wifi-scan .message)" "request is not a JSON object"
 
+# Several JSON values in one file: jq judges each, so the gate must see them all (a later object must not vouch for an earlier value).
+printf '"anything"\n{"enabled": true}\n' >"$R/wifi-scan.json"
+sys process-requests || bad "the dispatcher failed"
+expect "a file with two JSON values is refused" "$(status wifi-scan .message)" "request is not a JSON object"
+expect "and was not queued" "$(find "$ROOT/run/jobs" -name 'wifi-scan.json' | wc -l | tr -d ' ')" "0"
+
 # --- jobs: a failing step fails the job and stops what follows it -----------------------------------------------------------------
 job() { # job NAME BODY: queues BODY for NAME and runs the job
     printf '%s\n' "$2" >"$ROOT/run/jobs/$1.json"
@@ -85,15 +91,24 @@ job auto-update '{"enabled": "maybe"}'
 expect "a body that dies (cb_die) still ends the job with a status" "$(status auto-update .state)" "failed"
 expect "the job's arguments are gone" "$(find "$ROOT/run/jobs" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f ')" ""
 
+# --- Away from home: the away-set job hands its argument file to cb-away, which checks every value again ----------------------------
+job away-set '{"on": true, "port": 51820, "subnet": "10.77.12.0/24", "peers": []}'
+expect "the away-set job ends ok and gives cb-away its argument file" "$(status away-set .state) $(calls | grep -c "^cb-away set $ROOT/run/jobs/away-set.running.json\$" || true) $(calls | grep -c '^cb-away' || true)" "ok 1 1"
+touch "$ROOT/fails-cb-away"
+job away-set '{"on": true, "port": 51820, "subnet": "10.77.12.0/24", "peers": []}'
+expect "an away-set that cb-away refuses ends failed" "$(status away-set .state)" "failed"
+rm -f "$ROOT/fails-cb-away"
+
 # --- the factory reset forgets more than the bridge's data -----------------------------------------------------------------------
 echo psk=not-a-real-password >"$ROOT/system/network-connections/Maple Cottage.nmconnection"
 touch "$ROOT/system/ssh/enabled" "$ROOT/system/ssh/authorized_keys" "$ROOT/system/ssh/ssh_host_ed25519_key" "$ROOT/system/update.conf" \
-    "$ROOT/system/auto-update" "$ROOT/update/cache/cb-os_0.1.131_root.raw.zst" "$ROOT/data/config.json" "$ROOT/system/recording-drive"
+    "$ROOT/system/auto-update" "$ROOT/system/away/state.json" "$ROOT/system/away/private.key" "$ROOT/update/cache/cb-os_0.1.131_root.raw.zst" "$ROOT/data/config.json" "$ROOT/system/recording-drive"
 job factory-reset '{"confirm": "RESET"}'
 expect "the saved Wi-Fi networks (their passwords) are erased, and NetworkManager forgets them" "$(find "$ROOT/system/network-connections" -mindepth 1 | wc -l | tr -d ' ') $(calls | grep -c 'nmcli connection reload' || true)" "0 1"
 expect "SSH's keys and host key are erased" "$(find "$ROOT/system/ssh" -mindepth 1 | wc -l | tr -d ' ')" "0"
 expect "the update settings and downloads are erased" "$(find "$ROOT/system/update.conf" "$ROOT/system/auto-update" "$ROOT/update/cache" -mindepth 0 ! -path "$ROOT/update/cache" 2>/dev/null | wc -l | tr -d ' ')" "0"
 expect "the log of earlier boots is erased (and the folders of other machine ids)" "$(calls | grep -c 'journalctl --vacuum-time=1s' || true) $(find "$ROOT/journal" -mindepth 1 | wc -l | tr -d ' ')" "1 0"
+expect "Away from home's request and the box's VPN key are erased" "$(find "$ROOT/system/away" -mindepth 1 | wc -l | tr -d ' ')" "0"
 expect "the bridge's data is erased, the recording drive's choice kept, and the box restarts" \
     "$(find "$ROOT/data" -mindepth 1 | wc -l | tr -d ' ') $(find "$ROOT/system/recording-drive" 2>/dev/null | wc -l | tr -d ' ') $(calls | grep -c 'systemctl reboot' || true)" "0 1 1"
 

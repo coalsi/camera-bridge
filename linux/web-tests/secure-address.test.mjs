@@ -126,3 +126,48 @@ test('a box with no internet is waiting, calmly: no warning', async () => {
   assert.match(text(card), /Waiting for the internet\./);
   assert.equal(all(card, (n) => n.classList?.contains('banner') || n.getAttribute?.('role') === 'alert').length, 0);
 });
+
+// Away from home reaches the box by its secure name, so the box refuses to turn the secure address off while Away from home is on
+// (409 away_on). The box's sentence is said on the card, under its switch, which stays on.
+const AWAY_ON = 'Away from home needs the secure address. Turn Away from home off first.';
+
+test('the box’s refusal of the switch is said under it', async () => {
+  const { secureAddressCard } = await import('../web/js/screens/secure-address.js');
+  const card = secureAddressCard({ ...READY, enabled: true }, { refusal: AWAY_ON, setEnabled: () => {} });
+  const said = all(card, (n) => n.classList?.contains('secure-refusal'))[0];
+  assert.ok(said, 'on the card');
+  assert.equal(text(said), AWAY_ON);
+  assert.equal(said.getAttribute('role'), 'alert');
+  const row = all(card, (n) => n.className === 'switch-row')[0];
+  assert.equal(card.childNodes.indexOf(said), card.childNodes.indexOf(row) + 1, 'right under the switch');
+  assert.equal(all(secureAddressCard({ ...READY, enabled: true }, {}), (n) => n.classList?.contains('secure-refusal')).length, 0, 'nothing refused: nothing said');
+});
+
+test('turning the secure address off while Away from home is on: the box’s sentence on the card, and the switch still on', async () => {
+  const { secureAddressSection } = await import('../web/js/screens/secure-address.js');
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    if ((init.method ?? 'GET') === 'GET') return json(200, { ...READY, enabled: true });
+    sent.push([String(url).replace('/api/v1/', ''), JSON.parse(init.body)]);
+    return json(409, { error: 'away_on', message: AWAY_ON });
+  };
+  const section = secureAddressSection();
+  const settle = async () => { for (let i = 0; i < 12; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  try {
+    await settle();
+    const toggle = switchFor(section.el, /Use the secure address/);
+    assert.ok(toggle.checked);
+    toggle.checked = false;
+    toggle.dispatchEvent({ type: 'change', target: toggle });
+    await settle();
+    assert.deepEqual(sent, [['system/secure-address/enabled', { enabled: false }]]);
+    assert.match(text(section.el), new RegExp(AWAY_ON.replace('.', '\\.')));
+    assert.ok(switchFor(section.el, /Use the secure address/).checked, 'the box kept it on');
+    assert.doesNotMatch(text(browser.document.getElementById('toasts')), /Away from home needs/, 'said on the card, not in a toast');
+  } finally {
+    section.destroy();
+    globalThis.fetch = realFetch;
+  }
+});

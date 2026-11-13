@@ -11,7 +11,7 @@ Description=Camera Bridge factory reset (marker file on the boot partition)
 After=var-lib-camera\x2dbridge.mount srv.mount systemd-journal-flush.service
 Requires=var-lib-camera\x2dbridge.mount
 Before=camera-bridge-firstboot.service camerabridged.service
-Before=camera-bridge-ssh.service camera-bridge-credentials.service ssh.service camera-bridge-guard.service
+Before=camera-bridge-ssh.service camera-bridge-credentials.service ssh.service camera-bridge-guard.service camera-bridge-away.service
 Before=NetworkManager.service camera-bridge-wifi-import.service
 
 [Service]

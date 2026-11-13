@@ -53,6 +53,7 @@ systemctl enable \
     camera-bridge-disk-health.timer \
     camera-bridge-banner.service \
     camera-bridge-guard.service \
+    camera-bridge-away.service \
     camera-bridge-tls.service \
     nginx.service \
     fstrim.timer

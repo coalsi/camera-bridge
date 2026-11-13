@@ -119,6 +119,7 @@ public final class Daemon {
         configuration.archiveLocations = recordingsFolder.map { RecordingsFolder.locations(recordings: $0) } ?? []
         archiveLocations = configuration.archiveLocations
         configuration.viewerAdvertiser = Self.viewerAdvertiser(options: options, environment: bridgeEnvironment)
+        configuration.awayNetwork = Self.awayNetwork(systemAvailable: system.isAvailable, environment: bridgeEnvironment)
         let build = DaemonInfo.build(environment: environment)
         configuration.diagnosticsContext = { launched in
             var context = DiagnosticsContext.current(appVersion: DaemonInfo.version, appBuild: build, macModel: HostInfo.hardwareModel(), launched: launched)
@@ -284,6 +285,16 @@ public final class Daemon {
     static func viewerAdvertiser(options: DaemonOptions, environment: BridgeEnvironment) -> (any ServiceAdvertiser)? {
         guard !options.development, options.preview == nil, environment.advertise else { return nil }
         return environment.platform.advertiser
+    }
+
+    /// The network Away from home reads: on Camera Bridge OS only, because it needs the system underneath to keep the tunnel. The Mac has none.
+    static func awayNetwork(systemAvailable: Bool, environment: BridgeEnvironment) -> (any AwayNetwork)? {
+        #if os(Linux)
+        guard systemAvailable else { return nil }
+        return LinuxAwayNetwork(monitor: environment.platform.networkChanges)
+        #else
+        return nil
+        #endif
     }
 
     /// Whether a chrony configuration serves time to other machines: an `allow` line, and no `port 0` (which turns the server off).

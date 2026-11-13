@@ -1,6 +1,8 @@
 #if os(Linux)
+import BridgeSupport
 import Foundation
 import Glibc
+import Synchronization
 
 /// One address of a network interface.
 public struct InterfaceAddress: Equatable, Sendable, CustomStringConvertible {
@@ -17,6 +19,27 @@ public struct InterfaceAddress: Equatable, Sendable, CustomStringConvertible {
     }
 
     public var description: String { "\(interface) \(address)/\(prefixLength)" }
+}
+
+/// A global unicast IPv6 address (2000::/3) as the kernel holds it, with the flags it sets. Which one is the stable address is for the
+/// caller to choose: temporary and deprecated ones are listed and marked, not dropped.
+public struct GlobalIPv6Address: Equatable, Sendable {
+    public var interface: String
+    public var address: String
+    public var prefixLength: Int
+    /// Seconds the address stays preferred; `UInt32.max` is forever.
+    public var preferredLifetime: UInt32
+    public var isTemporary: Bool
+    public var isDeprecated: Bool
+
+    public init(interface: String, address: String, prefixLength: Int, preferredLifetime: UInt32, isTemporary: Bool, isDeprecated: Bool) {
+        self.interface = interface
+        self.address = address
+        self.prefixLength = prefixLength
+        self.preferredLifetime = preferredLifetime
+        self.isTemporary = isTemporary
+        self.isDeprecated = isDeprecated
+    }
 }
 
 /// What the box's own Ethernet and Wi-Fi interfaces hold right now: the addresses Home's controllers reach the accessories at.
@@ -61,6 +84,72 @@ public enum InterfaceAddresses {
         return found.sorted { ($0.interface, $0.address) < ($1.interface, $1.address) }
     }
 
+    /// The interface that holds the IPv6 default route (`/proc/self/net/ipv6_route`), nil when there is none. It reads `/proc/self/net`, not
+    /// `/proc/net`: the daemon's unit has `ProcSubset=pid`, which hides `/proc/net` (a link outside the pid subset) but keeps `/proc/self/net`.
+    public static func ipv6DefaultRouteInterface() -> String? {
+        ipv6DefaultRouteInterface(file: "/proc/self/net/ipv6_route")
+    }
+
+    /// `ipv6DefaultRouteInterface()` from `file` (tests give one that can't be read).
+    static func ipv6DefaultRouteInterface(file: String) -> String? {
+        let table: String
+        do {
+            table = try String(contentsOfFile: file, encoding: .utf8)
+        } catch {
+            // Without the table the box has no IPv6 default route as far as Away from home can tell, and its card says the home has no
+            // IPv6: the log says why, once, since this is asked every 30 s.
+            if routeTableUnreadable.withLock({ logged in defer { logged = true }; return !logged }) {
+                Log(category: "network").warning("\(file) can't be read (\(error.localizedDescription)), so the IPv6 default route is unknown")
+            }
+            return nil
+        }
+        return ipv6DefaultRouteInterface(routeTable: table)
+    }
+
+    /// Whether an unreadable IPv6 route table was logged already.
+    private static let routeTableUnreadable = Mutex(false)
+
+    /// `ipv6DefaultRouteInterface()` on given text (tests). A line is: destination, prefix length, source, source length, next hop, metric,
+    /// reference count, use count, flags, interface; all numbers hexadecimal. The lowest metric on a LAN interface wins, as the kernel would choose.
+    static func ipv6DefaultRouteInterface(routeTable: String) -> String? {
+        var best: (metric: UInt32, interface: String)?
+        for line in routeTable.split(separator: "\n") {
+            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard fields.count >= 10, fields[0].allSatisfy({ $0 == "0" }), fields[1] == "00",
+                  let metric = UInt32(fields[5], radix: 16), let flags = UInt32(fields[8], radix: 16) else { continue }
+            // RTF_UP set and RTF_REJECT clear: lo carries an unreachable default that is no way out.
+            guard flags & 0x1 != 0, flags & 0x200 == 0 else { continue }
+            let interface = String(fields[9])
+            guard isLANInterface(interface) else { continue }
+            if best == nil || metric < best!.metric { best = (metric, interface) }
+        }
+        return best?.interface
+    }
+
+    /// The global unicast IPv6 addresses of the interface with the IPv6 default route, in address order.
+    public static func globalIPv6() -> [GlobalIPv6Address] {
+        globalIPv6(kernel: Netlink.dumpAddresses(), names: interfaceNames(), defaultInterface: ipv6DefaultRouteInterface())
+    }
+
+    /// `globalIPv6()` on given data (tests). Addresses still in duplicate detection or that failed it are left out: they are not usable yet or ever.
+    /// Temporary and deprecated ones stay, marked, because the choice between them belongs to BridgeWeb. Nothing without a default-route interface.
+    static func globalIPv6(kernel: [KernelAddress], names: [UInt32: String], defaultInterface: String?) -> [GlobalIPv6Address] {
+        guard let defaultInterface else { return [] }
+        var found: [GlobalIPv6Address] = []
+        let candidates = kernel.filter { $0.family == AF_INET6 && $0.bytes.count == 16 && names[$0.interfaceIndex] == defaultInterface }
+        for item in candidates.sorted(by: { $0.bytes.lexicographicallyPrecedes($1.bytes) }) {
+            guard item.bytes[0] & 0xE0 == 0x20, item.flags & (KernelAddress.tentative | KernelAddress.duplicateFailed) == 0 else { continue }
+            var raw = in6_addr()
+            withUnsafeMutableBytes(of: &raw) { $0.copyBytes(from: item.bytes) }
+            var text = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            guard inet_ntop(AF_INET6, &raw, &text, socklen_t(text.count)) != nil else { continue }
+            found.append(GlobalIPv6Address(interface: defaultInterface, address: String(cString: text), prefixLength: item.prefixLength,
+                                           preferredLifetime: item.preferredLifetime ?? .max, isTemporary: item.flags & KernelAddress.temporary != 0,
+                                           isDeprecated: item.flags & KernelAddress.deprecated != 0))
+        }
+        return found
+    }
+
     static func isLinkLocal(_ address: [UInt8]) -> Bool {
         address.count == 16 && address[0] == 0xFE && (address[1] & 0xC0) == 0x80
     }
@@ -98,9 +187,10 @@ public enum InterfaceAddresses {
         return running
     }
 
-    /// The IPv4 default gateway (`/proc/net/route`), nil when there is none.
+    /// The IPv4 default gateway (`/proc/self/net/route`), nil when there is none. `/proc/self/net`, as for the IPv6 route: the daemon's
+    /// `ProcSubset=pid` hides `/proc/net`, which left the gateway out of `NetworkSignature` on the box.
     static func defaultGateway() -> String? {
-        guard let table = try? String(contentsOfFile: "/proc/net/route", encoding: .utf8) else { return nil }
+        guard let table = try? String(contentsOfFile: "/proc/self/net/route", encoding: .utf8) else { return nil }
         for line in table.split(separator: "\n").dropFirst() {
             let fields = line.split(whereSeparator: { $0 == "\t" || $0 == " " })
             // Iface Destination Gateway Flags ...; the default route has destination 0 and the gateway flag (RTF_GATEWAY = 2).

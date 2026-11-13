@@ -15,6 +15,18 @@
 
 export const RELEASE_NOTES = [
   {
+    version: '0.1.137',
+    date: '2026-11-12',
+    title: 'Away from home',
+    items: [
+      'Your phone can now watch your cameras from anywhere, straight from your home, with nothing of ours in between. It is a VPN built into the box, and it is off until you turn it on in Settings › Away from home. Turning it on turns the secure address on too, since it needs it.',
+      'It needs IPv6 at home, and most routers need one setting before it works. The Away from home card shows that step, written for your router, and how to check it.',
+      'For now, add a phone, a tablet or a laptop with the free WireGuard app: the card shows a QR code once to scan. The Camera Bridge iPhone app gets its own switch in an update that is coming.',
+      'Turning it off closes the port and removes every key at once, and a device you remove stops being able to connect (unless the system fails to take a removal: then the card says so and the box tries again).',
+      'Sky Watcher’s Find a feed now finds the flight feeds on your network, and a Wyze camera is found at its current address on your network rather than the one Wyze’s cloud last saw. Until now the box couldn’t read its own list of the devices it had heard from.',
+    ],
+  },
+  {
     version: '0.1.136',
     date: '2026-11-12',
     title: 'A quieter system log',

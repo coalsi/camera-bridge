@@ -128,13 +128,6 @@ kept_list() { # the kept list, checked again; empty when there is none or it is 
     echo '{"cameras":[],"timeZone":"UTC"}'
 }
 
-write_file() { # write_file PATH MODE [GROUP]: stdin to PATH, atomically (the group is left alone in tests)
-    local path=$1 mode=$2 group=${3:-} tmp
-    tmp=$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")
-    if cat >"$tmp" && chmod "$mode" "$tmp" && { [ -z "$group" ] || [ -n "$ROOT" ] || chgrp "$group" "$tmp"; }; then mv -f "$tmp" "$path"
-    else rm -f "$tmp"; return 1; fi
-}
-
 # --- firewall and services ------------------------------------------------------------------------------------------------
 
 sets_loaded() { nft list set inet camera_bridge guarded4 >/dev/null 2>&1 && nft list set inet camera_bridge guarded6 >/dev/null 2>&1; }
@@ -197,7 +190,7 @@ cmd_dns_prepare() {
     sets_loaded || cb_die "the firewall is not loaded; the DNS for watched cameras stays off"
     install -d -m 0755 "$RUN"
     install -d -m 0750 -o dnsmasq -g root "$LOGDIR"
-    dns_config | write_file "$RUN/dnsmasq.conf" 0644
+    dns_config | cb_write_file "$RUN/dnsmasq.conf" 0644
 }
 
 # --- collecting ---------------------------------------------------------------------------------------------------------
@@ -305,24 +298,24 @@ collect_locked() {
     fi
     history="$STATE/history.json"
     if ! jq -e 'type == "object"' "$history" >/dev/null 2>&1; then
-        echo '{"v": 1, "cameras": {}}' | write_file "$history" 0600
+        echo '{"v": 1, "cameras": {}}' | cb_write_file "$history" 0600
         restarted=true
     fi
     if kept=$({ [ -f "$WORK_LOG" ] && timeout "$READ_SECONDS" tail -c "$MAX_LOG_BYTES" "$WORK_LOG" || true; } \
                 | jq -R -n -c --argjson now "$NOW" --argjson keep "$KEEP_SECONDS" --argjson perHour "$NAMES_PER_HOUR" \
                      --argjson maxBytes "$MAX_HISTORY_BYTES" --argjson watched "[$list]" --slurpfile history "$history" "$JQ_COLLECT") \
        && [ -n "$kept" ]; then
-        printf '%s\n' "$kept" | write_file "$history" 0600
+        printf '%s\n' "$kept" | cb_write_file "$history" 0600
     else
         cb_log "the internet guard's history could not be updated; it starts again"
-        echo '{"v": 1, "cameras": {}}' | write_file "$history" 0600
+        echo '{"v": 1, "cameras": {}}' | cb_write_file "$history" 0600
         restarted=true
     fi
     rm -f "$WORK_LOG"
     # A camera's watch begins again with the history (nothing it asked before is known), and a list kept by an older version begins now.
     if [ "$restarted" = true ] || jq -e 'any(.cameras[]; .since == null)' <<<"$list" >/dev/null; then
         list=$(jq -c --argjson now "$NOW" --argjson all "$restarted" '.cameras |= map(if $all or .since == null then .since = $now else . end)' <<<"$list")
-        printf '%s\n' "$list" | write_file "$STATE/cameras.json" 0600
+        printf '%s\n' "$list" | cb_write_file "$STATE/cameras.json" 0600
     fi
 
     zone=$(jq -r .timeZone <<<"$list")
@@ -339,7 +332,7 @@ collect_locked() {
                     --argjson dnsSince "$since" --argjson watched "[$list]" --slurpfile history "$history" "$JQ_STATUS")
         [ "${#status}" -le "$MAX_STATUS_BYTES" ] && break
     done
-    printf '%s\n' "$status" | write_file "$CB_STATUS/guard.json" 0640 camerabridge
+    printf '%s\n' "$status" | cb_write_file "$CB_STATUS/guard.json" 0640 camerabridge "$ROOT"
 }
 
 # --- commands -----------------------------------------------------------------------------------------------------------
@@ -384,7 +377,7 @@ cmd_set() {
     # A camera already on the list keeps when its watch began; one new to it (or put back) begins now.
     list=$(jq -c --argjson now "$NOW" --argjson old "$(kept_list)" \
               '.cameras |= map(.address as $a | .since = ([$old.cameras[] | select(.address == $a) | .since | numbers] | first // $now))' <<<"$list")
-    printf '%s\n' "$list" | write_file "$STATE/cameras.json" 0600
+    printf '%s\n' "$list" | cb_write_file "$STATE/cameras.json" 0600
     cb_log "watching $(jq '.cameras | length' <<<"$list") camera(s)"
     apply_locked strict
 }

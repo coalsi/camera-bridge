@@ -67,13 +67,14 @@ import CoreImage
     }
 
     #if canImport(CoreImage) && canImport(CoreGraphics)
-    /// Draws the code the way a phone would see it (black on white with a quiet zone) and lets Core Image read it.
-    private func decode(_ code: QRCode, scale: Int = 8) -> String? {
+    /// Draws a code of `size` by `size` modules (row by row, `true` = dark) the way a phone would see it (black on white with a quiet zone) and
+    /// lets Core Image read it. It takes the modules rather than a `QRCode`, so the page's codes are read the same way.
+    private func decode(size: Int, modules: [Bool], scale: Int = 8) -> String? {
         let quiet = 4
-        let side = (code.size + 2 * quiet) * scale
+        let side = (size + 2 * quiet) * scale
         var pixels = [UInt8](repeating: 255, count: side * side)
-        for y in 0..<code.size {
-            for x in 0..<code.size where code.isDark(x: x, y: y) {
+        for y in 0..<size {
+            for x in 0..<size where modules[y * size + x] {
                 for dy in 0..<scale {
                     for dx in 0..<scale { pixels[((y + quiet) * scale + dy) * side + (x + quiet) * scale + dx] = 0 }
                 }
@@ -91,7 +92,7 @@ import CoreImage
     func aPhonesDecoderReadsWhatWasEncoded(message: String) throws {
         for level in [QRCode.ErrorCorrection.low, .medium] {
             let code = try QRCode(text: message, errorCorrection: level)
-            #expect(decode(code) == message, "version \(code.version), level \(level), mask \(code.mask)")
+            #expect(decode(size: code.size, modules: code.modules) == message, "version \(code.version), level \(level), mask \(code.mask)")
         }
     }
 
@@ -102,8 +103,95 @@ import CoreImage
             let message = String((0..<capacity).map { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement() ?? "a" })
             let code = try QRCode(text: message)
             #expect(code.version == version)
-            #expect(decode(code, scale: 6) == message, "version \(version)")
+            #expect(decode(size: code.size, modules: code.modules, scale: 6) == message, "version \(version)")
         }
     }
+
+    /// The longest message for each version from 11 to 20 at level M, which only the page's encoder makes, then a WireGuard configuration as the
+    /// box writes it for a device (44-character keys, the box's address as the endpoint).
+    @Test(.enabled(if: QRCodeTests.node != nil, "node is not on the PATH"))
+    func aPhonesDecoderReadsThePagesLargerCodes() throws {
+        let capacities = [251, 287, 331, 362, 412, 450, 504, 560, 624, 666]
+        let letters = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+        // Fixed messages, so a code Core Image can't read is the same code the next time.
+        var messages = capacities.enumerated().map { index, length in String((0..<length).map { letters[($0 * 7 + index) % letters.count] }) }
+        messages.append(AwayRules.wireGuardConfig(privateKey: Self.countingKey(from: 0), address: "10.123.45.2", boxPublicKey: Self.countingKey(from: 32),
+                                                  endpoint: "[2001:db8:4:7000:1a2b:3c4d:5e6f:7a8b]:51820", allowedIPs: ["10.123.45.1/32", "192.0.2.10/32"]))
+        let codes = try pageCodes(messages.map { (text: $0, level: "M") })
+        try #require(codes.count == messages.count)
+        for (index, message) in messages.enumerated() {
+            let code = codes[index]
+            if index < capacities.count { #expect(code.version == 11 + index, "\(message.count) characters") }
+            #expect(decode(size: code.size, modules: code.dark) == message, "version \(code.version), mask \(code.mask)")
+        }
+        #expect((codes.last?.version ?? 99) <= 14, "the configuration fits version 14")
+    }
     #endif
+
+    // MARK: The page's encoder
+
+    /// The page's own encoder (`linux/web/js/qr.js`), a port of this one extended to version 20: Settings shows a WireGuard device's
+    /// configuration with it, once.
+    private static let pageEncoder = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()   // Packages/CameraBridgeKit
+        .deletingLastPathComponent().deletingLastPathComponent()                             // the repository
+        .appending(path: "linux/web/js/qr.js")
+
+    /// `node` on the PATH, which runs the page's encoder. Without it (the Linux container, a bare machine) the page's codes are not compared.
+    static let node: String? = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":")
+        .map { "\($0)/node" }.first { FileManager.default.isExecutableFile(atPath: $0) }
+
+    /// A code the page's encoder made.
+    private struct PageCode: Decodable {
+        var version: Int
+        var size: Int
+        var mask: Int
+        /// Row by row, "1" for a dark module.
+        var modules: String
+        var dark: [Bool] { modules.map { $0 == "1" } }
+    }
+
+    /// A key-shaped value, the base64 of 32 counting bytes: the length of a WireGuard key, and nobody's key.
+    private static func countingKey(from start: Int) -> String {
+        Data((0..<32).map { UInt8(start + $0) }).base64EncodedString()
+    }
+
+    /// The page's codes for `cases` (a message and its level, "L" or "M"), made by `node` running `qr.js` from this checkout.
+    private func pageCodes(_ cases: [(text: String, level: String)]) throws -> [PageCode] {
+        let node = try #require(Self.node)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        // The module's address is a JSON string, which is a JavaScript string too. The messages go as base64 of their JSON: on macOS, Process
+        // hands a program its arguments in the file system's Unicode form, which decomposes "é" into "e" and a combining accent, so the page
+        // would encode other bytes than this encoder does.
+        let module = String(decoding: try encoder.encode(Self.pageEncoder.absoluteString), as: UTF8.self)
+        let list = try encoder.encode(cases.map { [$0.text, $0.level] }).base64EncodedString()
+        let script = """
+        import { encodeQR } from \(module);
+        const cases = JSON.parse(Buffer.from('\(list)', 'base64').toString('utf8'));
+        const codes = cases.map(([text, level]) => encodeQR(text, { level }));
+        process.stdout.write(JSON.stringify(codes.map(({ version, size, mask, modules }) => ({ version, size, mask, modules: modules.join('') }))));
+        """
+        // ClipTools.run (ClipLabelTests) runs a program with its output in files, which hold the larger codes a pipe's buffer would not.
+        let run = try ClipTools.run(node, ["--input-type=module", "-e", script], timeout: 60)
+        try #require(run.status == 0, "node: \(run.errors)")
+        return try JSONDecoder().decode([PageCode].self, from: run.data)
+    }
+
+    /// The page's encoder gives exactly this one's codes: the same version, the same mask and every module the same, at L and M.
+    @Test(.enabled(if: QRCodeTests.node != nil, "node is not on the PATH"))
+    func thePagesEncoderMatchesThisOne() throws {
+        let messages = ["X-HM://00GW95DQA7OSX", "A", String(repeating: "x", count: 150), "héllo wörld ✓"]
+        let cases = messages.flatMap { text in [(text: text, level: "L"), (text: text, level: "M")] }
+        let codes = try pageCodes(cases)
+        try #require(codes.count == cases.count)
+        for (index, item) in cases.enumerated() {
+            let code = try QRCode(text: item.text, errorCorrection: item.level == "L" ? .low : .medium)
+            let page = codes[index]
+            #expect(page.version == code.version, "\(item.level): \(item.text)")
+            #expect(page.size == code.size, "\(item.level): \(item.text)")
+            #expect(page.mask == code.mask, "\(item.level): \(item.text)")
+            #expect(page.dark == code.modules, "\(item.level): \(item.text), version \(code.version)")
+        }
+    }
 }

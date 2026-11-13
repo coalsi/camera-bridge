@@ -75,6 +75,39 @@ service and characteristic definitions; the generator is not shipped.
 | [@mega-yfue/eufy-sdk](https://www.npmjs.com/package/@mega-yfue/eufy-sdk) 0.4.0 (commit `7d1f016362465b0747405c5dc83124c86b2c630b`) | Apache-2.0 | Camera Bridge OS only (amd64): bundled into the eufy-bridge helper (`/usr/lib/camera-bridge/helpers/eufy/eufy-bridge.js`, source [`linux/helpers/eufy-bridge`](linux/helpers/eufy-bridge)); its protobufjs loader is rewritten at bundle time, nothing else is modified (see NOTICE). No upstream NOTICE file. |
 | npm packages bundled with the eufy SDK: @babel/runtime 7.29.10, abort-controller 3.0.0, bl 6.1.6, broker-factory 3.1.15, debug 4.4.3, event-target-shim 5.0.1, fast-unique-numbers 9.0.27, ip-address 10.7.4, mqtt 5.16.1, mqtt-packet 9.0.2, ms 2.1.3, process 0.11.10, process-nextick-args 2.0.1, readable-stream 4.8.0, rfdc 1.4.1, safe-buffer 5.2.1, smart-buffer 4.2.0, socks 2.8.10, string_decoder 1.3.0, worker-timers 8.0.34, worker-timers-broker 8.0.18, ws 8.22.0 (MIT); inherits 2.0.4, lru-cache 10.4.3 (ISC); jpeg-js 0.4.4, protobufjs 8.8.1 (BSD-3-Clause); long 5.3.2 (Apache-2.0) | MIT, ISC, BSD-3-Clause, Apache-2.0 | Camera Bridge OS only (amd64), inside `eufy-bridge.js`, unmodified. Every licence text is in the image at `/usr/lib/camera-bridge/helpers/eufy/LICENSES/`; list in [docs/third-party/eufy-bridge.md](docs/third-party/eufy-bridge.md). |
 
+### Derived from Project Nayuki's QR Code generator (MIT License)
+
+Two files of Camera Bridge OS are derived from [Project Nayuki's QR Code generator library](https://www.nayuki.io/page/qr-code-generator-library):
+they follow its steps (the data bits, Reed-Solomon error correction, interleaving, placement, the masks and their penalty scores), rewritten
+in Swift and in JavaScript.
+
+- `Packages/CameraBridgeKit/Sources/BridgeWeb/QRCode.swift`: the daemon's QR codes, such as Apple Home setup codes.
+- `linux/web/js/qr.js`: the web page's own QR codes, such as a WireGuard device's configuration in Settings › Away from home. It ships with
+  the page, so the browser draws the code and the device's key is never sent anywhere to be drawn.
+
+Its copyright and permission notice, as in the library's source files:
+
+```
+Copyright (c) Project Nayuki. (MIT License)
+https://www.nayuki.io/page/qr-code-generator-library
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+- The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+- The Software is provided "as is", without warranty of any kind, express or
+  implied, including but not limited to the warranties of merchantability,
+  fitness for a particular purpose and noninfringement. In no event shall the
+  authors or copyright holders be liable for any claim, damages or other
+  liability, whether in an action of contract, tort or otherwise, arising from,
+  out of or in connection with the Software or the use or other dealings in the
+  Software.
+```
+
 ## Development and test tooling (not shipped)
 
 | Component | License | Use |

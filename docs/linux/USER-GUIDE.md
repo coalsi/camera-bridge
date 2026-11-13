@@ -306,9 +306,84 @@ Sentences already written stay with their events and go when the recordings' rul
 
 The Camera Bridge app for iPhone and iPad is coming and is not available yet, so nothing here can be tried on a phone today. When it is, it will watch the same cameras as the Apple TV app, live and recorded, and pair the same way: open the app on the phone, and it shows an 8-letter code (and a button that opens this page on the phone). In the web page, go to **Settings › Security › Apple TV and iPhone**, type the code into **Add a device**, and press **Add**. The phone never needs your password. **Remove** on the same card stops a device at once. Up to 20 devices can be added in all, Apple TVs and phones together.
 
-* **Home network only, for now.** The phone finds the box and plays video only while it is on your home network. Watching from away from home is not supported yet.
+* **At home, and away from home with Away from home.** The phone finds the box and plays video on your home network by itself. To watch from anywhere else, turn on Away from home (section 14), which needs IPv6 at home and, once the app's update is out, a switch in the app.
 * **AirPlay and CarPlay play a little behind.** The phone's own screen shows live video under a second behind. Sending it to a TV by AirPlay, or to a car screen, goes through a different kind of stream (called HLS) that runs about 7 to 17 seconds behind and takes about 7 seconds to start when the camera sends a key frame every 2 seconds. A camera with longer key frame intervals is slower: about 14 to 16 seconds to start at 4 seconds, and about 32 seconds at 10 seconds, with the delay growing the same way.
 * **CarPlay needs Apple's approval and a car that supports CarPlay video.** Apple has to approve the app for CarPlay, and few cars show video from a phone at all. No car is known to work yet, so treat CarPlay as something that may come, not something to count on.
+
+## 14. Away from home
+
+Away from home lets your iPhone, or any device with the WireGuard app, watch your cameras from anywhere, straight from your home, with nothing of ours in between: the device makes a private connection (a VPN) to your box over the internet. It is off until you turn it on, and the box opens its one port for it only while it is on.
+
+### What it needs
+
+* **IPv6 at home.** Phones reach the box over IPv6, so your internet connection must have it (Starlink and many cable and fibre providers do). Without it the card says so, and you can ask your provider whether they offer it. Homes that have only IPv4 can't use Away from home yet.
+* **IPv6 where the phone is.** Cellular works. A Wi-Fi network without IPv6 (common in hotels) can't reach your home: turn Wi-Fi off and use cellular there.
+* **The secure address** (see "The secure address"). Turning Away from home on turns it on too, and says so. While Away from home is on, the box refuses to turn the secure address off.
+
+### Turn it on
+
+1. Open **Settings › Away from home** and turn on **Use Away from home**. The card first says it is looking at how your home reaches the internet, then shows what is left to do.
+2. Do the router step, if the card shows one (below).
+3. Turn on Away from home in the Camera Bridge app on your iPhone, or add a device for the WireGuard app (the phone step, below). The card shows this step until a device has Away from home.
+
+### The router step
+
+Most routers do not let anything in from the internet, even over IPv6, so most need one rule: let UDP port 51820 through to the box. The card shows the box's address on the internet and says which rule to add for your router.
+
+**eero.** The card gives these steps for an eero:
+
+1. In the eero app: Settings › Network settings › Reservations & port forwarding › IPv6 firewall rules › Add.
+2. Choose the device that is the box. The eero app lists devices by name and may show it under a name you gave it; the address in the next step tells you which one it is.
+3. Choose the address ending in the last groups of the address the card shows (exactly that one). The eero app offers each of the box's addresses, temporary ones too, and only the one the card names keeps working.
+4. Enter port 51820, UDP.
+
+**Any other router.** Allow incoming IPv6 traffic to the address the card shows, UDP port 51820. Routers usually keep that setting with their firewall or port forwarding settings, often under IPv6. Steps for other brands are added when someone has tried them.
+
+The rule names an address, not "the box", so give the box a fixed address in your router if it can (see "When your home's address changes").
+
+### The phone step
+
+* **The Camera Bridge iPhone app** has its own switch: in the app, at home, with the phone paired, open Settings › Away from home and turn it on (iOS asks once to allow a VPN). That switch comes with an update that is not out yet.
+* **Meanwhile, or for any other device,** use the free WireGuard app. On the card press **Add a device with the WireGuard app**, give the device a name, and scan the QR code the card shows with the WireGuard app (on a computer, copy the text under it instead). **The code is shown once**: the box keeps only the device's public key, so it can't show it again. If you lose it, remove the device and add it again.
+* A device added with the WireGuard app also opens the box's secure address, so a laptop can use the web page from away. AirPlay and CarPlay are for the iPhone app only.
+
+### Check that it works
+
+Under **Check**, the card says how: on your iPhone, turn off Wi-Fi and open the Camera Bridge app; on a device with the WireGuard app, turn the tunnel on while the device is off your home network (on a phone, turn off Wi-Fi). When the box is reached from away, the card shows "Reached from away:" with the device's name and when it last reached the box. The card's states mean:
+
+| The card says | What it means |
+|---|---|
+| Off | Away from home is off. Nothing is open. |
+| Looking at how your home reaches the internet | The box is checking. Wait a moment. |
+| Phones can't reach this home from outside yet | The internet connection has no IPv6. Ask your provider. |
+| On your router | Away from home is on, but no device has reached the box from away yet. Do the router step and the phone step. |
+| Reached from away: *name*, *time* | It works. One line for each device; a device that hasn't been heard from away yet says so. |
+| Your home's address changed | See the next part. |
+| A problem, with Try again | The card says in a sentence what failed. Try again repeats the last choice, and while Away from home is on it also asks the website again at once. When the website itself has a passing fault, the card shows no problem: the box tries again by itself. |
+
+A removed device is cut off at once. If the box's system could not take a removal yet, the card says "A removed device can still connect until the box's retry goes through." and the box keeps trying.
+
+### When your home's address changes
+
+Some providers change your home's IPv6 address now and then. The box notices and tells the website within a minute or two, and phones with the Camera Bridge app follow by themselves. But:
+
+* **The router rule names the old address,** so it probably stops working. The card then says **Your home's address changed** and shows the new address and the router step again: change the rule to the new address. Give the box a fixed address in your router (a reservation, if it has one) so the rule keeps pointing at the box, and so the address that devices added with the WireGuard app were given stays the box's.
+* **Devices added with the WireGuard app keep the home's old address** in their configuration. After a change, remove each one and add it again to get a new code (the card says so while there is such a device).
+
+### Turn it off
+
+Turn the switch off. The box closes the port, takes the VPN down, deletes its key and every device's key, and asks the website to delete the record, so every device has to be set up again to use it. If the website can't be reached then, the box keeps trying until the record is gone. A device you remove on the card loses its way in from away at once (a phone stays paired and keeps working at home). A phone you remove in **Settings › Security › Apple TV and iPhone** loses its VPN key together with its pairing. A factory reset removes it all.
+
+### What leaves the box
+
+The website, camera-bridge.app, learns one thing: the box's IPv6 address, which it publishes as a DNS record under a random name (the away name; it never gets a certificate). Nothing of ours carries video, keys or requests: your phone connects to your box, nothing in between. The website is an outside dependency: if it is down, phones use the address they last knew. Through the VPN, a device reaches only the box's own web page; it can't reach your cameras or anything else in your home, and the box forwards nothing.
+
+### What it can't do
+
+* **AirPlay to a TV works at home only.** The TV fetches the video itself and isn't in your phone's VPN. CarPlay should work away from home when the phone sends the video to the car; that is expected, and still to be confirmed in a car.
+* **One VPN at a time on iOS.** A phone that is using another VPN can't also use this one while that one is on.
+* **Networks that refuse a public name pointing at a private address** ("DNS rebind protection", on by default in some routers) can't reach home, even through the VPN. Cellular is not affected.
+* **IPv6 only, for now.** Homes that have only IPv4 (with a shared address from the provider) can't use it yet.
 
 ## Troubleshooting
 
@@ -338,7 +413,7 @@ The Camera Bridge app for iPhone and iPad is coming and is not available yet, so
 
 * No Secure Boot, no disk encryption (the secrets file on the data partition is protected by file permissions, not by a TPM yet).
 * Only amd64 mini PCs; Raspberry Pi 5 is planned.
-* The box is for your local network only. Do not forward ports to it from the internet. The iPhone, iPad and CarPlay apps, and the HLS streams they use, work on the home network only for now. Apple Home reaches it through your home hub.
+* The box is for your local network. Do not forward ports to it from the internet; the one exception is the IPv6 rule that Away from home asks for on some routers (section 14), which lets in a single port for a single address. The iPhone app and its HLS streams work away from home through Away from home, once it is on (section 14); CarPlay is expected to once the phone sends the video to the car (not yet confirmed in a car); AirPlay to a TV works at home only. Apple Home reaches it through your home hub.
 * The page plays recorded sound at normal speed only, not while you drag the timeline or at other speeds.
 * No motion or person markers on the timeline: the wave shows how much was going on, not what.
 * The plain address `http://camera-bridge.local` is not encrypted. The secure address (see "The secure address") is, and needs the internet and a router that lets the name through.
@@ -369,7 +444,7 @@ A box that knows a network does not open its hotspot when that network goes away
 
 The box has two addresses. The plain one, `http://camera-bridge.local`, is not encrypted. The secure one is a name like `https://<random letters>.box.camera-bridge.app` with a real certificate, so every browser at home trusts it and nothing needs installing. It is on by default and shown on the **System** page, under **Secure address**.
 
-How it works. The first time the box has internet, it registers with www.camera-bridge.app, the project's website, and gets its random name. It then asks Let's Encrypt for a certificate for that name and renews it by itself. The name points to the box's address on your home network, so it only works for devices at home. Video and the web page never go through the website: they travel from the box to your browser inside your home. Getting the certificate takes a few minutes. Until it is ready, and whenever the box has no internet, the plain address keeps working.
+How it works. The first time the box has internet, it registers with www.camera-bridge.app, the project's website, and gets its random name. It then asks Let's Encrypt for a certificate for that name and renews it by itself. The name points to the box's address on your home network, so it only works for devices at home, or for a phone or laptop that Away from home (section 14) has connected to the box. Video and the web page never go through the website: they travel from the box to your browser inside your home. Getting the certificate takes a few minutes. Until it is ready, and whenever the box has no internet, the plain address keeps working.
 
 What this publishes:
 

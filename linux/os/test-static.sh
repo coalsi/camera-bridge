@@ -35,8 +35,8 @@ helper_scripts=(../helpers/wyze-lake/build.sh ../helpers/wyze-lake/test/run.sh
                 ../helpers/eufy-bridge/test/integration/run.sh ../helpers/eufy-bridge/test/integration/container.sh
                 ../helpers/eufy-bridge/test/integration/go2rtc.sh)
 scripts=(build.sh build-image.sh build-boot-fallback.sh fetch-go2rtc.sh build-helpers.sh test-static.sh test-vm.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken
-         mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk mkosi.extra/usr/sbin/cb-guard mkosi.extra/usr/sbin/cb-tls mkosi.extra/usr/sbin/cb-wifi
-         mkosi.extra/usr/sbin/cb-recording-drive test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh
+         mkosi.extra/usr/sbin/cb-system mkosi.extra/usr/sbin/cb-update mkosi.extra/usr/sbin/cb-install-to-disk mkosi.extra/usr/sbin/cb-guard mkosi.extra/usr/sbin/cb-away mkosi.extra/usr/sbin/cb-tls mkosi.extra/usr/sbin/cb-wifi
+         mkosi.extra/usr/sbin/cb-recording-drive test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh test-away.sh
          mkosi.extra/usr/lib/camera-bridge/lib.sh "${helper_scripts[@]}")
 while IFS= read -r f; do scripts+=("$f"); done < <(find mkosi.extra/usr/lib/camera-bridge -name 'cb-*' -type f | sort)
 
@@ -44,7 +44,7 @@ for f in "${scripts[@]}"; do [ -f "$f" ] || continue; check "bash -n $f" bash -n
 # (C.UTF-8: shellcheck cannot print the non-ASCII characters some scripts contain in the C locale)
 check "shellcheck (all scripts)" env LC_ALL=C.UTF-8 shellcheck -x "${scripts[@]}"
 check "stub daemon parses" python3 -c "import ast; ast.parse(open('stub/camerabridged-stub').read())"
-check "scripts are executable" bash -c 'for f in build.sh build-image.sh build-boot-fallback.sh fetch-go2rtc.sh build-helpers.sh '"${helper_scripts[*]}"' test-static.sh test-vm.sh test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
+check "scripts are executable" bash -c 'for f in build.sh build-image.sh build-boot-fallback.sh fetch-go2rtc.sh build-helpers.sh '"${helper_scripts[*]}"' test-static.sh test-vm.sh test-tls.sh test-wifi.sh test-recording-drive.sh test-update.sh test-firewall.sh test-system.sh test-away.sh mkosi.postinst.chroot mkosi.finalize stub/camerabridged-broken mkosi.extra/usr/sbin/cb-* mkosi.extra/usr/lib/camera-bridge/cb-* stub/camerabridged-stub; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done'
 
 # --- build-image.sh's checks of the finished image: debugfs exits 0 whether it finds a file or not, so they read its answer ---------------
 check "build-image.sh's image checks tell a file in the image from a missing one (or a folder of that name)" bash -c '
@@ -183,7 +183,7 @@ check "cb-wait-online returns at once on a network and after its limit without o
     s=$(date +%s); out=$(unshare -n bash -c "ip link set lo up && ip addr add 192.0.2.5/24 dev lo && /usr/lib/camera-bridge/cb-wait-online 5" 2>&1) || { echo "failed with an address: $out"; exit 1; }
     [ $(($(date +%s) - s)) -le 1 ] && grep -q "on the network" <<<"$out" || { echo "a camera network without a router is not online: $out"; exit 1; }
     ! /usr/lib/camera-bridge/cb-wait-online abc >/dev/null 2>&1 || { echo "accepted a bad limit"; exit 1; }'
-check "a factory reset finishes before SSH and the guard read their settings" bash -c 'u=/usr/lib/systemd/system/camera-bridge-factory-reset.service; for s in camera-bridge-ssh camera-bridge-credentials ssh camera-bridge-guard; do grep -Eq "^Before=.*\b$s\.service\b" "$u" || { echo "not Before=: $s.service"; exit 1; }; done'
+check "a factory reset finishes before SSH, the guard and Away from home read their settings" bash -c 'u=/usr/lib/systemd/system/camera-bridge-factory-reset.service; for s in camera-bridge-ssh camera-bridge-credentials ssh camera-bridge-guard camera-bridge-away; do grep -Eq "^Before=.*\b$s\.service\b" "$u" || { echo "not Before=: $s.service"; exit 1; }; done'
 
 # --- the internet guard: its DNS configuration, its job, its units ------------------------------------------------------------
 check "the guard's DNS configuration is valid (dnsmasq --test)" bash -c '/usr/sbin/cb-guard config >/tmp/guard-dnsmasq.conf && dnsmasq --test --conf-file=/tmp/guard-dnsmasq.conf'
@@ -194,8 +194,22 @@ check "the guard is applied at boot" grep -q "camera-bridge-guard.service" mkosi
 check "the guard's collector cannot hang with its lock" grep -Eq "^TimeoutStartSec=[0-9]+min$" /usr/lib/systemd/system/camera-bridge-guard-collect.service
 check "the guard's log is read in a folder only root can change" bash -c 'grep -q "^d /run/camera-bridge/guard/work 0700 root root -" /usr/lib/tmpfiles.d/camera-bridge.conf && grep -q "^WORKDIR=\$RUN/work" /usr/sbin/cb-guard'
 
+# --- Away from home: its job, its units, wireguard-tools ----------------------------------------------------------------------
+check "The away-set request is allowed and handled" bash -c 'grep -q "^ALLOWED_JOBS=\".*\baway-set\b" mkosi.extra/usr/sbin/cb-system && grep -q "away-set) /usr/sbin/cb-away set" mkosi.extra/usr/sbin/cb-system' 
+check "Away from home is applied at boot, after the firewall and networkd, before the daemon, and again when the firewall is loaded again" bash -c 'u=mkosi.extra/usr/lib/systemd/system/camera-bridge-away.service
+    for l in ExecStart=/usr/sbin/cb-away\ apply ExecReload=/usr/sbin/cb-away\ apply PartOf=nftables.service ReloadPropagatedFrom=nftables.service Wants=nftables.service Type=oneshot RemainAfterExit=yes \
+             "After=nftables.service systemd-networkd.service srv.mount camera-bridge-datadirs.service camera-bridge-factory-reset.service" Before=camerabridged.service WantedBy=multi-user.target \
+             TimeoutStartSec=2min; do
+        grep -qxF "$l" $u || { echo "missing: $l"; exit 1; }; done
+    grep -q camera-bridge-away.service mkosi.postinst.chroot'
+check "Away from home takes its tunnel down when it stops, before the firewall flushes its rules (it starts after nftables.service), keeping the request and the key" bash -c 'u=mkosi.extra/usr/lib/systemd/system/camera-bridge-away.service; grep -qxF "ExecStop=/usr/sbin/cb-away down" $u && grep -q "^PartOf=nftables.service$" $u'
+check "Its status timer runs every 30 s and only when cb-away starts it, and systemd's lines about each run stay out of the journal" bash -c 'd=mkosi.extra/usr/lib/systemd/system; grep -qx "OnUnitActiveSec=30s" $d/camera-bridge-away-status.timer && ! grep -q "^\[Install\]" $d/camera-bridge-away-status.timer && grep -qx "ExecStart=/usr/sbin/cb-away refresh" $d/camera-bridge-away-status.service && grep -qx "TimeoutStartSec=1min" $d/camera-bridge-away-status.service && grep -qx "LogLevelMax=notice" $d/camera-bridge-away-status.service'
+check "wireguard-tools is in the image" grep -Eq '^ +wireguard-tools$' mkosi.conf
+check "Away from home's folder is made on the data partition, private to root" grep -qx 'install -d -m 0700 /srv/system/away' mkosi.extra/usr/lib/camera-bridge/cb-datadirs
+
 # --- the secure address: its certificate script and hook (test-tls.sh), the TLS front's configuration, its units -----------------------
 check "the secure address's scripts pass their self-test (test-tls.sh)" bash test-tls.sh
+check "Away from home's root side passes its self-test (test-away.sh)" bash test-away.sh
 check "the 5 GHz preference passes its self-test (test-wifi.sh)" bash test-wifi.sh
 check "the recording and archive drives pass their self-test (test-recording-drive.sh)" bash test-recording-drive.sh
 check "the request dispatcher and the jobs pass their self-test (test-system.sh)" bash test-system.sh

@@ -1,9 +1,18 @@
 import Testing
 @testable import CameraAdapters
 
-/// The box's neighbour table (Linux `/proc/net/arp`): the addresses of the hosts on its own network (the sky detector's feed finder looks only
-/// at these).
+/// The box's neighbour table (Linux `/proc/self/net/arp`): the addresses of the hosts on its own network (the sky detector's feed finder looks
+/// only at these).
 @Suite struct NeighborTableTests {
+    /// The live table is the process's own: the daemon's unit has `ProcSubset=pid`, which hides `/proc/net`. Off Linux there is none.
+    @Test func theLiveTableIsTheProcessesOwn() {
+        #if os(Linux)
+        #expect(NeighborTable.read()?.hasPrefix("IP address") == true)
+        #else
+        #expect(NeighborTable.read() == nil)
+        #endif
+    }
+
     static let table = """
     IP address       HW type     Flags       HW address            Mask     Device
     192.168.77.1     0x1         0x2         a4:91:b1:00:11:22     *        enp1s0

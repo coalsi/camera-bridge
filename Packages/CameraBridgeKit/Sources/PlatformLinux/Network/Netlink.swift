@@ -12,6 +12,8 @@ struct KernelAddress: Equatable, Sendable {
     var flags: UInt32
     /// 4 or 16 bytes.
     var bytes: [UInt8]
+    /// `IFA_CACHEINFO`'s `ifa_prefered`, in seconds; `UInt32.max` is forever. nil when the kernel sent no cache info, which `globalIPv6` counts as forever.
+    var preferredLifetime: UInt32? = nil
 
     static let temporary: UInt32 = 0x01        // IFA_F_TEMPORARY: a privacy address; rotates daily
     static let duplicateFailed: UInt32 = 0x08  // IFA_F_DADFAILED
@@ -38,6 +40,7 @@ enum Netlink {
     private static let attributeHeaderSize = 4    // struct rtattr
     private static let attributeAddress: UInt16 = 1   // IFA_ADDRESS
     private static let attributeLocal: UInt16 = 2     // IFA_LOCAL
+    private static let attributeCacheInfo: UInt16 = 6 // IFA_CACHEINFO: struct ifa_cacheinfo { u32 prefered, valid, cstamp, tstamp }
     private static let attributeFlags: UInt16 = 8     // IFA_FLAGS
 
     /// A non-blocking, close-on-exec `NETLINK_ROUTE` socket bound to the multicast `groups`; nil when the kernel (or a sandbox)
@@ -106,8 +109,8 @@ enum Netlink {
         return found
     }
 
-    /// Appends the addresses in one datagram of messages; true once the dump is complete (or failed).
-    private static func parse(_ datagram: ArraySlice<UInt8>, into found: inout [KernelAddress]) -> Bool {
+    /// Appends the addresses in one datagram of messages; true once the dump is complete (or failed). Not private so a test can hand it a datagram.
+    static func parse(_ datagram: ArraySlice<UInt8>, into found: inout [KernelAddress]) -> Bool {
         let bytes = Array(datagram)
         var offset = 0
         while offset + headerSize <= bytes.count {
@@ -130,6 +133,7 @@ enum Netlink {
                     switch kind {
                     case attributeAddress: address.bytes = payload
                     case attributeLocal: local = payload
+                    case attributeCacheInfo where payload.count >= 16: address.preferredLifetime = load(UInt32.self, payload, 0)
                     case attributeFlags where payload.count == 4: address.flags = load(UInt32.self, payload, 0)
                     default: break
                     }

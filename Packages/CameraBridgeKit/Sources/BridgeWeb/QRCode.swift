@@ -1,9 +1,10 @@
 import Foundation
 
 /// A small QR Code encoder (ISO/IEC 18004, byte mode, versions 1 to 10, error correction L or M) that draws SVG, so the server can
-/// show Apple Home setup codes (`X-HM://…`, 20 characters: version 2) without an image library. After Project Nayuki's reference
-/// implementation (MIT): the same steps (data bits, Reed-Solomon over GF(256)/0x11D, interleaving, zig-zag placement, the eight
-/// masks scored by the standard penalty rules, format and version information).
+/// show Apple Home setup codes (`X-HM://…`, 20 characters: version 2) without an image library. Derived from Project Nayuki's QR Code
+/// generator library (Copyright (c) Project Nayuki, MIT License; its copyright and permission notice are in THIRD_PARTY_LICENSES.md): the
+/// same steps (data bits, Reed-Solomon over GF(256)/0x11D, interleaving, zig-zag placement, the eight masks scored by the standard penalty
+/// rules, format and version information).
 public struct QRCode: Sendable, Equatable {
     public enum ErrorCorrection: Int, Sendable { case low = 0, medium = 1 }
 

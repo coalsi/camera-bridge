@@ -294,6 +294,7 @@ public actor HTTPServer {
                     var out = HTTPSerializer.response(status: response.status, headers: stamped(response.headers), body: payload)
                     if head.method == "HEAD" { out = out.prefix(out.count - payload.count).withUnsafeBytes { Data($0) } }
                     do { try await send(out, on: connection, limits: limits) } catch { return }
+                    response.afterSend?()
                     if wantsClose { return }
                 case .stream(let body):
                     await stream(response, body: body, request: head, connection: connection, limits: limits)

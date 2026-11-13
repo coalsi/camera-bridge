@@ -1,0 +1,8 @@
+[Unit]
+Description=Away from home: write the status every 30 seconds
+# Started and stopped by cb-away, only while Away from home is on, so there is no [Install] section.
+
+[Timer]
+OnActiveSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s

@@ -810,7 +810,13 @@ public final class BridgeEngine {
 
     /// This machine's IPv4 addresses on interfaces that are up (not loopback), for a plugin that sweeps its local network.
     public nonisolated func localIPv4Addresses() -> [String] {
-        StreamAddress.interfaceAddresses().map(\.address).filter { !$0.contains(":") && !$0.hasPrefix("127.") }
+        Self.localIPv4Addresses(among: StreamAddress.interfaceAddresses())
+    }
+
+    /// Tunnels are left out: Away from home's `wg-away` holds 10.a.b.1, which the secure address would otherwise take for the home address
+    /// while the LAN address is briefly gone (a DHCP renewal), send to the website and keep.
+    nonisolated static func localIPv4Addresses(among interfaces: [InterfaceAddress]) -> [String] {
+        interfaces.filter { !$0.isIPv6 && !$0.address.hasPrefix("127.") && !MacVPNDetector.isTunnelName($0.interface) }.map(\.address)
     }
 
     // MARK: Plugin secrets

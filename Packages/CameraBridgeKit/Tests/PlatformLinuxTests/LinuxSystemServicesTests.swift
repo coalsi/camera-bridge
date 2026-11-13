@@ -6,6 +6,7 @@ import Foundation
 import Glibc
 #endif
 import MediaCore
+import Synchronization
 import TestSupport
 import Testing
 @testable import PlatformLinux
@@ -446,6 +447,115 @@ import Testing
     @Test func theKernelAddressDumpListsLoopback() {
         let loopback = Netlink.dumpAddresses().filter { $0.family == AF_INET && $0.bytes == [127, 0, 0, 1] }
         #expect(loopback.count == 1 && loopback[0].prefixLength == 8)
+    }
+
+    /// An RTM_NEWADDR datagram for an IPv6 address on interface 2, with IFA_CACHEINFO when `cacheInfo` is given.
+    private func datagram(cacheInfo: [UInt32]?) -> [UInt8] {
+        func le<T: FixedWidthInteger>(_ value: T) -> [UInt8] { withUnsafeBytes(of: value.littleEndian) { Array($0) } }
+        var address = [UInt8](repeating: 0, count: 16)
+        _ = inet_pton(AF_INET6, "2001:db8:4:7000::1", &address)
+        var attributes = le(UInt16(20)) + le(UInt16(1)) + address   // IFA_ADDRESS
+        if let cacheInfo { attributes += le(UInt16(20)) + le(UInt16(6)) + cacheInfo.flatMap { le($0) } }   // IFA_CACHEINFO
+        let body: [UInt8] = [UInt8(AF_INET6), 64, 0, 0] + le(UInt32(2)) + attributes
+        return le(UInt32(16 + body.count)) + le(UInt16(20)) + le(UInt16(0)) + le(UInt32(1)) + le(UInt32(0)) + body
+    }
+
+    @Test func theCacheInfoGivesThePreferredLifetime() {
+        var found: [KernelAddress] = []
+        _ = Netlink.parse(datagram(cacheInfo: [3600, 7200, 0, 0])[...], into: &found)
+        #expect(found.count == 1 && found[0].preferredLifetime == 3600 && found[0].prefixLength == 64 && found[0].interfaceIndex == 2)
+        var without: [KernelAddress] = []
+        _ = Netlink.parse(datagram(cacheInfo: nil)[...], into: &without)
+        #expect(without.count == 1 && without[0].preferredLifetime == nil, "no cache info: forever, said as nil")
+    }
+
+    @Test func theIPv6DefaultRouteIsTheLowestMetricOnALANInterface() {
+        let zeros = String(repeating: "0", count: 32)
+        func line(_ interface: String, metric: String, flags: String = "00000003", destination: String = String(repeating: "0", count: 32), length: String = "00") -> String {
+            "\(destination) \(length) \(zeros) 00 \(zeros) \(metric) 00000001 00000000 \(flags) \(interface)"
+        }
+        let loopback = line("lo", metric: "ffffffff", flags: "00200200")   // the unreachable default of lo
+        let docker = line("docker0", metric: "00000001")
+        let ethernet = line("eth0", metric: "00000400")
+        let wifi = line("wlan0", metric: "00000258")
+        let specific = line("eth1", metric: "00000001", destination: "20010db8000000000000000000000000", length: "20")
+        #expect(InterfaceAddresses.ipv6DefaultRouteInterface(routeTable: [loopback, docker, ethernet, wifi, specific].joined(separator: "\n")) == "wlan0")
+        #expect(InterfaceAddresses.ipv6DefaultRouteInterface(routeTable: [loopback, docker, ethernet, specific].joined(separator: "\n")) == "eth0")
+        #expect(InterfaceAddresses.ipv6DefaultRouteInterface(routeTable: [loopback, docker, specific].joined(separator: "\n")) == nil)
+        #expect(InterfaceAddresses.ipv6DefaultRouteInterface(routeTable: "") == nil)
+    }
+
+    @Test func globalAddressesAreThoseOfTheDefaultRoutesInterface() {
+        let names: [UInt32: String] = [2: "eth0", 3: "wlan0"]
+        var forever = kernel("2001:db8:4:7000::1"); forever.preferredLifetime = 3600
+        let kernelAddresses = [
+            forever,
+            kernel("2001:db8:4:7000::2", flags: KernelAddress.temporary),
+            kernel("2001:db8:4:7000::3", flags: KernelAddress.deprecated),
+            kernel("2001:db8:4:7000::4", flags: KernelAddress.tentative),
+            kernel("2001:db8:4:7000::5", flags: KernelAddress.duplicateFailed),
+            kernel("fd00::1"), kernel("fe80::1"), kernel("192.0.2.5", prefix: 24),
+            kernel(index: 3, "2001:db8:9::1"),
+        ]
+        let found = InterfaceAddresses.globalIPv6(kernel: kernelAddresses, names: names, defaultInterface: "eth0")
+        #expect(found.map(\.address) == ["2001:db8:4:7000::1", "2001:db8:4:7000::2", "2001:db8:4:7000::3"])
+        #expect(found.map(\.isTemporary) == [false, true, false] && found.map(\.isDeprecated) == [false, false, true])
+        #expect(found[0].preferredLifetime == 3600 && found[1].preferredLifetime == UInt32.max, "an address without cache info lasts forever")
+        #expect(found.allSatisfy { $0.interface == "eth0" && $0.prefixLength == 64 })
+        #expect(InterfaceAddresses.globalIPv6(kernel: kernelAddresses, names: names, defaultInterface: nil).isEmpty)
+    }
+
+    /// Without its route table Away from home finds no IPv6 default route, and its card then says the home has no IPv6: the log says why,
+    /// once, although the table is asked for every 30 s.
+    @Test func anUnreadableRouteTableIsLoggedOnce() {
+        final class Lines: LogSink {
+            let lines = Mutex<[String]>([])
+            func record(_ entry: LogEntry) { lines.withLock { $0.append(entry.message) } }
+        }
+        let sink = Lines()
+        let token = LogHub.addSink(sink)
+        defer { LogHub.removeSink(token) }
+        let missing = "/nonexistent/ipv6_route"
+        #expect(InterfaceAddresses.ipv6DefaultRouteInterface(file: missing) == nil)
+        #expect(InterfaceAddresses.ipv6DefaultRouteInterface(file: missing) == nil)
+        #expect(sink.lines.withLock { $0.filter { $0.hasPrefix("\(missing) can't be read") }.count } == 1)
+    }
+
+    /// The test container has no IPv6, so there the list and the default route are both empty; the test still says something.
+    @Test func theLiveLookStaysOnOneInterface() {
+        let interface = InterfaceAddresses.ipv6DefaultRouteInterface()
+        let found = InterfaceAddresses.globalIPv6()
+        if interface == nil { #expect(found.isEmpty, "no default route, no address") }
+        #expect(found.allSatisfy { $0.interface == interface })
+    }
+
+    /// The IPv4 gateway comes from the process's own route table (`/proc/self/net/route`: the daemon's `ProcSubset=pid` hides `/proc/net`).
+    /// In the test container it is a gateway `ip` lists on a LAN interface, or nothing when there is none.
+    @Test func theGatewayIsOneTheRouteTableNames() {
+        guard let listed = Self.ipOutput(["-4", "route", "show", "default"]) else { return }
+        var gateways: [String] = []
+        for line in listed.split(separator: "\n") {
+            let words = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard let via = words.firstIndex(of: "via"), via + 1 < words.count, let dev = words.firstIndex(of: "dev"), dev + 1 < words.count,
+                  InterfaceAddresses.isLANInterface(words[dev + 1]) else { continue }
+            gateways.append(words[via + 1])
+        }
+        let gateway = InterfaceAddresses.defaultGateway()
+        if gateways.isEmpty { #expect(gateway == nil) } else { #expect(gateway.map { gateways.contains($0) } == true, "\(gateway ?? "nil") among \(gateways)") }
+    }
+
+    /// What `ip ARGUMENTS` prints, or nil without `ip` (or when it fails).
+    private static func ipOutput(_ arguments: [String]) -> String? {
+        guard let ip = ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"].first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }
+        let process = Process(), pipe = Pipe()
+        process.executableURL = URL(filePath: ip)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
     }
 
     @Test func gatewaysCountOnlyOnNetworksALANInterfaceIsOn() {

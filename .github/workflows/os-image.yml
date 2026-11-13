@@ -132,8 +132,8 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
           SMOKE_TESTS: ${{ github.event.inputs.smoke_tests }}
         run: |
-          # daemon, nvr, nvr-archive and nvr-faults skip themselves on an image with the stub daemon.
-          tests=${SMOKE_TESTS:-boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,factory-reset,installer,install-boot}
+          # daemon, nvr, nvr-archive and nvr-faults skip themselves on an image with the stub daemon, and so does away's check of the Settings card.
+          tests=${SMOKE_TESTS:-boot,ssh-off,system,persist,rescue,daemon,nvr,nvr-archive,nvr-faults,requests,away,factory-reset,installer,install-boot}
           case $tests in *[!a-z,-]*) echo "::error::the test list may only hold letters, commas and hyphens"; exit 1 ;; esac
           if [ ! -w /dev/kvm ]; then tests=boot,ssh-off; fi
           echo "tests=$tests" >> "$GITHUB_OUTPUT"

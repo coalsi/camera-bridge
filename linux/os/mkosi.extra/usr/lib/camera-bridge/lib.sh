@@ -58,3 +58,12 @@ cb_wipe_dir_contents() {
     [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
     find "$dir" -xdev -mindepth 1 -delete
 }
+
+# cb_write_file PATH MODE [GROUP [TEST_ROOT]]: stdin to PATH, atomically (a temporary file in the same folder, then mv). The group is set
+# only when one is given, and left alone when TEST_ROOT is not empty (a test stands in for / and is not root).
+cb_write_file() {
+    local path=$1 mode=$2 group=${3:-} test_root=${4:-} tmp
+    tmp=$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")
+    if cat >"$tmp" && chmod "$mode" "$tmp" && { [ -z "$group" ] || [ -n "$test_root" ] || chgrp "$group" "$tmp"; }; then mv -f "$tmp" "$path"
+    else rm -f "$tmp"; return 1; fi
+}

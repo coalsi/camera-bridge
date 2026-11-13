@@ -27,8 +27,13 @@ chain() { sed -n "/^	chain $1 {/,/^	}/p" "$RULES" | sed -e 's/#.*//' -e 's/^[[:s
 
 input=$(chain input)
 basics='^(iifname "lo" accept|ct state invalid drop|ct state \{ established, related \} accept|ip protocol icmp |ip6 nexthdr icmpv6 |udp dport 67 iifname "wl\*" accept|iifname "wl\*" ip saddr 10\.42\.0\.0/24 (udp|tcp) dport 53 accept|ip6? saddr @guarded[46] (udp|tcp) dport 53 meter |udp sport 67 udp dport 68 accept|udp sport 547 udp dport 546 accept)'
-expect "the input chain accepts nothing but the basics by itself, and jumps to the lan chain for local sources only" \
-    "$(grep -Ev "$basics" <<<"$input" | tr '\n' ';')" "ip saddr @lan4 jump lan;ip6 saddr @lan6 jump lan;ip saddr @onlink4 jump lan;ip6 saddr @onlink6 jump lan;"
+expect "the input chain accepts nothing but the basics by itself: the VPN goes to its own chain, its port is open, the rest jumps to lan" \
+    "$(grep -Ev "$basics" <<<"$input" | tr '\n' ';')" \
+    'iifname "wg-away" jump away;udp dport @away_port accept;ip saddr @lan4 jump lan;ip6 saddr @lan6 jump lan;ip saddr @onlink4 jump lan;ip6 saddr @onlink6 jump lan;'
+expect "what arrives through the VPN leaves the input chain before anything else can accept it" "$(sed -n 4p <<<"$input")" 'iifname "wg-away" jump away'
+expect "the away chain is exactly: ICMP, ICMPv6, the HTTPS page, drop" "$(chain away | tr '\n' ';')" \
+    'ip protocol icmp icmp type { echo-request, destination-unreachable, time-exceeded, parameter-problem } limit rate 20/second accept;ip6 nexthdr icmpv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request } accept;tcp dport 443 accept;drop;'
+expect "the VPN's port set is empty until cb-away fills it" "$(sed -n '/set away_port {/,/}/p' "$RULES" | grep -c elements || true)" "0"
 lan=$(chain lan)
 # Exactly what the box offers its network, in this order, and nothing else: a rule added here must be added to this list on purpose.
 expect "the lan chain is exactly: mDNS, the web page, the bridge's listeners (21090-21199), SSH when on, NTP, SADP's answers, the media ports" \

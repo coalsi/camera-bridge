@@ -365,6 +365,42 @@ final class FakeSystem: SystemControlling {
 
     init(mode: String = "installed") { self.mode = mode }
 
+    /// Away from home: what the system reports (nil: this system has none, until `supportAway()`), the requests it took, the sentence a
+    /// request fails with while set, and how long a request takes.
+    let away = Box<AwayStatus?>(nil)
+    let awayRequests = Box<[AwayRequest]>([])
+    let awayFailure = Box<String?>(nil)
+    let awayDelay = Box<Duration>(.zero)
+    /// The box's WireGuard public key as this fake reports it: a fixed example key (32 bytes of base64, written the one way).
+    static let awayBoxKey = String(repeating: "Z", count: 42) + "A="
+
+    func supportAway() { away.set(.off) }
+
+    func awayStatus() async -> AwayStatus? { away.value }
+
+    func setAway(_ request: AwayRequest) async throws {
+        awayRequests.update { $0.append(request) }
+        try await Task.sleep(for: awayDelay.value)
+        if let failure = awayFailure.value { throw SystemError(failure) }
+        if request.on {
+            away.set(AwayStatus(state: "ok", message: nil, publicKey: Self.awayBoxKey, port: AwayRequest.port, router: nil,
+                                peers: request.peers.map { AwayStatus.Peer(publicKey: $0.publicKey, latestHandshake: 0, endpoint: nil) }, updated: 0))
+        } else {
+            away.set(.off)
+        }
+    }
+
+    /// A device's tunnel handshake as the system would report it.
+    func awayHandshake(_ publicKey: String, at epoch: Int, from endpoint: String?) {
+        away.update { status in
+            guard var current = status, let index = current.peers.firstIndex(where: { $0.publicKey == publicKey }) else { return }
+            current.peers[index].latestHandshake = epoch
+            current.peers[index].endpoint = endpoint
+            current.updated = epoch
+            status = current
+        }
+    }
+
     func certificateStatus() async -> CertificateStatus? { certificate.value }
 
     func obtainCertificate(name: String, host: String, privateKeyPEM: String) async throws {
@@ -584,4 +620,16 @@ extension Harness {
         let viewer = try #require(collected.json["viewer"] as? [String: Any])
         return PairedTV(key: key, id: try #require(viewer["id"] as? String), name: try #require(viewer["name"] as? String))
     }
+}
+
+/// The box's network, held in memory: tests set what it holds and call `changed()` to say it may have changed.
+final class FakeAwayNetwork: AwayNetwork {
+    let addresses = Box<[AwayAddress]>([])
+    let prefixes = Box<[String]>([])
+    private let broadcaster = AsyncBroadcaster<Void>(bufferingNewest: 1)
+
+    func globalIPv6() async -> [AwayAddress] { addresses.value }
+    func ownPrefixes() async -> [String] { prefixes.value }
+    var changes: AsyncStream<Void> { broadcaster.subscribe() }
+    func changed() { broadcaster.yield(()) }
 }

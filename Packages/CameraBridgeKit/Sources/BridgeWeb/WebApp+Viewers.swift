@@ -9,7 +9,7 @@ import MediaCore
 //                                 404 pairing_gone (ended, unknown, a wrong secret, collected already, or the TV removed meanwhile)
 //   POST   /viewers/approve       { code } in any case, with or without the dash -> 201 { viewer }; 404 no_such_code, 409 too_many_viewers, 500 storage
 //   GET    /viewers               { viewers: [viewer] }, the one used last first
-//   DELETE /viewers/:id           204; 404 when there is no such TV
+//   DELETE /viewers/:id           204; 404 when there is no such TV. A phone's Away from home key leaves the VPN with it (`AwayService.removeAppDevice`).
 // `viewer` is { id, name, device, created, lastSeen, address }, every key always there (null for what is not known). `id` names the TV in the
 // list and signs nobody in. The two open routes can only make a code: nothing is added until a signed-in owner types it, and the key goes
 // to the TV in the one answer that ends its request (the box keeps only its SHA-256).
@@ -217,6 +217,8 @@ extension WebApp {
         guard let id = ctx.params["id"], !id.isEmpty, id.utf8.count <= 64, await auth.removeViewer(id: id) else {
             throw APIError.notFound("That device isn’t added any more.")
         }
+        // The pairing is gone, so its VPN key goes now and not at the next look; a failure shows on Away from home's card.
+        await away.removeAppDevice(viewerID: id)
         return .empty()
     }
 

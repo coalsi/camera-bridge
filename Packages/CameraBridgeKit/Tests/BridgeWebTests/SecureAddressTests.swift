@@ -13,12 +13,14 @@ final class FakeBoxServer: BoxTransport {
     /// The answer to every call after `register` (status, body); the default is the success answer.
     let answer = Box<(Int, String)>((200, #"{"ok":true}"#))
     let registerAnswer = Box<(Int, String)>((201, #"{"name":"k7f2q9","host":"k7f2q9.box.camera-bridge.app"}"#))
+    /// The answer to `POST …/away`: the name the website makes for the box.
+    let awayAnswer = Box<(Int, String)>((200, #"{"name":"abcdefghij0123456789.away.camera-bridge.app"}"#))
     let unreachable = Box<Bool>(false)
 
     func send(method: String, url: URL, headers: [String: String], body: Data) async throws -> (status: Int, body: Data) {
         seen.update { $0.append(Seen(method: method, path: url.path, headers: headers, body: body)) }
         if unreachable.value { throw URLError(.notConnectedToInternet) }
-        let (status, text) = url.path.hasSuffix("/register") ? registerAnswer.value : answer.value
+        let (status, text) = url.path.hasSuffix("/register") ? registerAnswer.value : method == "POST" && url.path.hasSuffix("/away") ? awayAnswer.value : answer.value
         return (status, Data(text.utf8))
     }
 }
@@ -66,6 +68,74 @@ final class FakeBoxServer: BoxTransport {
         #expect(client.lastSentTimestamp == stamps[2])
     }
 
+    // MARK: Away from home's calls
+
+    @Test func theAwayCallsAreSignedLikeTheAddress() async throws {
+        let server = FakeBoxServer()
+        let key = Curve25519.Signing.PrivateKey()
+        let client = BoxClient(base: Self.base, transport: server, now: { Self.now })
+        let name = try await client.sendAway("2001:db8:4:7000::1", as: ("k7f2q9", key))
+        try await client.deleteAway(as: ("k7f2q9", key))
+        #expect(name == "abcdefghij0123456789.away.camera-bridge.app")
+        let seen = server.seen.value
+        #expect(seen.map(\.method) == ["POST", "DELETE"] && seen.map(\.path) == ["/api/v1/box/away", "/api/v1/box/away"])
+        #expect(String(decoding: seen[0].body, as: UTF8.self) == #"{"ip":"2001:db8:4:7000::1"}"# && seen[1].body.isEmpty)
+        let stamps = try seen.map { try #require(Int64($0.headers["X-CB-Timestamp"] ?? "")) }
+        #expect(stamps[1] > stamps[0])
+        for call in seen {
+            let message = BoxClient.signedMessage(method: call.method, path: call.path, timestamp: try #require(Int64(call.headers["X-CB-Timestamp"] ?? "")), body: call.body)
+            #expect(key.publicKey.isValidSignature(try #require(Data(base64Encoded: call.headers["X-CB-Signature"] ?? "")), for: message))
+            #expect(call.headers["X-CB-Name"] == "k7f2q9")
+        }
+    }
+
+    @Test func anAwayNameThatIsNotOursIsRefused() async throws {
+        let server = FakeBoxServer()
+        let client = BoxClient(base: Self.base, transport: server)
+        let key = Curve25519.Signing.PrivateKey()
+        for answer in [#"{"name":"evil.example.com"}"#, #"{"name":"ab.away.camera-bridge.app"}"#, #"{"name":"abcdefghij0123456789.away.camera-bridge.app.evil.example"}"#,
+                       #"{"name":"ABCDEFGHIJ0123456789.away.camera-bridge.app"}"#, #"{"name":"abcdefghij0123456789012345678901234.away.camera-bridge.app"}"#,
+                       #"{"name":"abcdefghij0123456789\n.away.camera-bridge.app"}"#, #"{"other":1}"#] {
+            server.awayAnswer.set((200, answer))
+            do { _ = try await client.sendAway("2001:db8:4:7000::1", as: ("k7f2q9", key)); Issue.record("\(answer) was taken") } catch let error as BoxClientError {
+                #expect(error.kind == .refused, "\(answer)")
+            }
+        }
+        for good in ["abcdefghij012345", "abcdefghij0123456789", String(repeating: "a", count: 32)] {
+            #expect(BoxClient.isAwayName(good + ".away.camera-bridge.app"), "\(good)")
+        }
+    }
+
+    /// Holds the first call until released, to see whether a second one starts meanwhile.
+    final class GatedBoxServer: BoxTransport {
+        let inner = FakeBoxServer()
+        let released = Box<Bool>(false)
+        func send(method: String, url: URL, headers: [String: String], body: Data) async throws -> (status: Int, body: Data) {
+            let first = inner.seen.value.isEmpty
+            let answer = try await inner.send(method: method, url: url, headers: headers, body: body)
+            while first, !released.value { try await Task.sleep(for: .milliseconds(5)) }
+            return answer
+        }
+    }
+
+    @Test func signedCallsGoOutOneAtATime() async throws {
+        let server = GatedBoxServer()
+        let key = Curve25519.Signing.PrivateKey()
+        let client = BoxClient(base: Self.base, transport: server, now: { Self.now })
+        let first = Task { try await client.sendAddress("192.168.77.5", as: ("k7f2q9", key)) }
+        while server.inner.seen.value.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        let second = Task { try await client.sendAway("2001:db8:4:7000::1", as: ("k7f2q9", key)) }
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(server.inner.seen.value.count == 1, "the second call waits for the first to be answered")
+        server.released.set(true)
+        try await first.value
+        _ = try await second.value
+        let seen = server.inner.seen.value
+        #expect(seen.map(\.path) == ["/api/v1/box/address", "/api/v1/box/away"])
+        let stamps = try seen.map { try #require(Int64($0.headers["X-CB-Timestamp"] ?? "")) }
+        #expect(stamps[0] < stamps[1], "the timestamps rise in the order the calls were sent")
+    }
+
     @Test func registerIsUnsignedAndFailuresAreSaidInPlainWords() async throws {
         let server = FakeBoxServer()
         let client = BoxClient(base: Self.base, transport: server)
@@ -73,11 +143,13 @@ final class FakeBoxServer: BoxTransport {
         #expect(registration == BoxClient.Registration(name: "k7f2q9", host: "k7f2q9.box.camera-bridge.app"))
         #expect(server.seen.value[0].headers["X-CB-Signature"] == nil && String(decoding: server.seen.value[0].body, as: UTF8.self) == #"{"publicKey":"AAAA"}"#)
         let key = Curve25519.Signing.PrivateKey()
-        for (status, kind) in [(503, BoxClientError.Kind.notReady), (429, .rateLimited), (401, .unauthorized), (400, .refused)] {
+        // A server error other than the website's own 503 (its database or DNS provider failing, a gateway's 502) is no refusal: it goes by itself.
+        for (status, kind) in [(503, BoxClientError.Kind.notReady), (500, .serverError), (502, .serverError), (429, .rateLimited), (401, .unauthorized), (400, .refused)] {
             server.answer.set((status, #"{"error":"nope"}"#))
             do { try await client.sendAddress("192.168.77.5", as: ("k7f2q9", key)); Issue.record("status \(status) was taken") } catch let error as BoxClientError {
-                #expect(error.kind == kind)
+                #expect(error.kind == kind, "\(status)")
                 if status == 503 { #expect(error.message.hasPrefix("The secure address service isn’t ready yet")) }
+                if kind == .serverError { #expect(error.message == "The Camera Bridge website had a problem on its side. The box tries again by itself.") }
             }
         }
         server.unreachable.set(true)
@@ -151,6 +223,27 @@ final class FakeBoxServer: BoxTransport {
         #expect(stamps == stamps.sorted() && Set(stamps).count == stamps.count, "the timestamps rise across a restart")
     }
 
+    @Test func publishAwayNeedsTheSecureAddress() async throws {
+        let rig = try rig()
+        defer { rig.directory.remove() }
+        do { _ = try await rig.service.publishAway(ip: "2001:db8:4:7000::1"); Issue.record("no TLS front") } catch let error as BoxClientError { #expect(error.kind == .notRegistered) }
+        rig.system.certificate.set(CertificateStatus(state: "none"))
+        do { _ = try await rig.service.publishAway(ip: "2001:db8:4:7000::1"); Issue.record("no name yet") } catch let error as BoxClientError { #expect(error.kind == .notRegistered) }
+        try await rig.service.withdrawAway()   // no name, so no record can exist: done
+        #expect(rig.server.seen.value.isEmpty, "nothing was sent")
+        await rig.service.tick()
+        rig.server.seen.set([])
+        let name = try await rig.service.publishAway(ip: "2001:db8:4:7000::1")
+        #expect(name == "abcdefghij0123456789.away.camera-bridge.app")
+        let call = try #require(rig.server.seen.value.first)
+        #expect(call.method == "POST" && call.path == "/api/v1/box/away" && call.headers["X-CB-Name"] == "k7f2q9")
+        #expect(SecureAddressState.load(from: rig.directory.url).lastTimestamp == Int64(call.headers["X-CB-Timestamp"] ?? ""), "kept, so a restart never goes backwards")
+        try await rig.service.withdrawAway()
+        let last = try #require(rig.server.seen.value.last)
+        #expect(last.method == "DELETE" && last.path == "/api/v1/box/away")
+        #expect(SecureAddressState.load(from: rig.directory.url).lastTimestamp == Int64(last.headers["X-CB-Timestamp"] ?? ""))
+    }
+
     @Test func itAsksForACertificateAndWaitsBetweenTries() async throws {
         let rig = try rig()
         defer { rig.directory.remove() }
@@ -208,6 +301,7 @@ final class FakeBoxServer: BoxTransport {
         await rig.service.tick()   // registers, then the address fails
         let afterFirst = rig.server.seen.value.count
         #expect(rig.server.seen.value.last?.path.hasSuffix("/address") == true, "the address was asked and failed")
+        #expect(await rig.service.report().problem?.code == "service_not_ready", "a server error is the service not being ready, not a refusal")
         for _ in 0..<5 {   // a minute apart, as the service runs: nothing is asked while it waits
             rig.clock.update { $0 = $0.addingTimeInterval(60) }
             await rig.service.tick()

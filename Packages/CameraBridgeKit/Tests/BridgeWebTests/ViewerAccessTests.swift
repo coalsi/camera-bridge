@@ -6,8 +6,8 @@ import Testing
 import TestSupport
 @testable import BridgeWeb
 
-/// An Apple TV's key on the API (`Route.Access.viewer`). Sent as `Authorization: Bearer <key>`, it opens the twelve viewer routes (live and
-/// recorded video, pictures, `GET viewer` and moving a camera) and nothing else, needs no CSRF token and never works in the address; a wrong
+/// An Apple TV's key on the API (`Route.Access.viewer`). Sent as `Authorization: Bearer <key>`, it opens the fifteen viewer routes (live and
+/// recorded video, pictures, `GET viewer`, moving a camera and an iPhone's Away from home tunnel) and nothing else, needs no CSRF token and never works in the address; a wrong
 /// or removed key is `401 viewer_key`, even beside a session cookie, and a TV removed while it watches live loses the stream. A browser's
 /// session works on the same routes as before. Pairing itself is `ViewerPairingAPITests`'.
 @Suite(.timeLimit(.minutes(1))) struct ViewerAccessTests {
@@ -15,7 +15,7 @@ import TestSupport
     private static let viewerRoutes: Set<String> = [
         "GET viewer", "GET cameras/:id/snapshot", "GET live", "GET nvr/cameras", "GET nvr/activity", "GET nvr/events", "GET nvr/cameras/:id/fragments",
         "GET nvr/cameras/:id/fragments/:fid", "GET nvr/cameras/:id/fragments/:fid/init", "GET nvr/cameras/:id/keyframe", "POST cameras/:id/pan-tilt",
-        "POST hls/tickets",
+        "POST hls/tickets", "POST viewer/away", "GET viewer/away", "DELETE viewer/away",
     ]
     private static let removed = "This device was removed from Camera Bridge. Pair it again."
     private static let inTheAddress = "Send the key in the Authorization header (Bearer), never in the address."

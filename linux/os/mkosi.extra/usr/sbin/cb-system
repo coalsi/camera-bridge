@@ -27,7 +27,7 @@ export CB_TAG=cb-system
 REQUESTS=$CB_RUN/requests
 JOBS=$CB_RUN/jobs
 MAX_REQUEST_BYTES=65536
-ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget archive-use archive-forget wifi-scan wifi-join wifi-forget guard-set tls-obtain"
+ALLOWED_JOBS="ssh-enable ssh-disable auto-update update-check update-apply reboot poweroff factory-reset install-list install-to-disk drive-list drive-use drive-forget archive-use archive-forget wifi-scan wifi-join wifi-forget guard-set tls-obtain away-set"
 # Jobs that change disks or the running system image take this lock; only one at a time.
 HEAVY_JOBS=" update-apply install-to-disk factory-reset drive-use drive-forget archive-use archive-forget "
 
@@ -193,7 +193,7 @@ cmd_auto_update() {
 # --- reset / power ----------------------------------------------------------------------------------------------------
 
 # wipe_settings: everything of the owner's that the box keeps, so a box that is given away tells nothing about its last home: the bridge's
-# data, the secure address, the guard's lists, the saved Wi-Fi networks (their passwords are in the files), SSH (keys and the host key), the
+# data, the secure address, the guard's lists, Away from home's keys (the box's VPN key and the paired devices), the saved Wi-Fi networks (their passwords are in the files), SSH (keys and the host key), the
 # update settings and downloads, and the log of earlier boots (camera names, addresses). The recording and archive drive choices stay: their
 # drives are not erased.
 wipe_settings() {
@@ -201,6 +201,7 @@ wipe_settings() {
     rm -f "$CB_SYSTEM/first-boot-done" "$CB_SYSTEM/auto-update" "$CB_SYSTEM/update.conf" "$CB_SYSTEM/wifi-pending"
     rm -rf "$CB_SYSTEM/tls"   # the secure address's certificate, key and account: the box registers anew
     rm -rf "$CB_SYSTEM/guard"   # the internet guard's list of watched cameras and what they asked for
+    rm -rf "$CB_SYSTEM/away"   # Away from home's request and the box's VPN key: the box makes a new key if it is turned on again
     cb_wipe_dir_contents "$SSH_DIR" || true
     cb_wipe_dir_contents "$CB_SYSTEM/network-connections" || true
     nmcli connection reload >/dev/null 2>&1 || true   # NetworkManager forgets them now too (when it runs already)
@@ -309,7 +310,7 @@ process_requests() {
         head -c "$MAX_REQUEST_BYTES" -- "$incoming" >"$JOBS/.$name.new"
         rm -f -- "$incoming"
         chmod 0600 "$JOBS/.$name.new"
-        if ! jq -e 'type == "object"' "$JOBS/.$name.new" >/dev/null 2>&1; then
+        if ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$JOBS/.$name.new" >/dev/null 2>&1; then
             cb_log "request '$name' is not a JSON object"
             rm -f -- "$JOBS/.$name.new"
             cb_status "$name" failed "request is not a JSON object"
@@ -437,6 +438,9 @@ run_job_body() {
         wifi-forget) /usr/sbin/cb-wifi --forget "$(jq -r '.ssid // ""' "$args")" || return $? ;;
         # The internet guard's list of watched cameras; cb-guard checks every address (private ranges only, at most 64, level watch).
         guard-set) /usr/sbin/cb-guard set "$args" || return $? ;;
+        # Away from home (cb-away): the WireGuard interface, its port in the firewall and the kept devices. cb-away checks every value again
+        # (51820 only, a /24 in 10/8, at most 64 devices). It isn't a heavy job: it waits at most a few seconds for networkd.
+        away-set) /usr/sbin/cb-away set "$args" || return $? ;;
         # The secure address's certificate (cb-tls). The box key arrives in the request (root-only folder), is used by cb-tls-hook to sign calls to
         # the website, and is removed when the job ends.
         tls-obtain)

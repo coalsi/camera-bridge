@@ -1,13 +1,15 @@
-// Bridge-wide settings, in sections: General (name, time zone, password, sign out), Video and recording (one label on every camera,
-// recording), Apple Home and other systems (ports, webhook), AI (descriptions of events), Troubleshooting (the log). The appearance is the
-// menu's button. (Sky Watcher's own setup, where the box is and the flight feed, is on its page, #/sky.) Security also has the Apple TV and iPhone
-// card; #/pair/<code>, the address in an Apple TV's or iPhone's QR code, opens Settings at it (params ['apple-tv', code], see app.js).
+// Bridge-wide settings, in sections: General (name, time zone), Security (the password, signed-in browsers, the Apple TV and iPhone card, sign
+// out), Away from home (the box's own VPN for phones away from home; #/settings/away opens Settings at it), Video and recording (one label on
+// every camera, recording), Apple Home and other systems (ports, webhook), AI (descriptions of events), Troubleshooting (the log). The
+// appearance is the menu's button. (Sky Watcher's own setup, where the box is and the flight feed, is on its page, #/sky.) #/pair/<code>, the
+// address in an Apple TV's or iPhone's QR code, opens Settings at the Apple TV and iPhone card (params ['apple-tv', code], see app.js).
 import { get, patch, post } from '../api.js';
 import { confirmDialog, h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import { loadNVR } from '../nvr/lite.js';
 import { cameraList, setBridgeZone, store } from '../store.js';
 import { createAISettingsCard } from './ai-settings.js';
+import { createAwayCard } from './away-card.js';
 import { field, inlineError, selectField, switchRow } from './common.js';
 import { importMacCard } from './import-mac.js';
 import { monitorCardFor } from './monitor-card.js';
@@ -85,12 +87,13 @@ export function renderSettings({ params, setTitle }) {
   const sessions = createSessionsCard();   // Signed-in browsers: made once (it loads its own list)
   // The Apple TV and iPhone card: made once too. A device added from the #/pair/<code> address leaves that address, so a reload does not fill the code again.
   const viewers = createViewersCard({ onApproved: () => { if (location.hash.startsWith('#/pair/')) history.replaceState(null, '', '#/settings'); } });
+  const away = createAwayCard();          // Away from home: made once too (it reads the box's card itself, and again every 15 s while on)
   let monitorShown = false;               // the monitoring token is shown (Show), across the draws of Settings
   let aiCard = null;      // the AI descriptions card: { el, update }, made once (it keeps what is being typed and Try it's answer)
   let settings = null;
   let onTheBox = true;   // Camera Bridge OS, whose firewall decides which ports work; false for a development daemon (GET system's mode)
   let destroyed = false;
-  let wanted = params?.[0] ?? null;   // the address #/settings/recording or #/settings/ai scrolls to that card; #/pair/<code> ('apple-tv', the code) to the Apple TV and iPhone card
+  let wanted = params?.[0] ?? null;   // the address #/settings/recording, #/settings/away or #/settings/ai scrolls to that card; #/pair/<code> ('apple-tv', the code) to the Apple TV and iPhone card
 
   async function load() {
     try {
@@ -284,13 +287,13 @@ export function renderSettings({ params, setTitle }) {
   }
 
   /**
-   * Scrolls to the card the address names (Recording, AI descriptions, Apple TV and iPhone) once, when both it and the other settings are on the page.
-   * The AI card also waits for the Recording card, which loads on demand above it and would push it down (mountRecording asks again). The
-   * Apple TV and iPhone card, in Security above the Recording card, is not pushed by it: it gets the code from the address and the keyboard on Add, and
-   * nothing is added until the owner presses Add.
+   * Scrolls to the card the address names (Recording, Away from home, AI descriptions, Apple TV and iPhone) once, when both it and the other settings
+   * are on the page. The AI card also waits for the Recording card, which loads on demand above it and would push it down (mountRecording asks
+   * again). The Apple TV and iPhone card and the Away from home card, above the Recording card, are not pushed by it. The Apple TV and iPhone card
+   * gets the code from the address and the keyboard on Add, and nothing is added until the owner presses Add.
    */
   function showWanted() {
-    const host = wanted === 'recording' ? recordingHost : wanted === 'ai' ? aiCard?.el : wanted === 'apple-tv' ? viewers.el : null;
+    const host = wanted === 'recording' ? recordingHost : wanted === 'ai' ? aiCard?.el : wanted === 'away' ? away.el : wanted === 'apple-tv' ? viewers.el : null;
     if (!host || !settings || !host.firstChild || !host.isConnected) return;
     if (wanted === 'ai' && !recordingHost.firstChild) return;
     const appleTV = wanted === 'apple-tv';
@@ -308,6 +311,7 @@ export function renderSettings({ params, setTitle }) {
       // Bringing cameras over from the Mac app is a first-day step: offered while the bridge has none.
       section('General', nameCard(), timeZoneCard(), cameraList().length ? null : importCard),
       section('Security', passwordCard(), sessions.el, viewers.el, accountCard()),
+      section('Away from home', away.el),
       section('Video and recording', labelsCard(), recordingHost),
       section('Apple Home and other systems', portsCard(), webhookCard(), monitorCard()),
       section('AI', aiCard.el),
@@ -318,7 +322,7 @@ export function renderSettings({ params, setTitle }) {
   replace(root, h('div', { class: 'checking' }, spinner()));
   load();
   mountRecording();
-  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Settings')), root), destroy() { destroyed = true; recording?.destroy(); kept?.destroy(); sessions.destroy(); viewers.destroy(); aiCard?.destroy(); } };
+  return { el: h('div', null, h('div', { class: 'page-head' }, h('h1', null, 'Settings')), root), destroy() { destroyed = true; recording?.destroy(); kept?.destroy(); sessions.destroy(); viewers.destroy(); away.destroy(); aiCard?.destroy(); } };
 }
 
 const LABEL_DEFAULTS = { enabled: false, position: 'topRight', size: 'medium', showCameraName: true, showDate: true, showSeconds: true, use24Hour: false };

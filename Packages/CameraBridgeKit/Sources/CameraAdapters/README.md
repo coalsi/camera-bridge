@@ -527,7 +527,7 @@ Also: `IntegrationService` (ring, nest, tuya, wyze, unifiProtect, other), `Go2RT
   The e-mailed code's endpoint follows the texted one's shape; no open-source client documents it, so it is unverified until tried on an account.
   `WyzeDevice` (`modelName` from `WyzeModels`, `connection`: `WyzeConnection` from `WyzeFirmware.hasRTSP` (v4 ≥ 4.52.17.0, v3 ≥ 4.36.16.5654, Pan v3 ≥
   4.50.16.5654, compared numerically) and DTLS/UID/`enr`), `Go2RTCSource.wyze(_:host:hd:)` (`wyze://HOST?dtls=true&enr=…&mac=…&model=…&subtype=hd|sd&uid=…`),
-  `NeighborTable` (a MAC's IPv4 address from Linux `/proc/net/arp`). Tests: `WyzeCloudTests` (recorded answers through a fake transport).
+  `NeighborTable` (a MAC's IPv4 address from Linux `/proc/self/net/arp`). Tests: `WyzeCloudTests` (recorded answers through a fake transport).
 
 Wyze helper programs (2026-10-15): `WyzeHelpers` (kinds `cloud` → `wyze-lake`, `gwell` → `wyze-gwell`; `Request`; `setProvider`, the plugin's fresh
 credentials for every start; `kind(of:)`) and `WyzeHelperDriver`, which publishes into a go2rtc stream with no source (`Go2RTCSource.published`,
@@ -639,6 +639,6 @@ Camera Bridge can't change say so and point to the router (`CameraNetworkFeature
 
 ## Additions beyond the contract: the neighbours' addresses (2026-10-25, docs/CONTRACT_CHANGES.md)
 
-`NeighborTable.ipv4s(in:)` (Linux `/proc/net/arp`): the IPv4 address of every complete entry, in the table's order, each once (an incomplete
+`NeighborTable.ipv4s(in:)` (Linux `/proc/self/net/arp`): the IPv4 address of every complete entry, in the table's order, each once (an incomplete
 entry, an all-zero MAC and the broadcast MAC are left out; an address of any range is listed, and choosing among them is the caller's). The
 sky detector's feed finder asks only these hosts. `ipv4(forMAC:)` shares its line reading. Tests: `NeighborTableTests`.

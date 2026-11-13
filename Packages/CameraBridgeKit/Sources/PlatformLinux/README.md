@@ -27,3 +27,5 @@ a dummy interface).
 ## Additions beyond the contract
 
 `KernelClock`, `KernelClock.synchronization`, `KernelClock.Synchronization` (2026-11-11, docs/CONTRACT_CHANGES.md).
+
+Away from home (2026-11-12, docs/CONTRACT_CHANGES.md; BridgeWeb README, "Away from home"): `GlobalIPv6Address` (a global unicast IPv6 address as the kernel holds it, with its preferred lifetime and whether it is temporary or deprecated), `InterfaceAddresses.globalIPv6` (the global addresses of the interface with the IPv6 default route, in address order: temporary and deprecated ones are listed, marked, and the caller chooses the stable one) and `InterfaceAddresses.ipv6DefaultRouteInterface` (the interface of the lowest-metric IPv6 default route on a LAN interface, read from `/proc/self/net/ipv6_route`; a tunnel such as `wg-away` is never one). Internal: `KernelAddress.preferredLifetime` (the address attribute `IFA_CACHEINFO`'s `ifa_prefered`, in seconds; nil means forever).

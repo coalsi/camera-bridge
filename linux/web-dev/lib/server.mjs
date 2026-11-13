@@ -199,20 +199,113 @@ export function createDevServer(options) {
 
   const systemInfo = () => json({ product: 'Camera Bridge OS', version: '0.0-dev', build: 'development', mode: 'development', osName: 'Dev server', canUpdate: false, canReboot: false, canInstall: false, canManage: false });
 
-  // The secure address (BridgeWeb/WebApp+SecureAddress.swift): a ready address with a certificate, a redirect switch and a rebind self-test.
-  // `POST /__dev/secure` {state: 'ready' | 'waiting' | 'error', router: 'open' | 'blocked'} changes what the card shows.
-  const secure = { state: 'ready', redirect: true, router: 'open', rebind: null };
+  // The secure address (BridgeWeb/WebApp+SecureAddress.swift): a ready address with a certificate, its own switch, a redirect switch and a
+  // rebind self-test. `POST /__dev/secure` {state: 'ready' | 'waiting' | 'error', router: 'open' | 'blocked'} changes what the card shows.
+  const secure = { state: 'ready', enabled: true, redirect: true, router: 'open', rebind: null };
   function secureReport() {
     const host = 'k7f2q9.box.camera-bridge.app';
-    const ready = secure.state === 'ready';
+    const shown = secure.enabled ? secure.state : 'off';
+    const ready = shown === 'ready';
     const expires = new Date(state.serverNow() + 60 * 86_400_000);
     return {
-      available: true, state: secure.state, host, url: `https://${host}`, address: '192.168.77.5',
+      available: true, enabled: secure.enabled, state: shown, host, url: `https://${host}`, address: '192.168.77.5',
       expiresOn: ready ? expires.toISOString() : null, renewsOn: ready ? new Date(expires.getTime() - 30 * 86_400_000).toISOString() : null,
       redirect: secure.redirect, redirectActive: ready && secure.redirect,
-      problem: secure.state === 'error' ? { code: 'no_internet', message: 'The Camera Bridge website can’t be reached. Check that the box has internet.' } : null,
+      problem: shown === 'error' ? { code: 'no_internet', message: 'The Camera Bridge website can’t be reached. Check that the box has internet.' } : null,
       rebind: secure.rebind,
     };
+  }
+  // The secure address's switch. A phone reaches the box through the tunnel by its secure name, so the bridge keeps it on while Away from
+  // home is on.
+  function secureEnabled(ctx) {
+    if (typeof ctx.body.enabled !== 'boolean') throw ApiError.invalid(ctx.body.enabled === undefined ? '“enabled” is missing.' : '“enabled” has the wrong kind of value.', 'enabled');
+    if (!ctx.body.enabled && away.available && away.on) {
+      throw new ApiError(409, 'away_on', 'Away from home needs the secure address. Turn Away from home off first.');
+    }
+    secure.enabled = ctx.body.enabled;
+    return json(secureReport());
+  }
+
+  // Away from home (BridgeWeb/WebApp+Away.swift): the card and its devices in memory, the page's four routes answered in the bridge's order
+  // (the body, then 503 on a box without it, then the rest). A WireGuard device's configuration is made of placeholders, which no WireGuard app
+  // takes for a key: the dev server has no keys at all, so the phone's `viewer/away` routes are left out too. `POST /__dev/away` {available,
+  // on, state, router, problem, devices} sets the scenario; a state other than 'off' turns it on.
+  const AWAY_ADDRESS = '2001:db8:4:7000:1a2b:3c4d:5e6f:7a8b';
+  const AWAY_NAME = 'devserver0123456789a.away.camera-bridge.app';
+  const AWAY_PORT = 51820;
+  const AWAY_SUBNET = '10.123.45';
+  const AWAY_STATES = ['off', 'checking', 'no_ipv6', 'setup', 'working', 'address_changed', 'problem'];
+  const away = { available: true, on: false, state: 'off', problem: null, router: null, addressChangedAt: null, devices: [] };
+  const awayUnavailable = () => new ApiError(503, 'unavailable', 'Away from home is part of Camera Bridge OS.');
+  const awayHasAddress = () => away.on && !['checking', 'no_ipv6'].includes(away.state);
+  // The bridge's order (AwayService.ordered): the devices that reached the box from away, the newest first, then the others as they were added.
+  const awayOrdered = () => [...away.devices].sort((a, b) => (Date.parse(b.lastAwayAt ?? '') || 0) - (Date.parse(a.lastAwayAt ?? '') || 0) || a.added - b.added);
+  const awayDevice = ({ id, kind, name, lastHandshake, lastAwayAt }) => ({ id, kind, name, lastHandshake, lastAwayAt });
+  function awayCard() {
+    if (!away.available) throw awayUnavailable();
+    if (!away.on) {
+      return { on: false, state: away.problem ? 'problem' : 'off', problem: away.problem, port: AWAY_PORT, address: null, name: null, router: null, addressChangedAt: null, devices: [] };
+    }
+    return {
+      on: true, state: away.state, problem: away.state === 'problem' ? away.problem ?? 'The VPN interface isn’t up.' : null, port: AWAY_PORT,
+      address: awayHasAddress() ? AWAY_ADDRESS : null, name: AWAY_NAME, router: away.router,
+      addressChangedAt: away.state === 'address_changed' ? away.addressChangedAt : null, devices: awayOrdered().map(awayDevice),
+    };
+  }
+  function setAwayState(next) {
+    away.state = next;
+    away.on = next !== 'off';
+    if (!away.on) away.devices = [];
+    const now = state.serverNow();
+    // Working means some device reached the box from away, and a changed address means it did before the change: one is added when none has.
+    if (['working', 'address_changed'].includes(next) && !away.devices.some((device) => device.lastAwayAt)) {
+      const at = new Date(now - 5 * 60_000).toISOString();
+      away.devices.push({ id: randomBytes(16).toString('hex'), kind: 'app', name: 'iPhone', lastHandshake: at, lastAwayAt: at, added: now });
+    }
+    if (next === 'address_changed') away.addressChangedAt = new Date(now).toISOString();
+  }
+  function awaySetOn(ctx) {
+    if (typeof ctx.body.on !== 'boolean') throw ApiError.invalid(ctx.body.on === undefined ? '“on” is missing.' : '“on” has the wrong kind of value.', 'on');
+    if (!away.available) throw awayUnavailable();
+    away.problem = null;
+    if (ctx.body.on) {
+      secure.enabled = true;   // as the bridge does: the phone talks HTTPS to the secure name through the tunnel
+      // Turning it on, or the card's Try again on a problem: here the system always takes it.
+      if (!away.on || away.state === 'problem') setAwayState('setup');
+    } else {
+      setAwayState('off');
+    }
+    return json(awayCard());
+  }
+  function awayAddDevice(ctx) {
+    const { name } = ctx.body;
+    if (name !== undefined && name !== null && typeof name !== 'string') throw ApiError.invalid('“name” has the wrong kind of value.', 'name');
+    if (!away.available) throw awayUnavailable();
+    if (!away.on) throw new ApiError(409, 'away_off', 'Away from home is off on the box.');
+    // Cleaned as the box cleans a device's name (AuthStore.cleaned): no control characters, trimmed, at most 60 characters.
+    const cleaned = String(name ?? '').replace(/\p{Cc}/gu, '').trim().slice(0, 60);
+    if (!cleaned) throw ApiError.invalid('Give the device a name.', 'name');
+    if (away.devices.filter((device) => device.kind === 'wireguard').length >= 20) {
+      throw new ApiError(409, 'too_many_devices', '20 devices use the WireGuard app already. Remove one first.');
+    }
+    if (!awayHasAddress()) throw new ApiError(409, 'no_address', 'The box has no address on the internet yet, so a device couldn’t reach it from away.');
+    const taken = new Set(away.devices.map((device) => device.address));
+    let host = 2;
+    while (taken.has(host)) host += 1;
+    const device = { id: randomBytes(16).toString('hex'), kind: 'wireguard', name: cleaned, lastHandshake: null, lastAwayAt: null, address: host, added: state.serverNow() };
+    away.devices.push(device);
+    // AwayRules.wireGuardConfig's text, with placeholders of a key's length where the keys go.
+    const config = ['[Interface]', `PrivateKey = ${'devserver-placeholder-not-a-key'.padEnd(44, '-')}`, `Address = ${AWAY_SUBNET}.${host}/32`, 'MTU = 1280', '',
+      '[Peer]', `PublicKey = ${'devserver-placeholder-box-key'.padEnd(44, '-')}`, `AllowedIPs = ${AWAY_SUBNET}.1/32, ${secureReport().address}/32`,
+      `Endpoint = [${AWAY_ADDRESS}]:${AWAY_PORT}`, ''].join('\n');
+    return json({ device: awayDevice(device), config }, 201);
+  }
+  function awayRemoveDevice(ctx) {
+    if (!away.available) throw awayUnavailable();
+    const before = away.devices.length;
+    away.devices = away.devices.filter((device) => device.id !== ctx.params.id);
+    if (away.devices.length === before) throw ApiError.notFound('That device isn’t there any more.');
+    return empty(204);
   }
   function secureCheck() {
     const blocked = secure.router === 'blocked';
@@ -288,8 +381,13 @@ export function createDevServer(options) {
       secure.redirect = ctx.body.enabled;
       return json(secureReport());
     }],
+    ['POST', 'system/secure-address/enabled', 'session', true, secureEnabled],
     ['POST', 'system/secure-address/check', 'session', true, secureCheck],
     ['POST', 'system/secure-address/retry', 'session', true, () => json(secureReport())],
+    ['GET', 'away', 'session', false, () => json(awayCard())],
+    ['POST', 'away', 'session', true, awaySetOn],
+    ['POST', 'away/devices', 'session', true, awayAddDevice],
+    ['DELETE', 'away/devices/:id', 'session', false, awayRemoveDevice],
     ['GET', 'events', 'session', false, () => ({ events: true })],
     ...NVR_ROUTES.map(([method, pattern, handler, takesBody]) => [method, pattern, 'session', takesBody, (ctx) => handler(app, ctx)]),
   ];
@@ -382,6 +480,14 @@ export function createDevServer(options) {
     } else if (url.pathname === '/__dev/secure') {
       if (['ready', 'waiting', 'error', 'off'].includes(input.state)) secure.state = input.state;
       if (['open', 'blocked'].includes(input.router)) { secure.router = input.router; secure.rebind = null; }
+    } else if (url.pathname === '/__dev/away') {
+      // What the box says about Away from home: {available, on, state, router: 'eero' | null, problem, devices: [{id, kind, name, lastHandshake, lastAwayAt}]}.
+      if (typeof input.available === 'boolean') away.available = input.available;
+      if (typeof input.on === 'boolean') setAwayState(input.on ? (away.on ? away.state : 'setup') : 'off');
+      if (Array.isArray(input.devices)) away.devices = input.devices.map((device, index) => ({ ...awayDevice({ lastHandshake: null, lastAwayAt: null, ...device }), added: index }));
+      if (AWAY_STATES.includes(input.state)) setAwayState(input.state);
+      if ('router' in input) away.router = input.router === 'eero' ? 'eero' : null;
+      if ('problem' in input) away.problem = typeof input.problem === 'string' ? input.problem : null;
     } else if (url.pathname === '/__dev/options') {
       for (const [name, value] of Object.entries(input)) if (typeof config[name] === 'number' && Number.isFinite(value)) config[name] = value;
     } else {

@@ -28,7 +28,7 @@ final class FakeRootHelper: @unchecked Sendable {
 
     static let allowed: Set<String> = ["ssh-enable", "ssh-disable", "auto-update", "update-check", "update-apply", "reboot", "poweroff", "factory-reset",
                                        "install-list", "install-to-disk", "drive-list", "drive-use", "drive-forget", "archive-use", "archive-forget",
-                                       "wifi-scan", "wifi-join", "wifi-forget", "guard-set"]
+                                       "wifi-scan", "wifi-join", "wifi-forget", "guard-set", "away-set"]
 
     let requests: URL
     let status: URL
@@ -185,6 +185,14 @@ extension FakeRootHelper {
                 helper.write("guard.json", ["state": "ok", "available": true, "running": !cameras.isEmpty, "cameras": cameras,
                                             "updatedAt": helper.clock.peek().formatted(Date.ISO8601FormatStyle())])
                 helper.writeStatus(name, "ok", "done")
+            case "away-set":
+                // cb-away set: the kept list is written to status/away.json before the job ends, and an off request leaves "off".
+                let on = request["on"] as? Bool ?? false
+                let keys = (request["peers"] as? [[String: Any]] ?? []).compactMap { $0["publicKey"] as? String }
+                helper.write("away.json", ["state": on ? "ok" : "off", "message": NSNull(), "publicKey": on ? "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" : NSNull(),
+                                           "port": 51820, "router": NSNull(), "updated": Int(helper.clock.peek().timeIntervalSince1970),
+                                           "peers": on ? keys.map { ["publicKey": $0, "latestHandshake": 0, "endpoint": NSNull()] as [String: Any] } : []])
+                helper.writeStatus(name, "ok", "done")
             case "install-to-disk":
                 for step in ["checking", "partitioning", "copying", "done"] {
                     helper.writeStatus(name, step == "done" ? "ok" : "running", "step \(step)", extra: ["step": step, "device": request["device"] ?? ""])
@@ -212,7 +220,8 @@ struct Rig {
     let helper: FakeRootHelper?
     let system: RequestFileSystemControl
 
-    init(helper behavior: FakeRootHelper.Behavior? = FakeRootHelper.image(), timing: RequestFileSystemControl.Timing? = nil) throws {
+    init(helper behavior: FakeRootHelper.Behavior? = FakeRootHelper.image(), timing: RequestFileSystemControl.Timing? = nil,
+         awayHelper: String = "/usr/sbin/cb-away") throws {
         directory = try TemporaryDirectory()
         requests = directory.url.appending(path: "requests", directoryHint: .isDirectory)
         status = directory.url.appending(path: "status", directoryHint: .isDirectory)
@@ -224,7 +233,7 @@ struct Rig {
         if timing.pollInterval == RequestFileSystemControl.Timing().pollInterval { timing.pollInterval = .milliseconds(10) }
         system = RequestFileSystemControl(requestDirectory: requests, statusDirectory: status, product: "Camera Bridge OS", version: "0.1", build: "test",
                                           facts: .init(osName: "Debian GNU/Linux 13 (trixie)", hostname: "camera-bridge", hardware: "N100", architecture: "x86_64"),
-                                          timing: timing, now: { clock.tick() })
+                                          timing: timing, now: { clock.tick() }, awayHelper: awayHelper)
         helper?.start()
     }
 

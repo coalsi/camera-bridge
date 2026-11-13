@@ -2,7 +2,8 @@
 // neither camera-bridge.app nor Let's Encrypt), the box's https name (a real certificate through camera-bridge.app), when the certificate
 // renews, what went wrong in plain words (a box with no internet is simply waiting), a test for routers that hide names pointing into the home
 // (DNS rebind protection), and the switch that sends the plain address to the secure one. The card shows only where the box has the pieces for
-// it (`report.available`).
+// it (`report.available`). While Away from home is on, the box keeps the secure address on (409 away_on: phones reach the box through the VPN
+// by its secure name), and the card says the box's sentence under the switch.
 import { get, post } from '../api.js';
 import { h, replace, spinner, toast } from '../dom.js';
 import { icon } from '../icons.js';
@@ -23,15 +24,17 @@ function dateText(value) {
 
 /**
  * The card for `report` (`GET system/secure-address`), or null where it does not apply. `actions` are called with the new report:
- * `{ retry, check, setRedirect, setEnabled }` return promises; the card asks `redraw()` to draw it again when one ends.
+ * `{ retry, check, setRedirect, setEnabled }` return promises; the card asks `redraw()` to draw it again when one ends. `refusal`: the box's
+ * sentence when it refused the secure address's switch, said under it.
  */
-export function secureAddressCard(report, { busy = '', retry, check, setRedirect, setEnabled, rebind = report?.rebind } = {}) {
+export function secureAddressCard(report, { busy = '', retry, check, setRedirect, setEnabled, rebind = report?.rebind, refusal = '' } = {}) {
   if (!report?.available) return null;
   const parts = [h('h2', null, icon('lock', { size: 18 }), ' Secure address')];
   const url = report.url || (report.host ? `https://${report.host}` : 'https://…');
   const on = report.enabled !== false;
   parts.push(switchRow({ title: `Use the secure address (${url})`, checked: on, disabled: !!busy || typeof setEnabled !== 'function',
     desc: 'When off, the box never contacts camera-bridge.app or Let’s Encrypt.', onchange: setEnabled }));
+  if (refusal) parts.push(h('div', { class: 'banner warning secure-refusal', role: 'alert' }, icon('alert'), h('div', { class: 'text' }, refusal)));
   if (!on) {
     parts.push(h('p', { class: 'muted' }, 'The secure address is off. The plain address, http://camera-bridge.local, works as before.'));
     return h('div', { class: 'card secure-address' }, parts);
@@ -82,10 +85,11 @@ export function secureAddressSection(onChange = () => {}) {
   const host = h('div', null);
   let report = null;
   let busy = '';
+  let refusal = '';   // the box's sentence when it kept the secure address on (409 away_on), said on the card until the next action
   let destroyed = false;
   const draw = () => {
     if (destroyed) return;
-    const card = secureAddressCard(report, { busy, retry: () => act('retry', () => post('system/secure-address/retry', {})),
+    const card = secureAddressCard(report, { busy, refusal, retry: () => act('retry', () => post('system/secure-address/retry', {})),
       check: () => act('check', async () => { const answer = await post('system/secure-address/check', {}); return { ...report, rebind: answer.rebind }; }),
       setRedirect: (enabled) => act('redirect', () => post('system/secure-address/redirect', { enabled })),
       setEnabled: (enabled) => act('enabled', () => post('system/secure-address/enabled', { enabled })) });
@@ -94,8 +98,15 @@ export function secureAddressSection(onChange = () => {}) {
   };
   async function act(name, work) {
     busy = name;
+    refusal = '';
     draw();
-    try { report = await work(); } catch (error) { toast(error.message, 'error'); }
+    try {
+      report = await work();
+    } catch (error) {
+      // Away from home's refusal belongs with the switch it kept on; anything else is a passing problem, said in a toast.
+      if (error?.code === 'away_on') refusal = error.message;
+      else toast(error.message, 'error');
+    }
     busy = '';
     draw();
   }

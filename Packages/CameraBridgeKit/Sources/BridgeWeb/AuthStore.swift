@@ -439,7 +439,7 @@ public actor AuthStore {
         if count > passwordLength.upperBound { throw Failure.passwordTooLong }
     }
 
-    private static func cleaned(_ name: String?) -> String? {
+    static func cleaned(_ name: String?) -> String? {
         guard let name else { return nil }
         let trimmed = String(name.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.map(Character.init))
             .trimmingCharacters(in: .whitespacesAndNewlines)

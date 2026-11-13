@@ -1,0 +1,13 @@
+[Unit]
+Description=Away from home: write the status (handshakes, endpoints, the firewall's port)
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/linux/os/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/cb-away refresh
+# It holds cb-away's lock: a refresh that hangs must not keep the devices from changing.
+TimeoutStartSec=1min
+# It runs every 30 s while Away from home is on. systemd's own lines about each run ("Starting", "Deactivated successfully", "Finished") are
+# at info level, and on systemd 257 LogLevelMax= drops them as well as the unit's own lines below notice. cb-away logs its failures as
+# notices, and systemd's lines about a run that fails are notices and warnings, so those still reach the journal.
+LogLevelMax=notice

@@ -1,0 +1,455 @@
+#!/bin/bash
+# cb-away: the root side of Away from home (docs/superpowers/specs/2026-11-12-away-from-home-design.md): a WireGuard interface, wg-away, run by
+# systemd-networkd, and UDP port 51820 in the firewall's set away_port. Run as root.
+#
+#   cb-away status          print status/away.json (the off document when there is none)
+#   cb-away set FILE        (the away-set request) {"on": true, "port": 51820, "subnet": "10.a.b.0/24", "peers": [{"publicKey": "...",
+#                           "address": "10.a.b.N"}]}: checked, kept in /srv/system/away, then applied; a failure writes a "failed" status and
+#                           exits 1
+#   cb-away check FILE      check such a request and print it as it would be kept; nothing changes
+#   cb-away apply           apply what is kept (at boot: camera-bridge-away.service); a missing firewall is logged and does not fail the boot
+#   cb-away refresh         write status/away.json (camera-bridge-away-status.timer, every 30 s while on); while on, a firewall that is
+#                           gone takes the interface down with it
+#   cb-away down            take the interface down and close the port, keeping the request and the key (camera-bridge-away.service, when
+#                           it stops: stopping the firewall empties its rules, and a tunnel must not outlive the chain that guards it)
+#
+# Turning off, and down, fail while wg-away is still there after networkd and then the kernel were asked to remove it: the status says so.
+#
+# The box's key is made here and never leaves root: it is in /srv/system/away/private.key and, because networkd reads a netdev file and never
+# /srv, inline in 50-wg-away.netdev (0640 root:systemd-network). No status, log line or command line carries it. A device's key arrives in the
+# request as a public key; the private key of a WireGuard-app device exists only in the daemon's memory.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export CB_TAG=cb-away
+export LC_ALL=C
+
+# Tests only (linux/os/test-away.sh): CB_AWAY_ROOT is a folder that stands in for /, CB_AWAY_NOW the time, CB_AWAY_TEST_PATH a folder of
+# stand-ins for wg, ip, nft, networkctl and systemctl that goes first in PATH.
+ROOT=${CB_AWAY_ROOT:-}
+CB_LIB=/usr/lib/camera-bridge/lib.sh
+[ -z "$ROOT" ] || CB_LIB=$(dirname "${BASH_SOURCE[0]}")/../lib/camera-bridge/lib.sh
+[ -z "$ROOT" ] || [ -z "${CB_AWAY_TEST_PATH:-}" ] || PATH=$CB_AWAY_TEST_PATH:$PATH
+# shellcheck source=../lib/camera-bridge/lib.sh
+. "$CB_LIB"
+
+NOW=$(date +%s)
+[ -z "$ROOT" ] || NOW=${CB_AWAY_NOW:-$NOW}
+CB_STATUS=$ROOT$CB_STATUS
+STATE=$ROOT$CB_SYSTEM/away                  # state.json and private.key (data partition)
+RUN=$ROOT$CB_RUN/away                       # the lock (tmpfs)
+NETWORKD=$ROOT/run/systemd/network
+NETDEV=$NETWORKD/50-wg-away.netdev
+NETWORK=$NETWORKD/50-wg-away.network
+INTERFACE=wg-away
+PORT=51820
+SET=away_port
+TIMER=camera-bridge-away-status.timer
+MAX_PEERS=64
+NO_FIREWALL="The firewall isn’t loaded, so Away from home can’t open its port."
+NOT_REMOVED="The VPN interface couldn’t be removed."
+LINK_WAIT_STEPS=50                          # 50 steps of 0.2 s: networkd takes a moment to make the interface
+[ -z "$ROOT" ] || LINK_WAIT_STEPS=${CB_AWAY_WAIT_STEPS:-$LINK_WAIT_STEPS}   # tests only: a stand-in networkd that never answers
+KEY_PATTERN='^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$'   # the one way base64 writes 32 bytes
+
+# The hardware address prefixes (MA-L, "eero inc.") that the IEEE registry lists, read from https://standards-oui.ieee.org/oui/oui.txt on
+# 2026-11-12. A home router with one of them is an eero, which does not forward a port from outside, so the page explains its setup.
+EERO_OUIS=(
+    00:ab:48 08:9b:f1 08:f0:1e 0c:1c:1a 0c:39:3d 0c:93:a5 0c:c7:63 14:22:db
+    18:90:88 18:a9:ed 20:3a:0c 20:74:dd 20:ad:72 20:be:cd 20:e6:df 24:2d:6c
+    24:f3:e3 28:ec:22 2c:2b:db 2c:2f:f4 30:29:2b 30:34:22 30:3a:4a 30:57:8e
+    34:23:8e 34:bc:5e 3c:1f:52 3c:5c:f1 40:47:5e 40:49:7c 44:14:04 44:ac:85
+    44:d7:b7 48:b4:24 48:dd:0c 4c:01:43 50:27:a9 50:61:3f 50:85:7c 5c:51:df
+    5c:5a:35 5c:a5:bc 60:57:7d 60:5f:8d 60:f4:19 64:97:14 64:c2:69 64:d9:c2
+    64:da:ed 68:4a:76 6c:55:f6 6c:ae:f6 6c:bf:2f 70:93:c1 74:b6:b6 78:68:29
+    78:76:89 78:d6:d6 7c:49:cf 7c:5e:98 7c:7e:f9 80:af:9f 80:b9:7a 80:da:13
+    84:70:d7 84:d9:e0 88:67:46 8c:d1:a6 8c:dd:0b 90:0e:84 94:cd:fd 98:ed:7e
+    9c:0b:05 9c:57:bc 9c:a5:70 a0:8e:24 a4:0f:25 a4:6b:1f a4:99:a8 a8:13:0b
+    a8:b0:88 ac:39:3d ac:ec:85 ac:f8:96 b0:f1:ae b4:20:46 b4:b9:e6 b8:32:8f
+    b8:cd:2b c0:36:53 c0:6f:98 c4:a8:16 c4:f1:74 c8:b8:2f c8:c6:fe c8:cc:21
+    c8:e3:06 c8:e8:af d0:16:7c d0:68:27 d0:cb:dd d4:05:de d4:3f:32 d8:26:d3
+    d8:8e:d4 d8:e6:ab dc:69:b5 dc:b4:3f e4:19:7f e8:d3:eb ec:30:dd ec:74:27
+    f0:21:e0 f0:b6:61 f4:25:3c f4:b4:9e f8:62:2a f8:bb:bf f8:bc:0e fc:3d:73
+    fc:3f:a6
+)
+
+require_root() { [ -n "$ROOT" ] || [ "$(id -u)" -eq 0 ] || cb_die "run as root"; }
+
+# --- the request ----------------------------------------------------------------------------------------------------------
+
+# normalize: a request (or the kept request) as it is kept: {on, port, subnet, peers: [{publicKey, address}]} with the peers by address, or
+# {on: false}; {error} when it is refused. Nothing but a valid key, a valid address inside the subnet and the one port gets through, because
+# the values end up in a networkd file and in an nft command. \A and \z, not ^ and $: those also match at a line break.
+# shellcheck disable=SC2016
+JQ_NORMALIZE='
+def shown: tostring | .[0:40] | gsub("[^ -~]"; "?");
+def octet: "(0|[1-9][0-9]{0,2})";
+def isKey: type == "string" and test("\\A[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=\\z");
+def normalized:
+    if type != "object" then error("the request is not a JSON object")
+    elif (.on | type) != "boolean" then error("\"on\" must be true or false")
+    elif .on == false then {on: false}
+    elif .port != $port then error("the port must be \($port)")
+    elif (.subnet | type) != "string" then error("the request has no subnet")
+    else
+      (.subnet | capture("\\A10\\.(?<a>\(octet))\\.(?<b>\(octet))\\.0/24\\z")? // null) as $s
+      | if $s == null or ($s.a | tonumber) > 255 or ($s.b | tonumber) > 255 then error("not a /24 inside 10.0.0.0/8: \(.subnet | shown)")
+        elif ($s.a | tonumber) as $a | $a == 0 or $a == 1 or $a == 10 or $a == 42 or $a == 255 then error("that subnet is reserved: \(.subnet | shown)")
+        elif (.peers | type) != "array" then error("the request has no list of devices")
+        elif (.peers | length) > $max then error("at most \($max) devices can be paired")
+        else
+          .subnet as $subnet
+          | (.peers | map(
+              if type != "object" then error("a device is not a JSON object")
+              elif (.publicKey | isKey | not) then error("not a WireGuard public key: \(.publicKey | shown)")
+              else (.address | if type == "string" then (capture("\\A10\\.(?<a>\(octet))\\.(?<b>\(octet))\\.(?<n>\(octet))\\z")? // null) else null end) as $p
+              | if $p == null or $p.a != $s.a or $p.b != $s.b then error("not an address in the subnet: \(.address | shown)")
+                elif ($p.n | tonumber) < 2 or ($p.n | tonumber) > 254 then error("a device takes .2 to .254: \(.address | shown)")
+                else {publicKey, address, n: ($p.n | tonumber)} end end)) as $peers
+          | if ($peers | map(.publicKey) | unique | length) != ($peers | length) then error("a device key is listed twice")
+            elif ($peers | map(.address) | unique | length) != ($peers | length) then error("two devices have one address")
+            else {on: true, port: $port, subnet: $subnet, peers: ($peers | sort_by(.n) | map({publicKey, address}))} end
+        end
+    end;
+try normalized catch {error: tostring}
+'
+
+normalize() { # normalize FILE: prints the kept form, or dies with the reason
+    local out count
+    # jq runs the check once per JSON value in a file and the rest of this function judges only the last, so two values (two kept
+    # documents, or a refusal hidden in front of a good one) are turned away here.
+    count=$(jq -s 'length' "$1" 2>/dev/null) || cb_die "the request is not JSON"
+    [ "$count" = 1 ] || cb_die "the request must hold exactly one JSON value, not $count"
+    out=$(jq -c --argjson port "$PORT" --argjson max "$MAX_PEERS" "$JQ_NORMALIZE" "$1" 2>/dev/null) || cb_die "the request is not JSON"
+    [ -n "$out" ] || cb_die "the request is empty"
+    if jq -e 'has("error")' <<<"$out" >/dev/null; then cb_die "$(jq -r .error <<<"$out")"; fi
+    printf '%s\n' "$out"
+}
+
+kept_request() { # the kept request, checked again; {"on":false} when there is none or it is damaged
+    if [ -s "$STATE/state.json" ] && (normalize "$STATE/state.json") 2>/dev/null; then return 0; fi
+    echo '{"on":false}'
+}
+
+# --- the router -----------------------------------------------------------------------------------------------------------
+
+is_eero() { # is_eero HARDWARE_ADDRESS: one of the eero prefixes (the first three bytes)
+    local prefix oui
+    prefix=$(tr 'A-F' 'a-f' <<<"${1:0:8}")
+    for oui in "${EERO_OUIS[@]}"; do [ "$oui" != "$prefix" ] || return 0; done
+    return 1
+}
+
+router_is_eero() { # the default gateway's hardware address, asked for IPv4 and then IPv6
+    local family line gateway dev mac
+    for family in -4 -6; do
+        line=$(ip "$family" route show default 2>/dev/null | head -n 1)
+        gateway=$(awk '{for (i = 1; i < NF; i++) if ($i == "via") {print $(i + 1); exit}}' <<<"$line")
+        [ -n "$gateway" ] || continue
+        dev=$(awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}' <<<"$line")
+        if [ -n "$dev" ]; then mac=$(ip neigh show "$gateway" dev "$dev" 2>/dev/null | head -n 1)
+        else mac=$(ip neigh show "$gateway" 2>/dev/null | head -n 1); fi
+        mac=$(awk '{for (i = 1; i < NF; i++) if ($i == "lladdr") {print $(i + 1); exit}}' <<<"$mac")
+        [ -z "$mac" ] || ! is_eero "$mac" || return 0
+    done
+    return 1
+}
+
+# --- the status -----------------------------------------------------------------------------------------------------------
+
+# wg-away is there, up or down: take_down's last resort sets it down, which leaves it there.
+link_exists() { ip link show "$INTERFACE" >/dev/null 2>&1; }
+
+firewall_loaded() { nft list set inet camera_bridge "$SET" >/dev/null 2>&1; }
+
+port_open() { nft list set inet camera_bridge "$SET" 2>/dev/null | grep -qE "[ {,]${PORT}[ ,}]"; }
+
+# interface_problem: nothing when the interface is up with exactly the kept devices and port (a netdev networkd made earlier keeps its old
+# devices when a file changes, and that must not look fine); else the sentence. `wg show peers` and `listen-port` print no private key.
+interface_problem() {
+    local want have
+    if ! link_exists; then echo "The VPN interface isn’t up."; return 0; fi
+    want=$(kept_request | jq -r '.peers[].publicKey' | sort)
+    have=$(wg show "$INTERFACE" peers 2>/dev/null | sort || true)
+    if [ "$want" != "$have" ] || [ "$(wg show "$INTERFACE" listen-port 2>/dev/null || true)" != "$PORT" ]; then
+        echo "The VPN interface doesn’t hold the paired devices."
+    fi
+}
+
+# health: nothing when the interface is right and the port is in the firewall, else the sentence that says what is missing. The firewall is
+# looked at first: when it is gone the interface is taken down with it, and "the VPN interface isn’t up" would hide the cause.
+health() {
+    local problem
+    if ! firewall_loaded; then echo "$NO_FIREWALL"; return 0; fi
+    problem=$(interface_problem)
+    if [ -n "$problem" ]; then echo "$problem"
+    elif ! port_open; then echo "The firewall doesn’t let the VPN’s port in."
+    fi
+}
+
+# JQ_PEERS: the kept devices with what `wg show` says about each (never `wg show ... dump`, whose first line is the box's private key). A
+# handshake of 0 is "never"; an endpoint is the address without its port, or null before the device has been heard from.
+# shellcheck disable=SC2016
+JQ_PEERS='
+def table($text): [$text | split("\n")[] | split("\t") | select(length == 2) | {key: .[0], value: .[1]}] | from_entries;
+table($handshakes) as $h
+| table($endpoints) as $e
+| [.peers[] | .publicKey as $k
+   | {publicKey: $k,
+      latestHandshake: (($h[$k] // "0") | if test("\\A[0-9]{1,11}\\z") then tonumber else 0 end),
+      endpoint: ($e[$k] // "(none)" | if . == "(none)" then null
+                 elif startswith("[") then sub("\\A\\[(?<a>[^]]*)\\].*\\z"; .a)
+                 else sub(":[0-9]*\\z"; "") end)}]
+'
+
+# write_status STATE MESSAGE: status/away.json for the kept request; MESSAGE may be empty. With Away from home off the status is "off", or
+# "failed" while wg-away is still there: a device with a session could go on using it, so the daemon must not take it for off.
+write_status() {
+    local state=$1 message=$2 request public="" peers='[]' router=false handshakes="" endpoints=""
+    request=$(kept_request)
+    if jq -e '.on' <<<"$request" >/dev/null; then
+        [ ! -s "$STATE/private.key" ] || public=$(wg pubkey <"$STATE/private.key" 2>/dev/null || true)
+        if link_exists; then
+            handshakes=$(wg show "$INTERFACE" latest-handshakes 2>/dev/null || true)
+            endpoints=$(wg show "$INTERFACE" endpoints 2>/dev/null || true)
+        fi
+        peers=$(jq -c --arg handshakes "$handshakes" --arg endpoints "$endpoints" "$JQ_PEERS" <<<"$request")
+        ! router_is_eero || router=true
+    elif link_exists; then
+        state=failed message=$NOT_REMOVED
+    else
+        state=off message=""
+    fi
+    mkdir -p "$CB_STATUS"
+    jq -n -c --arg state "$state" --arg message "$message" --arg public "$public" --argjson port "$PORT" --argjson router "$router" \
+        --argjson peers "$peers" --argjson now "$NOW" \
+        '{state: $state, message: (if $message == "" then null else $message end), publicKey: (if $public == "" then null else $public end),
+          port: $port, router: (if $router then "eero" else null end), peers: $peers, updated: $now}' \
+        | cb_write_file "$CB_STATUS/away.json" 0640 camerabridge "$ROOT"
+}
+
+# log_failure SENTENCE: to the journal, unless the status already says it. A failure that lasts is logged when it starts and when its
+# sentence changes, not at every run of the 30 s status timer or every retry of the daemon. Called before the status is written.
+log_failure() {
+    [ "$(jq -r 'select(.state == "failed") | .message // empty' "$CB_STATUS/away.json" 2>/dev/null)" = "$1" ] || cb_log "$1"
+}
+
+# report: the status as it is now; fails when the tunnel is not whole (the sentence is in the status)
+report() {
+    local message
+    message=$(health)
+    if [ -n "$message" ]; then log_failure "$message"; write_status failed "$message"; return 1; fi
+    write_status ok ""
+}
+
+# --- applying -------------------------------------------------------------------------------------------------------------
+
+netdev_text() { # netdev_text KEY REQUEST
+    cat <<EOF
+# Written by cb-away from /srv/system/away at every boot; changes here are lost.
+[NetDev]
+Name=$INTERFACE
+Kind=wireguard
+MTUBytes=1280
+
+[WireGuard]
+PrivateKey=$1
+ListenPort=$PORT
+EOF
+    jq -r '.peers[] | "\n[WireGuardPeer]\nPublicKey=\(.publicKey)\nAllowedIPs=\(.address)/32"' <<<"$2"
+}
+
+network_text() { # network_text SUBNET
+    cat <<EOF
+# Written by cb-away from /srv/system/away at every boot; changes here are lost.
+[Match]
+Name=$INTERFACE
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+Address=${1%.0/24}.1/24
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+EOF
+}
+
+same_text() { # same_text PATH TEXT: the file holds this text
+    [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]
+}
+
+box_key() { # the box's key: kept, or made now (wg genkey under umask 077)
+    local key=""
+    [ ! -s "$STATE/private.key" ] || key=$(cat "$STATE/private.key")
+    if [[ ! "$key" =~ $KEY_PATTERN ]]; then
+        key=$(umask 077 && wg genkey)
+        [[ "$key" =~ $KEY_PATTERN ]] || return 1
+        printf '%s\n' "$key" | cb_write_file "$STATE/private.key" 0600 || return 1
+    fi
+    printf '%s\n' "$key"
+}
+
+# take_down: wg-away goes, with the files networkd would make it from; the kept request and key stay. Fails while wg-away is still there.
+take_down() {
+    # Nothing to remove (Away from home was never on, at every boot and every reload of the firewall): a networkd reload would only add lines
+    # to the journal.
+    [ -e "$NETDEV" ] || [ -e "$NETWORK" ] || link_exists || return 0
+    # The files go first: networkd makes the interface again on a reload while its netdev file is there.
+    rm -f "$NETDEV" "$NETWORK"
+    networkctl delete "$INTERFACE" >/dev/null 2>&1 || true
+    networkctl reload >/dev/null 2>&1 || true
+    link_exists || return 0
+    # networkd didn't remove it (it isn't running, or its D-Bus call timed out), so the kernel is asked directly; failing that, the interface
+    # is set down, which closes WireGuard's socket. A device with a session would otherwise go on using it: the firewall's rule for established
+    # traffic lets its packets in before the emptied port set is looked at.
+    ip link delete dev "$INTERFACE" >/dev/null 2>&1 || ip link set dev "$INTERFACE" down >/dev/null 2>&1 || true
+    ! link_exists
+}
+
+apply_off() {
+    systemctl stop "$TIMER" 2>/dev/null || true
+    # `set -e` doesn't reach in here (the caller tests the result with `&&`), so a step that fails returns the failure itself.
+    rm -f "$STATE/private.key" "$STATE/state.json" || return 1
+    if close_down; then write_status off ""; return; fi
+    # Off isn't done while wg-away is there: the status says failed (write_status), the job fails, and the daemon tries again.
+    log_failure "$NOT_REMOVED"
+    write_status off ""
+    return 1
+}
+
+apply_failed() { # apply_failed SENTENCE: the status says why, and the caller returns 1
+    log_failure "$1"
+    write_status failed "$1"
+    return 1
+}
+
+# close_down: the interface and the port go; the kept request and key stay, so the next apply tries again. Fails while wg-away is still there.
+close_down() {
+    local gone=0
+    take_down || gone=1
+    nft flush set inet camera_bridge "$SET" 2>/dev/null || true
+    return "$gone"
+}
+
+# down_failed SENTENCE: the tunnel goes (close_down), and the status says SENTENCE, adding that the interface is still there when it is.
+down_failed() {
+    if close_down; then apply_failed "$1"; else apply_failed "$1 $NOT_REMOVED"; fi
+}
+
+# fail_closed SENTENCE: a step failed, so whatever interface exists must hold exactly the kept devices and port, or it goes (with the files
+# networkd would make it from). Otherwise a device that was removed would keep its key's access because a later step went wrong.
+fail_closed() {
+    if [ -n "$(interface_problem)" ]; then down_failed "$1"; else apply_failed "$1"; fi
+}
+
+apply_on() { # apply_on REQUEST
+    local request=$1 key netdev network problem changed=false
+    if ! firewall_loaded; then
+        # Without the firewall's rules a device on the tunnel would reach every port of the box, so a running interface goes down too (the
+        # kept request and key stay, and the next apply brings it back).
+        down_failed "$NO_FIREWALL"
+        return 1
+    fi
+    install -d -m 0700 "$STATE" || { fail_closed "The VPN’s folder could not be made."; return 1; }
+    key=$(box_key) || { fail_closed "The VPN’s key could not be made or kept."; return 1; }
+    netdev=$(netdev_text "$key" "$request")
+    network=$(network_text "$(jq -r .subnet <<<"$request")")
+    mkdir -p "$NETWORKD" || { fail_closed "The VPN’s network folder could not be made."; return 1; }
+    same_text "$NETDEV" "$netdev" || changed=true
+    if [ "$changed" = true ]; then
+        printf '%s\n' "$netdev" | cb_write_file "$NETDEV" 0640 systemd-network "$ROOT" || { fail_closed "The VPN’s settings could not be written."; return 1; }
+    fi
+    same_text "$NETWORK" "$network" \
+        || printf '%s\n' "$network" | cb_write_file "$NETWORK" 0644 || { fail_closed "The VPN’s address could not be written."; return 1; }
+    # networkd does not change an interface it made when the file changes, so the interface is made again.
+    if [ "$changed" = true ] && link_exists; then networkctl delete "$INTERFACE" >/dev/null 2>&1 || true; fi
+    if [ "$changed" = true ] || ! link_exists; then networkctl reload || { fail_closed "networkd could not load the VPN interface."; return 1; }; fi
+    for _ in $(seq "$LINK_WAIT_STEPS"); do [ -z "$(interface_problem)" ] && break; sleep 0.2; done
+    # An interface that still holds an old list (networkd kept it, or the delete failed) would let a removed device in: it goes, and the port
+    # stays closed.
+    problem=$(interface_problem)
+    if [ -n "$problem" ]; then down_failed "$problem"; return 1; fi
+    if ! { nft flush set inet camera_bridge "$SET" && nft add element inet camera_bridge "$SET" "{ $PORT }"; }; then
+        # The firewall went while the interface was being made (a flush, or nftables stopped by hand): the interface goes with its chain.
+        if ! firewall_loaded; then down_failed "$NO_FIREWALL"; return 1; fi
+        apply_failed "The firewall wouldn’t take the VPN’s port."
+        return 1
+    fi
+    systemctl start --no-block "$TIMER" || cb_log "the status timer did not start"
+    report
+}
+
+apply_locked() { # apply_locked strict|lenient: lenient (at boot, and when the firewall is loaded again) logs a failure, writes the status and goes on
+    local mode=$1 request
+    request=$(kept_request)
+    if jq -e '.on' <<<"$request" >/dev/null; then
+        apply_on "$request" && return 0
+    else
+        apply_off && return 0
+    fi
+    [ "$mode" = lenient ]
+}
+
+# --- commands -------------------------------------------------------------------------------------------------------------
+
+lock() {
+    mkdir -p "$RUN"
+    exec 8>"$RUN/.lock"
+    flock -w 60 8 || cb_die "another cb-away is still running"
+}
+
+cmd_set() {
+    local file=${1:?usage: cb-away set FILE} request
+    [ -f "$file" ] || cb_die "no such file: $file"
+    request=$(normalize "$file")
+    lock
+    install -d -m 0700 "$STATE"
+    if jq -e '.on' <<<"$request" >/dev/null; then printf '%s\n' "$request" | cb_write_file "$STATE/state.json" 0600
+    else rm -f "$STATE/state.json"; fi
+    cb_log "Away from home: $(jq -r 'if .on then "on, \(.peers | length) device(s)" else "off" end' <<<"$request")"
+    apply_locked strict || cb_die "Away from home could not be applied (see the status)"
+}
+
+cmd_down() { # the tunnel stops before the firewall's chain goes; what is kept stays for the next apply
+    if close_down; then cmd_refresh; return 0; fi
+    # The interface outlived the stop: the status says so, and the stop fails, so the unit shows it too.
+    log_failure "$NOT_REMOVED"
+    write_status failed "$NOT_REMOVED"
+    return 1
+}
+
+cmd_refresh() {
+    local request
+    request=$(kept_request)
+    if jq -e '.on' <<<"$request" >/dev/null; then
+        # The firewall can go while the tunnel runs (a flush, or nftables stopped or started by hand, outside camera-bridge-away.service), and
+        # its chain is what keeps a device to the HTTPS page: the interface goes with it, within one run of the status timer. The request and
+        # the key stay, and the next apply brings the tunnel back.
+        if ! firewall_loaded && ! close_down; then
+            log_failure "$NO_FIREWALL $NOT_REMOVED"
+            write_status failed "$NO_FIREWALL $NOT_REMOVED"
+            return 0
+        fi
+        report || true
+    else
+        write_status off ""   # "failed" while wg-away is still there
+    fi
+}
+
+main() {
+    local cmd=${1:-}
+    shift || true
+    case $cmd in
+        status)  cat "$CB_STATUS/away.json" 2>/dev/null || jq -n -c --argjson now "$NOW" --argjson port "$PORT" \
+                     '{state: "off", message: null, publicKey: null, port: $port, router: null, peers: [], updated: $now}' ;;
+        set)     require_root; cmd_set "$@" ;;
+        check)   normalize "${1:?usage: cb-away check FILE}" ;;
+        apply)   require_root; lock; apply_locked lenient ;;
+        refresh) require_root; lock; cmd_refresh ;;
+        down)    require_root; lock; cmd_down ;;
+        ''|-h|--help|help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+        *) cb_die "unknown command: $cmd (try: cb-away help)" ;;
+    esac
+}
+
+main "$@"

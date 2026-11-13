@@ -62,6 +62,10 @@ public protocol SystemControlling: Sendable {
     /// Asks the system to get (or renew) the certificate for `host` with the box key `privateKeyPEM`; returns once the system took the request.
     /// `certificateStatus()` follows it.
     func obtainCertificate(name: String, host: String, privateKeyPEM: String) async throws
+    /// What the system says about Away from home (`status/away.json`); nil where this system has none (a plain program, an older image).
+    func awayStatus() async -> AwayStatus?
+    /// Asks the system to keep this tunnel (or, with `on` false, to take it down); returns once the system's list matches the request.
+    func setAway(_ request: AwayRequest) async throws
 }
 
 extension SystemControlling {
@@ -124,6 +128,10 @@ extension SystemControlling {
     public func obtainCertificate(name: String, host: String, privateKeyPEM: String) async throws {
         throw SystemError("The secure address is part of Camera Bridge OS.")
     }
+
+    public func awayStatus() async -> AwayStatus? { nil }
+
+    public func setAway(_ request: AwayRequest) async throws { throw SystemError("Away from home is part of Camera Bridge OS.") }
 }
 
 /// The certificate the TLS front serves, as the system reports it.

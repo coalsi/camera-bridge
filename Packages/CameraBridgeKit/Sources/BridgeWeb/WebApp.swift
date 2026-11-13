@@ -54,6 +54,9 @@ public struct WebConfiguration: Sendable {
     /// Announces the bridge to Apple TVs and iPhones as `_camera-bridge._tcp` (`ViewerAnnouncer`) through this advertiser. nil announces nothing: the default, and
     /// what development runs, the Mac and the tests keep.
     public var viewerAdvertiser: (any ServiceAdvertiser)? = nil
+    /// The box's network as Away from home reads it (its global IPv6 addresses and own networks). nil where there is none: the Mac and the tests that do not
+    /// need it.
+    public var awayNetwork: (any AwayNetwork)? = nil
     /// The time of day (where a recorded HLS range ends at most); tests move it.
     public var now: @Sendable () -> Date = { Date() }
     /// A clock nobody sets, for what expires and how long something has been idle (HLS tickets, an HLS packager); tests move it.
@@ -172,7 +175,7 @@ extension HTTPResponse {
 /// 3. **Session.** Every other API call needs the session cookie (256 random bits, `HttpOnly`, `SameSite=Strict`): `cb_session`, and over
 ///    HTTPS `__Host-cb_session` (a sibling name under camera-bridge.app cannot set a `__Host-` cookie, so it cannot shadow it; a browser
 ///    that signed in over HTTPS before has `cb_session`, which is still read and moved to the new name on its next request).
-///    The twelve `viewer` routes (`Route.Access.viewer`: live and recorded video, pictures, `GET viewer` and moving a camera) also take a
+///    The fifteen `viewer` routes (`Route.Access.viewer`: live and recorded video, pictures, `GET viewer`, moving a camera and an iPhone's Away from home tunnel) also take a
 ///    paired device's key (an Apple TV's, an iPhone's), as `Authorization: Bearer <key>`. A key that is there decides alone: a wrong, expired or removed one is
 ///    `401 viewer_key`, even beside a valid cookie. A key in the address (`token=`, `access_token=`) is refused even with a good header,
 ///    and every other route never looks at one.
@@ -211,6 +214,8 @@ public final class WebApp: Sendable {
     let hlsPackagers = HLSLivePackagers()
     /// The secure address (`SecureAddress/`): the box's HTTPS name, its certificate and the redirect to it.
     let secureAddress: SecureAddressService
+    /// Away from home (`Away/`): the devices that reach the box from outside through its WireGuard tunnel.
+    let away: AwayService
     /// Announces the bridge to Apple TVs; nil without a `WebConfiguration.viewerAdvertiser`.
     let announcer: ViewerAnnouncer?
     /// The task that gathers what is announced and hands it to the announcer, from `startAnnouncing` until it is done or `stopAnnouncing`.
@@ -225,14 +230,22 @@ public final class WebApp: Sendable {
         self.init(configuration: configuration, backend: backend, system: system, logs: logs, auth: auth, secureAddress: nil)
     }
 
-    init(configuration: WebConfiguration, backend: any BridgeBackend, system: any SystemControlling, logs: LogFeed, auth: AuthStore?, secureAddress: SecureAddressService?) {
-        self.secureAddress = secureAddress ?? SecureAddressService(backend: backend, system: system, directory: configuration.dataDirectory)
+    init(configuration: WebConfiguration, backend: any BridgeBackend, system: any SystemControlling, logs: LogFeed, auth: AuthStore?, secureAddress: SecureAddressService?,
+         away: AwayService? = nil) {
+        // Locals first: the Away from home service needs both, and `self` can't be read before every property is set.
+        let auth = auth ?? AuthStore(directory: configuration.dataDirectory, iterations: configuration.passwordIterations)
+        let secureAddress = secureAddress ?? SecureAddressService(backend: backend, system: system, directory: configuration.dataDirectory)
+        self.secureAddress = secureAddress
+        self.auth = auth
+        // The tunnel's subnet avoids the /16 of every camera, so the route to a camera is never taken by the tunnel.
+        self.away = away ?? AwayService(system: system, secureAddress: secureAddress, auth: auth, network: configuration.awayNetwork,
+                                        directory: configuration.dataDirectory,
+                                        cameraAddresses: { await backend.overview().configurations.map(\.endpoint.host) }, now: configuration.now)
         announcer = configuration.viewerAdvertiser.map { ViewerAnnouncer(advertiser: $0) }
         self.configuration = configuration
         self.backend = backend
         self.system = system
         self.logs = logs
-        self.auth = auth ?? AuthStore(directory: configuration.dataDirectory, iterations: configuration.passwordIterations)
         notifications = NotificationLog(directory: configuration.dataDirectory)
         Self.clearClipWork(dataDirectory: configuration.dataDirectory)
         hub = EventHub(backend: backend, interval: configuration.eventInterval, notifications: notifications)
@@ -245,16 +258,18 @@ public final class WebApp: Sendable {
 
     func startEvents() {
         hub.start()
-        let wyze = wyze, eufy = eufy, secureAddress = secureAddress
+        let wyze = wyze, eufy = eufy, secureAddress = secureAddress, away = away
         Task { await secureAddress.start() }
+        Task { await away.start() }
         Task { await wyze.start() }
         Task { await eufy.start() }
     }
 
     func stopEvents() {
         hub.stop()
-        let (secureAddress, hlsPackagers) = (secureAddress, hlsPackagers)
+        let (secureAddress, hlsPackagers, away) = (secureAddress, hlsPackagers, away)
         Task { await secureAddress.stop() }
+        Task { await away.stop() }
         Task { await hlsPackagers.stopAll() }
     }
 

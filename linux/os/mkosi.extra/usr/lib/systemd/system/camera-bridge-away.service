@@ -1,0 +1,28 @@
+[Unit]
+Description=Apply Away from home (the VPN interface and its port in the firewall)
+Documentation=https://github.com/coalsi/camera-bridge/blob/main/linux/os/README.md
+# Makes wg-away from /srv/system/away (networkd reads the files cb-away writes to /run) and puts the VPN's port into the firewall's set
+# away_port, then writes /run/camera-bridge/status/away.json. A factory reset by marker file removes the kept state first.
+# Loading the firewall again empties its sets, so a reload of nftables.service applies it again. A stop or restart of nftables.service reaches
+# this unit through PartOf=, and since this unit starts after nftables.service, systemd stops it first: ExecStop= takes the tunnel down while
+# the firewall's rules are still loaded, and only then does nftables' own stop flush the whole ruleset, the chain `away` with it. So the
+# tunnel never runs without the chain that keeps its devices to the HTTPS page. What is kept stays, and the start that follows brings the
+# tunnel back.
+After=nftables.service systemd-networkd.service srv.mount camera-bridge-datadirs.service camera-bridge-factory-reset.service
+Before=camerabridged.service
+Wants=nftables.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/cb-away apply
+ExecReload=/usr/sbin/cb-away apply
+ExecStop=/usr/sbin/cb-away down
+# The daemon, and with it recording, starts after this unit, and a oneshot has no start timeout of its own. Each of cb-away's waits has its
+# own limit (60 s for its lock, 25 s for each call to networkd), so two minutes cut off only an apply that hangs.
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target

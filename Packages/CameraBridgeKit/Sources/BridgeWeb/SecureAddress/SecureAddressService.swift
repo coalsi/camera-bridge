@@ -1,5 +1,6 @@
 import BridgeEngine
 import BridgeSupport
+import Crypto
 import Foundation
 import Synchronization
 
@@ -138,7 +139,7 @@ actor SecureAddressService {
             state.websiteWaitUntil = nil
         } catch let error as BoxClientError {
             problem = Self.problem(for: error)
-            // Every failed answer (a server error reads as `refused`) waits: never once a minute.
+            // Every failed answer waits, a server error's (`serverError`) too: never once a minute.
             let failures = (state.websiteFailures ?? 0) + 1
             state.websiteFailures = failures
             state.websiteWaitUntil = SecureAddressRules.websiteWait(after: error.kind, failures: failures, now: now())
@@ -186,6 +187,33 @@ actor SecureAddressService {
         log.notice("told the website the home address changed")
     }
 
+    // MARK: Away from home
+
+    private static let notRegistered = BoxClientError(kind: .notRegistered, message: "The secure address isn’t set up yet, so Away from home can’t be published.")
+
+    /// The box's identity for a signed Away from home call. The system's TLS front is asked first: without one the secure address is not
+    /// part of this system and nothing may be sent (`.notRegistered`). `nil` when the box has no name yet.
+    private func awayIdentity() async throws -> (name: String, key: Curve25519.Signing.PrivateKey)? {
+        guard await system.certificateStatus() != nil else { throw Self.notRegistered }
+        guard let name = state.name else { return nil }
+        return (name, try await loadIdentity().key)
+    }
+
+    /// Tells the website the box's global IPv6 address and returns the box's away name. `BoxClientError` (`.notRegistered` without a TLS
+    /// front or without a name) when it cannot.
+    func publishAway(ip: String) async throws -> String {
+        guard let identity = try await awayIdentity() else { throw Self.notRegistered }
+        defer { persist() }
+        return try await client.sendAway(ip, as: identity)
+    }
+
+    /// Asks the website to delete the away record. Done, too, without a name: no record can exist for a box that never registered.
+    func withdrawAway() async throws {
+        guard let identity = try await awayIdentity() else { return }
+        defer { persist() }
+        try await client.deleteAway(as: identity)
+    }
+
     private func requestCertificateIfDue(_ status: CertificateStatus, name: String, host: String) async throws {
         if SecureAddressRules.isValid(status, host: host, now: now()), status.state == "ready", !SecureAddressRules.needsCertificate(status, host: host, now: now()) {
             state.attempts = 0
@@ -208,7 +236,7 @@ actor SecureAddressService {
     static func problem(for error: BoxClientError) -> Problem {
         switch error.kind {
         case .unreachable: Problem(code: "no_internet", message: error.message)
-        case .notReady: Problem(code: "service_not_ready", message: error.message)
+        case .notReady, .serverError, .notRegistered: Problem(code: "service_not_ready", message: error.message)
         case .rateLimited: Problem(code: "rate_limited", message: error.message)
         case .refused, .unauthorized: Problem(code: "refused", message: error.message)
         }

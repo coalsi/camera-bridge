@@ -91,7 +91,7 @@ const ROUTES = [
   { pattern: PAIR_ROUTE, title: 'Settings', render: (context) => renderSettings({ ...context, params: ['apple-tv', context.params[0]] }) },
   { pattern: /^logs$/, title: 'Log', render: renderLogs },
   { pattern: /^system$/, title: 'System', render: renderSystem },
-  { pattern: /^settings(?:\/(recording|ai))?$/, title: 'Settings', render: renderSettings },
+  { pattern: /^settings(?:\/(recording|ai|away))?$/, title: 'Settings', render: renderSettings },
   { pattern: /^about$/, title: 'About', render: renderAbout },
   { pattern: /^plugins$/, title: 'Plugins', render: renderPlugins },
   { pattern: /^plugins\/wyze$/, title: 'Wyze', render: renderWyzePlugin },

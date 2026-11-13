@@ -2,7 +2,7 @@ import Foundation
 
 /// The box's neighbour (ARP) table: a Wyze camera's current IPv4 address from its MAC, so a stale cloud address is not trusted.
 public enum NeighborTable {
-    /// The IPv4 address `table` (Linux `/proc/net/arp`) lists for `mac`. MACs compare without case or separators (Wyze gives
+    /// The IPv4 address `table` (Linux `/proc/self/net/arp`) lists for `mac`. MACs compare without case or separators (Wyze gives
     /// `D03F27A1B2C3`, the table `d0:3f:27:a1:b2:c3`). Incomplete entries (flags `0x0`, an all-zero MAC) are skipped; the last
     /// complete entry wins.
     ///
@@ -13,7 +13,7 @@ public enum NeighborTable {
         return completeEntries(in: table).last { $0.mac == wanted }?.address
     }
 
-    /// The IPv4 address of every complete entry of `table` (Linux `/proc/net/arp`): the hosts that answered the box on its own networks,
+    /// The IPv4 address of every complete entry of `table` (Linux `/proc/self/net/arp`): the hosts that answered the box on its own networks,
     /// in the table's order, each once. An entry is complete when its flags say so (`0x2`) and its MAC is neither all zeros nor the
     /// broadcast address; entries of any address range are listed, and what to do with them is the caller's (the sky detector's feed
     /// finder keeps the private ones). An IPv6 entry is not an IPv4 address and is left out.
@@ -24,10 +24,11 @@ public enum NeighborTable {
         }
     }
 
-    /// The contents of `/proc/net/arp` on Linux; nil elsewhere (or when it cannot be read).
+    /// The contents of `/proc/self/net/arp` on Linux; nil elsewhere (or when it cannot be read). `/proc/self/net`, not `/proc/net`: the
+    /// daemon's unit has `ProcSubset=pid`, which hides `/proc/net` (a link outside the pid subset), so on the box the table was never read.
     public static func read() -> String? {
         #if os(Linux)
-        return try? String(contentsOfFile: "/proc/net/arp", encoding: .utf8)
+        return try? String(contentsOfFile: "/proc/self/net/arp", encoding: .utf8)
         #else
         return nil
         #endif

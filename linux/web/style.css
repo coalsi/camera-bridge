@@ -706,6 +706,25 @@ a.version:hover { color: var(--text); text-decoration: underline; }
 .ai-card h2:focus { outline: none; }       /* and its heading takes the focus */
 .viewers-card { scroll-margin-top: 84px; }  /* #/pair/<code> scrolls to the Apple TV card (screens/viewers-card.js), below the sticky top bar */
 .viewer-title { overflow-wrap: anywhere; }  /* a TV's name has no spaces to break at, and a long one must not push the card sideways on a phone */
+/* Settings › Away from home (screens/away-card.js): the card's state, the router's steps, Check, the devices, and in its own dialog the QR code
+   of a WireGuard device's configuration. Addresses and device names have no spaces to break at, so they wrap anywhere on a phone. */
+.away-card { scroll-margin-top: 84px; }    /* #/settings/away scrolls here, below the sticky top bar */
+.away-card h2:focus { outline: none; }     /* and its heading takes the focus */
+.away-body > * + * { margin-top: 12px; }
+.away-body > p, .away-body .banner { margin-bottom: 0; }
+.away-body > .desc { color: var(--text-2); font-size: 0.95rem; }
+.away-router h3 { font-size: 1rem; margin-bottom: 6px; }
+.away-router p { margin: 0 0 4px; overflow-wrap: anywhere; }
+.away-steps { margin: 0; padding-left: 1.4em; display: grid; gap: 4px; }
+.away-check summary, .away-config summary { cursor: pointer; color: var(--link); width: fit-content; }
+.away-check p { margin: 6px 0 0; color: var(--text-2); }
+.away-address code { overflow-wrap: anywhere; }
+.away-devices { list-style: none; margin: 0; padding: 0; display: grid; }
+.away-device { padding: 8px 0; border-top: 1px solid var(--border); }   /* the first one too: the list stands apart from the steps above it */
+.away-device-line { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.away-qr { width: min(300px, 72vw); height: min(300px, 72vw); margin: 14px auto; }
+.away-config pre { margin: 8px 0 0; padding: 10px 12px; max-height: 30vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 0.8rem/1.45 var(--mono); background: var(--bg-raised); border: 1px solid var(--border); border-radius: 10px; }
 /* The camera page's AI descriptions card (screens/camera.js createAIDescriptionsCard): what Settings says is missing, and the camera's last
    description with its mark as on the Monitor's events list (red for an alarm, amber for something unusual, none for the routine; "Nothing
    notable" dimmed). */

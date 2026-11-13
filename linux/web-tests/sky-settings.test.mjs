@@ -305,7 +305,7 @@ test('the Settings page no longer has a Sky Watcher section: its setup is on the
     screen = renderSettings({ params: [], setTitle: () => {} });
     for (let i = 0; i < 20; i += 1) await settle();
     const titles = all(screen.el, (node) => node.classList?.contains('section-title')).map((node) => node.textContent);
-    assert.deepEqual(titles, ['General', 'Security', 'Video and recording', 'Apple Home and other systems', 'AI', 'Troubleshooting'], 'the sections, in order');
+    assert.deepEqual(titles, ['General', 'Security', 'Away from home', 'Video and recording', 'Apple Home and other systems', 'AI', 'Troubleshooting'], 'the sections, in order');
     assert.equal(titles.indexOf('AI') + 1, titles.indexOf('Troubleshooting'), 'the AI section still sits right before Troubleshooting');
     assert.equal(all(screen.el, (node) => node.classList?.contains('sky-settings-card')).length, 0, 'no card of the Sky Watcher');
     assert.doesNotMatch(shown(screen.el), /Sky Watcher|Find a feed|Where the box is|Flight feed/);

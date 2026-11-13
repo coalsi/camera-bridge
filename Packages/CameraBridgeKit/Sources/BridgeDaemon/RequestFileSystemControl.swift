@@ -59,12 +59,13 @@ public struct RequestFileSystemControl: SystemControlling {
         case wifiForget = "wifi-forget"
         case guardSet = "guard-set"
         case tlsObtain = "tls-obtain"
+        case awaySet = "away-set"
     }
 
     /// The files the system publishes.
     private enum StatusFile {
         case job(Request)
-        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, archiveDrive, wifi, wifiNetworks, internetGuard, tls
+        case update, system, installCandidates, installToDisk, recordingDrive, recordingDriveCandidates, archiveDrive, wifi, wifiNetworks, internetGuard, tls, away
         case diskHealth
 
         var name: String {
@@ -81,6 +82,7 @@ public struct RequestFileSystemControl: SystemControlling {
             case .wifiNetworks: "wifi-networks.json"
             case .internetGuard: "guard.json"
             case .tls: "tls.json"
+            case .away: "away.json"
             case .diskHealth: "disk-health.json"
             }
         }
@@ -159,6 +161,8 @@ public struct RequestFileSystemControl: SystemControlling {
     private let fallback: UnavailableSystemControl
     /// The image's TLS helper; where it is missing the system has no TLS front (an older image).
     private let tlsHelper: String
+    /// The image's Away from home helper; where it is missing the system has no Away from home (an older image).
+    private let awayHelper: String
     private let log = Log(category: "system")
     /// The notices of the drives' health as last read, and the file's modification date then (the event stream asks twice a second; the file
     /// changes once a day).
@@ -170,8 +174,9 @@ public struct RequestFileSystemControl: SystemControlling {
 
     public init(requestDirectory: URL, statusDirectory: URL, product: String, version: String, build: String,
                 facts: HostFacts = .current(), timing: Timing = Timing(), now: @escaping @Sendable () -> Date = { Date() },
-                tlsHelper: String = "/usr/sbin/cb-tls") {
+                tlsHelper: String = "/usr/sbin/cb-tls", awayHelper: String = "/usr/sbin/cb-away") {
         self.tlsHelper = tlsHelper
+        self.awayHelper = awayHelper
         self.requestDirectory = requestDirectory
         self.statusDirectory = statusDirectory
         self.product = product
@@ -794,6 +799,67 @@ public struct RequestFileSystemControl: SystemControlling {
         return String(decoding: buffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self).lowercased()
     }
 
+    // MARK: Away from home
+
+    /// `status/away.json` as the system writes it; `awayStatus()` cleans it.
+    private struct AwayFile: Decodable {
+        struct Peer: Decodable {
+            var publicKey: String?
+            var latestHandshake: Int?
+            var endpoint: String?
+        }
+        var state: String?
+        var message: String?
+        var publicKey: String?
+        var port: Int?
+        var router: String?
+        var peers: [Peer]?
+        var updated: Int?
+    }
+
+    public func awayStatus() async -> AwayStatus? {
+        guard isAvailable, FileManager.default.fileExists(atPath: awayHelper) else { return nil }
+        guard let file: AwayFile = read(.away) else { return .off }
+        return Self.cleaned(file)
+    }
+
+    private static func cleaned(_ file: AwayFile) -> AwayStatus {
+        func line(_ text: String?) -> String? { text.map(sentence).flatMap { $0.isEmpty ? nil : $0 } }
+        let peers = (file.peers ?? []).compactMap { peer -> AwayStatus.Peer? in
+            guard let key = peer.publicKey, AwayRequest.isPublicKey(key) else { return nil }
+            return AwayStatus.Peer(publicKey: key, latestHandshake: max(peer.latestHandshake ?? 0, 0), endpoint: line(peer.endpoint))
+        }
+        return AwayStatus(state: ["ok", "failed", "off"].contains(file.state ?? "") ? file.state! : "failed", message: line(file.message),
+                          publicKey: file.publicKey.flatMap { AwayRequest.isPublicKey($0) ? $0 : nil }, port: file.port ?? AwayRequest.port,
+                          router: line(file.router), peers: peers, updated: max(file.updated ?? 0, 0))
+    }
+
+    public func setAway(_ request: AwayRequest) async throws {
+        if let problem = request.problem { throw SystemError(problem) }
+        try requireAvailable("Away from home is part of Camera Bridge OS.")
+        guard FileManager.default.fileExists(atPath: awayHelper) else { throw SystemError("Away from home is part of Camera Bridge OS.") }
+        let failure = "The system couldn’t change Away from home."
+        // The job's own line only says "failed (exit 1)"; the sentence is in away.json, but only a status written since this request started
+        // is this request's: a request refused by cb-away's own check leaves an earlier run's failure in place.
+        try await runShortJob(.awaySet, request, failure: failure) { since in
+            guard let file: AwayFile = self.read(.away), file.state == "failed", let at = file.updated, at >= Int(since.timeIntervalSince1970) else { return nil }
+            return Self.sentence(file.message ?? "").isEmpty ? nil : Self.sentence(file.message ?? "")
+        }
+        // The job's end can be an older request's (one that ran while this one was sent): taken only when the system reports this list.
+        let reported = await awayStatus()
+        let matches = request.on ? reported?.state == "ok" && Set(reported?.peers.map(\.publicKey) ?? []) == Set(request.peers.map(\.publicKey))
+            : reported?.state == "off"
+        guard matches else {
+            // A turn-off has no list to compare: what is left over is Away from home itself, which the card then names.
+            guard request.on else {
+                log.warning("away-set ended, but the system still reports Away from home as on")
+                throw SystemError("\(failure) It still reports Away from home as on.")
+            }
+            log.warning("away-set ended, but the system reports another list of devices")
+            throw SystemError("\(failure) It still has another list of devices.")
+        }
+    }
+
     // MARK: The secure address
 
     private struct TLSFile: Decodable {
@@ -904,7 +970,8 @@ public struct RequestFileSystemControl: SystemControlling {
     }
 
     /// Writes a request and waits (bounded) for the helper to finish it; a failure carries the helper's sentence.
-    private func runShortJob<Body: Encodable>(_ request: Request, _ body: Body, failure: String) async throws {
+    /// `detail` may give a better sentence for a failure than the job's own line; it is asked with the request's start.
+    private func runShortJob<Body: Encodable>(_ request: Request, _ body: Body, failure: String, detail: ((Date) -> String?)? = nil) async throws {
         let since = floorToSecond(now())
         try submit(request, body)
         try await awaitPickup(request)
@@ -916,7 +983,7 @@ public struct RequestFileSystemControl: SystemControlling {
                 }
                 if job.state == "failed" {
                     log.warning("\(request.rawValue) failed: \(Redact.string(job.message ?? ""))")
-                    throw SystemError("\(failure) \(Self.sentence(job.message ?? ""))".trimmingCharacters(in: .whitespaces))
+                    throw SystemError("\(failure) \(detail?(since) ?? Self.sentence(job.message ?? ""))".trimmingCharacters(in: .whitespaces))
                 }
             }
             try await Task.sleep(for: timing.pollInterval)

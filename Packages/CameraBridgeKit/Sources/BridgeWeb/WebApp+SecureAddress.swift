@@ -14,6 +14,10 @@ extension WebApp {
 
     func secureAddressEnabled(_ ctx: RequestContext) async throws -> HTTPResponse {
         let body = try decode(SwitchBody.self, from: ctx)
+        // A phone reaches the box through the tunnel by its secure name, so the name has to stay while Away from home is on.
+        if !body.enabled, await away.isOn {
+            throw APIError.conflict("away_on", "Away from home needs the secure address. Turn Away from home off first.")
+        }
         await secureAddress.setEnabled(body.enabled)
         return .json(await secureAddress.report())
     }

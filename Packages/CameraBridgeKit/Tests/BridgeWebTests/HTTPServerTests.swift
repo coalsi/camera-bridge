@@ -182,6 +182,43 @@ final class RawClient: Sendable {
         await rig.server.stop()
     }
 
+    @Test func afterSendRunsOnceTheAnswerIsWritten() async throws {
+        let ran = Box(0)
+        let rig = Rig { _ in
+            var response = HTTPResponse.text("done")
+            response.afterSend = { ran.update { $0 += 1 } }
+            return response
+        }
+        let client = try await rig.connect()
+        try await client.send("GET /a HTTP/1.1\r\nHost: a\r\n\r\n")
+        #expect(try await client.reply()?.text == "done")
+        for _ in 0..<100 where ran.value == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(ran.value == 1)
+        await rig.server.stop()
+    }
+
+    @Test func afterSendWaitsForASendThatHangsAndNeverRunsForOneThatFails() async throws {
+        let ran = Box(0)
+        let rig = Rig { _ in
+            var response = HTTPResponse.text("done")
+            response.afterSend = { ran.update { $0 += 1 } }
+            return response
+        }
+        let hanging = try await rig.connect()
+        rig.serverEnds.value[0].stallSends()
+        try await hanging.send("GET /a HTTP/1.1\r\nHost: a\r\n\r\n")
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(ran.value == 0, "not while the answer is still being written")
+
+        let failing = try await rig.connect()
+        rig.serverEnds.value[1].failSends()
+        try await failing.send("GET /b HTTP/1.1\r\nHost: a\r\n\r\n")
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(ran.value == 0, "not when the write failed")
+        hanging.close()
+        await rig.server.stop()
+    }
+
     @Test func keepAliveServesSeveralRequestsOnOneConnection() async throws {
         let rig = Rig()
         let client = try await rig.connect()

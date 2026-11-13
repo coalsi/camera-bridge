@@ -8,7 +8,10 @@ import Synchronization
 
 /// What the website said or why it could not be reached. `message` is a sentence for the person.
 struct BoxClientError: Error, Equatable, CustomStringConvertible {
-    enum Kind: Equatable, Sendable { case unreachable, notReady, refused, rateLimited, unauthorized }
+    /// `notReady` is the website's 503 (its DNS token is not set); `serverError` any other 5xx (its database or its DNS provider failed), which
+    /// goes by itself like a website out of reach and is never the website saying no; `notRegistered` is this box's own: no TLS front or no
+    /// name yet, so nothing was sent.
+    enum Kind: Equatable, Sendable { case unreachable, notReady, serverError, notRegistered, refused, rateLimited, unauthorized }
     var kind: Kind
     var message: String
     var description: String { message }
@@ -40,7 +43,9 @@ struct URLSessionBoxTransport: BoxTransport {
 /// so a later change touches this file only.
 ///
 /// A signed call carries `X-CB-Name`, `X-CB-Timestamp` (Unix milliseconds, strictly greater than the one before) and `X-CB-Signature`
-/// (base64 Ed25519 over `METHOD\nPATH\nTIMESTAMP\nSHA256hex(body)`, the path without a query, the body as sent).
+/// (base64 Ed25519 over `METHOD\nPATH\nTIMESTAMP\nSHA256hex(body)`, the path without a query, the body as sent). The website refuses a timestamp that
+/// is not above the last one, and the secure address and Away from home call from different tasks, so signed calls go out one at a time:
+/// each timestamp is taken and its call answered before the next call starts.
 final class BoxClient: Sendable {
     static let defaultBase = URL(string: "https://www.camera-bridge.app/api/v1/box/")!
 
@@ -50,6 +55,7 @@ final class BoxClient: Sendable {
     private let transport: any BoxTransport
     private let now: @Sendable () -> Date
     private let lastTimestamp: Mutex<Int64>
+    private let calls = AsyncSerialLock()
 
     init(base: URL = BoxClient.defaultBase, transport: any BoxTransport = URLSessionBoxTransport(), lastTimestamp: Int64 = 0,
          now: @escaping @Sendable () -> Date = { Date() }) {
@@ -108,11 +114,38 @@ final class BoxClient: Sendable {
         _ = try await exchange("DELETE", "acme", body: Data(), signer: identity)
     }
 
+    /// Tells the website the box's global IPv6 address for Away from home; returns the box's away name.
+    func sendAway(_ ip: String, as identity: (name: String, key: Curve25519.Signing.PrivateKey)) async throws -> String {
+        struct Body: Encodable { var ip: String }
+        struct Answer: Decodable { var name: String }
+        let data = try await exchange("POST", "away", body: try JSONEncoder().encode(Body(ip: ip)), signer: identity)
+        guard let answer = try? JSONDecoder().decode(Answer.self, from: data), Self.isAwayName(answer.name) else { throw Self.badAnswer }
+        return answer.name
+    }
+
+    /// Deletes the box's away record (the website keeps the name); also fine when there was none.
+    func deleteAway(as identity: (name: String, key: Curve25519.Signing.PrivateKey)) async throws {
+        _ = try await exchange("DELETE", "away", body: Data(), signer: identity)
+    }
+
+    /// An away name as the website makes it (20 lowercase letters and digits; 16 to 32 are taken, so a longer label never breaks the box) under
+    /// `away.camera-bridge.app`, and nothing else: the answer becomes the name phones connect to, so it is never taken unchecked.
+    static func isAwayName(_ name: String) -> Bool {
+        let suffix = ".away.camera-bridge.app"
+        guard name.hasSuffix(suffix) else { return false }
+        let label = name.utf8.dropLast(suffix.utf8.count)
+        return (16...32).contains(label.count) && label.allSatisfy { ($0 >= 0x61 && $0 <= 0x7A) || ($0 >= 0x30 && $0 <= 0x39) }
+    }
+
     // MARK: Exchange
 
     private static let badAnswer = BoxClientError(kind: .refused, message: "The Camera Bridge website gave an answer this box doesn’t understand.")
 
     private func exchange(_ method: String, _ endpoint: String, body: Data, signer: (name: String, key: Curve25519.Signing.PrivateKey)?) async throws -> Data {
+        try await calls.withLock { try await send(method, endpoint, body: body, signer: signer) }
+    }
+
+    private func send(_ method: String, _ endpoint: String, body: Data, signer: (name: String, key: Curve25519.Signing.PrivateKey)?) async throws -> Data {
         let url = base.appending(path: endpoint, directoryHint: .notDirectory)
         var headers: [String: String] = ["Accept": "application/json"]
         if !body.isEmpty { headers["Content-Type"] = "application/json" }
@@ -133,6 +166,7 @@ final class BoxClient: Sendable {
         let said = (try? JSONDecoder().decode(Failure.self, from: answer.body))?.error
         switch answer.status {
         case 503: throw BoxClientError(kind: .notReady, message: "The secure address service isn’t ready yet. The box will try again later.")
+        case 500..<600: throw BoxClientError(kind: .serverError, message: "The Camera Bridge website had a problem on its side. The box tries again by itself.")
         case 429: throw BoxClientError(kind: .rateLimited, message: "The secure address service has had too many requests from this box today. It will try again later.")
         case 401: throw BoxClientError(kind: .unauthorized, message: "The Camera Bridge website didn’t accept this box’s signature\(said.map { ": \($0)" } ?? "").")
         default: throw BoxClientError(kind: .refused, message: "The Camera Bridge website refused the request\(said.map { ": \($0)" } ?? "").")

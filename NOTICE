@@ -138,3 +138,10 @@ change is made to it at bundle time: its lazy protobufjs loader (createRequire(i
 by a plain require("protobufjs"). Also bundled, unmodified: long (Apache-2.0), protobufjs and jpeg-js (BSD-3-Clause),
 inherits and lru-cache (ISC), and MIT-licensed npm packages. Every licence text is in the image at
 /usr/lib/camera-bridge/helpers/eufy/LICENSES; the list is in docs/third-party/eufy-bridge.md.
+
+--------------------------------------------------------------------------------
+QR Code generator (MIT License)
+--------------------------------------------------------------------------------
+Copyright (c) Project Nayuki. https://www.nayuki.io/page/qr-code-generator-library
+Camera Bridge's QR code encoders, Packages/CameraBridgeKit/Sources/BridgeWeb/QRCode.swift and linux/web/js/qr.js (shipped with the web
+page), are derived from it. Its permission notice is in THIRD_PARTY_LICENSES.md.
